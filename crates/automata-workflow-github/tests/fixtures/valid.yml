@@ -1,0 +1,47 @@
+# The comments, quotes, and block scalar are source evidence and must remain available.
+name: Fixture CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  VERSION: "0.1.0"
+  ENABLED: true
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    name: Verify
+    runs-on:
+      - self-hosted
+      - linux
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@0123456789012345678901234567890123456789
+        with:
+          persist-credentials: false
+      - id: check
+        name: Check
+        env:
+          MODE: strict
+        run: |
+          cargo check --workspace
+          cargo test --workspace
+  frontend:
+    needs: verify
+    defaults:
+      run:
+        working-directory: ui
+    runs-on:
+      group: linux-runners
+      labels: x64
+    steps:
+      - run: npm test

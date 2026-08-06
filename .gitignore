@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+**/target/
+/crates/*/*.cdx.json
+
+# JavaScript and Vite build output
+/node_modules/
+**/node_modules/
+/dist/
+**/dist/
+**/.vite/
+.pnpm-store/
+
+# Test and coverage output
+/coverage/
+**/coverage/
+*.profraw
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local logs
+*.log

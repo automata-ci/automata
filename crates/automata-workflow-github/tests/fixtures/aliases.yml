@@ -1,0 +1,10 @@
+name: Aliases
+on: push
+env: &shared_env
+  MODE: strict
+jobs:
+  build:
+    runs-on: linux
+    env: *shared_env
+    steps:
+      - run: echo test

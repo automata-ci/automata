@@ -1,0 +1,5 @@
+package automata:ui@1.0.0;
+
+world renderer {
+    export render: func(request: string) -> string;
+}

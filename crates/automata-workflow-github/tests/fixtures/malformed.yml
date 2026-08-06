@@ -1,0 +1,7 @@
+name: Broken
+on: push
+jobs:
+  broken:
+    runs-on: [linux
+    steps:
+      - run: echo never

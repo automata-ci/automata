@@ -1,0 +1,34 @@
+[package]
+name = "rquickjs-macro"
+version = "0.10.0"
+edition = "2021"
+publish = false
+license = "MIT"
+repository = "https://github.com/DelSkayn/rquickjs"
+description = "Automata's deterministic patch of rquickjs-macro 0.10.0"
+
+[lib]
+name = "rquickjs_macro"
+path = "src/lib.rs"
+proc-macro = true
+
+[features]
+default = []
+bindgen = ["rquickjs-core/bindgen"]
+# Declared only for compatibility with rquickjs's feature table. Automata's
+# reviewed wrapper profile does not enable the PHF embedding implementation.
+phf = []
+
+[dependencies]
+convert_case = "=0.8.0"
+fnv = "=1.0.7"
+ident_case = "=1.0.1"
+indexmap = "=2.14.0"
+proc-macro-crate = "=3.5.0"
+proc-macro2 = "=1.0.106"
+quote = "=1.0.46"
+rquickjs-core = { version = "=0.10.0", default-features = false, features = ["loader"] }
+syn = { version = "=2.0.118", features = ["full", "fold", "extra-traits", "visit"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("phf"))'] }

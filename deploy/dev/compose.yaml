@@ -1,0 +1,57 @@
+name: automata-dev
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    environment:
+      POSTGRES_DB: "${AUTOMATA_DEV_POSTGRES_DB:-automata}"
+      POSTGRES_USER: "${AUTOMATA_DEV_POSTGRES_USER:-automata}"
+      POSTGRES_PASSWORD: "${AUTOMATA_DEV_POSTGRES_PASSWORD:-automata-local-only}"
+    ports:
+      - "127.0.0.1:${AUTOMATA_DEV_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 stores clusters in major-version-specific children of
+      # this directory so pg_upgrade can hard-link across adjacent versions.
+      - postgres-18-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready
+          --dbname="$${POSTGRES_DB}"
+          --username="$${POSTGRES_USER}"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  rustfs:
+    image: docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c
+    command:
+      - /data
+    environment:
+      RUSTFS_ACCESS_KEY: "${AUTOMATA_DEV_S3_ACCESS_KEY:-automata-local}"
+      RUSTFS_SECRET_KEY: "${AUTOMATA_DEV_S3_SECRET_KEY:-automata-local-secret-change-me}"
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "127.0.0.1:${AUTOMATA_DEV_S3_PORT:-9000}:9000"
+      - "127.0.0.1:${AUTOMATA_DEV_S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres-18-data:
+  rustfs-data:

@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/automata",
+    "crates/automata-auth",
+    "crates/automata-core",
+    "crates/automata-github",
+    "crates/automata-protocol",
+    "crates/automata-runner",
+    "crates/automata-store",
+    "crates/automata-ui-renderer",
+    "crates/automata-workflow-github",
+]
+default-members = [
+    "crates/automata",
+    "crates/automata-runner",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["Alexander Dzhoganov"]
+license = "MIT"
+repository = "https://github.com/AlexanderDzhoganov/automata"
+
+[workspace.dependencies]
+anyhow = "1.0.99"
+async-trait = "0.1.91"
+automata-auth = { path = "crates/automata-auth", version = "0.1.0" }
+automata-core = { path = "crates/automata-core", version = "0.1.0" }
+automata-github = { path = "crates/automata-github", version = "0.1.0" }
+automata-protocol = { path = "crates/automata-protocol", version = "0.1.0" }
+automata-store = { path = "crates/automata-store", version = "0.1.0" }
+automata-ui-renderer = { path = "crates/automata-ui-renderer", version = "0.1.0" }
+automata-workflow-github = { path = "crates/automata-workflow-github", version = "0.1.0" }
+axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
+base64 = "0.22.1"
+clap = { version = "4.5.45", features = ["derive", "env"] }
+futures = "0.3.31"
+getrandom = "0.3.3"
+http = "1.3.1"
+reqwest = { version = "0.12.23", default-features = false, features = ["http2", "json", "rustls-tls-webpki-roots"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+saphyr-parser = { version = "0.0.11", default-features = false }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
+static_assertions = "1.1.0"
+subtle = "2.6.1"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.2", features = ["timeout", "util"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
+url = { version = "2.5.4", features = ["serde"] }
+uuid = { version = "1.18.0", features = ["serde", "v4"] }
+wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
+zeroize = { version = "1.8.1", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

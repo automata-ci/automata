@@ -1,0 +1,61 @@
+# Reviewed manifest for the generated WASI renderer wrapper.
+#
+# wasm-rquickjs generates a general-purpose manifest containing every optional
+# runtime capability it supports. Automata enables only WASI Preview 2 and text
+# encoding. Regeneration replaces the generated manifest with this allowlist so
+# Cargo resolves, audits, and inventories exactly the dependency graph compiled
+# into the checked-in component.
+
+[package]
+name = "renderer"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "Apache-2.0 AND MIT"
+repository = "https://github.com/AlexanderDzhoganov/automata"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+p2 = ["dep:wasip2", "dep:wit-bindgen", "dep:wit-bindgen-rt", "dep:wstd"]
+encoding = ["dep:encoding_rs"]
+
+[dependencies]
+base64ct = { version = "=1.8.3", features = ["alloc"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["alloc"] }
+encoding_rs = { version = "=0.8.35", optional = true }
+futures = "=0.3.32"
+futures-concurrency = "=7.7.1"
+indexmap = { version = "=2.14.0", features = ["serde"] }
+rand = "=0.9.4"
+rand_core_06 = { package = "rand_core", version = "=0.6.4", features = ["getrandom"] }
+rquickjs = { version = "=0.10.0", default-features = false, features = ["std", "futures", "bindgen", "loader", "macro"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+unicode-segmentation = "=1.13.3"
+url = "=2.5.8"
+uuid = { version = "=1.23.4", features = ["v4"] }
+wasip2 = { version = "=1.0.4", optional = true }
+wit-bindgen = { version = "=0.42.1", default-features = false, features = ["macros"], optional = true }
+wit-bindgen-rt = { version = "=0.42.1", features = ["bitflags"], optional = true }
+wstd = { version = "=0.6.5", optional = true }
+
+[patch.crates-io]
+rquickjs-macro = { path = "../../../ui/renderer/vendor/rquickjs-macro-0.10.0" }
+
+# The generated source contains disabled modules for wasm-rquickjs capabilities
+# outside Automata's renderer profile. Make their cfg names known to rustc while
+# deliberately not exposing them as Cargo features.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("brotli", "crypto", "crypto-full", "fetch", "golem", "logging", "node-http", "p3", "sqlite", "timezone", "websocket", "zlib"))',
+] }

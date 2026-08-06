@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AUTOMATA_BUILD_GIT_SHA: ${{ github.sha }}
+  AUTOMATA_EXPECTED_GIT_SHA: ${{ github.sha }}
+  AUTOMATA_EXPECTED_VERSION: "0.1.0"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
+
+jobs:
+  verify:
+    name: Verify workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Show pinned toolchain
+        run: |
+          install -d -m 0700 -- "$TMPDIR"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql shellcheck
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Verify product binary policy
+        run: ./scripts/ci/verify-product-targets.sh
+
+      - name: Lint workflows and shell scripts
+        run: |
+          ./scripts/ci/install-actionlint.sh target/ci-tools
+          target/ci-tools/actionlint .github/workflows/ci.yml
+          shellcheck -x scripts/ci/*.sh scripts/ci/lib/*.sh scripts/ui/*.sh
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets --all-features --locked
+
+      - name: Start isolated PostgreSQL test database
+        run: |
+          sudo service postgresql start
+          sudo -u postgres psql --set=ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE automata_ci WITH LOGIN PASSWORD 'automata-ci-local-only';
+          CREATE DATABASE automata_ci OWNER automata_ci;
+          SQL
+
+      - name: Test PostgreSQL invariants
+        env:
+          AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
+        run: cargo test -p automata-store --tests --all-features --locked -- --ignored --test-threads=1
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Audit dependencies
+        run: cargo deny --locked --workspace --all-features check advisories bans licenses sources
+
+  frontend:
+    name: React SSR frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=low
+
+      - name: Test and build server-rendered frontend
+        run: npm run check
+
+      - name: Verify embedded renderer provenance
+        working-directory: .
+        run: ./scripts/ui/verify-renderer-assets.sh ui/dist
+
+      - name: Install pinned renderer generator
+        working-directory: .
+        run: |
+          cargo install wasm-rquickjs-cli --version 0.4.1 --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Test deterministic SBOM normalization
+        working-directory: .
+        run: node --test scripts/ci/tests/*.test.mjs
+
+      - name: Reproduce embedded renderer component and assets
+        working-directory: .
+        run: |
+          ./scripts/ui/regenerate-renderer.sh
+          cargo deny \
+            --manifest-path target/ui-renderer-wrapper/source/Cargo.toml \
+            --locked \
+            --config deny.toml \
+            check advisories bans licenses sources
+          git diff --exit-code -- \
+            crates/automata-ui-renderer/src/generated_assets.rs \
+            ui/renderer
+
+  dist:
+    name: Static Linux distribution
+    needs:
+      - verify
+      - frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install musl and ELF tooling
+        run: |
+          install -d -m 0700 -- "$TMPDIR"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends binutils musl-tools
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install pinned SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Build distribution binaries
+        env:
+          AUTOMATA_RELEASE_BUILD: "1"
+        run: ./scripts/ci/build-static-musl.sh
+
+      - name: Verify static binaries
+        env:
+          AUTOMATA_SCRATCH_RUNTIME: docker
+        run: ./scripts/ci/verify-static-musl.sh
+
+      - name: Generate binary and embedded-runtime SBOMs
+        run: ./scripts/ci/generate-sboms.sh
+
+      - name: Prepare locked third-party license sources
+        run: ./scripts/ci/prepare-third-party-license-sources.sh
+
+      - name: Generate and reproduce third-party notices offline
+        run: |
+          ./scripts/ci/generate-third-party-licenses.sh
+          ./scripts/ci/generate-third-party-licenses.sh \
+            target/third-party-license-reproduction
+          diff --recursive --brief \
+            target/distribution-input/licenses \
+            target/third-party-license-reproduction
+
+      - name: Package and reproduce deterministic distribution
+        run: |
+          ./scripts/ci/package-static-musl.sh
+          cp \
+            "target/distribution/automata-${AUTOMATA_EXPECTED_VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256" \
+            target/distribution-first.sha256
+          ./scripts/ci/package-static-musl.sh
+          cmp \
+            target/distribution-first.sha256 \
+            "target/distribution/automata-${AUTOMATA_EXPECTED_VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256"
+
+      - name: Upload bootstrap distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: automata-x86_64-unknown-linux-musl
+          path: |
+            target/distribution/*.tar.gz
+            target/distribution/*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

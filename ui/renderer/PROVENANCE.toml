@@ -1,0 +1,31 @@
+schema = 1
+
+[tools]
+wasm_rquickjs_cli = "0.4.1"
+rustc = "1.97.1"
+node = "24.19.0"
+npm = "11.17.0"
+
+[wrapper]
+target = "wasm32-wasip2"
+profile = "release"
+features = ["p2", "encoding"]
+codegen_units = 1
+incremental = false
+source_date_epoch = 0
+path_remap = "/automata"
+lock_sha256 = "295fbd3c18da24110635de361f37e15db8fbbeb3c0ae8525e1d6877bee2ed442"
+manifest_sha256 = "f1756a736afbedbc009abbc6cd0e0bb3395a0997f0d869506c5a7c301b12c5a5"
+macro_patch_sha256 = "495498e2e05b7e633b3bda6695e930103ec2567266a6943b31541027217bfbad"
+wit_sha256 = "7b8c98d27674059af59e301b26f72ed47a96b25565397346f7476e6baf508d67"
+ssr_bundle_sha256 = "f69ea06126aa0653ab6c311a2649d38d73c5a42935cbd11bf8e7c46e1b91940f"
+
+[ui]
+package_lock_sha256 = "2e3271fa9b6b1ede1a1065a7b4b84e4a686467769ff9295d7cff4723ccdb8282"
+script_public_path = "/assets/entry-client-CXNIQG-W.js"
+stylesheet_public_path = "/assets/entry-client-DnE6LV8l.css"
+
+[artifacts]
+component_sha256 = "e805802054512ca7e7de32ae2305570c2d7cab655438bff2ffaea103e9d24f7d"
+script_sha256 = "7a846e6cad51a817f842b7f6c435ba606398d9aa45af3cf055c7f1407d0807ab"
+stylesheet_sha256 = "4d2ecd9ab62605346602e0856d366c14599e0e1d265d19bc05f11ac1f61ae58b"

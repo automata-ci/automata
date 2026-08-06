@@ -1,0 +1,9 @@
+name: First
+name: Second
+on: push
+jobs:
+  build:
+    runs-on: linux
+    steps:
+      - run: echo first
+        run: echo second

@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "cargo": {
+    "allowedLicenseExpressions": [
+      "(Apache-2.0 OR MIT) AND BSD-3-Clause",
+      "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "Apache-2.0",
+      "Apache-2.0 / MIT",
+      "Apache-2.0 AND MIT",
+      "Apache-2.0 AND ISC",
+      "Apache-2.0 OR BSL-1.0",
+      "Apache-2.0 OR ISC OR MIT",
+      "Apache-2.0 OR MIT",
+      "Apache-2.0 WITH LLVM-exception",
+      "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "BSD-3-Clause",
+      "CDLA-Permissive-2.0",
+      "ISC",
+      "MIT",
+      "MIT AND BSD-3-Clause",
+      "MIT OR Apache-2.0",
+      "MIT OR Apache-2.0 OR Zlib",
+      "MIT/Apache-2.0",
+      "Unicode-3.0",
+      "Unlicense OR MIT",
+      "Zlib",
+      "Zlib OR Apache-2.0 OR MIT"
+    ],
+    "licenseFilePattern": "^(licen[cs]e|copying|unlicense)(?:$|[-._])",
+    "noticeFilePattern": "^(notices?|copyright)(?:$|[-._])",
+    "vendoredPathPrefixes": [
+      "ui/renderer/vendor/"
+    ],
+    "fallbacks": [
+      {
+        "components": [
+          "cargo:cranelift-assembler-x64@0.134.3",
+          "cargo:cranelift-bitset@0.134.3"
+        ],
+        "licenseTextFrom": "cargo:cranelift-codegen@0.134.3",
+        "reason": "These crates are published from the Wasmtime repository without a copied root license."
+      },
+      {
+        "components": [
+          "cargo:pulley-interpreter@47.0.3",
+          "cargo:pulley-macros@47.0.3",
+          "cargo:wasmtime-internal-component-macro@47.0.3",
+          "cargo:wasmtime-internal-component-util@47.0.3",
+          "cargo:wasmtime-internal-core@47.0.3",
+          "cargo:wasmtime-internal-jit-debug@47.0.3",
+          "cargo:wasmtime-internal-jit-icache-coherence@47.0.3",
+          "cargo:wasmtime-internal-versioned-export-macros@47.0.3",
+          "cargo:wasmtime-internal-wit-bindgen@47.0.3",
+          "cargo:wasmtime-wasi-io@47.0.3"
+        ],
+        "licenseTextFrom": "cargo:wasmtime@47.0.3",
+        "reason": "These crates are published from the Wasmtime repository without a copied root license."
+      },
+      {
+        "components": [
+          "cargo:rquickjs-core@0.10.0"
+        ],
+        "licenseTextFrom": "cargo:rquickjs@0.10.0",
+        "reason": "These crates are published from the rquickjs workspace without a copied root license."
+      },
+      {
+        "components": [
+          "cargo:wasm-encoder@0.230.0",
+          "cargo:wasm-metadata@0.230.0",
+          "cargo:wasmparser@0.230.0",
+          "cargo:wit-component@0.230.0",
+          "cargo:wit-parser@0.230.0"
+        ],
+        "licenseTextFrom": "cargo:wit-bindgen-core@0.42.1",
+        "reason": "These wasm-tools crates omit the workspace license files; the locked Bytecode Alliance source carries the same three declared license alternatives."
+      },
+      {
+        "components": [
+          "cargo:wstd-macro@0.6.5"
+        ],
+        "licenseTextFrom": "cargo:wstd@0.6.5",
+        "reason": "The proc-macro crate is published from the wstd workspace without a copied root license."
+      }
+    ],
+    "supplements": [
+      {
+        "component": "cargo:renderer@0.0.1",
+        "licenseTextFrom": "cargo:memfd@0.6.5",
+        "file": "LICENSE-APACHE",
+        "expectedSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "reason": "The generated wrapper combines Automata's MIT UI with Apache-licensed wasm-rquickjs output. This locked text is byte-identical to wasm-rquickjs-cli 0.4.1's Apache license."
+      }
+    ]
+  },
+  "npm": {
+    "allowedLicenseExpressions": [
+      "MIT"
+    ],
+    "allowedProductionPackages": [
+      {
+        "name": "react",
+        "version": "19.2.8"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.2.8"
+      },
+      {
+        "name": "scheduler",
+        "version": "0.27.0"
+      }
+    ]
+  }
+}
