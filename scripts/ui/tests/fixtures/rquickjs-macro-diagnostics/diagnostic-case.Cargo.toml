@@ -1,0 +1,9 @@
+[package]
+name = "rquickjs-macro-diagnostic-case"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+rquickjs-macro = { version = "=0.10.0", path = "../rquickjs-macro" }

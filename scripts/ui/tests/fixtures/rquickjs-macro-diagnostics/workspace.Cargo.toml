@@ -1,0 +1,3 @@
+[workspace]
+members = ["rquickjs-macro", "diagnostic-case"]
+resolver = "2"
