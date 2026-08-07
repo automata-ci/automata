@@ -6,6 +6,7 @@ pub mod cli;
 pub mod doctor;
 pub mod podman_probe;
 mod probe_http;
+pub mod product;
 
 use anyhow::Result;
 use clap::Parser as _;
@@ -17,8 +18,9 @@ use crate::cli::{Cli, Command};
 ///
 /// # Errors
 ///
-/// Returns an error when a requested diagnostic cannot be serialized or a
-/// required capability or server health check fails.
+/// Returns an error when production runner startup/supervision fails, a
+/// requested diagnostic cannot be serialized, or a required capability or
+/// server health check fails.
 pub async fn run() -> Result<()> {
     init_tracing();
     execute(Cli::parse()).await
@@ -26,6 +28,7 @@ pub async fn run() -> Result<()> {
 
 async fn execute(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Run(args) => product::run(&args.config).await.map_err(Into::into),
         Command::Doctor(args) => doctor::run(args).await,
         Command::InternalProbeHttp(args) => probe_http::serve(args).await,
     }

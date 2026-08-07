@@ -1,0 +1,41 @@
+[package]
+name = "automata-job-executor-github"
+description = "Provider-neutral GitHub Actions job executor adapter for Automata runners"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-action.workspace = true
+automata-action-github.workspace = true
+automata-auth.workspace = true
+automata-blob.workspace = true
+automata-core.workspace = true
+automata-execution.workspace = true
+automata-expression-github.workspace = true
+automata-github-runtime.workspace = true
+automata-protocol.workspace = true
+automata-runner-journal.workspace = true
+automata-runner-runtime.workspace = true
+automata-scm.workspace = true
+automata-workflow-github.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+automata-action-cache-file.workspace = true
+automata-blob-s3.workspace = true
+automata-runner-spool.workspace = true
+static_assertions.workspace = true
+tokio.workspace = true

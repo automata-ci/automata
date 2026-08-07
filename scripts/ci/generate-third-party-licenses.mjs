@@ -1,5 +1,5 @@
 // Internal implementation. Invoke generate-third-party-licenses.sh so TMPDIR
-// is canonicalized before the Node runtime can initialize its own caches.
+// and the shared renderer-input lock are established before Node starts.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -13,9 +13,11 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertIdenticalRegularTrees,
   collectCargoComponents,
   collectNpmComponents,
   generateThirdPartyBundles,
+  hashRegularTree,
   resolveTargetChild,
   sha256,
 } from "./lib/third-party-licenses.mjs";
@@ -85,10 +87,20 @@ function main() {
   const npmLockPath = path.join(repositoryRoot, "ui/package-lock.json");
   const rendererInputDirectory = resolveTargetChild({
     repositoryRoot,
-    candidate: "target/third-party-license-input/renderer",
+    candidate:
+      process.env.AUTOMATA_INTERNAL_THIRD_PARTY_LICENSE_RENDERER_INPUT ??
+      "target/third-party-license-input/renderer",
     label: "renderer license input",
     mustExist: true,
   });
+  const rendererVendorSourceDirectory = path.join(
+    repositoryRoot,
+    "ui/renderer/vendor",
+  );
+  const rendererVendorInputDirectory = path.join(
+    rendererInputDirectory,
+    "vendor",
+  );
   for (const required of [
     path.join(rendererInputDirectory, "Cargo.toml"),
     path.join(rendererInputDirectory, "Cargo.lock"),
@@ -110,6 +122,11 @@ function main() {
   ) {
     fail("renderer license input is stale; run prepare-third-party-license-sources.sh");
   }
+  assertIdenticalRegularTrees({
+    expected: rendererVendorSourceDirectory,
+    actual: rendererVendorInputDirectory,
+    label: "renderer vendor",
+  });
 
   const policyBytes = readFileSync(policyPath);
   const policy = JSON.parse(policyBytes.toString("utf8"));
@@ -163,6 +180,10 @@ function main() {
       metadata: rendererMetadata,
       rootName: "renderer",
       artifact: "embedded-renderer",
+      vendoredPathMappings: [{
+        prepared: rendererVendorInputDirectory,
+        reviewed: rendererVendorSourceDirectory,
+      }],
       includeRoot: true,
       rootSource: "generated:wasm-rquickjs-cli@0.4.1+automata-ui",
     }),
@@ -179,9 +200,14 @@ function main() {
       "Cargo.lock": sha256(readFileSync(workspaceLockPath)),
       "ui/package-lock.json": sha256(readFileSync(npmLockPath)),
       "ui/renderer/wrapper.Cargo.lock": sha256(readFileSync(rendererLockPath)),
+      "ui/renderer/vendor": hashRegularTree(
+        rendererVendorSourceDirectory,
+        "renderer vendor reviewed source",
+      ),
     },
     policy,
     policyHash: sha256(policyBytes),
+    repositoryRoot,
   });
   writeReadOnlyOutput(
     outputDirectory,

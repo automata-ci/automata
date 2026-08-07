@@ -1,14 +1,18 @@
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, fs::File, io::Read as _, path::Path, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use reqwest::StatusCode;
 use serde_json::Value;
 
-use super::{AdminCommand, Command, OutputFormat};
+use super::{AdminCommand, Command, OutputFormat, WorkflowCommand, WorkflowDispatchArgs};
+use crate::app::workflow_api::{LocalWorkflowAdmissionRequest, LocalWorkflowAdmissionResponse};
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_WORKFLOW_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOCAL_TOKEN_BYTES: usize = 4 * 1024;
 
 /// Resource limits applied to an administration status request.
 ///
@@ -175,11 +179,115 @@ pub async fn execute_control_plane_command(
         Command::Admin(admin) if matches!(admin.command, AdminCommand::Status) => {
             print_status(server_url, output).await
         }
+        Command::Workflow(workflow) => match &workflow.command {
+            WorkflowCommand::Dispatch(args) => dispatch_workflow(server_url, output, args).await,
+        },
         _ => bail!(
             "{} is not available in this bootstrap build",
             command.operation_name()
         ),
     }
+}
+
+async fn dispatch_workflow(
+    server_url: &str,
+    output: OutputFormat,
+    args: &WorkflowDispatchArgs,
+) -> Result<()> {
+    let source = read_bounded_utf8(&args.source_file, MAX_WORKFLOW_SOURCE_BYTES)
+        .context("failed to read workflow source")?;
+    let event = match &args.event_file {
+        Some(path) => {
+            read_bounded_utf8(path, MAX_EVENT_BYTES).context("failed to read workflow event")?
+        }
+        None => "{}".to_owned(),
+    };
+    serde_json::from_str::<Value>(&event).context("workflow event is not valid JSON")?;
+    let token = args
+        .token_source
+        .load_scalar(MAX_LOCAL_TOKEN_BYTES)
+        .context("failed to load local admission token")?;
+    let document = LocalWorkflowAdmissionRequest::new(
+        &args.provider_repository_id,
+        args.repository.owner(),
+        args.repository.name(),
+        &args.workflow,
+        source,
+        event,
+        &args.event_name,
+        &args.delivery_id,
+        &args.commit_sha,
+        &args.git_ref,
+        &args.workflow_name,
+    );
+    let endpoint = format!(
+        "{}/api/v1/local/workflow-runs",
+        server_url.trim_end_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .build()
+        .context("failed to configure workflow admission client")?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(token.as_str())
+        .json(&document)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("workflow admission request failed")?;
+    let status = response.status();
+    let body = read_bounded_body(response, DEFAULT_MAX_RESPONSE_BYTES)
+        .await
+        .context("failed to read workflow admission response")?;
+    if !status.is_success() {
+        let code = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|document| {
+                document
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "invalid_response".to_owned());
+        bail!("workflow admission returned HTTP {status} ({code})");
+    }
+    let admitted = serde_json::from_slice::<LocalWorkflowAdmissionResponse>(&body)
+        .context("control plane returned an invalid workflow admission response")?;
+    match output {
+        OutputFormat::Table => {
+            println!("run\t{}", admitted.run_id());
+            println!("number\t{}", admitted.run_number());
+            println!("replayed\t{}", admitted.is_replay());
+        }
+        OutputFormat::Json | OutputFormat::JsonLines => {
+            println!("{}", serde_json::to_string(&admitted)?);
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_utf8(path: &Path, maximum: usize) -> Result<String> {
+    let file = File::open(path).context("input file could not be opened")?;
+    let metadata = file
+        .metadata()
+        .context("input file metadata could not be read")?;
+    if metadata.len() > u64::try_from(maximum).unwrap_or(u64::MAX) {
+        bail!("input file exceeds its byte limit");
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(maximum)
+            .min(maximum),
+    );
+    file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .context("input file could not be read")?;
+    if bytes.len() > maximum {
+        bail!("input file exceeds its byte limit");
+    }
+    String::from_utf8(bytes).context("input file is not valid UTF-8")
 }
 
 async fn print_status(server_url: &str, output: OutputFormat) -> Result<()> {

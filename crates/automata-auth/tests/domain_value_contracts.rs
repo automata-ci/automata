@@ -9,7 +9,10 @@ use automata_auth::{
     },
     machine::{AuthenticatedMachine, ExternalRunnerIdentity, MachineIdentityError},
     secret::SessionToken,
-    session::{AutomataSessionClaims, IssuedSession, SessionId, SessionValidationError},
+    session::{
+        AutomataSessionClaims, AutomataSessionIdentity, IssuedSession, SessionId,
+        SessionValidationError,
+    },
     time::UnixTimestamp,
     vault::{
         KeyEncryptionContext, KeyEncryptionPurpose, ProviderAccessToken, ProviderGrantKind,
@@ -31,16 +34,17 @@ fn provider_subject() -> ProviderSubject {
 }
 
 fn valid_metadata() -> ProviderTokenMetadata {
-    ProviderTokenMetadata::new(
+    ProviderTokenMetadata::builder(
         provider_id(),
-        Some(provider_subject()),
         ProviderGrantKind::BrowserAuthorizationCode,
         "bearer",
-        BTreeSet::from(["repo:status".to_owned()]),
         UnixTimestamp::from_seconds(100),
-        Some(UnixTimestamp::from_seconds(200)),
-        Some(UnixTimestamp::from_seconds(300)),
     )
+    .provider_subject(Some(provider_subject()))
+    .scopes(BTreeSet::from(["repo:status".to_owned()]))
+    .access_expires_at(Some(UnixTimestamp::from_seconds(200)))
+    .refresh_expires_at(Some(UnixTimestamp::from_seconds(300)))
+    .build()
     .expect("valid token metadata")
 }
 
@@ -122,18 +126,21 @@ fn machine_identity_requires_a_non_empty_certificate_lifetime() {
 #[test]
 fn session_claims_reject_invalid_audiences_and_lifetimes_on_every_path() {
     let make_claims = |audience: &str, issued_at: u64, expires_at: u64| {
-        AutomataSessionClaims::new(
-            SessionId::new("session-1").expect("session ID"),
-            TenantId::new("tenant-1").expect("tenant ID"),
-            PrincipalId::new("github:42").expect("principal ID"),
-            provider_id(),
-            provider_subject(),
-            BTreeSet::from([RoleName::new("viewer").expect("role")]),
+        AutomataSessionClaims::builder(
+            AutomataSessionIdentity::new(
+                SessionId::new("session-1").expect("session ID"),
+                TenantId::new("tenant-1").expect("tenant ID"),
+                PrincipalId::new("github:42").expect("principal ID"),
+                provider_id(),
+                provider_subject(),
+            ),
             audience,
             UnixTimestamp::from_seconds(issued_at),
             UnixTimestamp::from_seconds(expires_at),
-            9,
         )
+        .roles(BTreeSet::from([RoleName::new("viewer").expect("role")]))
+        .authorization_revision(9)
+        .build()
     };
 
     assert_eq!(
@@ -178,42 +185,35 @@ fn session_claims_reject_invalid_audiences_and_lifetimes_on_every_path() {
 #[test]
 fn token_metadata_and_secret_material_cannot_become_inconsistent() {
     assert_eq!(
-        ProviderTokenMetadata::new(
+        ProviderTokenMetadata::builder(
             provider_id(),
-            None,
             ProviderGrantKind::DeviceAuthorization,
             "bearer token",
-            BTreeSet::new(),
             UnixTimestamp::from_seconds(100),
-            None,
-            None,
-        ),
+        )
+        .build(),
         Err(ProviderTokenMetadataError::InvalidTokenType)
     );
     assert_eq!(
-        ProviderTokenMetadata::new(
+        ProviderTokenMetadata::builder(
             provider_id(),
-            None,
             ProviderGrantKind::DeviceAuthorization,
             "bearer",
-            BTreeSet::from(["bad scope".to_owned()]),
             UnixTimestamp::from_seconds(100),
-            None,
-            None,
-        ),
+        )
+        .scopes(BTreeSet::from(["bad scope".to_owned()]))
+        .build(),
         Err(ProviderTokenMetadataError::InvalidScope)
     );
     assert_eq!(
-        ProviderTokenMetadata::new(
+        ProviderTokenMetadata::builder(
             provider_id(),
-            None,
             ProviderGrantKind::DeviceAuthorization,
             "bearer",
-            BTreeSet::new(),
             UnixTimestamp::from_seconds(100),
-            Some(UnixTimestamp::from_seconds(100)),
-            None,
-        ),
+        )
+        .access_expires_at(Some(UnixTimestamp::from_seconds(100)))
+        .build(),
         Err(ProviderTokenMetadataError::InvalidAccessLifetime)
     );
 

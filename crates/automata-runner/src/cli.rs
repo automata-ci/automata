@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -14,11 +16,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Connect to the control plane and execute assigned jobs.
+    Run(RunArgs),
     /// Inspect local capabilities; read-only unless --active is supplied.
     Doctor(DoctorArgs),
     /// Internal one-shot readiness server used by the isolated network probe.
     #[command(name = "__probe-http-ready", hide = true)]
     InternalProbeHttp(InternalProbeHttpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Strict JSON product configuration. Secrets must use file or environment sources.
+    #[arg(long, env = "AUTOMATA_RUNNER_CONFIG", value_name = "PATH")]
+    pub config: PathBuf,
 }
 
 #[derive(Debug, Args)]

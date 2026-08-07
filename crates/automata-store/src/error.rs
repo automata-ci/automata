@@ -3,6 +3,8 @@ use std::error::Error;
 use automata_core::{AttemptId, JobLifecycle, LeaseError, UnixMillis};
 use thiserror::Error;
 
+use crate::AttemptAssignmentError;
+
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AttemptCommandError {
     #[error("lease expiration must be strictly later than trusted observation time")]
@@ -21,8 +23,12 @@ pub enum AttemptSnapshotError {
     },
     #[error("active lifecycle {0:?} requires a complete lease")]
     ActiveLifecycleMissingLease(JobLifecycle),
+    #[error("active lifecycle {0:?} requires a runner-session slot assignment")]
+    ActiveLifecycleMissingAssignment(JobLifecycle),
     #[error("inactive lifecycle {0:?} cannot retain an active lease")]
     InactiveLifecycleHasLease(JobLifecycle),
+    #[error("inactive lifecycle {0:?} cannot retain a runner-session slot assignment")]
+    InactiveLifecycleHasAssignment(JobLifecycle),
     #[error("active lease is invalid: {0}")]
     InvalidLease(#[source] LeaseError),
     #[error(
@@ -32,6 +38,8 @@ pub enum AttemptSnapshotError {
         snapshot_attempt_id: AttemptId,
         lease_attempt_id: AttemptId,
     },
+    #[error("active lease and runner-session assignment are inconsistent: {0}")]
+    InvalidAssignment(#[source] AttemptAssignmentError),
     #[error("active lease was issued at {issued_at:?}, before queuing at {queued_at:?}")]
     LeaseIssuedBeforeQueued {
         queued_at: UnixMillis,

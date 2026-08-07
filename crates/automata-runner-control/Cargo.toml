@@ -1,0 +1,38 @@
+[package]
+name = "automata-runner-control"
+description = "Replica-neutral runner control application handler for Automata"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-auth.workspace = true
+automata-blob.workspace = true
+automata-control.workspace = true
+automata-control-plane.workspace = true
+automata-core.workspace = true
+automata-protocol.workspace = true
+automata-protocol-protobuf.workspace = true
+automata-runner-transport.workspace = true
+automata-store.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+# This crate uses zeroization types directly and does not need the workspace's derive macro.
+zeroize = "1.8.1"
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

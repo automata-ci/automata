@@ -37,17 +37,22 @@ The principal internal ports are deliberately narrower than a provider API:
 - `ContainerEngine` is separate because job containers, service containers,
   and sequential container actions exist inside one job sandbox. Unsupported
   Docker options are rejected, never dropped.
-- `BlobStore`, `ArtifactStore`, `CacheStore`, `SecretVault`, `ScmProvider`, and
-  `AuthenticationProvider` are provider-neutral ports. Adapters use owned,
-  versioned data and do not leak backend handles into durable records.
+- `BlobStore`, `ArtifactStore`, `CacheStore`, `SecretVault`, `ScmProvider`,
+  `RepositoryCredentialBroker`, and `AuthenticationProvider` are
+  provider-neutral ports. Adapters use owned, versioned data and do not leak
+  backend handles into durable records.
 
 Rust traits are used only within one release and address space. Guest agents,
 privileged helpers, third-party providers, and remote runners use versioned RPC
 over Unix sockets, vsock, or mTLS; Rust dynamic libraries are not a plugin ABI.
-The G0 protocol crate uses a strictly bounded, versioned JSON codec to harden
-the message model and negotiation rules. Protobuf is the planned stable network
-encoding adapter before the G1 remote-runner protocol is declared compatible;
-durable records never serialize Rust layouts directly.
+The G0 protocol crate retains a strictly bounded, versioned JSON codec for
+fixtures and bootstrap hardening. The production boundary is the checked,
+fully typed `automata.runner.v1` protobuf adapter; it has no opaque JSON fields,
+runtime `protoc`, or Rust-layout serialization. The adapter is wired into a
+bounded, mutually authenticated TLS 1.3 and HTTP/2 runner transport. The G1
+product composition binds that transport to the durable application handler,
+PostgreSQL-backed runner machine authority, and the two product binaries. The
+dogfood gate below remains the acceptance boundary for compatibility claims.
 
 ## Durable correctness rules
 

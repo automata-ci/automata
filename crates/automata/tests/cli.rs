@@ -1,7 +1,8 @@
 use automata::cli::{
     AuthCommand, AuthLoginMode, Cli, Command, OutputFormat, RepositoryRef, SecretCommand,
-    SecretScope,
+    SecretScope, WorkflowCommand,
 };
+use automata::server::{ServerConfig, ServerConfigError};
 use clap::Parser as _;
 
 #[test]
@@ -15,10 +16,49 @@ fn server_uses_a_loopback_default() {
 }
 
 #[test]
+fn preview_is_an_explicit_dependency_free_mode() {
+    let cli = Cli::try_parse_from(["automata", "preview"]).expect("CLI must parse");
+
+    let Command::Preview(args) = cli.command else {
+        panic!("preview command expected");
+    };
+    assert_eq!(args.listen.to_string(), "127.0.0.1:8080");
+    assert_eq!(Command::Preview(args).operation_name(), "preview");
+}
+
+#[test]
 fn server_rejects_an_invalid_socket_address_during_parsing() {
     let result = Cli::try_parse_from(["automata", "server", "--listen", "not-an-address"]);
 
     assert!(result.is_err());
+}
+
+#[test]
+fn serve_alias_uses_the_same_full_server_configuration() {
+    let cli = Cli::try_parse_from(["automata", "serve"]).expect("serve alias must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert_eq!(args.runner_listen.to_string(), "127.0.0.1:9090");
+}
+
+#[test]
+fn server_credentials_must_be_references_not_values() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--database-url-source",
+        "postgres://operator:plaintext-secret@database/automata",
+    ])
+    .expect("invalid credential text must become a redacted configuration sentinel");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidSecretSource)
+    ));
 }
 
 #[test]
@@ -102,4 +142,40 @@ fn all_secret_scope_forms_round_trip() {
         let scope = value.parse::<SecretScope>().expect("scope must parse");
         assert_eq!(scope.to_string(), value);
     }
+}
+
+#[test]
+fn workflow_dispatch_uses_exact_source_event_and_secret_references() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "workflow",
+        "dispatch",
+        "-R",
+        "GoNeuralAI/automata",
+        "--provider-repository-id",
+        "repository-automata",
+        "--source-file",
+        ".github/workflows/ci.yml",
+        "--event-file",
+        "target/dogfood-event.json",
+        "--delivery-id",
+        "delivery-7",
+        "--commit-sha",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--local-admission-token-source",
+        "file:target/local-admission-token",
+    ])
+    .expect("workflow dispatch must parse");
+
+    let Command::Workflow(workflow) = cli.command else {
+        panic!("workflow command expected");
+    };
+    let WorkflowCommand::Dispatch(dispatch) = workflow.command;
+    assert_eq!(dispatch.repository.to_string(), "GoNeuralAI/automata");
+    assert_eq!(dispatch.delivery_id, "delivery-7");
+    assert_eq!(dispatch.event_name, "workflow_dispatch");
+    assert_eq!(dispatch.git_ref, "refs/heads/main");
+    let debug = format!("{:?}", dispatch.token_source);
+    assert!(debug.contains("[redacted]"));
+    assert!(!debug.contains("local-admission-token"));
 }

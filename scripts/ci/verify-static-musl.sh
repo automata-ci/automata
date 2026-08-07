@@ -164,7 +164,7 @@ printf '%s\n' \
   --name "$container_name" \
   --publish 127.0.0.1::8080/tcp \
   "$image_tag" \
-  server --listen 0.0.0.0:8080 >/dev/null
+  preview --listen 0.0.0.0:8080 >/dev/null
 
 published_address="$($runtime port "$container_name" 8080/tcp)" \
   || die "could not resolve the scratch server's published port"

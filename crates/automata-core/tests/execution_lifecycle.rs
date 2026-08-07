@@ -37,6 +37,7 @@ fn lifecycle_allows_only_declared_edges_property_style() {
                         | JobLifecycle::Cancelling
                         | JobLifecycle::Failed
                         | JobLifecycle::TimedOut
+                        | JobLifecycle::Skipped
                         | JobLifecycle::Lost
                 ) | (
                     JobLifecycle::Running,

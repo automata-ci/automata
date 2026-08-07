@@ -186,16 +186,16 @@ fn provider_tokens(grant_kind: ProviderGrantKind, refresh_expiry: u64) -> Provid
     ProviderTokenSet::new(
         ProviderAccessToken::new(secret("old-access")),
         Some(ProviderRefreshToken::new(secret("old-refresh"))),
-        ProviderTokenMetadata::new(
+        ProviderTokenMetadata::builder(
             config.provider_id().clone(),
-            None,
             grant_kind,
             "bearer",
-            BTreeSet::default(),
             UnixTimestamp::from_seconds(1),
-            Some(UnixTimestamp::from_seconds(2)),
-            Some(UnixTimestamp::from_seconds(refresh_expiry)),
         )
+        .scopes(BTreeSet::default())
+        .access_expires_at(Some(UnixTimestamp::from_seconds(2)))
+        .refresh_expires_at(Some(UnixTimestamp::from_seconds(refresh_expiry)))
+        .build()
         .expect("valid token metadata"),
     )
     .expect("valid provider token set")

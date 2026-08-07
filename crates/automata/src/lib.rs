@@ -3,6 +3,8 @@
 pub mod app;
 pub mod build_info;
 pub mod cli;
+pub mod preview;
+pub mod server;
 pub mod shutdown;
 
 use anyhow::Result;
@@ -24,7 +26,8 @@ pub async fn run() -> Result<()> {
 
 async fn execute(cli: Cli) -> Result<()> {
     match &cli.command {
-        Command::Server(args) => app::serve(args.listen).await,
+        Command::Server(args) => server::serve(args).await,
+        Command::Preview(args) => preview::serve(args).await,
         command => cli::execute_control_plane_command(&cli.server_url, cli.output, command).await,
     }
 }

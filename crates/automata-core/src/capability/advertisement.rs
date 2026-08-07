@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ContainerCapabilities, ResourceCapacity, RunnerFeature, RunnerGroup, RunnerLabel,
-    RunnerPlatform, SandboxCapabilities,
+    ContainerCapabilities, EnvironmentProfile, ResourceCapacity, RunnerFeature, RunnerGroup,
+    RunnerLabel, RunnerPlatform, SandboxCapabilities,
 };
 use crate::{CORE_SCHEMA_VERSION, RunnerId};
 
@@ -24,6 +24,8 @@ pub struct RunnerCapabilities {
     sandbox: SandboxCapabilities,
     containers: ContainerCapabilities,
     features: BTreeSet<RunnerFeature>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    environment_profiles: BTreeSet<EnvironmentProfile>,
 }
 
 impl RunnerCapabilities {
@@ -41,6 +43,7 @@ impl RunnerCapabilities {
             sandbox: SandboxCapabilities::default(),
             containers: ContainerCapabilities::default(),
             features: BTreeSet::new(),
+            environment_profiles: BTreeSet::new(),
         }
     }
 
@@ -94,6 +97,12 @@ impl RunnerCapabilities {
         &self.features
     }
 
+    /// Returns the exact content-attested environments this runner can supply.
+    #[must_use]
+    pub const fn environment_profiles(&self) -> &BTreeSet<EnvironmentProfile> {
+        &self.environment_profiles
+    }
+
     /// Replaces the runner labels, canonicalized by [`RunnerLabel`].
     #[must_use]
     pub fn with_labels(mut self, labels: impl IntoIterator<Item = RunnerLabel>) -> Self {
@@ -142,6 +151,16 @@ impl RunnerCapabilities {
     #[must_use]
     pub fn with_features(mut self, features: impl IntoIterator<Item = RunnerFeature>) -> Self {
         self.features = features.into_iter().collect();
+        self
+    }
+
+    /// Replaces the exact content-attested environments this runner can supply.
+    #[must_use]
+    pub fn with_environment_profiles(
+        mut self,
+        profiles: impl IntoIterator<Item = EnvironmentProfile>,
+    ) -> Self {
+        self.environment_profiles = profiles.into_iter().collect();
         self
     }
 

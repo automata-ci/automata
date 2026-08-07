@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Expression, JobValidationError, StepId, ValueSource};
+use super::{ExpressionProgram, JobValidationError, StepId, ValueSource};
 
 /// One semantically ordered workflow step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StepIr {
     id: StepId,
     name: String,
-    condition: Option<Expression>,
+    condition: Option<ExpressionProgram>,
     continue_on_error: bool,
     timeout_seconds: Option<u32>,
     environment: BTreeMap<String, ValueSource>,
@@ -44,7 +44,7 @@ impl StepIr {
     }
 
     #[must_use]
-    pub const fn condition(&self) -> Option<&Expression> {
+    pub const fn condition(&self) -> Option<&ExpressionProgram> {
         self.condition.as_ref()
     }
 
@@ -69,7 +69,7 @@ impl StepIr {
     }
 
     #[must_use]
-    pub fn with_condition(mut self, condition: Expression) -> Self {
+    pub fn with_condition(mut self, condition: ExpressionProgram) -> Self {
         self.condition = Some(condition);
         self
     }

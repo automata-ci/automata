@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use automata_core::{
     AttemptId, AttemptNumber, FencingToken, IdentifierError, JobId, JobLifecycle, Lease,
-    LeaseGuard, LeaseId, RunnerId, UnixMillis,
+    LeaseGuard, LeaseId, RunnerId, RunnerSessionId, UnixMillis,
 };
 use sqlx::{PgConnection, PgPool, Row as _, postgres::PgPoolOptions};
 use thiserror::Error;
@@ -9,10 +9,15 @@ use uuid::Uuid;
 
 use crate::migration::MIGRATOR;
 use crate::{
-    AcquireLease, AttemptSnapshot, AttemptSnapshotError, AttemptStoreError, ConcludeQueuedAttempt,
-    InternalAttemptRepository, QueuedAttempt, RenewLease, TenantAttemptQuery, TenantScope,
+    AcquireLease, AttemptAssignment, AttemptSnapshot, AttemptSnapshotError, AttemptStoreError,
+    ConcludeQueuedAttempt, InternalAttemptRepository, QueuedAttempt, RenewLease, RunnerGeneration,
+    RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantAttemptQuery, TenantScope,
     TransitionAttempt,
 };
+
+mod admission;
+mod g1;
+mod maintenance;
 
 /// Failures specific to configuring or migrating the `PostgreSQL` adapter.
 ///
@@ -84,6 +89,8 @@ impl PostgresStore {
             r"
             SELECT id, job_id, attempt_number, lifecycle, fencing_token,
                    lease_id, runner_id, lease_issued_at_ms, lease_expires_at_ms,
+                   runner_session_id, runner_session_epoch, runner_generation,
+                   runner_slot,
                    lease_failures, queued_at_ms, changed_at_ms
             FROM job_attempts
             WHERE id = $1
@@ -102,6 +109,12 @@ impl PostgresStore {
 #[async_trait]
 impl InternalAttemptRepository for PostgresStore {
     async fn insert_queued(&self, attempt: QueuedAttempt) -> Result<(), AttemptStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE")
+            .bind(attempt.job_id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(operation_error)?;
         sqlx::query(
             r"
             INSERT INTO job_attempts (
@@ -117,9 +130,10 @@ impl InternalAttemptRepository for PostgresStore {
             AttemptStoreError::corrupt_data("attempt number does not fit PostgreSQL INTEGER")
         })?)
         .bind(attempt.queued_at.get())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(operation_error)?;
+        transaction.commit().await.map_err(operation_error)?;
         Ok(())
     }
 
@@ -132,6 +146,13 @@ impl InternalAttemptRepository for PostgresStore {
 
     async fn acquire_lease(&self, request: AcquireLease) -> Result<Lease, AttemptStoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        verify_live_session_and_slot(
+            &mut transaction,
+            request.attempt_id,
+            request.session,
+            request.slot,
+        )
+        .await?;
         let snapshot = locked_snapshot(&mut transaction, request.attempt_id).await?;
         if snapshot.lifecycle != JobLifecycle::Queued {
             return Err(AttemptStoreError::NotQueued {
@@ -144,7 +165,7 @@ impl InternalAttemptRepository for PostgresStore {
             &mut transaction,
             request.attempt_id,
             snapshot.job_id,
-            request.runner_id,
+            request.runner_id(),
         )
         .await?;
         let fencing_token = match snapshot.fencing_token {
@@ -163,6 +184,10 @@ impl InternalAttemptRepository for PostgresStore {
                 runner_id = $4,
                 lease_issued_at_ms = $5,
                 lease_expires_at_ms = $6,
+                runner_session_id = $7,
+                runner_session_epoch = $8,
+                runner_generation = $9,
+                runner_slot = $10,
                 changed_at_ms = $5
             WHERE id = $1
               AND lifecycle = 'queued'
@@ -172,9 +197,15 @@ impl InternalAttemptRepository for PostgresStore {
         .bind(request.attempt_id.as_uuid())
         .bind(fencing_to_i64(fencing_token)?)
         .bind(request.lease_id.as_uuid())
-        .bind(request.runner_id.as_uuid())
+        .bind(request.runner_id().as_uuid())
         .bind(request.observed_at.get())
         .bind(request.expires_at.get())
+        .bind(request.session.session_id().as_uuid())
+        .bind(g1::session_epoch_to_i64(request.session.session_epoch())?)
+        .bind(g1::runner_generation_to_i64(
+            request.session.runner_generation(),
+        )?)
+        .bind(i32::from(request.slot.ordinal()))
         .execute(&mut *transaction)
         .await
         .map_err(operation_error)?;
@@ -182,7 +213,7 @@ impl InternalAttemptRepository for PostgresStore {
         let lease = Lease::new(
             request.lease_id,
             request.attempt_id,
-            request.runner_id,
+            request.runner_id(),
             fencing_token,
             request.observed_at,
             request.expires_at,
@@ -233,67 +264,23 @@ impl InternalAttemptRepository for PostgresStore {
 
     async fn renew_lease(&self, request: RenewLease) -> Result<Lease, AttemptStoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        let snapshot = locked_snapshot(&mut transaction, request.attempt_id).await?;
-        verify_guard(request.attempt_id, request.guard, &snapshot)?;
-        verify_runner(request.attempt_id, request.runner_id, &snapshot)?;
-        verify_mutation_time(request.attempt_id, request.observed_at, &snapshot)?;
-        let current_expiration = snapshot
-            .lease_expires_at
-            .ok_or_else(|| corrupt("active lease is missing its expiration"))?;
-        if request.expires_at <= current_expiration {
-            return Err(AttemptStoreError::RenewalDoesNotExtend(request.attempt_id));
-        }
-
-        let result = sqlx::query(
-            r"
-            UPDATE job_attempts
-            SET lease_expires_at_ms = $5,
-                changed_at_ms = $6
-            WHERE id = $1
-              AND lease_id = $2
-              AND fencing_token = $3
-              AND runner_id = $4
-              AND changed_at_ms <= $6
-            ",
-        )
-        .bind(request.attempt_id.as_uuid())
-        .bind(request.guard.lease_id().as_uuid())
-        .bind(fencing_to_i64(request.guard.fencing_token())?)
-        .bind(request.runner_id.as_uuid())
-        .bind(request.expires_at.get())
-        .bind(request.observed_at.get())
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        require_single_update(result.rows_affected())?;
-        let runner_id = snapshot
-            .runner_id
-            .ok_or_else(|| corrupt("active lease is missing its runner"))?;
-        let issued_at = snapshot
-            .lease_issued_at
-            .ok_or_else(|| corrupt("active lease is missing its issuance"))?;
-        let lease = Lease::new(
-            request.guard.lease_id(),
-            request.attempt_id,
-            runner_id,
-            request.guard.fencing_token(),
-            issued_at,
-            request.expires_at,
-        )
-        .map_err(|error| {
-            AttemptStoreError::corrupt_data(format!(
-                "durable renewal produced an invalid lease: {error}"
-            ))
-        })?;
+        let lease = renew_lease_in_transaction(&mut transaction, request).await?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(lease)
     }
 
     async fn transition(&self, request: TransitionAttempt) -> Result<(), AttemptStoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        verify_live_session(
+            &mut transaction,
+            request.attempt_id,
+            request.session,
+            SessionUse::ExistingWork,
+        )
+        .await?;
         let snapshot = locked_snapshot(&mut transaction, request.attempt_id).await?;
         verify_guard(request.attempt_id, request.guard, &snapshot)?;
-        verify_runner(request.attempt_id, request.runner_id, &snapshot)?;
+        verify_assignment(request.attempt_id, request.session, &snapshot)?;
         verify_mutation_time(request.attempt_id, request.observed_at, &snapshot)?;
         snapshot
             .lifecycle
@@ -320,12 +307,27 @@ impl InternalAttemptRepository for PostgresStore {
                 lease_expires_at_ms = CASE
                     WHEN $4 IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
                     THEN lease_expires_at_ms ELSE NULL END,
+                runner_session_id = CASE
+                    WHEN $4 IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
+                    THEN runner_session_id ELSE NULL END,
+                runner_session_epoch = CASE
+                    WHEN $4 IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
+                    THEN runner_session_epoch ELSE NULL END,
+                runner_generation = CASE
+                    WHEN $4 IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
+                    THEN runner_generation ELSE NULL END,
+                runner_slot = CASE
+                    WHEN $4 IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
+                    THEN runner_slot ELSE NULL END,
                 queued_at_ms = CASE WHEN $4 = 'queued' THEN $5 ELSE queued_at_ms END,
                 changed_at_ms = $5
             WHERE id = $1
               AND lease_id = $2
               AND fencing_token = $3
               AND runner_id = $6
+              AND runner_session_id = $7
+              AND runner_session_epoch = $8
+              AND runner_generation = $9
               AND changed_at_ms <= $5
             ",
         )
@@ -334,7 +336,12 @@ impl InternalAttemptRepository for PostgresStore {
         .bind(fencing_to_i64(request.guard.fencing_token())?)
         .bind(next)
         .bind(request.observed_at.get())
-        .bind(request.runner_id.as_uuid())
+        .bind(request.runner_id().as_uuid())
+        .bind(request.session.session_id().as_uuid())
+        .bind(g1::session_epoch_to_i64(request.session.session_epoch())?)
+        .bind(g1::runner_generation_to_i64(
+            request.session.runner_generation(),
+        )?)
         .execute(&mut *transaction)
         .await
         .map_err(operation_error)?;
@@ -369,15 +376,21 @@ impl InternalAttemptRepository for PostgresStore {
             )
             UPDATE job_attempts AS attempt
             SET lifecycle = CASE
-                    WHEN attempt.lease_failures + 1 >= $2 THEN 'lost'
+                    WHEN attempt.lifecycle IN ('running', 'cancelling', 'finalizing')
+                         OR attempt.lease_failures + 1 >= $2 THEN 'lost'
                     ELSE 'queued' END,
                 lease_id = NULL,
                 runner_id = NULL,
                 lease_issued_at_ms = NULL,
                 lease_expires_at_ms = NULL,
+                runner_session_id = NULL,
+                runner_session_epoch = NULL,
+                runner_generation = NULL,
+                runner_slot = NULL,
                 lease_failures = attempt.lease_failures + 1,
                 queued_at_ms = CASE
-                    WHEN attempt.lease_failures + 1 >= $2 THEN attempt.queued_at_ms
+                    WHEN attempt.lifecycle IN ('running', 'cancelling', 'finalizing')
+                         OR attempt.lease_failures + 1 >= $2 THEN attempt.queued_at_ms
                     ELSE $1 END,
                 changed_at_ms = $1
             FROM expired
@@ -402,6 +415,79 @@ impl InternalAttemptRepository for PostgresStore {
     }
 }
 
+pub(super) async fn renew_lease_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: RenewLease,
+) -> Result<Lease, AttemptStoreError> {
+    verify_live_session(
+        transaction,
+        request.attempt_id,
+        request.session,
+        SessionUse::ExistingWork,
+    )
+    .await?;
+    let snapshot = locked_snapshot(transaction, request.attempt_id).await?;
+    verify_guard(request.attempt_id, request.guard, &snapshot)?;
+    verify_assignment(request.attempt_id, request.session, &snapshot)?;
+    verify_mutation_time(request.attempt_id, request.observed_at, &snapshot)?;
+    let current_expiration = snapshot
+        .lease_expires_at
+        .ok_or_else(|| corrupt("active lease is missing its expiration"))?;
+    if request.expires_at <= current_expiration {
+        return Err(AttemptStoreError::RenewalDoesNotExtend(request.attempt_id));
+    }
+
+    let result = sqlx::query(
+        r"
+        UPDATE job_attempts
+        SET lease_expires_at_ms = $5,
+            changed_at_ms = $6
+        WHERE id = $1
+          AND lease_id = $2
+          AND fencing_token = $3
+          AND runner_id = $4
+          AND runner_session_id = $7
+          AND runner_session_epoch = $8
+          AND runner_generation = $9
+          AND changed_at_ms <= $6
+        ",
+    )
+    .bind(request.attempt_id.as_uuid())
+    .bind(request.guard.lease_id().as_uuid())
+    .bind(fencing_to_i64(request.guard.fencing_token())?)
+    .bind(request.runner_id().as_uuid())
+    .bind(request.expires_at.get())
+    .bind(request.observed_at.get())
+    .bind(request.session.session_id().as_uuid())
+    .bind(g1::session_epoch_to_i64(request.session.session_epoch())?)
+    .bind(g1::runner_generation_to_i64(
+        request.session.runner_generation(),
+    )?)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    require_single_update(result.rows_affected())?;
+    let runner_id = snapshot
+        .runner_id
+        .ok_or_else(|| corrupt("active lease is missing its runner"))?;
+    let issued_at = snapshot
+        .lease_issued_at
+        .ok_or_else(|| corrupt("active lease is missing its issuance"))?;
+    Lease::new(
+        request.guard.lease_id(),
+        request.attempt_id,
+        runner_id,
+        request.guard.fencing_token(),
+        issued_at,
+        request.expires_at,
+    )
+    .map_err(|error| {
+        AttemptStoreError::corrupt_data(format!(
+            "durable renewal produced an invalid lease: {error}"
+        ))
+    })
+}
+
 #[async_trait]
 impl TenantAttemptQuery for PostgresStore {
     async fn get_attempt_for_tenant(
@@ -415,6 +501,8 @@ impl TenantAttemptQuery for PostgresStore {
                    attempt.lifecycle, attempt.fencing_token, attempt.lease_id,
                    attempt.runner_id, attempt.lease_issued_at_ms,
                    attempt.lease_expires_at_ms, attempt.lease_failures,
+                   attempt.runner_session_id, attempt.runner_session_epoch,
+                   attempt.runner_generation, attempt.runner_slot,
                    attempt.queued_at_ms, attempt.changed_at_ms
             FROM job_attempts AS attempt
             JOIN jobs AS job ON job.id = attempt.job_id
@@ -439,6 +527,7 @@ impl TenantAttemptQuery for PostgresStore {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_snapshot(row: &sqlx::postgres::PgRow) -> Result<AttemptSnapshot, AttemptStoreError> {
     let attempt_id = AttemptId::from_uuid(row.try_get("id").map_err(operation_error)?);
     let job_id = JobId::from_uuid(row.try_get("job_id").map_err(operation_error)?);
@@ -473,6 +562,19 @@ fn decode_snapshot(row: &sqlx::postgres::PgRow) -> Result<AttemptSnapshot, Attem
         .try_get::<Option<i64>, _>("lease_expires_at_ms")
         .map_err(operation_error)?
         .map(UnixMillis::new);
+    let runner_session_id = row
+        .try_get::<Option<Uuid>, _>("runner_session_id")
+        .map_err(operation_error)?
+        .map(RunnerSessionId::from_uuid);
+    let runner_session_epoch = row
+        .try_get::<Option<i64>, _>("runner_session_epoch")
+        .map_err(operation_error)?;
+    let runner_generation = row
+        .try_get::<Option<i64>, _>("runner_generation")
+        .map_err(operation_error)?;
+    let runner_slot = row
+        .try_get::<Option<i32>, _>("runner_slot")
+        .map_err(operation_error)?;
     let lease_failures = u32::try_from(
         row.try_get::<i32, _>("lease_failures")
             .map_err(operation_error)?,
@@ -481,23 +583,56 @@ fn decode_snapshot(row: &sqlx::postgres::PgRow) -> Result<AttemptSnapshot, Attem
     let queued_at = UnixMillis::new(row.try_get("queued_at_ms").map_err(operation_error)?);
     let changed_at = UnixMillis::new(row.try_get("changed_at_ms").map_err(operation_error)?);
 
-    let active_lease = match (lease_id, runner_id, lease_issued_at, lease_expires_at) {
-        (None, None, None, None) => None,
-        (Some(lease_id), Some(runner_id), Some(issued_at), Some(expires_at)) => {
+    let active = match (
+        lease_id,
+        runner_id,
+        lease_issued_at,
+        lease_expires_at,
+        runner_session_id,
+        runner_session_epoch,
+        runner_generation,
+        runner_slot,
+    ) {
+        (None, None, None, None, None, None, None, None) => None,
+        (
+            Some(lease_id),
+            Some(runner_id),
+            Some(issued_at),
+            Some(expires_at),
+            Some(session_id),
+            Some(raw_epoch),
+            Some(raw_generation),
+            Some(raw_slot),
+        ) => {
             let fencing_token = fencing_token.ok_or_else(|| {
                 AttemptStoreError::corrupt_data("active lease is missing its fencing token")
             })?;
-            Some(
-                Lease::new(
-                    lease_id,
-                    attempt_id,
-                    runner_id,
-                    fencing_token,
-                    issued_at,
-                    expires_at,
-                )
-                .map_err(AttemptSnapshotError::InvalidLease)?,
+            let epoch = u64::try_from(raw_epoch)
+                .ok()
+                .and_then(|value| SessionEpoch::new(value).ok())
+                .ok_or_else(|| AttemptStoreError::corrupt_data("invalid runner session epoch"))?;
+            let generation = u64::try_from(raw_generation)
+                .ok()
+                .and_then(|value| RunnerGeneration::new(value).ok())
+                .ok_or_else(|| AttemptStoreError::corrupt_data("invalid runner generation"))?;
+            let slot = u16::try_from(raw_slot)
+                .ok()
+                .and_then(|value| StableRunnerSlot::new(value).ok())
+                .ok_or_else(|| AttemptStoreError::corrupt_data("invalid stable runner slot"))?;
+            let lease = Lease::new(
+                lease_id,
+                attempt_id,
+                runner_id,
+                fencing_token,
+                issued_at,
+                expires_at,
             )
+            .map_err(AttemptSnapshotError::InvalidLease)?;
+            let assignment = AttemptAssignment::new(
+                RunnerSessionFence::new(session_id, runner_id, generation, epoch),
+                slot,
+            );
+            Some((lease, assignment))
         }
         _ => {
             return Err(AttemptStoreError::corrupt_data(
@@ -515,8 +650,8 @@ fn decode_snapshot(row: &sqlx::postgres::PgRow) -> Result<AttemptSnapshot, Attem
         changed_at,
     )
     .with_lease_failures(lease_failures);
-    if let Some(active_lease) = active_lease {
-        builder = builder.with_active_lease(active_lease);
+    if let Some((active_lease, assignment)) = active {
+        builder = builder.with_active_lease(active_lease, assignment);
     } else if let Some(fencing_token) = fencing_token {
         builder = builder.with_retained_fencing_token(fencing_token);
     }
@@ -531,6 +666,8 @@ async fn locked_snapshot(
         r"
         SELECT id, job_id, attempt_number, lifecycle, fencing_token,
                lease_id, runner_id, lease_issued_at_ms, lease_expires_at_ms,
+               runner_session_id, runner_session_epoch, runner_generation,
+               runner_slot,
                lease_failures, queued_at_ms, changed_at_ms
         FROM job_attempts
         WHERE id = $1
@@ -604,12 +741,77 @@ fn verify_guard(
     Ok(())
 }
 
-fn verify_runner(
+fn verify_assignment(
     attempt_id: AttemptId,
-    runner_id: RunnerId,
+    session: RunnerSessionFence,
     snapshot: &AttemptSnapshot,
 ) -> Result<(), AttemptStoreError> {
-    if snapshot.runner_id != Some(runner_id) {
+    if snapshot.assignment.map(AttemptAssignment::session) != Some(session) {
+        return Err(AttemptStoreError::RunnerRejected(attempt_id));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionUse {
+    ExistingWork,
+    NewWork,
+}
+
+async fn verify_live_session(
+    connection: &mut PgConnection,
+    attempt_id: AttemptId,
+    session: RunnerSessionFence,
+    session_use: SessionUse,
+) -> Result<(), AttemptStoreError> {
+    let desired_state = sqlx::query_scalar::<_, String>(
+        r"
+        SELECT runner.desired_state
+        FROM runners AS runner
+        JOIN runner_sessions AS session ON session.runner_id = runner.id
+        WHERE session.id = $1
+          AND runner.id = $2
+          AND runner.generation = $3
+          AND runner.session_epoch = $4
+          AND runner.status = 'online'
+          AND session.runner_generation = $3
+          AND session.session_epoch = $4
+          AND session.disconnected_at_ms IS NULL
+        FOR UPDATE OF runner, session
+        ",
+    )
+    .bind(session.session_id().as_uuid())
+    .bind(session.runner_id().as_uuid())
+    .bind(g1::runner_generation_to_i64(session.runner_generation())?)
+    .bind(g1::session_epoch_to_i64(session.session_epoch())?)
+    .fetch_optional(connection)
+    .await
+    .map_err(operation_error)?;
+    let allowed = matches!(
+        (session_use, desired_state.as_deref()),
+        (SessionUse::NewWork, Some("active"))
+            | (SessionUse::ExistingWork, Some("active" | "draining"))
+    );
+    if !allowed {
+        return Err(AttemptStoreError::RunnerRejected(attempt_id));
+    }
+    Ok(())
+}
+
+async fn verify_live_session_and_slot(
+    connection: &mut PgConnection,
+    attempt_id: AttemptId,
+    session: RunnerSessionFence,
+    slot: StableRunnerSlot,
+) -> Result<(), AttemptStoreError> {
+    verify_live_session(connection, attempt_id, session, SessionUse::NewWork).await?;
+    let in_range: bool = sqlx::query_scalar("SELECT slots >= $2 FROM runners WHERE id = $1")
+        .bind(session.runner_id().as_uuid())
+        .bind(i32::from(slot.ordinal()))
+        .fetch_one(connection)
+        .await
+        .map_err(operation_error)?;
+    if !in_range {
         return Err(AttemptStoreError::RunnerRejected(attempt_id));
     }
     Ok(())

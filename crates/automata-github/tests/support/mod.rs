@@ -22,7 +22,7 @@ const MAX_FIXTURE_REQUEST_BYTES: usize = 1_048_576;
 pub struct ResponseSpec {
     status: StatusCode,
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
 }
 
 impl ResponseSpec {
@@ -30,7 +30,7 @@ impl ResponseSpec {
         Self {
             status,
             headers: vec![("content-type".to_owned(), "application/json".to_owned())],
-            body: body.into(),
+            body: body.into().into_bytes(),
         }
     }
 
@@ -38,7 +38,15 @@ impl ResponseSpec {
         Self {
             status,
             headers: Vec::new(),
-            body: String::new(),
+            body: Vec::new(),
+        }
+    }
+
+    pub fn binary(status: StatusCode, media_type: &str, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            headers: vec![("content-type".to_owned(), media_type.to_owned())],
+            body: body.into(),
         }
     }
 

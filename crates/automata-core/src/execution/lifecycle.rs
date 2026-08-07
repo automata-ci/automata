@@ -37,6 +37,8 @@ impl JobLifecycle {
     }
 
     /// Validates one lifecycle edge. Lease authorization is checked separately.
+    /// A leased job whose job-level condition is false resolves directly from
+    /// [`Self::Preparing`] to [`Self::Skipped`] without inventing execution.
     ///
     /// # Errors
     ///
@@ -57,6 +59,7 @@ impl JobLifecycle {
                         | Self::Cancelling
                         | Self::Failed
                         | Self::TimedOut
+                        | Self::Skipped
                         | Self::Lost
                 )
                 | (

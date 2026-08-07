@@ -54,6 +54,32 @@ fn superseded_lease_is_rejected_by_stale_fencing_token() {
 }
 
 #[test]
+fn preparing_job_can_skip_without_inventing_running_and_revokes_lease() {
+    let mut attempt = queued_attempt();
+    let lease = attempt
+        .acquire_lease(
+            LeaseId::new(),
+            RunnerId::new(),
+            UnixMillis::new(1_000),
+            UnixMillis::new(2_000),
+        )
+        .expect("lease");
+    attempt
+        .apply_transition(lease.guard(), JobLifecycle::Preparing)
+        .expect("prepare leased job");
+    attempt
+        .apply_transition(lease.guard(), JobLifecycle::Skipped)
+        .expect("resolve false job condition");
+
+    assert_eq!(attempt.lifecycle(), JobLifecycle::Skipped);
+    assert!(attempt.active_lease().is_none());
+    assert_eq!(
+        attempt.verify_fence(lease.guard()),
+        Err(FenceError::NoActiveLease)
+    );
+}
+
+#[test]
 fn lease_interval_and_renewal_must_advance() {
     let mut attempt = queued_attempt();
     assert!(matches!(

@@ -133,9 +133,9 @@ pub(super) fn empty_run_list(
                 ],
             },
             repository: Repository {
-                owner: "AlexanderDzhoganov",
+                owner: "GoNeuralAI",
                 name: "automata",
-                href: "/AlexanderDzhoganov/automata",
+                href: "/GoNeuralAI/automata",
                 runs_href: "/runs",
             },
             heading: "Workflow runs",

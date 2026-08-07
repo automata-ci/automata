@@ -126,6 +126,270 @@ Never allow a failed probe to fall back to a weaker isolation provider while
 retaining the stronger capability advertisement. The runner remains
 unregistered or advertises only the providers whose active probes succeeded.
 
+## Local smart-Git bridge firewall
+
+Local dogfood jobs fetch an immutable snapshot from the bounded smart-HTTP Git
+bridge on the host. A rootless job reaches the host gateway, so a loopback-only
+listener is insufficient. Bind the bridge to one exact RFC 1918 address
+(`192.168.0.8:8088` in the development example), never `0.0.0.0`. Exact binding
+prevents the process from also listening on Tailscale and any other host
+address, but the private LAN address still needs an ingress guard.
+
+[`scripts/dev/git-bridge-firewall.sh`](../../scripts/dev/git-bridge-firewall.sh)
+owns the independent `inet automata_git_bridge_guard` table. Its input base
+chain has an `accept` policy and exactly one terminal rule: drop packets for the
+configured Git address and TCP port when their input interface is not `lo`.
+It does not flush a ruleset or edit Results, `iptables-nft`, Netavark, Docker,
+or Tailscale state.
+
+Choose the host-specific values in a nonsymlink config copied from
+[`deploy/dev/git-bridge-firewall.env.example`](../../deploy/dev/git-bridge-firewall.env.example).
+The helper parses this strict data without sourcing it and rejects wildcard,
+loopback, public, carrier-grade NAT, and non-canonical addresses; privileged or
+invalid ports; duplicate or unknown keys; and every config path that traverses
+a symbolic link. `audit` and `apply` additionally reject an address that is not
+assigned to a non-loopback interface on the host.
+
+Inspect the exact transaction before approving any privileged action:
+
+```console
+./scripts/dev/git-bridge-firewall.sh render \
+  --listen-address 192.168.0.8 \
+  --port 8088
+```
+
+For these inputs the complete proposed table is:
+
+```nftables
+table inet automata_git_bridge_guard {
+	comment "automata-git-bridge-firewall:v1"
+	chain git_bridge_input {
+		type filter hook input priority -10; policy accept;
+		ip daddr 192.168.0.8 tcp dport 8088 iifname != "lo" drop comment "automata-git-bridge-firewall:deny-non-loopback:v1"
+	}
+}
+```
+
+Verify that the host routes its own exact private address through loopback:
+
+```console
+ip -4 route get 192.168.0.8
+# local 192.168.0.8 dev lo ...
+```
+
+After reviewing the render output, install and audit the guard before starting
+the bridge. Creation is one atomic nftables transaction, exact reapplication is
+a no-op, and any extra, missing, or changed table object makes `audit`, `apply`,
+and `remove` refuse without changing the table.
+
+```console
+sudo ./scripts/dev/git-bridge-firewall.sh apply \
+  --listen-address 192.168.0.8 \
+  --port 8088
+sudo ./scripts/dev/git-bridge-firewall.sh audit \
+  --listen-address 192.168.0.8 \
+  --port 8088
+python3 scripts/dev/git-http-server.py \
+  --project-root "$(realpath target/dogfood/source)" \
+  --scratch-directory "$(realpath target/runner-local/git-http-scratch)" \
+  --git-http-backend "$(realpath "$(git --exec-path)/git-http-backend")" \
+  --listen-address 192.168.0.8 \
+  --port 8088
+```
+
+Confirm the actual rootless Podman path after the exact listener is running.
+Capture one request in one terminal (the `tcpdump` package is diagnostic-only):
+
+```console
+sudo timeout 30s tcpdump -l -nn -i any -Q in -c 1 \
+  'tcp and dst host 192.168.0.8 and dst port 8088'
+```
+
+In another terminal, use the same host-gateway alias and rootless Netavark path
+as a job. This probe creates and removes only its uniquely named network:
+
+```console
+(
+  set -e
+  git_probe_network="automata-git-path-probe-${UID}"
+  git_probe_image='localhost/automata/ubuntu-24.04-x64@sha256:40c952578a042ce6333c3965420068dad0a08ec8acd6514de03807dbe5cf3de8'
+  trap 'podman network rm "${git_probe_network}" >/dev/null 2>&1 || true' EXIT
+  podman network create "${git_probe_network}" >/dev/null
+  podman run --rm --pull never --network "${git_probe_network}" \
+    --add-host automata-git.ghe.com:host-gateway \
+    "${git_probe_image}" \
+    curl --silent --show-error --output /dev/null --max-time 5 \
+      --write-out 'HTTP %{http_code}\n' \
+      'http://automata-git.ghe.com:8088/GoNeuralAI/automata/info/refs?service=git-upload-pack'
+)
+```
+
+The request must return HTTP 200 and the capture must identify `lo` as the
+input interface. If it arrives through another interface, the guard remains
+fail-closed and the request is dropped; stop the listener and investigate the
+route rather than weakening the rule. From a separate LAN machine, a request
+to `http://192.168.0.8:8088/` must time out. The process must have no listener
+on `0.0.0.0:8088`, a Tailscale address, or any address other than the reviewed
+private address.
+
+Stop the bridge before removal. Removal requires a byte-for-byte canonical
+match, captures the table's kernel handle, and deletes by that handle so a
+concurrent replacement is not selected by name:
+
+```console
+sudo ./scripts/dev/git-bridge-firewall.sh remove \
+  --listen-address 192.168.0.8 \
+  --port 8088
+```
+
+Kernel table state does not survive boot. A persistent development setup must
+run `apply` as a dedicated startup dependency before the exact-address bridge,
+using root-owned nonsymlink copies of the reviewed helper and config. Never
+reload a generic nftables ruleset that flushes tables owned by container
+runtimes. To change address or port, stop the listener, remove the exact old
+policy, apply the reviewed new policy, and only then start the new listener.
+
+The standalone contract suite exercises strict validation, symlink rejection,
+atomic idempotency, drift refusal, loopback allowance, non-loopback denial, and
+exact removal inside a disposable network namespace; it does not alter the host
+namespace:
+
+```console
+./scripts/dev/git-bridge-firewall.test.sh
+```
+
+## Local Results listener firewall
+
+The local GitHub Actions Results endpoint is a deliberate exception to the
+loopback-only development services. A rootless job resolves
+`host.containers.internal`, but it cannot reach a process bound only to host
+loopback. Bind the development listener to one exact RFC 1918 address instead
+(`192.168.0.8:8081` on the current development host), and publish
+`http://host.containers.internal:8081/` to the job. Never bind this HTTP-only
+development endpoint to `0.0.0.0`.
+
+That private address is also reachable from the physical LAN unless the host
+filters it. [`scripts/dev/results-firewall.sh`](../../scripts/dev/results-firewall.sh)
+owns one independent `inet automata_results_guard` table. Its input base chain
+has an `accept` policy and only one terminal rule: packets for the configured
+address and TCP port are dropped when their input interface is not `lo`.
+Consequently, traffic unrelated to the Results socket continues to the
+existing Docker, Podman, Tailscale, and host rules unchanged. The helper never
+flushes a ruleset or edits an `iptables-nft`, Netavark, or Tailscale table.
+
+Choose the host-specific inputs in a nonsymlink config copied from
+[`deploy/dev/results-firewall.env.example`](../../deploy/dev/results-firewall.env.example).
+The helper parses this as strict data rather than sourcing shell. It rejects
+wildcard, loopback, public, non-canonical, and unassigned addresses; privileged
+or invalid ports; unknown keys; duplicate keys; and a config path containing
+any symbolic-link component.
+
+Before applying the policy, inspect its complete transaction:
+
+```console
+./scripts/dev/results-firewall.sh render \
+  --listen-address 192.168.0.8 \
+  --port 8081
+```
+
+For those example inputs the exact proposed table is:
+
+```nftables
+table inet automata_results_guard {
+	comment "automata-results-firewall:v1"
+	chain results_input {
+		type filter hook input priority -10; policy accept;
+		ip daddr 192.168.0.8 tcp dport 8081 iifname != "lo" drop comment "automata-results-firewall:deny-non-loopback:v1"
+	}
+}
+```
+
+Confirm the route and the real rootless Podman packet path before installing
+the guard. `ip route` must select host loopback for the bound address:
+
+```console
+ip -4 route get 192.168.0.8
+# local 192.168.0.8 dev lo ...
+```
+
+With the Results listener already running, capture one inbound request in one
+terminal (the `tcpdump` package is needed only for this diagnostic):
+
+```console
+sudo timeout 30s tcpdump -l -nn -i any -Q in -c 1 \
+  'tcp and dst host 192.168.0.8 and dst port 8081'
+```
+
+In another terminal, make the request through the same rootless Netavark path
+used by a job. This probe creates and then removes only its uniquely named
+Podman network:
+
+```console
+(
+  set -e
+  results_probe_network="automata-results-path-probe-${UID}"
+  results_probe_image='localhost/automata/ubuntu-24.04-x64@sha256:40c952578a042ce6333c3965420068dad0a08ec8acd6514de03807dbe5cf3de8'
+  trap 'podman network rm "${results_probe_network}" >/dev/null 2>&1 || true' EXIT
+  podman network create "${results_probe_network}" >/dev/null
+  podman run --rm --pull never --network "${results_probe_network}" \
+    "${results_probe_image}" \
+    curl --silent --show-error --output /dev/null --max-time 5 \
+      --write-out 'HTTP %{http_code}\n' \
+      http://host.containers.internal:8081/
+)
+```
+
+The capture must identify `lo` as the input interface. Do not apply this
+policy if the packet arrives through any other interface: the guard is
+intentionally fail-closed and would make Results unreachable to jobs.
+
+Once the rendered rules and packet path have been reviewed, apply and audit
+the policy. Each creation is one atomic nftables transaction. Reapplying an
+exact policy is a no-op; a present table with any extra, missing, or changed
+object makes both `audit` and `apply` fail without modifying it.
+
+```console
+sudo ./scripts/dev/results-firewall.sh apply \
+  --listen-address 192.168.0.8 \
+  --port 8081
+sudo ./scripts/dev/results-firewall.sh audit \
+  --listen-address 192.168.0.8 \
+  --port 8081
+```
+
+Test denial from a separate LAN machine, not from the host itself. A request
+to `http://192.168.0.8:8081/` must time out while the Podman request above must
+still receive an HTTP response.
+
+Removal is equally narrow. It requires a byte-for-byte canonical match of the
+entire expected table, captures that table's kernel handle, and deletes by
+handle. Drift causes refusal, and a concurrent replacement is not selected by
+name:
+
+```console
+sudo ./scripts/dev/results-firewall.sh remove \
+  --listen-address 192.168.0.8 \
+  --port 8081
+```
+
+The table is kernel state and must be applied again after boot. Keep this as a
+dedicated startup dependency that runs `apply` before the Results listener;
+do not enable or reload a generic nftables ruleset that flushes tables owned by
+container runtimes. Install any startup copy of the helper and its config as
+root-owned regular files, reject existing symlink targets, and use the same
+reviewed arguments for startup audit and removal. When changing the address or
+port, first stop the listener, remove the exact old policy, apply the new
+policy, and only then restart the listener. This avoids a period in which an
+unprotected socket is listening.
+
+The standalone contract suite exercises validation, config symlink rejection,
+atomic idempotency, drift refusal, and exact removal inside a disposable
+network namespace; it never changes the host namespace:
+
+```console
+./scripts/dev/results-firewall.test.sh
+```
+
 ## Upgrade procedure
 
 1. Mark the runner draining and wait for active leases to finish.

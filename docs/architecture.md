@@ -37,17 +37,20 @@ The primary internal ports are:
    inspect, execute, signal, copy, and idempotent destroy.
 5. `ContainerEngine`, which implements job containers, services, and sequential
    container actions *inside* a job sandbox.
-6. Storage and SCM ports for PostgreSQL, S3-compatible object stores, secrets,
-   and GitHub.
+6. Storage, SCM, and workload-credential ports for PostgreSQL, S3-compatible
+   object stores, secrets, and GitHub.
 
-Human authentication, authorization, provider-token custody, sessions, and
-runner machine identity are separate ports. See the
+Human authentication, authorization, repository workload credentials,
+provider-token custody, sessions, and runner machine identity are separate
+ports. See the
 [authentication design](authentication.md).
 
 Rust traits are internal to one release and receive owned, versioned domain
 types. Remote runners, guest agents, privileged helpers, and optional external
-providers use explicitly versioned messages. Backend-native identifiers never
-leak into durable JobIR.
+providers use explicitly versioned messages. The remote runner wire contract is
+the typed `automata.runner.v1` protobuf package; its package version is
+independent from negotiated protocol and JobIR versions. Backend-native
+identifiers never leak into durable JobIR.
 
 ## Correctness model
 

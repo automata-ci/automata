@@ -1,14 +1,17 @@
 mod common;
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicU16, Ordering},
+};
 
 use automata_core::{
     AttemptId, AttemptNumber, FencingToken, JobLifecycle, LeaseGuard, LeaseId, UnixMillis,
 };
 use automata_store::{
     AcquireLease, AttemptCommandError, AttemptStoreError, ConcludeQueuedAttempt,
-    InternalAttemptRepository as _, QueuedAttempt, RenewLease, TenantAttemptQuery as _,
-    TenantScope, TransitionAttempt,
+    InternalAttemptRepository as _, QueuedAttempt, RenewLease, RunnerSessionFence,
+    StableRunnerSlot, TenantAttemptQuery as _, TenantScope, TransitionAttempt,
 };
 use common::{TestDatabase, TestResult, run_with_database, seed_control_plane};
 
@@ -42,11 +45,77 @@ async fn tenant_queries_hide_cross_tenant_attempts() -> TestResult {
     run_with_database(|database| async move { exercise_tenant_queries(&database).await }).await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn direct_attempt_ports_enforce_new_work_and_existing_work_authority() -> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        let fence = seed.session_fences[0];
+        let attempt_id = insert_attempt(&database, seed.job_id, 1, 10).await?;
+        sqlx::query("UPDATE runners SET desired_state = 'draining' WHERE id = $1")
+            .bind(fence.runner_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .acquire_lease(acquire_request(attempt_id, fence, 20, 100))
+                .await,
+            Err(AttemptStoreError::RunnerRejected(id)) if id == attempt_id
+        ));
+
+        sqlx::query("UPDATE runners SET desired_state = 'active' WHERE id = $1")
+            .bind(fence.runner_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        let lease = database
+            .store()
+            .acquire_lease(acquire_request(attempt_id, fence, 20, 100))
+            .await?;
+        sqlx::query("UPDATE runners SET desired_state = 'draining' WHERE id = $1")
+            .bind(fence.runner_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        database
+            .store()
+            .renew_lease(renew_request(attempt_id, fence, lease.guard(), 30, 150))
+            .await?;
+        database
+            .store()
+            .transition(transition_request(
+                attempt_id,
+                fence,
+                lease.guard(),
+                JobLifecycle::Preparing,
+                40,
+            ))
+            .await?;
+
+        sqlx::query("UPDATE runners SET desired_state = 'disabled' WHERE id = $1")
+            .bind(fence.runner_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .renew_lease(renew_request(attempt_id, fence, lease.guard(), 50, 200))
+                .await,
+            Err(AttemptStoreError::RunnerRejected(id)) if id == attempt_id
+        ));
+        assert_eq!(
+            database.store().get_attempt(attempt_id).await?.lifecycle(),
+            JobLifecycle::Preparing
+        );
+        Ok(())
+    })
+    .await
+}
+
 async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
     let seed = seed_control_plane(database.pool(), 2).await?;
     let attempt_id = insert_attempt(database, seed.job_id, 1, 10).await?;
-    let first = acquire_request(attempt_id, seed.runner_ids[0], 20, 30);
-    let second = acquire_request(attempt_id, seed.runner_ids[1], 20, 30);
+    let first = acquire_request(attempt_id, seed.session_fences[0], 20, 30);
+    let second = acquire_request(attempt_id, seed.session_fences[1], 20, 30);
 
     let (left, right) = tokio::join!(
         database.store().acquire_lease(first),
@@ -58,6 +127,11 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
         outcomes => panic!("exactly one concurrent acquisition must win: {outcomes:?}"),
     };
     assert_eq!(winner.fencing_token().get(), 1);
+    let winner_session = if winner.runner_id() == seed.runner_ids[0] {
+        seed.session_fences[0]
+    } else {
+        seed.session_fences[1]
+    };
 
     let requeued = database
         .store()
@@ -66,7 +140,7 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
     assert_eq!(requeued, vec![attempt_id]);
     let reacquired = database
         .store()
-        .acquire_lease(acquire_request(attempt_id, seed.runner_ids[0], 31, 41))
+        .acquire_lease(acquire_request(attempt_id, seed.session_fences[0], 31, 41))
         .await?;
     assert_eq!(reacquired.fencing_token().get(), 2);
 
@@ -74,7 +148,7 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
         .store()
         .transition(transition_request(
             attempt_id,
-            winner.runner_id(),
+            winner_session,
             winner.guard(),
             JobLifecycle::Preparing,
             32,
@@ -85,7 +159,12 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
     let predating_id = insert_attempt(database, seed.job_id, 2, 40).await?;
     let predating = database
         .store()
-        .acquire_lease(acquire_request(predating_id, seed.runner_ids[0], 39, 50))
+        .acquire_lease(acquire_request(
+            predating_id,
+            seed.session_fences[0],
+            39,
+            50,
+        ))
         .await;
     assert!(matches!(
         predating,
@@ -101,7 +180,12 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
         .await?;
     let exhausted = database
         .store()
-        .acquire_lease(acquire_request(exhausted_id, seed.runner_ids[0], 41, 50))
+        .acquire_lease(acquire_request(
+            exhausted_id,
+            seed.session_fences[0],
+            41,
+            50,
+        ))
         .await;
     assert!(matches!(
         exhausted,
@@ -115,11 +199,23 @@ async fn exercise_guarded_phases(database: &TestDatabase) -> TestResult {
     let attempt_id = insert_attempt(database, seed.job_id, 1, 100).await?;
     let lease = database
         .store()
-        .acquire_lease(acquire_request(attempt_id, seed.runner_ids[0], 110, 200))
+        .acquire_lease(acquire_request(
+            attempt_id,
+            seed.session_fences[0],
+            110,
+            200,
+        ))
         .await?;
 
-    exercise_initial_rejections(database, attempt_id, lease.runner_id(), lease.guard()).await;
-    exercise_renewal_guards(database, attempt_id, &lease, seed.runner_ids[1]).await?;
+    exercise_initial_rejections(database, attempt_id, seed.session_fences[0], lease.guard()).await;
+    exercise_renewal_guards(
+        database,
+        attempt_id,
+        &lease,
+        seed.session_fences[0],
+        seed.session_fences[1],
+    )
+    .await?;
 
     let phases = [
         (JobLifecycle::Preparing, 130),
@@ -132,7 +228,7 @@ async fn exercise_guarded_phases(database: &TestDatabase) -> TestResult {
             .store()
             .transition(transition_request(
                 attempt_id,
-                lease.runner_id(),
+                seed.session_fences[0],
                 lease.guard(),
                 next,
                 changed_at,
@@ -149,21 +245,22 @@ async fn exercise_guarded_phases(database: &TestDatabase) -> TestResult {
     assert_eq!(snapshot.queued_at(), UnixMillis::new(100));
     assert_eq!(snapshot.changed_at(), UnixMillis::new(160));
 
-    exercise_expired_mutations(database, seed.job_id, seed.runner_ids[0]).await
+    exercise_expired_mutations(database, seed.job_id, seed.session_fences[0]).await
 }
 
 async fn exercise_renewal_guards(
     database: &TestDatabase,
     attempt_id: AttemptId,
     lease: &automata_core::Lease,
-    wrong_runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
+    wrong_session: RunnerSessionFence,
 ) -> TestResult {
     for expiration in [200, 199] {
         let rejected = database
             .store()
             .renew_lease(renew_request(
                 attempt_id,
-                lease.runner_id(),
+                session,
                 lease.guard(),
                 120,
                 expiration,
@@ -176,26 +273,14 @@ async fn exercise_renewal_guards(
     }
     let renewed = database
         .store()
-        .renew_lease(renew_request(
-            attempt_id,
-            lease.runner_id(),
-            lease.guard(),
-            120,
-            250,
-        ))
+        .renew_lease(renew_request(attempt_id, session, lease.guard(), 120, 250))
         .await?;
     assert_eq!(renewed.expires_at(), UnixMillis::new(250));
 
     let wrong_guard = LeaseGuard::new(LeaseId::new(), lease.fencing_token());
     let rejected = database
         .store()
-        .renew_lease(renew_request(
-            attempt_id,
-            lease.runner_id(),
-            wrong_guard,
-            130,
-            260,
-        ))
+        .renew_lease(renew_request(attempt_id, session, wrong_guard, 130, 260))
         .await;
     assert!(matches!(rejected, Err(AttemptStoreError::FenceRejected(id)) if id == attempt_id));
 
@@ -203,7 +288,7 @@ async fn exercise_renewal_guards(
         .store()
         .renew_lease(renew_request(
             attempt_id,
-            wrong_runner_id,
+            wrong_session,
             lease.guard(),
             130,
             260,
@@ -217,7 +302,7 @@ async fn exercise_renewal_guards(
         .store()
         .transition(transition_request(
             attempt_id,
-            wrong_runner_id,
+            wrong_session,
             lease.guard(),
             JobLifecycle::Preparing,
             130,
@@ -231,20 +316,14 @@ async fn exercise_renewal_guards(
     for regression in [
         database
             .store()
-            .renew_lease(renew_request(
-                attempt_id,
-                lease.runner_id(),
-                lease.guard(),
-                119,
-                260,
-            ))
+            .renew_lease(renew_request(attempt_id, session, lease.guard(), 119, 260))
             .await
             .map(|_| ()),
         database
             .store()
             .transition(transition_request(
                 attempt_id,
-                lease.runner_id(),
+                session,
                 lease.guard(),
                 JobLifecycle::Preparing,
                 119,
@@ -263,14 +342,14 @@ async fn exercise_renewal_guards(
 async fn exercise_initial_rejections(
     database: &TestDatabase,
     attempt_id: AttemptId,
-    runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
     guard: LeaseGuard,
 ) {
     let invalid_phase = database
         .store()
         .transition(transition_request(
             attempt_id,
-            runner_id,
+            session,
             guard,
             JobLifecycle::Running,
             115,
@@ -287,7 +366,7 @@ async fn exercise_initial_rejections(
 
     let predating_renewal = database
         .store()
-        .renew_lease(renew_request(attempt_id, runner_id, guard, 109, 210))
+        .renew_lease(renew_request(attempt_id, session, guard, 109, 210))
         .await;
     assert!(matches!(
         predating_renewal,
@@ -298,18 +377,18 @@ async fn exercise_initial_rejections(
 async fn exercise_expired_mutations(
     database: &TestDatabase,
     job_id: automata_core::JobId,
-    runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
 ) -> TestResult {
     let expired_attempt = insert_attempt(database, job_id, 2, 300).await?;
     let expired_lease = database
         .store()
-        .acquire_lease(acquire_request(expired_attempt, runner_id, 310, 320))
+        .acquire_lease(acquire_request(expired_attempt, session, 310, 320))
         .await?;
     let expired_renewal = database
         .store()
         .renew_lease(renew_request(
             expired_attempt,
-            runner_id,
+            session,
             expired_lease.guard(),
             320,
             400,
@@ -323,7 +402,7 @@ async fn exercise_expired_mutations(
         .store()
         .transition(transition_request(
             expired_attempt,
-            runner_id,
+            session,
             expired_lease.guard(),
             JobLifecycle::Preparing,
             320,
@@ -345,7 +424,7 @@ async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
             .store()
             .acquire_lease(acquire_request(
                 attempt_id,
-                seed.runner_ids[0],
+                seed.session_fences[0],
                 issued_at,
                 20,
             ))
@@ -372,7 +451,7 @@ async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
 
     let predating_reacquisition = database
         .store()
-        .acquire_lease(acquire_request(locked_id, seed.runner_ids[0], 19, 30))
+        .acquire_lease(acquire_request(locked_id, seed.session_fences[0], 19, 30))
         .await;
     assert!(matches!(
         predating_reacquisition,
@@ -389,7 +468,7 @@ async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
     for attempt_id in [locked_id, available_id] {
         let lease = database
             .store()
-            .acquire_lease(acquire_request(attempt_id, seed.runner_ids[0], 21, 30))
+            .acquire_lease(acquire_request(attempt_id, seed.session_fences[0], 21, 30))
             .await?;
         assert_eq!(lease.fencing_token(), FencingToken::new(2)?);
     }
@@ -436,7 +515,12 @@ async fn exercise_queued_conclusion(database: &TestDatabase) -> TestResult {
 
     let predating_acquisition = database
         .store()
-        .acquire_lease(acquire_request(predating_id, seed.runner_ids[0], 99, 200))
+        .acquire_lease(acquire_request(
+            predating_id,
+            seed.session_fences[0],
+            99,
+            200,
+        ))
         .await;
     assert!(matches!(
         predating_acquisition,
@@ -457,7 +541,7 @@ async fn exercise_queued_conclusion(database: &TestDatabase) -> TestResult {
         let attempt_id = insert_attempt(database, seed.job_id, attempt_number, queued_at).await?;
         let acquisition = acquire_request(
             attempt_id,
-            seed.runner_ids[0],
+            seed.session_fences[0],
             queued_at + 1,
             queued_at + 100,
         );
@@ -509,7 +593,7 @@ async fn exercise_tenant_queries(database: &TestDatabase) -> TestResult {
         .store()
         .acquire_lease(acquire_request(
             attempt_id,
-            outsider.runner_ids[0],
+            outsider.session_fences[0],
             110,
             200,
         ))
@@ -542,14 +626,18 @@ async fn insert_attempt(
 
 fn acquire_request(
     attempt_id: AttemptId,
-    runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
     observed_at: i64,
     expires_at: i64,
 ) -> AcquireLease {
+    static NEXT_SLOT: AtomicU16 = AtomicU16::new(1);
+    let slot = StableRunnerSlot::new(NEXT_SLOT.fetch_add(1, Ordering::Relaxed))
+        .expect("bounded one-based test slot");
     AcquireLease::new(
         attempt_id,
         LeaseId::new(),
-        runner_id,
+        session,
+        slot,
         UnixMillis::new(observed_at),
         UnixMillis::new(expires_at),
     )
@@ -558,14 +646,14 @@ fn acquire_request(
 
 fn renew_request(
     attempt_id: AttemptId,
-    runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
     guard: LeaseGuard,
     observed_at: i64,
     expires_at: i64,
 ) -> RenewLease {
     RenewLease::new(
         attempt_id,
-        runner_id,
+        session,
         guard,
         UnixMillis::new(observed_at),
         UnixMillis::new(expires_at),
@@ -575,14 +663,14 @@ fn renew_request(
 
 fn transition_request(
     attempt_id: AttemptId,
-    runner_id: automata_core::RunnerId,
+    session: RunnerSessionFence,
     guard: LeaseGuard,
     next: JobLifecycle,
     observed_at: i64,
 ) -> TransitionAttempt {
     TransitionAttempt::new(
         attempt_id,
-        runner_id,
+        session,
         guard,
         next,
         UnixMillis::new(observed_at),

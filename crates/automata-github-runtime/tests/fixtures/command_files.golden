@@ -1,0 +1,4 @@
+SIMPLE=plain
+MULTI=line one\nline two\n
+EMPTY=
+SPECIAL=a=b

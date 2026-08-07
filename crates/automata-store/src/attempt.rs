@@ -3,7 +3,10 @@ use automata_core::{
     AttemptId, AttemptNumber, JobId, JobLifecycle, Lease, LeaseGuard, LeaseId, RunnerId, UnixMillis,
 };
 
-use crate::{AttemptCommandError, AttemptSnapshot, AttemptStoreError, TenantScope};
+use crate::{
+    AttemptCommandError, AttemptSnapshot, AttemptStoreError, RunnerSessionFence, StableRunnerSlot,
+    TenantScope,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueuedAttempt {
@@ -54,7 +57,8 @@ impl QueuedAttempt {
 pub struct AcquireLease {
     pub(crate) attempt_id: AttemptId,
     pub(crate) lease_id: LeaseId,
-    pub(crate) runner_id: RunnerId,
+    pub(crate) session: RunnerSessionFence,
+    pub(crate) slot: StableRunnerSlot,
     /// Time at which the trusted control plane observed this acquisition.
     pub(crate) observed_at: UnixMillis,
     pub(crate) expires_at: UnixMillis,
@@ -70,7 +74,8 @@ impl AcquireLease {
     pub fn new(
         attempt_id: AttemptId,
         lease_id: LeaseId,
-        runner_id: RunnerId,
+        session: RunnerSessionFence,
+        slot: StableRunnerSlot,
         observed_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, AttemptCommandError> {
@@ -78,7 +83,8 @@ impl AcquireLease {
         Ok(Self {
             attempt_id,
             lease_id,
-            runner_id,
+            session,
+            slot,
             observed_at,
             expires_at,
         })
@@ -96,7 +102,17 @@ impl AcquireLease {
 
     #[must_use]
     pub const fn runner_id(self) -> RunnerId {
-        self.runner_id
+        self.session.runner_id()
+    }
+
+    #[must_use]
+    pub const fn session(self) -> RunnerSessionFence {
+        self.session
+    }
+
+    #[must_use]
+    pub const fn slot(self) -> StableRunnerSlot {
+        self.slot
     }
 
     #[must_use]
@@ -114,7 +130,7 @@ impl AcquireLease {
 pub struct TransitionAttempt {
     pub(crate) attempt_id: AttemptId,
     /// Identity established by the runner authentication boundary.
-    pub(crate) runner_id: RunnerId,
+    pub(crate) session: RunnerSessionFence,
     pub(crate) guard: LeaseGuard,
     pub(crate) next: JobLifecycle,
     /// Time at which the trusted control plane observed this transition.
@@ -125,14 +141,14 @@ impl TransitionAttempt {
     #[must_use]
     pub const fn new(
         attempt_id: AttemptId,
-        runner_id: RunnerId,
+        session: RunnerSessionFence,
         guard: LeaseGuard,
         next: JobLifecycle,
         observed_at: UnixMillis,
     ) -> Self {
         Self {
             attempt_id,
-            runner_id,
+            session,
             guard,
             next,
             observed_at,
@@ -146,7 +162,12 @@ impl TransitionAttempt {
 
     #[must_use]
     pub const fn runner_id(self) -> RunnerId {
-        self.runner_id
+        self.session.runner_id()
+    }
+
+    #[must_use]
+    pub const fn session(self) -> RunnerSessionFence {
+        self.session
     }
 
     #[must_use]
@@ -173,7 +194,7 @@ impl TransitionAttempt {
 pub struct RenewLease {
     pub(crate) attempt_id: AttemptId,
     /// Identity established by the runner authentication boundary.
-    pub(crate) runner_id: RunnerId,
+    pub(crate) session: RunnerSessionFence,
     pub(crate) guard: LeaseGuard,
     /// Time at which the trusted control plane observed this renewal.
     pub(crate) observed_at: UnixMillis,
@@ -192,7 +213,7 @@ impl RenewLease {
     /// is strictly later than observation.
     pub fn new(
         attempt_id: AttemptId,
-        runner_id: RunnerId,
+        session: RunnerSessionFence,
         guard: LeaseGuard,
         observed_at: UnixMillis,
         expires_at: UnixMillis,
@@ -200,7 +221,7 @@ impl RenewLease {
         validate_lease_interval(observed_at, expires_at)?;
         Ok(Self {
             attempt_id,
-            runner_id,
+            session,
             guard,
             observed_at,
             expires_at,
@@ -214,7 +235,12 @@ impl RenewLease {
 
     #[must_use]
     pub const fn runner_id(self) -> RunnerId {
-        self.runner_id
+        self.session.runner_id()
+    }
+
+    #[must_use]
+    pub const fn session(self) -> RunnerSessionFence {
+        self.session
     }
 
     #[must_use]

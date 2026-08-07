@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CancelJob, ErrorMessage, HandshakeRejected, JobResultMessage, JobStateUpdate, LeaseHeartbeat,
-    LeaseOffer, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch, NoWork,
-    ProtocolLimits, RunnerHello, ServerHello,
+    CancelJob, CommandAck, ErrorMessage, HandshakeRejected, JobResultMessage, JobStateUpdate,
+    LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
+    NoWork, OperationAck, ProtocolLimits, RunnerHello, ServerHello,
     validation::{validate_runner_message, validate_server_message},
 };
 
@@ -24,6 +24,7 @@ pub enum RunnerToServer {
     JobState(JobStateUpdate),
     JobResult(JobResultMessage),
     LogBatch(LogBatch),
+    CommandAck(CommandAck),
 }
 
 impl RunnerToServer {
@@ -52,6 +53,7 @@ pub enum ServerToRunner {
     LeaseRenewal(LeaseRenewal),
     CancelJob(CancelJob),
     LogAck(LogAckMessage),
+    OperationAck(OperationAck),
     NoWork(NoWork),
     Error(ErrorMessage),
 }

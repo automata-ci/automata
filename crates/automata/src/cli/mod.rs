@@ -9,9 +9,9 @@ use clap::Parser;
 
 pub use commands::{
     AdminArgs, AdminCommand, ArtifactArgs, ArtifactCommand, AuthArgs, AuthCommand, AuthLoginArgs,
-    AuthLoginMode, CacheArgs, CacheCommand, Command, JobArgs, JobCommand, RunArgs, RunCommand,
-    RunnerArgs, RunnerCommand, RunnerGroupArgs, RunnerGroupCommand, SecretArgs, SecretCommand,
-    ServerArgs,
+    AuthLoginMode, CacheArgs, CacheCommand, Command, JobArgs, JobCommand, PreviewArgs, RunArgs,
+    RunCommand, RunnerArgs, RunnerCommand, RunnerGroupArgs, RunnerGroupCommand, SecretArgs,
+    SecretCommand, ServerArgs, WorkflowArgs, WorkflowCommand, WorkflowDispatchArgs,
 };
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};

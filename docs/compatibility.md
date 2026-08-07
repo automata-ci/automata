@@ -13,6 +13,21 @@ developed. The open runner's parser, schema, expression behavior, fixtures, and
 protocol documentation are treated as a reference implementation. Automata
 ports behavior into safe Rust and keeps provenance for imported MIT fixtures.
 
+The initial G1 baseline, reviewed on 2026-08-07, is
+[`actions/runner` v2.336.0](https://github.com/actions/runner/releases/tag/v2.336.0)
+at commit
+[`98aabcd429c4e8402406c56ce2d26387fed3b9ce`](https://github.com/actions/runner/commit/98aabcd429c4e8402406c56ce2d26387fed3b9ce).
+Its bundled JavaScript-action runtime is Node.js 24.18.0. This pin is a
+semantic research and differential-test baseline, not a dependency in either
+Automata binary. Advancing it requires a reviewed compatibility-delta record
+and rerunning the conformance suite; a floating upstream branch is never used
+as evidence.
+
+The v2.336.0 delta also makes background-step control, the
+`GITHUB_ARTIFACTS` file command, `$self` repository-action references, and the
+effective cache-mode environment part of the tracked compatibility surface.
+They are not claimed by G1 until their differential fixtures pass.
+
 A conformance run records:
 
 - source workflow/action digests and event payload digest;

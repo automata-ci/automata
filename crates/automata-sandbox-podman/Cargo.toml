@@ -1,0 +1,23 @@
+[package]
+name = "automata-sandbox-podman"
+description = "Rootless local Podman whole-job sandbox adapter for Automata"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-execution.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions.workspace = true

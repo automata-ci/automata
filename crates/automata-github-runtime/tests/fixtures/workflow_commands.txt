@@ -1,0 +1,6 @@
+   ::warning file=src/main.rs,line=2,col=3,title=Lint%2C check::bad%0Athing
+prefix ##[group]build
+::debug::detail
+::endgroup::
+::add-matcher::.github/matcher.json
+::remove-matcher owner=rustc::

@@ -7,11 +7,28 @@ renderer_directory="${repository_root}/ui/renderer"
 asset_directory="${renderer_directory}/assets"
 sums_file="${renderer_directory}/SHA256SUMS"
 provenance_file="${renderer_directory}/PROVENANCE.toml"
+readonly expected_clang_package="clang-18=1:18.1.3-1ubuntu1"
+readonly expected_libclang_package="libclang1-18=1:18.1.3-1ubuntu1"
+readonly expected_wasm_rquickjs_version="0.4.1"
+readonly expected_rust_release="1.97.1"
+readonly expected_cargo_version="cargo 1.97.1 (c980f4866 2026-06-30)"
+readonly expected_rustfmt_version="rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)"
+readonly expected_node_release="24.19.0"
+readonly expected_npm_release="11.17.0"
+readonly expected_wasi_sdk_version="24.0"
+readonly expected_wasi_sdk_platform="x86_64-linux"
+readonly expected_wasi_sdk_archive="wasi-sdk-24.0-x86_64-linux.tar.gz"
+readonly expected_wasi_sdk_archive_sha256="c6c38aab56e5de88adf6c1ebc9c3ae8da72f88ec2b656fb024eda8d4167a0bc5"
+readonly expected_wasi_sdk_installation_root="/opt/wasi-sdk-24.0"
+readonly expected_wasi_sdk_clang="clang version 18.1.2-wasi-sdk (https://github.com/llvm/llvm-project 26a1d6601d727a96f4301d0d8647b5a42760ae0c)"
+readonly expected_wasi_sdk_llvm_ar="LLVM version 18.1.2-wasi-sdk"
 
-command -v node >/dev/null 2>&1 || {
-    echo "required command is unavailable: node" >&2
-    exit 1
-}
+for command in node python3; do
+    command -v "${command}" >/dev/null 2>&1 || {
+        echo "required command is unavailable: ${command}" >&2
+        exit 1
+    }
+done
 node "${script_directory}/sync-render-contract.mjs" --check
 
 if (( $# > 1 )); then
@@ -31,6 +48,38 @@ read_provenance_string() {
     line="${matches[0]}"
     value="${line#*\"}"
     printf '%s\n' "${value%\"}"
+}
+
+[[ "$(read_provenance_string wasm_rquickjs_cli)" == \
+    "${expected_wasm_rquickjs_version}" && \
+    "$(read_provenance_string rustc)" == "${expected_rust_release}" && \
+    "$(read_provenance_string cargo)" == "${expected_cargo_version}" && \
+    "$(read_provenance_string rustfmt)" == "${expected_rustfmt_version}" && \
+    "$(read_provenance_string node)" == "${expected_node_release}" && \
+    "$(read_provenance_string npm)" == "${expected_npm_release}" ]] || {
+    echo "renderer provenance does not identify the canonical Rust, Node, and generator tools" >&2
+    exit 1
+}
+[[ "$(read_provenance_string clang)" == "${expected_clang_package}" ]] || {
+    echo "renderer provenance does not identify the canonical Clang package" >&2
+    exit 1
+}
+[[ "$(read_provenance_string libclang)" == "${expected_libclang_package}" ]] || {
+    echo "renderer provenance does not identify the canonical libclang package" >&2
+    exit 1
+}
+[[ "$(read_provenance_string wasi_sdk_version)" == "${expected_wasi_sdk_version}" && \
+    "$(read_provenance_string wasi_sdk_platform)" == "${expected_wasi_sdk_platform}" && \
+    "$(read_provenance_string wasi_sdk_archive)" == "${expected_wasi_sdk_archive}" && \
+    "$(read_provenance_string wasi_sdk_archive_sha256)" == \
+        "${expected_wasi_sdk_archive_sha256}" && \
+    "$(read_provenance_string wasi_sdk_installation_root)" == \
+        "${expected_wasi_sdk_installation_root}" && \
+    "$(read_provenance_string wasi_sdk_clang)" == "${expected_wasi_sdk_clang}" && \
+    "$(read_provenance_string wasi_sdk_llvm_ar)" == \
+        "${expected_wasi_sdk_llvm_ar}" ]] || {
+    echo "renderer provenance does not identify the canonical WASI SDK" >&2
+    exit 1
 }
 
 verify_hash() {
@@ -78,6 +127,22 @@ while IFS= read -r asset_path; do
 done < <(find "${asset_directory}" -maxdepth 1 -type f -print | LC_ALL=C sort)
 
 echo "renderer assets verified (${listed_count} content-addressed files)"
+
+mapfile -t components < <(
+    find "${asset_directory}" -maxdepth 1 -type f \
+        -name 'renderer-*.wasm' -print | LC_ALL=C sort
+)
+[[ "${#components[@]}" -eq 1 ]] || {
+    echo "expected exactly one renderer component" >&2
+    exit 1
+}
+actual_wit_hash="$(
+    sha256sum "${repository_root}/crates/automata-ui-renderer/wit/renderer.wit" \
+        | awk '{print $1}'
+)"
+python3 "${script_directory}/component-wit-provenance.py" verify \
+    "${components[0]}" \
+    "${actual_wit_hash}"
 
 verify_hash "$(read_provenance_string package_lock_sha256)" \
     "${repository_root}/ui/package-lock.json"

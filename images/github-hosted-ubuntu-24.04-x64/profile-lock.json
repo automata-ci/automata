@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "profile_id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+  "profile_manifest_sha256": "b0c2f5c0cad341e34c422a1b69bcc70bb82224f24d8512026cab9346dd1c6087",
+  "containerfile_sha256": "1cde357b3f5a25877e1f68328734a1de351b8dc30aebf80d05c60c80ac6508fa",
+  "image": "localhost/automata/ubuntu-24.04-x64@sha256:40c952578a042ce6333c3965420068dad0a08ec8acd6514de03807dbe5cf3de8"
+}

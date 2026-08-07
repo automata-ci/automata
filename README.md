@@ -61,7 +61,7 @@ export TMPDIR="$PWD/target/task-tmp/local"
 install -d -m 0700 -- "$TMPDIR"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 Project build, test, regeneration, and probe tooling must keep scratch data
@@ -72,12 +72,36 @@ policy on CI and bare-metal runner hosts.
 Run the initial process-level smoke test with:
 
 ```console
-cargo run --bin automata -- server --listen 127.0.0.1:8080
+cargo run --bin automata -- preview --listen 127.0.0.1:8080
 cargo run --bin automata-runner -- doctor --server http://127.0.0.1:8080 --json
 ```
 
-The production integration stack will use rootless Podman, PostgreSQL, and
-RustFS locally. Provider prerequisites are runtime capabilities, not linked
+The preview command is intentionally dependency-free and does not exercise the
+control plane. See [`crates/automata/README.md`](crates/automata/README.md) for
+the strict PostgreSQL, S3, mTLS, and Results configuration required by
+`automata server`.
+
+Start the pinned PostgreSQL and RustFS integration stack through rootless
+Podman (the `podman compose` command requires an installed Compose provider):
+
+```console
+podman compose --file deploy/dev/compose.yaml up --detach --wait
+export AUTOMATA_TEST_DATABASE_URL='postgres://automata:automata-local-only@127.0.0.1:5432/automata'
+export AUTOMATA_TEST_S3_ENDPOINT='http://127.0.0.1:9000/'
+export AUTOMATA_TEST_S3_BUCKET='automata-dev'
+export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
+export AUTOMATA_TEST_S3_SECRET_KEY='automata-local-secret-change-me'
+cargo test -p automata-store --tests --all-features --locked -- --ignored --test-threads=1
+cargo test -p automata-runner-auth-postgres --test postgres_directory --all-features --locked -- --ignored --test-threads=1
+cargo test -p automata-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
+cargo test -p automata-blob-s3 --test rustfs_contract --all-features --locked
+```
+
+The RustFS contract creates its configured test bucket if a clean development
+stack does not have it yet, then exercises conditional immutable publication
+and verified reads. These values are deliberately local-only; production
+credentials are supplied through provider configuration and never enter job
+environments. Provider prerequisites are runtime capabilities, not linked
 dependencies of either Automata executable.
 
 ## License

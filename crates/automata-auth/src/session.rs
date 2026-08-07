@@ -66,6 +66,101 @@ pub struct AutomataSessionClaims {
     authorization_revision: u64,
 }
 
+/// Stable identity dimensions carried by an Automata session.
+///
+/// Grouping these values keeps claims construction explicit without exposing
+/// the claims' private representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutomataSessionIdentity {
+    session_id: SessionId,
+    tenant_id: TenantId,
+    principal_id: PrincipalId,
+    provider_id: ProviderId,
+    provider_subject: ProviderSubject,
+}
+
+impl AutomataSessionIdentity {
+    #[must_use]
+    pub const fn new(
+        session_id: SessionId,
+        tenant_id: TenantId,
+        principal_id: PrincipalId,
+        provider_id: ProviderId,
+        provider_subject: ProviderSubject,
+    ) -> Self {
+        Self {
+            session_id,
+            tenant_id,
+            principal_id,
+            provider_id,
+            provider_subject,
+        }
+    }
+}
+
+/// Builder for validated [`AutomataSessionClaims`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
+pub struct AutomataSessionClaimsBuilder {
+    identity: AutomataSessionIdentity,
+    roles: BTreeSet<RoleName>,
+    audience: String,
+    issued_at: UnixTimestamp,
+    expires_at: UnixTimestamp,
+    authorization_revision: u64,
+}
+
+impl AutomataSessionClaimsBuilder {
+    /// Replaces the roles captured by the session.
+    pub fn roles(mut self, roles: BTreeSet<RoleName>) -> Self {
+        self.roles = roles;
+        self
+    }
+
+    /// Records the authorization assignment revision used for issuance.
+    pub const fn authorization_revision(mut self, revision: u64) -> Self {
+        self.authorization_revision = revision;
+        self
+    }
+
+    /// Validates and creates session claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty, oversized, or control-bearing audience,
+    /// or when expiration is not strictly after issuance.
+    pub fn build(self) -> Result<AutomataSessionClaims, SessionValidationError> {
+        if self.audience.is_empty()
+            || self.audience.len() > MAX_AUDIENCE_LENGTH
+            || self.audience.chars().any(char::is_control)
+        {
+            return Err(SessionValidationError::InvalidAudience);
+        }
+        if self.issued_at >= self.expires_at {
+            return Err(SessionValidationError::InvalidLifetime);
+        }
+        let AutomataSessionIdentity {
+            session_id,
+            tenant_id,
+            principal_id,
+            provider_id,
+            provider_subject,
+        } = self.identity;
+        Ok(AutomataSessionClaims {
+            session_id,
+            tenant_id,
+            principal_id,
+            provider_id,
+            provider_subject,
+            roles: self.roles,
+            audience: self.audience,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            authorization_revision: self.authorization_revision,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct AutomataSessionClaimsData {
     session_id: SessionId,
@@ -81,47 +176,21 @@ struct AutomataSessionClaimsData {
 }
 
 impl AutomataSessionClaims {
-    /// Creates safe session claims with a bounded audience and valid lifetime.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an empty, oversized, or control-bearing audience, or
-    /// when expiration is not strictly after issuance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        session_id: SessionId,
-        tenant_id: TenantId,
-        principal_id: PrincipalId,
-        provider_id: ProviderId,
-        provider_subject: ProviderSubject,
-        roles: BTreeSet<RoleName>,
+    /// Starts building safe session claims.
+    pub fn builder(
+        identity: AutomataSessionIdentity,
         audience: impl Into<String>,
         issued_at: UnixTimestamp,
         expires_at: UnixTimestamp,
-        authorization_revision: u64,
-    ) -> Result<Self, SessionValidationError> {
-        let audience = audience.into();
-        if audience.is_empty()
-            || audience.len() > MAX_AUDIENCE_LENGTH
-            || audience.chars().any(char::is_control)
-        {
-            return Err(SessionValidationError::InvalidAudience);
-        }
-        if issued_at >= expires_at {
-            return Err(SessionValidationError::InvalidLifetime);
-        }
-        Ok(Self {
-            session_id,
-            tenant_id,
-            principal_id,
-            provider_id,
-            provider_subject,
-            roles,
-            audience,
+    ) -> AutomataSessionClaimsBuilder {
+        AutomataSessionClaimsBuilder {
+            identity,
+            roles: BTreeSet::new(),
+            audience: audience.into(),
             issued_at,
             expires_at,
-            authorization_revision,
-        })
+            authorization_revision: 0,
+        }
     }
 
     pub const fn session_id(&self) -> &SessionId {
@@ -191,18 +260,21 @@ impl TryFrom<AutomataSessionClaimsData> for AutomataSessionClaims {
     type Error = SessionValidationError;
 
     fn try_from(value: AutomataSessionClaimsData) -> Result<Self, Self::Error> {
-        Self::new(
-            value.session_id,
-            value.tenant_id,
-            value.principal_id,
-            value.provider_id,
-            value.provider_subject,
-            value.roles,
+        Self::builder(
+            AutomataSessionIdentity::new(
+                value.session_id,
+                value.tenant_id,
+                value.principal_id,
+                value.provider_id,
+                value.provider_subject,
+            ),
             value.audience,
             value.issued_at,
             value.expires_at,
-            value.authorization_revision,
         )
+        .roles(value.roles)
+        .authorization_revision(value.authorization_revision)
+        .build()
     }
 }
 

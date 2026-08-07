@@ -2,24 +2,53 @@ use std::collections::BTreeMap;
 
 use automata_core::{
     Architecture, AttemptId, FencingToken, IsolationLevel, JobConclusion, JobId, JobIr,
-    JobIrEnvelope, JobLifecycle, JobResult, JobSource, Lease, LeaseGuard, LeaseId, LogAck,
-    LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId,
-    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId,
-    SandboxCapabilities, SemanticStep, ShellSpec, StepId, StepIr, StepResult, UnixMillis,
-    WorkflowId,
+    JobIrEnvelope, JobIrVersion, JobIrVersionRange, JobLifecycle, JobResult, JobSource, Lease,
+    LeaseGuard, LeaseId, LogAck, LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem,
+    OperationId, RunId, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
+    RunnerSessionId, SandboxCapabilities, SemanticStep, ShellSpec, StepId, StepIr, StepResult,
+    UnixMillis, WorkflowId,
 };
 use automata_protocol::{
-    CancelJob, ErrorMessage, HandshakeErrorCode, HandshakeRejected, JobResultMessage,
+    CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
+    HandshakeRejected, JobResultMessage, JobRuntimeAuthorities, JobRuntimeAuthority,
     JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseRequest,
     LeaseResponse, LogAckMessage, LogBatch, MAX_CONFIGURABLE_FRAME_BYTES, MessageHeader,
-    MessageValidationError, NoWork, ProtocolDecodeError, ProtocolEncodeError, ProtocolLimits,
-    ProtocolLimitsError, RemoteErrorCode, RunnerHello, RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
-    ServerHello, ServerToRunner, ValidatedRunnerToServer, decode_runner_frame, decode_server_frame,
-    encode_runner_frame, encode_server_frame,
+    MessageValidationError, NegotiatedSession, NoWork, OperationAck, ProtocolDecodeError,
+    ProtocolEncodeError, ProtocolLimits, ProtocolLimitsError, RemoteErrorCode, RunnerHello,
+    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
+    ServerToRunner, SessionDisposition, ValidatedRunnerToServer, decode_runner_frame,
+    decode_server_frame, encode_runner_frame, encode_server_frame,
 };
 
 fn header() -> MessageHeader {
-    MessageHeader::new(SUPPORTED_PROTOCOL_RANGE.max(), OperationId::new())
+    MessageHeader::request(
+        SUPPORTED_PROTOCOL_RANGE.max(),
+        RunnerSessionId::new(),
+        OperationId::new(),
+    )
+}
+
+fn reply_header() -> MessageHeader {
+    MessageHeader::reply(
+        SUPPORTED_PROTOCOL_RANGE.max(),
+        RunnerSessionId::new(),
+        OperationId::new(),
+        OperationId::new(),
+    )
+}
+
+fn command_header() -> ServerCommandHeader {
+    ServerCommandHeader::new(
+        SUPPORTED_PROTOCOL_RANGE.max(),
+        RunnerSessionId::new(),
+        OperationId::new(),
+        CommandSequence::new(1).expect("valid command sequence"),
+    )
+}
+
+fn slot() -> RunnerSlotOrdinal {
+    RunnerSlotOrdinal::new(1).expect("valid runner slot")
 }
 
 fn guard() -> LeaseGuard {
@@ -59,6 +88,17 @@ fn job_envelope(requirements: RunnerRequirements) -> JobIrEnvelope {
             ".github/workflows/ci.yml",
             "push",
         ),
+        automata_core::JobExecutionContext::new(
+            "CI",
+            "refs/heads/main",
+            "/__w/repository/repository",
+            automata_core::JobContentReference::new(
+                "events/push.json",
+                automata_core::Sha256Digest::from_bytes([0x42; 32]),
+                2,
+                "application/json",
+            ),
+        ),
         job,
     )
 }
@@ -73,6 +113,31 @@ fn lease(attempt_id: AttemptId, runner_id: RunnerId) -> Lease {
         UnixMillis::new(20),
     )
     .expect("valid lease")
+}
+
+fn lease_offer(
+    header: ServerCommandHeader,
+    slot: RunnerSlotOrdinal,
+    lease: Lease,
+    job: JobIrEnvelope,
+) -> LeaseOffer {
+    let authority = JobRuntimeAuthority::new(
+        RuntimeAuthorityName::new("github-actions-results").expect("valid authority name"),
+        job.job().run_id(),
+        job.job().job_id(),
+        lease.attempt_id(),
+        lease.fencing_token(),
+        RuntimeAuthorityEndpoint::new("https://results.example.test/")
+            .expect("valid authority endpoint"),
+        RuntimeAuthorityCredential::new("header.payload.signature")
+            .expect("valid authority credential"),
+        UnixMillis::new(10),
+        UnixMillis::new(3_600_010),
+    )
+    .expect("valid runtime authority");
+    let authorities =
+        JobRuntimeAuthorities::new(vec![authority], &job, &lease).expect("valid authority bundle");
+    LeaseOffer::new(header, slot, lease, job, authorities)
 }
 
 fn result(attempt_id: AttemptId) -> JobResult {
@@ -116,17 +181,15 @@ fn every_runner_envelope_variant_round_trips_through_the_validated_codec() {
         RunnerToServer::Hello(RunnerHello::new(
             OperationId::new(),
             SUPPORTED_PROTOCOL_RANGE,
+            JobIrVersionRange::current(),
             runner_capabilities(),
             UnixMillis::new(1),
         )),
-        RunnerToServer::LeaseRequest(LeaseRequest::new(
-            header(),
-            RunnerId::new(),
-            RunnerSessionId::new(),
-            1,
-        )),
+        RunnerToServer::LeaseRequest(LeaseRequest::first(header(), slot())),
         RunnerToServer::LeaseResponse(LeaseResponse::new(
             header(),
+            attempt_id,
+            slot(),
             lease_guard,
             LeaseDisposition::Accepted,
         )),
@@ -154,6 +217,10 @@ fn every_runner_envelope_variant_round_trips_through_the_validated_codec() {
             lease_guard,
             vec![log_frame(stream_id, attempt_id, 0, b"ok", false)],
         )),
+        RunnerToServer::CommandAck(CommandAck::new(
+            header(),
+            CommandCursor::through(CommandSequence::new(1).expect("valid command sequence")),
+        )),
     ];
 
     for message in messages {
@@ -174,42 +241,50 @@ fn every_server_envelope_variant_round_trips_through_the_validated_codec() {
     let messages = vec![
         ServerToRunner::Hello(ServerHello::new(
             OperationId::new(),
-            SUPPORTED_PROTOCOL_RANGE.max(),
-            RunnerSessionId::new(),
-            UnixMillis::new(1),
-            1_000,
-            30_000,
+            OperationId::new(),
+            NegotiatedSession::new(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                JobIrVersion::current(),
+                RunnerSessionId::new(),
+                SessionDisposition::Opened,
+                CommandCursor::initial(),
+            ),
+            ServerTiming::new(UnixMillis::new(1), 1_000, 30_000),
         )),
         ServerToRunner::HandshakeRejected(HandshakeRejected::new(
+            OperationId::new(),
             OperationId::new(),
             HandshakeErrorCode::UnsupportedProtocol,
             SUPPORTED_PROTOCOL_RANGE,
             "no common protocol",
         )),
-        ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
-            header(),
+        ServerToRunner::LeaseOffer(Box::new(lease_offer(
+            command_header(),
+            slot(),
             active_lease,
             job_envelope(RunnerRequirements::default()),
         ))),
         ServerToRunner::LeaseRenewal(LeaseRenewal::new(
-            header(),
+            reply_header(),
+            attempt_id,
             lease_guard,
             UnixMillis::new(30),
         )),
         ServerToRunner::CancelJob(CancelJob::new(
-            header(),
+            command_header(),
             attempt_id,
             lease_guard,
             "workflow cancelled",
             UnixMillis::new(2),
         )),
         ServerToRunner::LogAck(LogAckMessage::new(
-            header(),
+            reply_header(),
             LogAck::new(stream_id, Some(LogSequence::new(0))),
         )),
-        ServerToRunner::NoWork(NoWork::new(header(), 1_000)),
+        ServerToRunner::OperationAck(OperationAck::new(reply_header())),
+        ServerToRunner::NoWork(NoWork::new(reply_header(), 1_000)),
         ServerToRunner::Error(ErrorMessage::new(
-            header(),
+            reply_header(),
             RemoteErrorCode::RetryLater,
             "retry later",
             true,
@@ -267,24 +342,22 @@ fn trusted_limit_configuration_rejects_zero_excessive_and_incoherent_budgets() {
 
 #[test]
 fn raw_deserialization_cannot_enter_the_validated_handler_boundary() {
-    let mut json = serde_json::to_value(RunnerToServer::LeaseRequest(LeaseRequest::new(
-        header(),
-        RunnerId::new(),
+    let invalid_header = MessageHeader::reply(
+        SUPPORTED_PROTOCOL_RANGE.max(),
         RunnerSessionId::new(),
-        1,
-    )))
-    .expect("serialize request");
-    json["payload"]["available_slots"] = serde_json::json!(0);
-    let raw: RunnerToServer = serde_json::from_value(json).expect("deserialize wire shape");
+        OperationId::new(),
+        OperationId::new(),
+    );
+    let raw = RunnerToServer::LeaseRequest(LeaseRequest::first(invalid_header, slot()));
 
     assert!(matches!(
         ValidatedRunnerToServer::try_from(raw.clone()),
-        Err(MessageValidationError::ZeroValue("available_slots"))
+        Err(MessageValidationError::UnexpectedResponseCorrelation)
     ));
     assert!(matches!(
         encode_runner_frame(raw, &ProtocolLimits::default()),
         Err(ProtocolEncodeError::InvalidMessage(
-            MessageValidationError::ZeroValue("available_slots")
+            MessageValidationError::UnexpectedResponseCorrelation
         ))
     ));
 }
@@ -293,7 +366,7 @@ fn raw_deserialization_cannot_enter_the_validated_handler_boundary() {
 fn encoded_output_cannot_exceed_the_frame_budget() {
     let limits = ProtocolLimits::new(128, 8, 64, 4, 64).expect("coherent limits");
     let message = ServerToRunner::Error(ErrorMessage::new(
-        header(),
+        reply_header(),
         RemoteErrorCode::Internal,
         "x".repeat(64),
         false,
@@ -310,8 +383,9 @@ fn nested_job_and_result_domain_errors_are_rejected() {
     let limits = ProtocolLimits::default();
     let attempt_id = AttemptId::new();
     let runner_id = RunnerId::new();
-    let offer = ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
-        header(),
+    let offer = ServerToRunner::LeaseOffer(Box::new(lease_offer(
+        command_header(),
+        slot(),
         lease(attempt_id, runner_id),
         job_envelope(RunnerRequirements::default()),
     )));
@@ -348,8 +422,9 @@ fn nested_requirement_collections_obey_the_configured_budget() {
         RunnerLabel::new("x64").expect("valid label"),
     ]);
     let attempt_id = AttemptId::new();
-    let message = ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
-        header(),
+    let message = ServerToRunner::LeaseOffer(Box::new(lease_offer(
+        command_header(),
+        slot(),
         lease(attempt_id, RunnerId::new()),
         job_envelope(requirements),
     )));
@@ -373,8 +448,9 @@ fn nested_job_and_result_maps_obey_the_configured_budget() {
     let limits =
         ProtocolLimits::new(16 * 1024, 1, 1_024, 1, 1_024).expect("coherent collection limits");
     let attempt_id = AttemptId::new();
-    let offer = ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
-        header(),
+    let offer = ServerToRunner::LeaseOffer(Box::new(lease_offer(
+        command_header(),
+        slot(),
         lease(attempt_id, RunnerId::new()),
         job_envelope(RunnerRequirements::default()),
     )));
@@ -515,7 +591,7 @@ fn cancellation_and_error_detail_text_use_control_plane_limits() {
     let limits =
         ProtocolLimits::new(64 * 1024, 4, 16 * 1024, 4, 1_024).expect("coherent control limits");
     let cancellation = ServerToRunner::CancelJob(CancelJob::new(
-        header(),
+        command_header(),
         AttemptId::new(),
         guard(),
         "x".repeat(4_097),
@@ -535,8 +611,13 @@ fn cancellation_and_error_detail_text_use_control_plane_limits() {
     let mut details = BTreeMap::new();
     details.insert("trace".to_owned(), "x".repeat(4_097));
     let error = ServerToRunner::Error(
-        ErrorMessage::new(header(), RemoteErrorCode::Internal, "internal error", false)
-            .with_details(details),
+        ErrorMessage::new(
+            reply_header(),
+            RemoteErrorCode::Internal,
+            "internal error",
+            false,
+        )
+        .with_details(details),
     );
     assert!(matches!(
         encode_server_frame(error, &limits),
@@ -571,7 +652,7 @@ fn decoded_log_cancellation_and_error_messages_receive_full_nested_validation() 
     ));
 
     let cancellation = ServerToRunner::CancelJob(CancelJob::new(
-        header(),
+        command_header(),
         attempt_id,
         guard(),
         "x".repeat(4_097),
@@ -591,8 +672,13 @@ fn decoded_log_cancellation_and_error_messages_receive_full_nested_validation() 
     let mut details = BTreeMap::new();
     details.insert("trace".to_owned(), "x".repeat(4_097));
     let error = ServerToRunner::Error(
-        ErrorMessage::new(header(), RemoteErrorCode::Internal, "internal error", false)
-            .with_details(details),
+        ErrorMessage::new(
+            reply_header(),
+            RemoteErrorCode::Internal,
+            "internal error",
+            false,
+        )
+        .with_details(details),
     );
     let error = serde_json::to_vec(&error).expect("encode error fixture");
     assert!(matches!(

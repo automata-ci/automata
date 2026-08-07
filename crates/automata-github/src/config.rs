@@ -190,6 +190,19 @@ impl GithubTrustedOrigins {
             && same_origin(&self.api_base, endpoint)
             && endpoint.path().starts_with(self.api_base.path())
     }
+
+    pub(crate) fn validate_archive_origin(
+        &self,
+        origin: &Url,
+    ) -> Result<(), GithubHttpConfigurationError> {
+        if !valid_endpoint(origin, self.transport_security)
+            || origin.path() != "/"
+            || origin.query().is_some()
+        {
+            return Err(GithubHttpConfigurationError::InvalidArchiveOrigin);
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for GithubTrustedOrigins {
@@ -280,6 +293,8 @@ pub enum GithubHttpConfigurationError {
     InvalidOAuthOrigin,
     #[error("the trusted GitHub API base is invalid")]
     InvalidApiBase,
+    #[error("the trusted GitHub archive origin is invalid")]
+    InvalidArchiveOrigin,
     #[error("the GitHub HTTP user agent is invalid")]
     InvalidUserAgent,
     #[error("the GitHub response byte limit is invalid")]

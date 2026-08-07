@@ -10,7 +10,7 @@ use automata_auth::{
         ProviderCredential, ProviderId, ProviderSubject, TenantId,
     },
     machine::{ExternalRunnerIdentity, MachineAuthenticationEvidence},
-    session::{AutomataSessionClaims, SessionId, SessionValidationError},
+    session::{AutomataSessionClaims, AutomataSessionIdentity, SessionId, SessionValidationError},
     time::UnixTimestamp,
 };
 use futures::executor::block_on;
@@ -97,18 +97,21 @@ fn malformed_provider_identity_is_rejected() {
 }
 
 fn claims() -> AutomataSessionClaims {
-    AutomataSessionClaims::new(
-        SessionId::new("session-1").expect("session ID"),
-        TenantId::new("tenant-1").expect("tenant ID"),
-        PrincipalId::new("github:42").expect("principal ID"),
-        ProviderId::new("github").expect("provider ID"),
-        ProviderSubject::new("42").expect("provider subject"),
-        BTreeSet::from([RoleName::new("viewer").expect("role")]),
+    AutomataSessionClaims::builder(
+        AutomataSessionIdentity::new(
+            SessionId::new("session-1").expect("session ID"),
+            TenantId::new("tenant-1").expect("tenant ID"),
+            PrincipalId::new("github:42").expect("principal ID"),
+            ProviderId::new("github").expect("provider ID"),
+            ProviderSubject::new("42").expect("provider subject"),
+        ),
         "automata-api",
         UnixTimestamp::from_seconds(100),
         UnixTimestamp::from_seconds(200),
-        7,
     )
+    .roles(BTreeSet::from([RoleName::new("viewer").expect("role")]))
+    .authorization_revision(7)
+    .build()
     .expect("valid claims")
 }
 

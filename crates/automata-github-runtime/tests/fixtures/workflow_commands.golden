@@ -1,0 +1,6 @@
+annotation:warning:bad\nthing:file=src/main.rs,line=2,col=3,title=Lint, check
+group:build
+debug:detail
+endgroup
+matcher:add:.github/matcher.json
+matcher:remove-owner:rustc

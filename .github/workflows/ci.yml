@@ -56,7 +56,16 @@ jobs:
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
           target/ci-tools/actionlint .github/workflows/ci.yml
-          shellcheck -x scripts/ci/*.sh scripts/ci/lib/*.sh scripts/ui/*.sh
+          shellcheck -x \
+            scripts/ci/*.sh \
+            scripts/ci/lib/*.sh \
+            scripts/dev/*.sh \
+            scripts/ui/*.sh \
+            scripts/ui/tests/*.sh \
+            crates/automata-protocol-protobuf/tools/*.sh
+          ./scripts/dev/git-bridge-firewall.test.sh
+          ./scripts/dev/results-firewall.test.sh
+          ./scripts/dev/git-http-server.test.sh
 
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -75,13 +84,18 @@ jobs:
       - name: Test PostgreSQL invariants
         env:
           AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
-        run: cargo test -p automata-store --tests --all-features --locked -- --ignored --test-threads=1
+        run: |
+          cargo test -p automata-store --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-runner-auth-postgres --test postgres_directory --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Audit dependencies
-        run: cargo deny --locked --workspace --all-features check advisories bans licenses sources
+        run: |
+          cargo deny --locked --workspace --all-features check advisories bans licenses sources
+          crates/automata-protocol-protobuf/tools/protobuf-codegen.sh audit
 
   frontend:
     name: React SSR frontend
@@ -128,7 +142,11 @@ jobs:
 
       - name: Test deterministic SBOM normalization
         working-directory: .
-        run: node --test scripts/ci/tests/*.test.mjs
+        run: |
+          node --test scripts/ci/tests/*.test.mjs
+          for test_script in scripts/ui/tests/*.test.sh; do
+            "${test_script}"
+          done
 
       - name: Reproduce embedded renderer component and assets
         working-directory: .

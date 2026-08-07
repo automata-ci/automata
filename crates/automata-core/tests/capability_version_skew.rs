@@ -6,7 +6,7 @@ use automata_core::{
 const KNOWN_RUNNER_JSON: &str = include_str!("fixtures/capabilities/runner-v1-known.json");
 const FUTURE_RUNNER_JSON: &str = include_str!("fixtures/capabilities/runner-v1-future.json");
 const FUTURE_REQUIREMENTS_JSON: &str =
-    include_str!("fixtures/capabilities/requirements-v1-future.json");
+    include_str!("fixtures/capabilities/requirements-v2-future.json");
 
 fn runner() -> RunnerCapabilities {
     RunnerCapabilities::new(

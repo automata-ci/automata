@@ -1,8 +1,11 @@
 use automata_core::{
     AttemptId, AttemptNumber, CORE_SCHEMA_VERSION, FencingToken, JobId, JobLifecycle, Lease,
-    LeaseError, LeaseId, RunnerId, UnixMillis,
+    LeaseError, LeaseId, RunnerId, RunnerSessionId, UnixMillis,
 };
-use automata_store::{AttemptSnapshot, AttemptSnapshotError};
+use automata_store::{
+    AttemptAssignment, AttemptSnapshot, AttemptSnapshotError, RunnerGeneration, RunnerSessionFence,
+    SessionEpoch, StableRunnerSlot,
+};
 
 fn attempt_number() -> AttemptNumber {
     AttemptNumber::new(1).expect("positive attempt number")
@@ -12,12 +15,28 @@ fn lease(attempt_id: AttemptId, issued_at: i64, expires_at: i64) -> Lease {
     Lease::new(
         LeaseId::new(),
         attempt_id,
-        RunnerId::new(),
+        runner_id(),
         FencingToken::new(7).expect("positive fence"),
         UnixMillis::new(issued_at),
         UnixMillis::new(expires_at),
     )
     .expect("valid lease")
+}
+
+fn runner_id() -> RunnerId {
+    RunnerId::from_uuid(uuid::Uuid::from_u128(1))
+}
+
+fn assignment() -> AttemptAssignment {
+    AttemptAssignment::new(
+        RunnerSessionFence::new(
+            RunnerSessionId::from_uuid(uuid::Uuid::from_u128(2)),
+            runner_id(),
+            RunnerGeneration::new(1).expect("generation"),
+            SessionEpoch::new(1).expect("epoch"),
+        ),
+        StableRunnerSlot::new(1).expect("slot"),
+    )
 }
 
 #[test]
@@ -60,7 +79,7 @@ fn builder_constructs_complete_inactive_and_active_snapshots() {
         UnixMillis::new(10),
         UnixMillis::new(30),
     )
-    .with_active_lease(active_lease.clone())
+    .with_active_lease(active_lease.clone(), assignment())
     .build()
     .expect("valid active snapshot");
 
@@ -115,7 +134,7 @@ fn builder_enforces_lifecycle_lease_consistency() {
                 UnixMillis::new(10),
                 UnixMillis::new(20),
             )
-            .with_active_lease(lease(attempt_id, 15, 30))
+            .with_active_lease(lease(attempt_id, 15, 30), assignment())
             .build(),
             Err(AttemptSnapshotError::InactiveLifecycleHasLease(lifecycle))
         );
@@ -136,7 +155,7 @@ fn builder_enforces_state_and_lease_timestamps() {
             UnixMillis::new(11),
             UnixMillis::new(12),
         )
-        .with_active_lease(lease(attempt_id, 10, 20))
+        .with_active_lease(lease(attempt_id, 10, 20), assignment())
         .build(),
         Err(AttemptSnapshotError::LeaseIssuedBeforeQueued {
             queued_at: UnixMillis::new(11),
@@ -169,7 +188,7 @@ fn builder_enforces_state_and_lease_timestamps() {
             UnixMillis::new(0),
             UnixMillis::new(9),
         )
-        .with_active_lease(lease(attempt_id, 10, 20))
+        .with_active_lease(lease(attempt_id, 10, 20), assignment())
         .build(),
         Err(AttemptSnapshotError::ChangedBeforeLeaseIssuance {
             issued_at: UnixMillis::new(10),
@@ -187,7 +206,7 @@ fn builder_enforces_state_and_lease_timestamps() {
                 UnixMillis::new(0),
                 UnixMillis::new(changed_at),
             )
-            .with_active_lease(lease(attempt_id, 10, 20))
+            .with_active_lease(lease(attempt_id, 10, 20), assignment())
             .build(),
             Err(AttemptSnapshotError::ChangedOutsideLease {
                 changed_at: UnixMillis::new(changed_at),
@@ -213,7 +232,7 @@ fn builder_rejects_foreign_and_invalid_leases() {
             UnixMillis::new(0),
             UnixMillis::new(10),
         )
-        .with_active_lease(foreign_lease)
+        .with_active_lease(foreign_lease, assignment())
         .build(),
         Err(AttemptSnapshotError::LeaseAttemptMismatch {
             snapshot_attempt_id: attempt_id,
@@ -234,7 +253,7 @@ fn builder_rejects_foreign_and_invalid_leases() {
             UnixMillis::new(0),
             UnixMillis::new(10),
         )
-        .with_active_lease(invalid_lease)
+        .with_active_lease(invalid_lease, assignment())
         .build(),
         Err(AttemptSnapshotError::InvalidLease(
             LeaseError::UnsupportedSchema {

@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::Zeroizing;
 
+use automata_scm::ScmProviderId;
+
 use crate::{
     config::{
         GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
@@ -40,8 +42,10 @@ const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 3_600;
 
 #[derive(Clone)]
 pub struct GithubHttpEndpoint {
-    client: Client,
-    trusted: GithubTrustedOrigins,
+    pub(crate) client: Client,
+    pub(crate) trusted: GithubTrustedOrigins,
+    pub(crate) archive_origin: Url,
+    pub(crate) scm_provider_id: ScmProviderId,
 }
 
 impl GithubHttpEndpoint {
@@ -52,7 +56,25 @@ impl GithubHttpEndpoint {
     ///
     /// Returns an error when the HTTP client cannot be constructed.
     pub fn new(trusted: GithubTrustedOrigins) -> Result<Self, GithubHttpConfigurationError> {
-        Self::build(trusted)
+        let archive_origin = default_archive_origin(&trusted)?;
+        Self::build(trusted, archive_origin)
+    }
+
+    /// Builds a production client with an explicit trusted archive origin.
+    ///
+    /// This is required when a GitHub Enterprise installation redirects
+    /// repository archives to a different HTTPS origin. Credentials are never
+    /// forwarded to that origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `archive_origin` is a credential-free HTTPS
+    /// origin URL or the client cannot be constructed.
+    pub fn new_with_archive_origin(
+        trusted: GithubTrustedOrigins,
+        archive_origin: Url,
+    ) -> Result<Self, GithubHttpConfigurationError> {
+        Self::build(trusted, archive_origin)
     }
 
     /// Builds the public GitHub.com production client with default limits.
@@ -79,19 +101,21 @@ impl GithubHttpEndpoint {
         user_agent: &str,
         limits: GithubHttpLimits,
     ) -> Result<Self, GithubHttpConfigurationError> {
-        Self::build(GithubTrustedOrigins::loopback_for_testing(
-            oauth_origin,
-            api_base,
-            user_agent,
-            limits,
-        )?)
+        let trusted =
+            GithubTrustedOrigins::loopback_for_testing(oauth_origin, api_base, user_agent, limits)?;
+        let archive_origin = default_archive_origin(&trusted)?;
+        Self::build(trusted, archive_origin)
     }
 
     pub fn trusted_origins(&self) -> &GithubTrustedOrigins {
         &self.trusted
     }
 
-    fn build(trusted: GithubTrustedOrigins) -> Result<Self, GithubHttpConfigurationError> {
+    fn build(
+        trusted: GithubTrustedOrigins,
+        archive_origin: Url,
+    ) -> Result<Self, GithubHttpConfigurationError> {
+        trusted.validate_archive_origin(&archive_origin)?;
         let mut default_headers = HeaderMap::new();
         default_headers.insert(reqwest::header::USER_AGENT, trusted.user_agent.clone());
         default_headers.insert(
@@ -110,7 +134,13 @@ impl GithubHttpEndpoint {
         let client = builder
             .build()
             .map_err(|_| GithubHttpConfigurationError::ClientConstructionFailed)?;
-        Ok(Self { client, trusted })
+        Ok(Self {
+            client,
+            trusted,
+            archive_origin,
+            scm_provider_id: ScmProviderId::new("github")
+                .map_err(|_| GithubHttpConfigurationError::ClientConstructionFailed)?,
+        })
     }
 
     fn oauth_request(&self, endpoint: &Url) -> Result<RequestBuilder, GithubEndpointError> {
@@ -343,6 +373,8 @@ impl fmt::Debug for GithubHttpEndpoint {
         formatter
             .debug_struct("GithubHttpEndpoint")
             .field("trusted", &self.trusted)
+            .field("archive_origin", &self.archive_origin)
+            .field("scm_provider_id", &self.scm_provider_id)
             .finish_non_exhaustive()
     }
 }
@@ -391,7 +423,9 @@ impl GithubEndpoint for GithubHttpEndpoint {
     }
 }
 
-fn authorization_header(token: &SecretString) -> Result<HeaderValue, GithubEndpointError> {
+pub(crate) fn authorization_header(
+    token: &SecretString,
+) -> Result<HeaderValue, GithubEndpointError> {
     let mut raw = Zeroizing::new(String::with_capacity(
         "Bearer ".len() + token.expose_secret().len(),
     ));
@@ -401,6 +435,24 @@ fn authorization_header(token: &SecretString) -> Result<HeaderValue, GithubEndpo
         HeaderValue::from_str(raw.as_str()).map_err(|_| GithubEndpointError::InvalidResponse)?;
     header.set_sensitive(true);
     Ok(header)
+}
+
+fn default_archive_origin(
+    trusted: &GithubTrustedOrigins,
+) -> Result<Url, GithubHttpConfigurationError> {
+    if trusted.api_base.scheme() == "https"
+        && trusted.api_base.host_str() == Some("api.github.com")
+        && trusted.api_base.port().is_none()
+    {
+        return Url::parse("https://codeload.github.com/")
+            .map_err(|_| GithubHttpConfigurationError::InvalidArchiveOrigin);
+    }
+
+    let mut origin = trusted.api_base.clone();
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    Ok(origin)
 }
 
 fn require_ok(response: &JsonResponse) -> Result<(), GithubEndpointError> {

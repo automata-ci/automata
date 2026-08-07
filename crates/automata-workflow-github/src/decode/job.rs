@@ -177,7 +177,10 @@ fn runner_selection(
                 node.span.clone(),
             );
         }
-        return Some(RunnerSelection::Labels(labels));
+        return Some(RunnerSelection::Labels {
+            labels,
+            span: node.span.clone(),
+        });
     }
 
     let entries = context.expect_mapping(node, path)?;

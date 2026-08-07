@@ -1,35 +1,45 @@
 //! Work leasing, acceptance, liveness, and renewal messages.
 
 use automata_core::{
-    AttemptId, FencingToken, JobIrEnvelope, JobLifecycle, Lease, LeaseGuard, LeaseId, RunnerId,
-    RunnerSessionId, UnixMillis,
+    AttemptId, FencingToken, JobIrEnvelope, JobLifecycle, Lease, LeaseGuard, LeaseId, OperationId,
+    UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 
-use super::MessageHeader;
+use super::MessageValidationError;
+use super::{MessageHeader, RunnerSlotOrdinal, ServerCommandHeader};
 
-/// Runner request for at most `available_slots` assignments.
+/// Runner request for at most one assignment to one stable slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LeaseRequest {
     header: MessageHeader,
-    runner_id: RunnerId,
-    session_id: RunnerSessionId,
-    available_slots: u16,
+    slot: RunnerSlotOrdinal,
+    acknowledges_operation_id: Option<OperationId>,
 }
 
 impl LeaseRequest {
+    /// Creates the first lease request in a slot's protocol-v4 request chain.
     #[must_use]
-    pub const fn new(
+    pub const fn first(header: MessageHeader, slot: RunnerSlotOrdinal) -> Self {
+        Self {
+            header,
+            slot,
+            acknowledges_operation_id: None,
+        }
+    }
+
+    /// Creates a successor that acknowledges the preceding request in the
+    /// same slot's protocol-v4 request chain.
+    #[must_use]
+    pub const fn successor(
         header: MessageHeader,
-        runner_id: RunnerId,
-        session_id: RunnerSessionId,
-        available_slots: u16,
+        slot: RunnerSlotOrdinal,
+        acknowledges_operation_id: OperationId,
     ) -> Self {
         Self {
             header,
-            runner_id,
-            session_id,
-            available_slots,
+            slot,
+            acknowledges_operation_id: Some(acknowledges_operation_id),
         }
     }
 
@@ -39,38 +49,71 @@ impl LeaseRequest {
     }
 
     #[must_use]
-    pub const fn runner_id(&self) -> RunnerId {
-        self.runner_id
+    pub const fn slot(&self) -> RunnerSlotOrdinal {
+        self.slot
     }
 
+    /// Returns the immediately preceding lease-request operation implicitly
+    /// acknowledged by this successor, or `None` for the first request.
     #[must_use]
-    pub const fn session_id(&self) -> RunnerSessionId {
-        self.session_id
+    pub const fn acknowledges_operation_id(&self) -> Option<OperationId> {
+        self.acknowledges_operation_id
     }
 
-    #[must_use]
-    pub const fn available_slots(&self) -> u16 {
-        self.available_slots
+    /// Validates locally provable protocol-v4 lease-request invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageValidationError`] when the header is not a supported
+    /// runner request or a successor acknowledges its own operation ID.
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        self.header.validate_request()?;
+        if self.acknowledges_operation_id == Some(self.header.operation_id()) {
+            return Err(MessageValidationError::LeaseRequestSelfAcknowledgement {
+                operation_id: self.header.operation_id(),
+            });
+        }
+        Ok(())
     }
 }
 
 /// Server offer containing an immutable job and its exclusive lease.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LeaseOffer {
-    header: MessageHeader,
+    header: ServerCommandHeader,
+    slot: RunnerSlotOrdinal,
     lease: Lease,
     job: JobIrEnvelope,
+    runtime_authorities: Option<super::JobRuntimeAuthorities>,
 }
 
 impl LeaseOffer {
+    /// Creates a protocol-v4 offer with required, execution-bound authority.
     #[must_use]
-    pub const fn new(header: MessageHeader, lease: Lease, job: JobIrEnvelope) -> Self {
-        Self { header, lease, job }
+    pub const fn new(
+        header: ServerCommandHeader,
+        slot: RunnerSlotOrdinal,
+        lease: Lease,
+        job: JobIrEnvelope,
+        runtime_authorities: super::JobRuntimeAuthorities,
+    ) -> Self {
+        Self {
+            header,
+            slot,
+            lease,
+            job,
+            runtime_authorities: Some(runtime_authorities),
+        }
     }
 
     #[must_use]
-    pub const fn header(&self) -> MessageHeader {
+    pub const fn header(&self) -> ServerCommandHeader {
         self.header
+    }
+
+    #[must_use]
+    pub const fn slot(&self) -> RunnerSlotOrdinal {
+        self.slot
     }
 
     #[must_use]
@@ -82,12 +125,20 @@ impl LeaseOffer {
     pub const fn job(&self) -> &JobIrEnvelope {
         &self.job
     }
+
+    /// Returns the protected per-job runtime authority, when present.
+    #[must_use]
+    pub const fn runtime_authorities(&self) -> Option<&super::JobRuntimeAuthorities> {
+        self.runtime_authorities.as_ref()
+    }
 }
 
 /// Runner's idempotent acceptance or rejection of an offered lease.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LeaseResponse {
     header: MessageHeader,
+    attempt_id: AttemptId,
+    slot: RunnerSlotOrdinal,
     lease_id: LeaseId,
     fencing_token: FencingToken,
     disposition: LeaseDisposition,
@@ -97,11 +148,15 @@ impl LeaseResponse {
     #[must_use]
     pub const fn new(
         header: MessageHeader,
+        attempt_id: AttemptId,
+        slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
         disposition: LeaseDisposition,
     ) -> Self {
         Self {
             header,
+            attempt_id,
+            slot,
             lease_id: guard.lease_id(),
             fencing_token: guard.fencing_token(),
             disposition,
@@ -114,6 +169,16 @@ impl LeaseResponse {
     }
 
     #[must_use]
+    pub const fn attempt_id(&self) -> AttemptId {
+        self.attempt_id
+    }
+
+    #[must_use]
+    pub const fn slot(&self) -> RunnerSlotOrdinal {
+        self.slot
+    }
+
+    #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         LeaseGuard::new(self.lease_id, self.fencing_token)
     }
@@ -121,6 +186,40 @@ impl LeaseResponse {
     #[must_use]
     pub const fn disposition(&self) -> &LeaseDisposition {
         &self.disposition
+    }
+
+    /// Validates this response against the durable lease offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageValidationError`] for protocol, session, attempt,
+    /// slot, or lease-guard correlation mismatches.
+    pub fn validate_for(&self, offer: &LeaseOffer) -> Result<(), MessageValidationError> {
+        self.header.validate_request()?;
+        offer
+            .header
+            .validate_for(self.header.protocol_version(), self.header.session_id())?;
+        if self.attempt_id != offer.lease.attempt_id() {
+            return Err(MessageValidationError::AttemptCorrelationMismatch {
+                expected: offer.lease.attempt_id(),
+                received: self.attempt_id,
+            });
+        }
+        if self.slot != offer.slot {
+            return Err(MessageValidationError::SlotCorrelationMismatch {
+                expected: offer.slot,
+                received: self.slot,
+            });
+        }
+        let expected = offer.lease.guard();
+        let received = self.guard();
+        if received != expected {
+            return Err(MessageValidationError::LeaseGuardCorrelationMismatch {
+                expected,
+                received,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -200,15 +299,22 @@ impl LeaseHeartbeat {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LeaseRenewal {
     header: MessageHeader,
+    attempt_id: AttemptId,
     guard: LeaseGuard,
     expires_at: UnixMillis,
 }
 
 impl LeaseRenewal {
     #[must_use]
-    pub const fn new(header: MessageHeader, guard: LeaseGuard, expires_at: UnixMillis) -> Self {
+    pub const fn new(
+        header: MessageHeader,
+        attempt_id: AttemptId,
+        guard: LeaseGuard,
+        expires_at: UnixMillis,
+    ) -> Self {
         Self {
             header,
+            attempt_id,
             guard,
             expires_at,
         }
@@ -220,6 +326,11 @@ impl LeaseRenewal {
     }
 
     #[must_use]
+    pub const fn attempt_id(&self) -> AttemptId {
+        self.attempt_id
+    }
+
+    #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         self.guard
     }
@@ -227,5 +338,28 @@ impl LeaseRenewal {
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
+    }
+
+    /// Validates this renewal against the heartbeat operation it answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageValidationError`] for response, attempt, or lease
+    /// correlation mismatches.
+    pub fn validate_for(&self, heartbeat: &LeaseHeartbeat) -> Result<(), MessageValidationError> {
+        self.header.validate_reply_for(heartbeat.header)?;
+        if self.attempt_id != heartbeat.attempt_id {
+            return Err(MessageValidationError::AttemptCorrelationMismatch {
+                expected: heartbeat.attempt_id,
+                received: self.attempt_id,
+            });
+        }
+        if self.guard != heartbeat.guard {
+            return Err(MessageValidationError::LeaseGuardCorrelationMismatch {
+                expected: heartbeat.guard,
+                received: self.guard,
+            });
+        }
+        Ok(())
     }
 }

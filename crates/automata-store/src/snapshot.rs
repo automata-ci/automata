@@ -3,6 +3,7 @@ use automata_core::{
     UnixMillis,
 };
 
+use crate::AttemptAssignment;
 use crate::AttemptSnapshotError;
 
 /// A validated, backend-neutral view of one durable job attempt.
@@ -19,6 +20,7 @@ pub struct AttemptSnapshot {
     pub(crate) fencing_token: Option<FencingToken>,
     pub(crate) lease_id: Option<LeaseId>,
     pub(crate) runner_id: Option<RunnerId>,
+    pub(crate) assignment: Option<AttemptAssignment>,
     pub(crate) lease_issued_at: Option<UnixMillis>,
     pub(crate) lease_expires_at: Option<UnixMillis>,
     pub(crate) lease_failures: u32,
@@ -45,6 +47,7 @@ impl AttemptSnapshot {
             lifecycle,
             retained_fencing_token: None,
             active_lease: None,
+            active_assignment: None,
             lease_failures: 0,
             queued_at,
             changed_at,
@@ -88,6 +91,12 @@ impl AttemptSnapshot {
         self.runner_id
     }
 
+    /// Returns the complete session/slot fence while the attempt is active.
+    #[must_use]
+    pub const fn assignment(self) -> Option<AttemptAssignment> {
+        self.assignment
+    }
+
     #[must_use]
     pub const fn lease_issued_at(self) -> Option<UnixMillis> {
         self.lease_issued_at
@@ -123,6 +132,7 @@ pub struct AttemptSnapshotBuilder {
     lifecycle: JobLifecycle,
     retained_fencing_token: Option<FencingToken>,
     active_lease: Option<Lease>,
+    active_assignment: Option<AttemptAssignment>,
     lease_failures: u32,
     queued_at: UnixMillis,
     changed_at: UnixMillis,
@@ -139,8 +149,9 @@ impl AttemptSnapshotBuilder {
 
     /// Records one complete, already interval-validated active lease.
     #[must_use]
-    pub fn with_active_lease(mut self, lease: Lease) -> Self {
+    pub fn with_active_lease(mut self, lease: Lease, assignment: AttemptAssignment) -> Self {
         self.active_lease = Some(lease);
+        self.active_assignment = Some(assignment);
         self
     }
 
@@ -180,7 +191,24 @@ impl AttemptSnapshotBuilder {
             _ => {}
         }
 
+        match (lifecycle_requires_lease, self.active_assignment) {
+            (true, None) => {
+                return Err(AttemptSnapshotError::ActiveLifecycleMissingAssignment(
+                    self.lifecycle,
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(AttemptSnapshotError::InactiveLifecycleHasAssignment(
+                    self.lifecycle,
+                ));
+            }
+            _ => {}
+        }
+
         if let Some(lease) = &self.active_lease {
+            let assignment = self.active_assignment.ok_or(
+                AttemptSnapshotError::ActiveLifecycleMissingAssignment(self.lifecycle),
+            )?;
             lease
                 .validate()
                 .map_err(AttemptSnapshotError::InvalidLease)?;
@@ -208,6 +236,9 @@ impl AttemptSnapshotBuilder {
                     expires_at: lease.expires_at(),
                 });
             }
+            assignment
+                .validate_lease(lease)
+                .map_err(AttemptSnapshotError::InvalidAssignment)?;
         }
 
         let (fencing_token, lease_id, runner_id, lease_issued_at, lease_expires_at) =
@@ -232,6 +263,7 @@ impl AttemptSnapshotBuilder {
             fencing_token,
             lease_id,
             runner_id,
+            assignment: self.active_assignment,
             lease_issued_at,
             lease_expires_at,
             lease_failures: self.lease_failures,

@@ -1,0 +1,25 @@
+[package]
+name = "automata-blob"
+description = "Immutable content-addressed blob ports and provider-neutral adapters for Automata"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-core.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio.workspace = true

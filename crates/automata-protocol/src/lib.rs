@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 //! Owned wire messages between `automata` and `automata-runner`.
 //!
-//! The protocol initially uses serde JSON exclusively. Every post-handshake
-//! message carries both the negotiated protocol version and an independent
-//! message-schema version; Rust's in-memory representation is not a wire format.
+//! These owned, validated messages are the transport-neutral protocol model.
+//! Serde JSON framing remains available for fixtures and bootstrap diagnostics;
+//! production runner transport is encoded by a separately versioned adapter.
+//! Rust's in-memory representation is never itself a wire format.
 
 pub mod message;
 pub mod negotiation;
@@ -12,4 +13,8 @@ pub use message::*;
 pub use negotiation::*;
 
 /// Current schema version for the message structs in this crate.
-pub const MESSAGE_SCHEMA_VERSION: u16 = 1;
+///
+/// Version three adds required, protected, per-attempt runtime authorities to
+/// lease offers. Protocol v4 peers fail closed instead of silently executing a
+/// job without its server-issued authority.
+pub const MESSAGE_SCHEMA_VERSION: u16 = 3;

@@ -4,6 +4,7 @@
 //! matching, while a non-empty eligible-group set uses any-of membership.
 
 mod advertisement;
+mod environment;
 mod feature;
 mod matching;
 mod platform;
@@ -12,12 +13,13 @@ mod resource;
 mod selector;
 
 pub use advertisement::{CapabilityValidationError, RunnerCapabilities};
+pub use environment::{EnvironmentProfile, EnvironmentProfileError, EnvironmentProfileId};
 pub use feature::{
     CapabilityIdError, ContainerFeature, MAX_CAPABILITY_ID_LENGTH, RunnerFeature, SandboxFeature,
 };
 pub use matching::{RequirementMismatch, RequirementMismatches, ResourceKind};
 pub use platform::{Architecture, IsolationLevel, OperatingSystem, RunnerPlatform};
-pub use requirement::RunnerRequirements;
+pub use requirement::{RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunnerRequirements};
 pub use resource::{
     ContainerCapabilities, ResourceCapacity, ResourceRequirements, SandboxCapabilities,
 };

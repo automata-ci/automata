@@ -1,7 +1,7 @@
 use std::{env, path::Path};
 
 use crate::common::crate_ident;
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 use rquickjs_core::{Context, Module, Result as JsResult, Runtime, WriteOptions};
 use syn::{
@@ -54,10 +54,15 @@ pub fn embed(modules: EmbedModules) -> Result<TokenStream> {
         let path = Path::new(&path);
 
         let path = if path.is_relative() {
-            let full_path = Path::new(
-                &env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
-            )
-            .join(path);
+            let manifest_directory = env::var("CARGO_MANIFEST_DIR").map_err(|error| {
+                Error::new(
+                    f.name.span(),
+                    format_args!(
+                        "CARGO_MANIFEST_DIR is unavailable while resolving embedded module path: {error}"
+                    ),
+                )
+            })?;
+            let full_path = Path::new(&manifest_directory).join(path);
             match full_path.canonicalize() {
                 Ok(x) => x,
                 Err(e) => {
@@ -123,7 +128,9 @@ pub fn embed(modules: EmbedModules) -> Result<TokenStream> {
     expand(&res)
 }
 
-fn to_entries(modules: impl Iterator<Item = (String, Vec<u8>)>) -> Vec<(String, TokenStream)> {
+pub(super) fn to_entries(
+    modules: impl Iterator<Item = (String, Vec<u8>)>,
+) -> Vec<(String, TokenStream)> {
     modules
         .map(|(name, data)| (name, quote! { &[#(#data),*] }))
         .collect::<Vec<_>>()
@@ -131,6 +138,16 @@ fn to_entries(modules: impl Iterator<Item = (String, Vec<u8>)>) -> Vec<(String, 
 
 #[cfg(feature = "phf")]
 pub fn expand(modules: &[(String, TokenStream)]) -> Result<TokenStream> {
+    let lib_crate = crate_ident()?;
+    let lib_crate = format_ident!("{}", lib_crate);
+    Ok(expand_for_crate(modules, &lib_crate))
+}
+
+#[cfg(feature = "phf")]
+pub(super) fn expand_for_crate(
+    modules: &[(String, TokenStream)],
+    lib_crate: &Ident,
+) -> TokenStream {
     let keys = modules.iter().map(|(x, _)| x.clone()).collect::<Vec<_>>();
 
     let state = phf_generator::generate_hash(&keys);
@@ -143,81 +160,31 @@ pub fn expand(modules: &[(String, TokenStream)]) -> Result<TokenStream> {
         quote!((#key, #value))
     });
 
-    let lib_crate = crate_ident()?;
-    let lib_crate = format_ident!("{}", lib_crate);
-    Ok(quote! {
+    quote! {
         #lib_crate::loader::bundle::Bundle(& #lib_crate::phf::Map{
             key: #key,
             disps: &[#(#disps),*],
             entries: &[#(#entries),*],
         })
-    })
+    }
 }
 
 #[cfg(not(feature = "phf"))]
 pub fn expand(modules: &[(String, TokenStream)]) -> Result<TokenStream> {
     let lib_crate = crate_ident()?;
     let lib_crate = format_ident!("{}", lib_crate);
+    Ok(expand_for_crate(modules, &lib_crate))
+}
+
+#[cfg(not(feature = "phf"))]
+pub(super) fn expand_for_crate(
+    modules: &[(String, TokenStream)],
+    lib_crate: &Ident,
+) -> TokenStream {
     let entries = modules.iter().map(|(name, data)| {
         quote! { (#name,#data)}
     });
-    Ok(quote! {
+    quote! {
         #lib_crate::loader::bundle::Bundle(&[#(#entries),*])
-    })
-}
-
-#[cfg(test)]
-mod test {
-    use super::{expand, to_entries, EmbedModules};
-    use quote::quote;
-
-    #[cfg(feature = "phf")]
-    #[test]
-    fn test_expand() {
-        let data = vec![("test_module".to_string(), vec![1u8, 2, 3, 4])];
-        let test_data = to_entries(data.into_iter());
-        let tokens = expand(&test_data);
-        let expected = quote! {
-            rquickjs::loader::bundle::Bundle(&rquickjs::phf::Map{
-                key: 16287231350648472473u64,
-                disps: &[(0u32,0u32)],
-                entries: &[
-                    ("test_module", &[1u8, 2u8, 3u8,4u8])
-                ],
-            })
-        };
-        assert_eq_tokens!(tokens.unwrap(), expected);
-    }
-
-    #[cfg(not(feature = "phf"))]
-    #[test]
-    fn test_expand() {
-        let data = vec![("test_module".to_string(), vec![1u8, 2, 3, 4])];
-        let test_data = to_entries(data.into_iter());
-        let tokens = expand(&test_data);
-        let expected = quote! {
-            rquickjs::loader::bundle::Bundle(&[
-                ("test_module", &[1u8, 2u8, 3u8,4u8])
-            ])
-        };
-        assert_eq_tokens!(tokens.unwrap(), expected);
-    }
-
-    #[test]
-    fn parse() {
-        let data = quote! {
-            "Hello world": "foo",
-            "bar"
-        };
-        let mods = syn::parse2::<EmbedModules>(data).unwrap();
-        assert_eq!(mods.0.len(), 2);
-        let mut iter = mods.0.iter();
-        let a = iter.next().unwrap();
-        assert_eq!(a.name.value(), "Hello world");
-        assert_eq!(a.path.as_ref().unwrap().1.value(), "foo");
-        let b = iter.next().unwrap();
-        assert_eq!(b.name.value(), "bar");
-        assert!(b.path.is_none());
-        assert!(iter.next().is_none());
     }
 }

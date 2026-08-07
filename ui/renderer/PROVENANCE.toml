@@ -3,8 +3,19 @@ schema = 1
 [tools]
 wasm_rquickjs_cli = "0.4.1"
 rustc = "1.97.1"
+cargo = "cargo 1.97.1 (c980f4866 2026-06-30)"
+rustfmt = "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)"
 node = "24.19.0"
 npm = "11.17.0"
+clang = "clang-18=1:18.1.3-1ubuntu1"
+libclang = "libclang1-18=1:18.1.3-1ubuntu1"
+wasi_sdk_version = "24.0"
+wasi_sdk_platform = "x86_64-linux"
+wasi_sdk_archive = "wasi-sdk-24.0-x86_64-linux.tar.gz"
+wasi_sdk_archive_sha256 = "c6c38aab56e5de88adf6c1ebc9c3ae8da72f88ec2b656fb024eda8d4167a0bc5"
+wasi_sdk_installation_root = "/opt/wasi-sdk-24.0"
+wasi_sdk_clang = "clang version 18.1.2-wasi-sdk (https://github.com/llvm/llvm-project 26a1d6601d727a96f4301d0d8647b5a42760ae0c)"
+wasi_sdk_llvm_ar = "LLVM version 18.1.2-wasi-sdk"
 
 [wrapper]
 target = "wasm32-wasip2"
@@ -13,11 +24,14 @@ features = ["p2", "encoding"]
 codegen_units = 1
 incremental = false
 source_date_epoch = 0
-path_remap = "/automata"
+repository_path_remap = "/automata"
+cargo_home_path_remap = "/cargo"
+rustup_home_path_remap = "/rustup"
+wasi_sdk_path_remap = "/wasi-sdk"
 lock_sha256 = "295fbd3c18da24110635de361f37e15db8fbbeb3c0ae8525e1d6877bee2ed442"
-manifest_sha256 = "f1756a736afbedbc009abbc6cd0e0bb3395a0997f0d869506c5a7c301b12c5a5"
-macro_patch_sha256 = "495498e2e05b7e633b3bda6695e930103ec2567266a6943b31541027217bfbad"
-wit_sha256 = "7b8c98d27674059af59e301b26f72ed47a96b25565397346f7476e6baf508d67"
+manifest_sha256 = "e718596d6a13d4b5d2b3171a0dc6aa3bc1f27e1ddc623976c14c0e081b5fce3b"
+macro_patch_sha256 = "49c0bc8615bc88bafd1acec0fa7fab71e72a210a6b3dc2961245bdfc2adce2d1"
+wit_sha256 = "d59593c5b09a51c61b687508750b00c1cd723071d98844e82578cbbdc08eb3b8"
 ssr_bundle_sha256 = "f69ea06126aa0653ab6c311a2649d38d73c5a42935cbd11bf8e7c46e1b91940f"
 
 [ui]
@@ -26,6 +40,6 @@ script_public_path = "/assets/entry-client-CXNIQG-W.js"
 stylesheet_public_path = "/assets/entry-client-DnE6LV8l.css"
 
 [artifacts]
-component_sha256 = "e805802054512ca7e7de32ae2305570c2d7cab655438bff2ffaea103e9d24f7d"
+component_sha256 = "61a3ef78b9690e01c2e476d37a52f51182e5e0d809c6f73011ca81a8d2efa2ec"
 script_sha256 = "7a846e6cad51a817f842b7f6c435ba606398d9aa45af3cf055c7f1407d0807ab"
 stylesheet_sha256 = "4d2ecd9ab62605346602e0856d366c14599e0e1d265d19bc05f11ac1f61ae58b"

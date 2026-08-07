@@ -12,7 +12,7 @@ use serde::Serialize;
 use tower::{ServiceBuilder, timeout::TimeoutLayer};
 
 use super::web;
-use crate::build_info::BuildInfo;
+use crate::{build_info::BuildInfo, server::Readiness};
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -94,10 +94,23 @@ impl std::error::Error for HttpPolicyError {}
 /// Returns an error if the embedded renderer component cannot be compiled or
 /// linked under the configured isolation policy.
 pub fn router() -> Result<Router, RendererInitError> {
+    router_with_readiness(Readiness::all_ready())
+}
+
+/// Builds the production HTTP application over a shared dependency-readiness state.
+///
+/// # Errors
+///
+/// Returns an error if the embedded renderer cannot be initialized.
+pub fn router_with_readiness(readiness: Readiness) -> Result<Router, RendererInitError> {
     let policy = RenderPolicy::default();
     let http_policy = HttpPolicy::default();
     let renderer = Arc::new(WasmtimeRenderer::new(policy)?);
-    Ok(router_with_renderer_and_policy(renderer, http_policy))
+    Ok(router_with_renderer_policy_and_readiness(
+        renderer,
+        http_policy,
+        readiness,
+    ))
 }
 
 pub fn router_with_renderer(renderer: Arc<dyn Renderer>) -> Router {
@@ -105,9 +118,21 @@ pub fn router_with_renderer(renderer: Arc<dyn Renderer>) -> Router {
 }
 
 pub fn router_with_renderer_and_policy(renderer: Arc<dyn Renderer>, policy: HttpPolicy) -> Router {
+    router_with_renderer_policy_and_readiness(renderer, policy, Readiness::all_ready())
+}
+
+/// Builds an HTTP router with explicit renderer, policy, and dependency readiness.
+pub fn router_with_renderer_policy_and_readiness(
+    renderer: Arc<dyn Renderer>,
+    policy: HttpPolicy,
+    readiness: Readiness,
+) -> Router {
     Router::new()
         .route("/healthz", get(health))
-        .route("/readyz", get(ready))
+        .route(
+            "/readyz",
+            get(move || std::future::ready(ready(&readiness))),
+        )
         .merge(web::router(renderer, policy.max_concurrent_renders()))
         .layer(
             ServiceBuilder::new()
@@ -142,8 +167,14 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn ready() -> impl IntoResponse {
-    // Adapter health checks will replace this process-level readiness signal as
-    // PostgreSQL and object storage are introduced.
-    (StatusCode::OK, "ready\n")
+fn ready(readiness: &Readiness) -> Response {
+    if readiness.snapshot().is_ready() {
+        return (StatusCode::OK, [(CACHE_CONTROL, "no-store")], "ready\n").into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(CACHE_CONTROL, "no-store")],
+        "not ready\n",
+    )
+        .into_response()
 }

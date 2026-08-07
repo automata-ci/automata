@@ -1,0 +1,21 @@
+name: Setup Node.js environment
+description: Set up a specific version of Node.js and add it to PATH
+author: GitHub
+inputs:
+  always-auth:
+    description: Always set auth in npmrc
+    default: 'false'
+  node-version:
+    description: Version Spec of the version to use
+  package-manager-cache:
+    description: Used to specify a package manager for caching
+    default: 'true'
+    deprecationMessage: Use cache instead
+outputs:
+  node-version:
+    description: Installed node version
+runs:
+  using: node24
+  main: dist/setup/index.js
+  post: dist/cache-save/index.js
+  post-if: success()

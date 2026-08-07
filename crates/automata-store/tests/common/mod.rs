@@ -1,7 +1,13 @@
 use std::{error::Error, future::Future, str::FromStr as _, sync::Arc};
 
-use automata_core::{JobId, RunnerId};
-use automata_store::PostgresStore;
+use automata_core::{
+    Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
+    RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
+};
+use automata_store::{
+    OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
+    RunnerSessionFence, RunnerSessionRepository as _, WORKFLOW_ADMISSION_EPOCH,
+};
 use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -36,6 +42,31 @@ where
     }
 }
 
+#[allow(dead_code)] // Only the migration integration-test crate uses the partial-upgrade fixture.
+pub async fn run_with_unmigrated_database<Test, TestFuture>(test: Test) -> TestResult
+where
+    Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
+    TestFuture: Future<Output = TestResult> + Send + 'static,
+{
+    let database = Arc::new(TestDatabase::create_unmigrated().await?);
+    let outcome = tokio::spawn(test(Arc::clone(&database))).await;
+    let cleanup = database.cleanup().await;
+
+    match outcome {
+        Ok(result) => {
+            result?;
+            cleanup
+        }
+        Err(join_error) => {
+            cleanup?;
+            if join_error.is_panic() {
+                std::panic::resume_unwind(join_error.into_panic());
+            }
+            Err(join_error.into())
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TestDatabase {
     schema: String,
@@ -45,6 +76,15 @@ pub struct TestDatabase {
 
 impl TestDatabase {
     pub async fn create() -> TestResult<Self> {
+        Self::create_inner(true).await
+    }
+
+    #[allow(dead_code)] // Each integration-test crate compiles this shared module independently.
+    pub async fn create_unmigrated() -> TestResult<Self> {
+        Self::create_inner(false).await
+    }
+
+    async fn create_inner(run_migrations: bool) -> TestResult<Self> {
         let database_url = std::env::var(DATABASE_URL_ENVIRONMENT).map_err(|_| {
             format!("set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL test server URL")
         })?;
@@ -84,7 +124,7 @@ impl TestDatabase {
             }
         };
         let store = PostgresStore::from_postgres_pool(pool);
-        if let Err(error) = store.migrate().await {
+        if run_migrations && let Err(error) = store.migrate().await {
             store.postgres_pool().close().await;
             let cleanup = drop_schema(&admin, &schema).await;
             admin.close().await;
@@ -120,10 +160,13 @@ pub struct SeedData {
     pub tenant_id: String,
     pub repository_id: Uuid,
     pub workflow_id: Uuid,
+    pub run_id: RunId,
     pub job_id: JobId,
     pub runner_ids: Vec<RunnerId>,
+    pub session_fences: Vec<RunnerSessionFence>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResult<SeedData> {
     let repository_id = Uuid::new_v4();
     let workflow_id = Uuid::new_v4();
@@ -202,29 +245,64 @@ pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResul
         r"
         INSERT INTO jobs (
             id, run_id, job_key, display_name, job_ir_digest,
-            job_ir_object_key, requirements, labels, created_at_ms
+            job_ir_object_key, requirements, admission_epoch,
+            job_ir_schema, job_ir_size_bytes, created_at_ms
         )
         VALUES (
             $1, $2, 'test', 'Store test', $3,
-            'test/job-ir', '{}'::jsonb, '{}', 1
+            'test/job-ir', $4::jsonb, $5, $6, 128, 1
         )
         ",
     )
     .bind(job_id.as_uuid())
     .bind(run_id)
     .bind(vec![11_u8; 32])
+    .bind(serde_json::to_value(RunnerRequirements::default())?)
+    .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
+    .bind(i32::from(JobIrVersion::current().get()))
     .execute(pool)
     .await?;
 
     let runner_ids = seed_runners(pool, &tenant_id, runner_count).await?;
+    let mut session_fences = Vec::with_capacity(runner_ids.len());
+    let store = PostgresStore::from_postgres_pool(pool.clone());
+    for runner_id in &runner_ids {
+        let capabilities = runner_capability_document(pool, *runner_id).await?;
+        let session = store
+            .open_session(OpenRunnerSession::new(
+                RunnerSessionId::new(),
+                *runner_id,
+                RunnerGeneration::new(1)?,
+                RunnerProtocolVersion::new(4)?,
+                JobIrVersion::current(),
+                capabilities,
+                UnixMillis::new(2),
+            ))
+            .await?;
+        session_fences.push(session.fence());
+    }
 
     Ok(SeedData {
         tenant_id,
         repository_id,
         workflow_id,
+        run_id: RunId::from_uuid(run_id),
         job_id,
         runner_ids,
+        session_fences,
     })
+}
+
+pub async fn runner_capability_document(
+    pool: &PgPool,
+    runner_id: RunnerId,
+) -> TestResult<RoutingDocument> {
+    let capabilities: serde_json::Value =
+        sqlx::query_scalar("SELECT capabilities FROM runners WHERE id = $1")
+            .bind(runner_id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+    Ok(RoutingDocument::new(serde_json::to_string(&capabilities)?)?)
 }
 
 async fn seed_runners(
@@ -235,18 +313,23 @@ async fn seed_runners(
     let mut runner_ids = Vec::with_capacity(runner_count);
     for index in 0..runner_count {
         let runner_id = RunnerId::new();
+        let capabilities = RunnerCapabilities::new(
+            runner_id,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        );
         sqlx::query(
             r"
             INSERT INTO runners (
                 id, tenant_id, name, normalized_name, capabilities, slots, status,
-                created_at_ms, updated_at_ms
+                desired_state, created_at_ms, updated_at_ms
             )
-            VALUES ($1, $2, $3, $3, '{}'::jsonb, 1, 'online', 1, 1)
+            VALUES ($1, $2, $3, $3, $4::jsonb, 65535, 'online', 'active', 1, 1)
             ",
         )
         .bind(runner_id.as_uuid())
         .bind(tenant_id)
         .bind(format!("test-runner-{index}"))
+        .bind(serde_json::to_value(capabilities)?)
         .execute(pool)
         .await?;
         runner_ids.push(runner_id);

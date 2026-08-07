@@ -2,7 +2,7 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
-      "bom-ref": "path+file:///workspace/ui/renderer/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0",
+      "bom-ref": "path+file:///workspace/target/ui-renderer-wrapper/source/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0",
       "description": "Automata's deterministic patch of rquickjs-macro 0.10.0",
       "externalReferences": [
         {
@@ -16,7 +16,7 @@
         }
       ],
       "name": "rquickjs-macro",
-      "purl": "pkg:cargo/rquickjs-macro@0.10.0?download_url=file:///workspace/ui/renderer/vendor/rquickjs-macro-0.10.0",
+      "purl": "pkg:cargo/rquickjs-macro@0.10.0?download_url=file://vendor/rquickjs-macro-0.10.0",
       "scope": "required",
       "type": "library",
       "version": "0.10.0"
@@ -4009,7 +4009,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#rquickjs-core@0.10.0",
         "registry+https://github.com/rust-lang/crates.io-index#syn@2.0.118"
       ],
-      "ref": "path+file:///workspace/ui/renderer/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0"
+      "ref": "path+file:///workspace/target/ui-renderer-wrapper/source/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0"
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#allocator-api2@0.2.21"
@@ -4488,7 +4488,7 @@
     {
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#rquickjs-core@0.10.0",
-        "path+file:///workspace/ui/renderer/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0"
+        "path+file:///workspace/target/ui-renderer-wrapper/source/vendor/rquickjs-macro-0.10.0#rquickjs-macro@0.10.0"
       ],
       "ref": "registry+https://github.com/rust-lang/crates.io-index#rquickjs@0.10.0"
     },
@@ -4826,13 +4826,13 @@
       "externalReferences": [
         {
           "type": "vcs",
-          "url": "https://github.com/AlexanderDzhoganov/automata"
+          "url": "https://github.com/GoNeuralAI/automata"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e805802054512ca7e7de32ae2305570c2d7cab655438bff2ffaea103e9d24f7d"
+          "content": "61a3ef78b9690e01c2e476d37a52f51182e5e0d809c6f73011ca81a8d2efa2ec"
         }
       ],
       "licenses": [

@@ -10,7 +10,10 @@ description = "Hardened GitHub HTTP adapters for Automata"
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 automata-auth.workspace = true
+automata-scm.workspace = true
+bytes.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

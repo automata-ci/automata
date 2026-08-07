@@ -69,6 +69,95 @@ pub struct ProviderTokenMetadata {
     refresh_expires_at: Option<UnixTimestamp>,
 }
 
+/// Builder for validated [`ProviderTokenMetadata`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use]
+pub struct ProviderTokenMetadataBuilder {
+    provider_id: ProviderId,
+    provider_subject: Option<ProviderSubject>,
+    grant_kind: ProviderGrantKind,
+    token_type: String,
+    scopes: BTreeSet<String>,
+    issued_at: UnixTimestamp,
+    access_expires_at: Option<UnixTimestamp>,
+    refresh_expires_at: Option<UnixTimestamp>,
+}
+
+impl ProviderTokenMetadataBuilder {
+    /// Records the stable provider subject when it is already known.
+    pub fn provider_subject(mut self, provider_subject: Option<ProviderSubject>) -> Self {
+        self.provider_subject = provider_subject;
+        self
+    }
+
+    /// Replaces the granted provider scopes.
+    pub fn scopes(mut self, scopes: BTreeSet<String>) -> Self {
+        self.scopes = scopes;
+        self
+    }
+
+    /// Records the access-token expiration, when the provider supplies one.
+    pub const fn access_expires_at(mut self, expiration: Option<UnixTimestamp>) -> Self {
+        self.access_expires_at = expiration;
+        self
+    }
+
+    /// Records the refresh-token expiration, when the provider supplies one.
+    pub const fn refresh_expires_at(mut self, expiration: Option<UnixTimestamp>) -> Self {
+        self.refresh_expires_at = expiration;
+        self
+    }
+
+    /// Validates and creates provider-token metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid token type or scope, or when a recorded
+    /// expiration is not strictly after issuance.
+    pub fn build(self) -> Result<ProviderTokenMetadata, ProviderTokenMetadataError> {
+        if self.token_type.is_empty()
+            || self.token_type.len() > MAX_TOKEN_TYPE_LENGTH
+            || self
+                .token_type
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(ProviderTokenMetadataError::InvalidTokenType);
+        }
+        if self.scopes.iter().any(|scope| {
+            scope.is_empty()
+                || scope.len() > MAX_SCOPE_LENGTH
+                || scope
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+        }) {
+            return Err(ProviderTokenMetadataError::InvalidScope);
+        }
+        if self
+            .access_expires_at
+            .is_some_and(|expiration| expiration <= self.issued_at)
+        {
+            return Err(ProviderTokenMetadataError::InvalidAccessLifetime);
+        }
+        if self
+            .refresh_expires_at
+            .is_some_and(|expiration| expiration <= self.issued_at)
+        {
+            return Err(ProviderTokenMetadataError::InvalidRefreshLifetime);
+        }
+        Ok(ProviderTokenMetadata {
+            provider_id: self.provider_id,
+            provider_subject: self.provider_subject,
+            grant_kind: self.grant_kind,
+            token_type: self.token_type,
+            scopes: self.scopes,
+            issued_at: self.issued_at,
+            access_expires_at: self.access_expires_at,
+            refresh_expires_at: self.refresh_expires_at,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct ProviderTokenMetadataData {
     provider_id: ProviderId,
@@ -82,57 +171,23 @@ struct ProviderTokenMetadataData {
 }
 
 impl ProviderTokenMetadata {
-    /// Creates validated provider-token metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid token type or scope, or when a recorded
-    /// expiration is not strictly after issuance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    /// Starts building validated provider-token metadata.
+    pub fn builder(
         provider_id: ProviderId,
-        provider_subject: Option<ProviderSubject>,
         grant_kind: ProviderGrantKind,
         token_type: impl Into<String>,
-        scopes: BTreeSet<String>,
         issued_at: UnixTimestamp,
-        access_expires_at: Option<UnixTimestamp>,
-        refresh_expires_at: Option<UnixTimestamp>,
-    ) -> Result<Self, ProviderTokenMetadataError> {
-        let token_type = token_type.into();
-        if token_type.is_empty()
-            || token_type.len() > MAX_TOKEN_TYPE_LENGTH
-            || token_type
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
-        {
-            return Err(ProviderTokenMetadataError::InvalidTokenType);
-        }
-        if scopes.iter().any(|scope| {
-            scope.is_empty()
-                || scope.len() > MAX_SCOPE_LENGTH
-                || scope
-                    .chars()
-                    .any(|character| character.is_control() || character.is_whitespace())
-        }) {
-            return Err(ProviderTokenMetadataError::InvalidScope);
-        }
-        if access_expires_at.is_some_and(|expiration| expiration <= issued_at) {
-            return Err(ProviderTokenMetadataError::InvalidAccessLifetime);
-        }
-        if refresh_expires_at.is_some_and(|expiration| expiration <= issued_at) {
-            return Err(ProviderTokenMetadataError::InvalidRefreshLifetime);
-        }
-        Ok(Self {
+    ) -> ProviderTokenMetadataBuilder {
+        ProviderTokenMetadataBuilder {
             provider_id,
-            provider_subject,
+            provider_subject: None,
             grant_kind,
-            token_type,
-            scopes,
+            token_type: token_type.into(),
+            scopes: BTreeSet::new(),
             issued_at,
-            access_expires_at,
-            refresh_expires_at,
-        })
+            access_expires_at: None,
+            refresh_expires_at: None,
+        }
     }
 
     pub const fn provider_id(&self) -> &ProviderId {
@@ -172,16 +227,17 @@ impl TryFrom<ProviderTokenMetadataData> for ProviderTokenMetadata {
     type Error = ProviderTokenMetadataError;
 
     fn try_from(value: ProviderTokenMetadataData) -> Result<Self, Self::Error> {
-        Self::new(
+        Self::builder(
             value.provider_id,
-            value.provider_subject,
             value.grant_kind,
             value.token_type,
-            value.scopes,
             value.issued_at,
-            value.access_expires_at,
-            value.refresh_expires_at,
         )
+        .provider_subject(value.provider_subject)
+        .scopes(value.scopes)
+        .access_expires_at(value.access_expires_at)
+        .refresh_expires_at(value.refresh_expires_at)
+        .build()
     }
 }
 

@@ -1,17 +1,29 @@
 use automata_core::{
     AttemptId, AttemptNumber, FencingToken, JobId, JobLifecycle, LeaseGuard, LeaseId, RunnerId,
-    UnixMillis,
+    RunnerSessionId, UnixMillis,
 };
 use automata_store::{
     AcquireLease, AttemptCommandError, ConcludeQueuedAttempt, InternalAttemptRepository,
-    QueuedAttempt, RenewLease, TenantAttemptQuery, TransitionAttempt,
+    QueuedAttempt, RenewLease, RunnerGeneration, RunnerSessionFence, SessionEpoch,
+    StableRunnerSlot, TenantAttemptQuery, TransitionAttempt,
 };
+
+fn session(runner_id: RunnerId) -> RunnerSessionFence {
+    RunnerSessionFence::new(
+        RunnerSessionId::new(),
+        runner_id,
+        RunnerGeneration::new(1).expect("generation"),
+        SessionEpoch::new(1).expect("epoch"),
+    )
+}
 
 #[test]
 fn commands_are_constructed_through_validated_read_only_apis() {
     let attempt_id = AttemptId::new();
     let job_id = JobId::new();
     let runner_id = RunnerId::new();
+    let session = session(runner_id);
+    let slot = StableRunnerSlot::new(1).expect("slot");
     let lease_id = LeaseId::new();
     let guard = LeaseGuard::new(lease_id, FencingToken::new(1).expect("fence"));
 
@@ -29,7 +41,8 @@ fn commands_are_constructed_through_validated_read_only_apis() {
     let acquisition = AcquireLease::new(
         attempt_id,
         lease_id,
-        runner_id,
+        session,
+        slot,
         UnixMillis::new(20),
         UnixMillis::new(30),
     )
@@ -37,12 +50,14 @@ fn commands_are_constructed_through_validated_read_only_apis() {
     assert_eq!(acquisition.attempt_id(), attempt_id);
     assert_eq!(acquisition.lease_id(), lease_id);
     assert_eq!(acquisition.runner_id(), runner_id);
+    assert_eq!(acquisition.session(), session);
+    assert_eq!(acquisition.slot(), slot);
     assert_eq!(acquisition.observed_at(), UnixMillis::new(20));
     assert_eq!(acquisition.expires_at(), UnixMillis::new(30));
 
     let renewal = RenewLease::new(
         attempt_id,
-        runner_id,
+        session,
         guard,
         UnixMillis::new(21),
         UnixMillis::new(40),
@@ -56,7 +71,7 @@ fn commands_are_constructed_through_validated_read_only_apis() {
 
     let transition = TransitionAttempt::new(
         attempt_id,
-        runner_id,
+        session,
         guard,
         JobLifecycle::Preparing,
         UnixMillis::new(22),
@@ -79,6 +94,7 @@ fn commands_are_constructed_through_validated_read_only_apis() {
 fn invariant_bearing_commands_reject_invalid_construction() {
     let attempt_id = AttemptId::new();
     let runner_id = RunnerId::new();
+    let session = session(runner_id);
     let lease_id = LeaseId::new();
     let guard = LeaseGuard::new(lease_id, FencingToken::new(1).expect("fence"));
 
@@ -87,20 +103,15 @@ fn invariant_bearing_commands_reject_invalid_construction() {
             AcquireLease::new(
                 attempt_id,
                 lease_id,
-                runner_id,
+                session,
+                StableRunnerSlot::new(1).expect("slot"),
                 UnixMillis::new(20),
                 expiration,
             ),
             Err(AttemptCommandError::InvalidLeaseInterval)
         );
         assert_eq!(
-            RenewLease::new(
-                attempt_id,
-                runner_id,
-                guard,
-                UnixMillis::new(20),
-                expiration,
-            ),
+            RenewLease::new(attempt_id, session, guard, UnixMillis::new(20), expiration,),
             Err(AttemptCommandError::InvalidLeaseInterval)
         );
     }

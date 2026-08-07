@@ -3,15 +3,24 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::{Args, Subcommand, ValueEnum};
 
 use super::{RepositoryRef, SecretScope};
+use crate::server::SecretSource;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the API, scheduler, results gateway, and SSR user interface.
-    Server(ServerArgs),
+    #[command(alias = "serve")]
+    Server(Box<ServerArgs>),
+    /// Serve only dependency-free health checks and the SSR user interface.
+    ///
+    /// This explicit mode is intended for release-image smoke tests and local
+    /// UI previews. It never starts the scheduler or runner-control services.
+    Preview(PreviewArgs),
     /// Authenticate this CLI with an Automata installation.
     Auth(AuthArgs),
     /// Inspect, monitor, cancel, or rerun workflow runs.
     Run(RunArgs),
+    /// Dispatch and inspect workflow definitions.
+    Workflow(WorkflowArgs),
     /// Inspect jobs and stream their logs.
     Job(JobArgs),
     /// Manage encrypted Actions secrets.
@@ -33,8 +42,10 @@ impl Command {
     pub const fn operation_name(&self) -> &'static str {
         match self {
             Self::Server(_) => "server",
+            Self::Preview(_) => "preview",
             Self::Auth(_) => "auth command",
             Self::Run(_) => "run command",
+            Self::Workflow(_) => "workflow command",
             Self::Job(_) => "job command",
             Self::Secret(_) => "secret command",
             Self::Runner(_) => "runner command",
@@ -47,10 +58,231 @@ impl Command {
 }
 
 #[derive(Debug, Args)]
+pub struct PreviewArgs {
+    /// Health and SSR TCP listen address.
+    #[arg(
+        long,
+        env = "AUTOMATA_PREVIEW_LISTEN",
+        default_value = "127.0.0.1:8080"
+    )]
+    pub listen: SocketAddr,
+}
+
+#[derive(Debug, Args)]
 pub struct ServerArgs {
-    /// TCP address on which to listen.
+    /// Human API and SSR TCP listen address.
     #[arg(long, env = "AUTOMATA_LISTEN", default_value = "127.0.0.1:8080")]
     pub listen: SocketAddr,
+
+    /// Dedicated direct-mTLS HTTP/2 runner-control listen address.
+    #[arg(long, env = "AUTOMATA_RUNNER_LISTEN", default_value = "127.0.0.1:9090")]
+    pub runner_listen: SocketAddr,
+
+    /// Dedicated GitHub Actions Results HTTP listen address.
+    ///
+    /// Production HTTPS is normally terminated by a trusted reverse proxy in
+    /// front of this listener. Plain HTTP requires the explicit development
+    /// option and an exact loopback or private-interface bind.
+    #[arg(
+        long,
+        env = "AUTOMATA_RESULTS_LISTEN",
+        default_value = "127.0.0.1:8081"
+    )]
+    pub results_listen: SocketAddr,
+
+    /// Public Results origin injected into each job, including its trailing slash.
+    #[arg(long, env = "AUTOMATA_RESULTS_PUBLIC_URL", value_name = "URL")]
+    pub results_public_url: Option<String>,
+
+    /// Permit a credential-free plain-HTTP Results origin for local development.
+    #[arg(long, env = "AUTOMATA_RESULTS_ALLOW_DEVELOPMENT_HTTP")]
+    pub results_allow_development_http: bool,
+
+    /// Exact public host asserted to map to a private development listener.
+    #[arg(
+        long,
+        env = "AUTOMATA_RESULTS_TRUSTED_PRIVATE_HOST",
+        requires = "results_allow_development_http"
+    )]
+    pub results_trusted_private_host: Option<String>,
+
+    /// HMAC signing-key reference for per-attempt Results credentials.
+    #[arg(
+        long,
+        env = "AUTOMATA_RESULTS_SIGNING_KEY_SOURCE",
+        default_value = "env:AUTOMATA_RESULTS_SIGNING_KEY",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub results_signing_key_source: SecretSource,
+
+    /// Stable Results signing-key identity used for audited key rotation.
+    #[arg(long, env = "AUTOMATA_RESULTS_KEY_ID", default_value = "primary")]
+    pub results_key_id: String,
+
+    /// `PostgreSQL` URL reference; secret values are never accepted in argv.
+    #[arg(
+        long,
+        env = "AUTOMATA_DATABASE_URL_SOURCE",
+        default_value = "env:AUTOMATA_DATABASE_URL",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub database_url_source: SecretSource,
+
+    /// Maximum `PostgreSQL` connections owned by this replica.
+    #[arg(
+        long,
+        env = "AUTOMATA_DATABASE_MAX_CONNECTIONS",
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u32).range(1..=1024)
+    )]
+    pub database_max_connections: u32,
+
+    /// Credential-free S3-compatible endpoint origin.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_ENDPOINT",
+        default_value = "https://s3.amazonaws.com/"
+    )]
+    pub s3_endpoint: String,
+
+    /// S3 signing region.
+    #[arg(long, env = "AUTOMATA_S3_REGION", default_value = "us-east-1")]
+    pub s3_region: String,
+
+    /// S3 bucket containing immutable Automata objects.
+    #[arg(long, env = "AUTOMATA_S3_BUCKET", default_value = "automata")]
+    pub s3_bucket: String,
+
+    /// Optional key prefix reserved for this Automata installation.
+    #[arg(long, env = "AUTOMATA_S3_PREFIX")]
+    pub s3_prefix: Option<String>,
+
+    /// Use path-style bucket addressing for the S3 adapter.
+    #[arg(long, env = "AUTOMATA_S3_FORCE_PATH_STYLE")]
+    pub s3_force_path_style: bool,
+
+    /// Permit plain HTTP only when the S3 endpoint is a literal loopback host.
+    #[arg(long, env = "AUTOMATA_S3_ALLOW_LOOPBACK_HTTP")]
+    pub s3_allow_loopback_http: bool,
+
+    /// All-attempt timeout for one immutable object-store operation.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_OPERATION_TIMEOUT_SECONDS",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    pub s3_operation_timeout_seconds: u64,
+
+    /// S3 access-key reference; secret values are never accepted in argv.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_ACCESS_KEY_SOURCE",
+        default_value = "env:AUTOMATA_S3_ACCESS_KEY",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_access_key_source: SecretSource,
+
+    /// S3 secret-key reference; secret values are never accepted in argv.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_SECRET_KEY_SOURCE",
+        default_value = "env:AUTOMATA_S3_SECRET_KEY",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_secret_key_source: SecretSource,
+
+    /// Optional S3 session-token reference.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_SESSION_TOKEN_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_session_token_source: Option<SecretSource>,
+
+    /// PEM bundle reference containing trusted runner client certificate roots.
+    #[arg(
+        long,
+        env = "AUTOMATA_RUNNER_CLIENT_CA_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_CLIENT_CA_PEM",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub runner_client_ca_source: SecretSource,
+
+    /// PEM chain reference for the runner-control server identity.
+    #[arg(
+        long = "runner-server-cert-source",
+        env = "AUTOMATA_RUNNER_SERVER_CERT_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_SERVER_CERT_PEM",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub runner_server_certificate_source: SecretSource,
+
+    /// PEM private-key reference for the runner-control server identity.
+    #[arg(
+        long,
+        env = "AUTOMATA_RUNNER_SERVER_KEY_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_SERVER_KEY_PEM",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub runner_server_key_source: SecretSource,
+
+    /// Interval between database and immutable object-store readiness probes.
+    #[arg(
+        long,
+        env = "AUTOMATA_READINESS_PROBE_INTERVAL_SECONDS",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    pub readiness_probe_interval_seconds: u64,
+
+    /// Delay between bounded expired-lease and stale-session maintenance passes.
+    #[arg(
+        long,
+        env = "AUTOMATA_MAINTENANCE_INTERVAL_SECONDS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    pub maintenance_interval_seconds: u64,
+
+    /// Maximum attempts and sessions considered by each maintenance pass.
+    #[arg(
+        long,
+        env = "AUTOMATA_MAINTENANCE_BATCH_SIZE",
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u16).range(1..=1000)
+    )]
+    pub maintenance_batch_size: u16,
+
+    /// Lease expirations permitted before unstarted work is marked lost.
+    #[arg(
+        long,
+        env = "AUTOMATA_MAXIMUM_LEASE_FAILURES",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u32).range(1..=2_147_483_647)
+    )]
+    pub maximum_lease_failures: u32,
+
+    /// Missing-heartbeat duration after which a runner session is closed.
+    #[arg(
+        long,
+        env = "AUTOMATA_STALE_RUNNER_SESSION_TIMEOUT_SECONDS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(30..=86_400)
+    )]
+    pub stale_runner_session_timeout_seconds: u64,
+
+    /// Enable the loopback-only local workflow ingress with a bearer-token reference.
+    #[arg(
+        long = "local-admission-token-source",
+        env = "AUTOMATA_LOCAL_ADMISSION_TOKEN_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub local_admission_token_source: Option<SecretSource>,
+
+    /// Authenticated tenant bound to the local workflow ingress.
+    #[arg(long, env = "AUTOMATA_LOCAL_ADMISSION_TENANT", default_value = "local")]
+    pub local_admission_tenant: String,
 }
 
 #[derive(Debug, Args)]
@@ -93,6 +325,70 @@ pub struct AuthLoginArgs {
 pub struct RunArgs {
     #[command(subcommand)]
     pub command: RunCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowArgs {
+    #[command(subcommand)]
+    pub command: WorkflowCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Dispatch an exact workflow snapshot through the local bootstrap ingress.
+    Dispatch(WorkflowDispatchArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowDispatchArgs {
+    /// Repository in OWNER/NAME form.
+    #[arg(short = 'R', long)]
+    pub repository: RepositoryRef,
+
+    /// Stable repository identifier assigned by the provider.
+    #[arg(long)]
+    pub provider_repository_id: String,
+
+    /// Repository-relative workflow path.
+    #[arg(long, default_value = ".github/workflows/ci.yml")]
+    pub workflow: String,
+
+    /// Exact workflow source to dispatch.
+    #[arg(long, value_name = "PATH", default_value = ".github/workflows/ci.yml")]
+    pub source_file: PathBuf,
+
+    /// Exact provider event JSON. Omit to dispatch an empty object.
+    #[arg(long, value_name = "PATH")]
+    pub event_file: Option<PathBuf>,
+
+    /// GitHub-compatible event name.
+    #[arg(long, default_value = "workflow_dispatch")]
+    pub event_name: String,
+
+    /// Stable provider delivery identifier used for exact retry replay.
+    #[arg(long)]
+    pub delivery_id: String,
+
+    /// Immutable 40- or 64-character commit SHA selected for this run.
+    #[arg(long)]
+    pub commit_sha: String,
+
+    /// Fully-qualified Git ref selected for this run.
+    #[arg(long = "ref", default_value = "refs/heads/main")]
+    pub git_ref: String,
+
+    /// Display name of the selected workflow.
+    #[arg(long, default_value = "CI")]
+    pub workflow_name: String,
+
+    /// Local admission bearer-token reference; the value never enters argv.
+    #[arg(
+        long = "local-admission-token-source",
+        env = "AUTOMATA_LOCAL_ADMISSION_TOKEN_SOURCE",
+        default_value = "env:AUTOMATA_LOCAL_ADMISSION_TOKEN",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub token_source: SecretSource,
 }
 
 #[derive(Debug, Subcommand)]

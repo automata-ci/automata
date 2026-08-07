@@ -5,6 +5,7 @@
 mod config;
 mod endpoint;
 mod pagination;
+mod repository;
 mod response;
 
 pub use config::{

@@ -1,0 +1,10 @@
+name: Unsupported plan
+on: push
+jobs:
+  build:
+    runs-on: linux
+    strategy:
+      matrix:
+        rust: [stable]
+    steps:
+      - run: cargo test

@@ -3,7 +3,7 @@
 use automata_core::{AttemptId, JobLifecycle, JobResult, LeaseGuard, UnixMillis};
 use serde::{Deserialize, Serialize};
 
-use super::MessageHeader;
+use super::{MessageHeader, ServerCommandHeader};
 
 /// Fenced runner transition event.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,7 +96,7 @@ impl JobResultMessage {
 /// Server cancellation request for an active lease.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CancelJob {
-    header: MessageHeader,
+    header: ServerCommandHeader,
     attempt_id: AttemptId,
     guard: LeaseGuard,
     reason: String,
@@ -106,7 +106,7 @@ pub struct CancelJob {
 impl CancelJob {
     #[must_use]
     pub fn new(
-        header: MessageHeader,
+        header: ServerCommandHeader,
         attempt_id: AttemptId,
         guard: LeaseGuard,
         reason: impl Into<String>,
@@ -122,7 +122,7 @@ impl CancelJob {
     }
 
     #[must_use]
-    pub const fn header(&self) -> MessageHeader {
+    pub const fn header(&self) -> ServerCommandHeader {
         self.header
     }
 

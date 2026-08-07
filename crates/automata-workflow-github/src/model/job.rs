@@ -28,7 +28,10 @@ pub enum Needs {
 #[non_exhaustive]
 pub enum RunnerSelection {
     Label(Spanned<String>),
-    Labels(Vec<Spanned<String>>),
+    Labels {
+        labels: Vec<Spanned<String>>,
+        span: SourceSpan,
+    },
     Group {
         group: Spanned<String>,
         labels: Vec<Spanned<String>>,

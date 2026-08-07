@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use super::StepId;
+use super::{ExpressionProgramError, StepId};
 
 /// Validation failure that must stop a plan before execution.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -13,6 +13,18 @@ pub enum JobValidationError {
     UnsupportedRequirementsSchema { supported: u16, received: u16 },
     #[error("required field `{0}` is empty")]
     EmptyField(&'static str),
+    #[error("execution context field `{0}` is invalid")]
+    InvalidContextField(&'static str),
+    #[error("execution Git ref is not a canonical full ref")]
+    InvalidGitRef,
+    #[error("execution workspace is not a canonical absolute target path")]
+    InvalidWorkspace,
+    #[error("execution content reference is invalid")]
+    InvalidContentReference,
+    #[error("provider run number cannot be zero")]
+    ZeroRunNumber,
+    #[error("provider run attempt cannot be zero")]
+    ZeroRunAttempt,
     #[error("a job must contain at least one step")]
     NoSteps,
     #[error("job timeout cannot be zero")]
@@ -29,4 +41,9 @@ pub enum JobValidationError {
     ZeroStepTimeout(StepId),
     #[error("run command for step `{0:?}` is empty")]
     EmptyRunCommand(StepId),
+    #[error("invalid {field}: {source}")]
+    InvalidExpression {
+        field: &'static str,
+        source: ExpressionProgramError,
+    },
 }

@@ -1,9 +1,9 @@
 use convert_case::Casing;
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
-    Attribute, Ident, LitStr, Result, Type, Visibility,
+    Attribute, Ident, Index, LitStr, Member, Result, Type, Visibility,
 };
 
 use crate::{
@@ -181,7 +181,7 @@ impl Field {
         if self.config.skip_trace {
             return TokenStream::new();
         }
-        let field = format_ident!("{which}");
+        let field = Index::from(which as usize);
 
         quote! {
             #crate_name::class::Trace::<'js>::trace(&self.#field,_tracer);
@@ -189,14 +189,14 @@ impl Field {
     }
 
     pub fn expand_property_named(&self, crate_name: &Ident, case: Option<Case>) -> TokenStream {
-        if !(self.config.get || self.config.set) {
+        let field = self
+            .ident
+            .as_ref()
+            .expect("named fields always carry an identifier");
+        let member = Member::Named(field.clone());
+        let Some(accessor) = self.expand_accessor(&member, crate_name, &self.ty) else {
             return TokenStream::new();
-        }
-
-        let field = self.ident.as_ref().unwrap();
-        let ty = &self.ty;
-
-        let accessor = self.expand_accessor(field, crate_name, ty);
+        };
         let prop_config = self.expand_prop_config();
         let name = if let Some(rename) = self.config.rename.clone() {
             rename
@@ -212,13 +212,10 @@ impl Field {
     }
 
     pub fn expand_property_unnamed(&self, crate_name: &Ident, name: u32) -> TokenStream {
-        if !(self.config.get || self.config.set) {
+        let field = Member::Unnamed(Index::from(name as usize));
+        let Some(accessor) = self.expand_accessor(&field, crate_name, &self.ty) else {
             return TokenStream::new();
-        }
-
-        let field = format_ident!("{}", name);
-        let ty = &self.ty;
-        let accessor = self.expand_accessor(&field, crate_name, ty);
+        };
         let prop_config = self.expand_prop_config();
         let name = if let Some(rename) = self.config.rename.clone() {
             quote!(#rename)
@@ -231,9 +228,14 @@ impl Field {
         }
     }
 
-    pub fn expand_accessor(&self, field: &Ident, crate_name: &Ident, ty: &Type) -> TokenStream {
+    fn expand_accessor(
+        &self,
+        field: &Member,
+        crate_name: &Ident,
+        ty: &Type,
+    ) -> Option<TokenStream> {
         if self.config.get && self.config.set {
-            quote! {
+            Some(quote! {
                 #crate_name::object::Accessor::new(
                     |this: #crate_name::function::This<#crate_name::class::OwnedBorrow<'js, Self>>|{
                         this.0.#field.clone()
@@ -242,25 +244,25 @@ impl Field {
                         this.0.#field = v;
                     }
                 )
-            }
+            })
         } else if self.config.get {
-            quote! {
+            Some(quote! {
                 #crate_name::object::Accessor::new_get(
                     |this: #crate_name::function::This<#crate_name::class::OwnedBorrow<'js, Self>>|{
                         this.0.#field.clone()
                     },
                 )
-            }
+            })
         } else if self.config.set {
-            quote! {
+            Some(quote! {
                 #crate_name::object::Accessor::new_set(
                     |mut this: #crate_name::function::This<#crate_name::class::OwnedBorrowMut<'js, Self>>, v: #ty|{
                         this.0.#field = v;
                     }
                 )
-            }
+            })
         } else {
-            panic!("called expand_accessor on non accessor field")
+            None
         }
     }
 

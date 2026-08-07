@@ -11,6 +11,7 @@ import path from "node:path";
 
 const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 const ignoredSourceDirectories = new Set([".git", "node_modules", "target"]);
+const licenseDirectoryExpression = /^licen[cs]es?$/iu;
 
 export function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -103,6 +104,58 @@ function normalizedRelativePath(root, candidate) {
   return path.relative(root, candidate).split(path.sep).join("/");
 }
 
+function regularTreeManifest(directory, label) {
+  if (!hasPathEntry(directory)) {
+    fail(`${label} does not exist`);
+  }
+  const rootEntry = lstatSync(directory);
+  if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) {
+    fail(`${label} must be a real directory`);
+  }
+
+  const manifest = [];
+  const visit = (current) => {
+    const entries = readdirSync(current, { withFileTypes: true }).sort((left, right) =>
+      compareText(left.name, right.name),
+    );
+    for (const entry of entries) {
+      const candidate = path.join(current, entry.name);
+      const relative = normalizedRelativePath(directory, candidate);
+      if (entry.isDirectory()) {
+        manifest.push({ kind: "directory", path: relative });
+        visit(candidate);
+      } else if (entry.isFile()) {
+        const bytes = readFileSync(candidate);
+        manifest.push({
+          kind: "file",
+          path: relative,
+          sha256: sha256(bytes),
+          size: bytes.length,
+        });
+      } else {
+        fail(`${label} contains a non-regular entry: ${relative}`);
+      }
+    }
+  };
+  visit(directory);
+  if (!manifest.some((entry) => entry.kind === "file")) {
+    fail(`${label} contains no regular files`);
+  }
+  return manifest;
+}
+
+export function assertIdenticalRegularTrees({ expected, actual, label }) {
+  const expectedManifest = regularTreeManifest(expected, `${label} reviewed source`);
+  const actualManifest = regularTreeManifest(actual, `${label} prepared input`);
+  if (JSON.stringify(actualManifest) !== JSON.stringify(expectedManifest)) {
+    fail(`${label} prepared input does not exactly match its reviewed source`);
+  }
+}
+
+export function hashRegularTree(directory, label) {
+  return sha256(JSON.stringify(regularTreeManifest(directory, label)));
+}
+
 function cargoComponentKey(pkg) {
   return `cargo:${pkg.name}@${pkg.version}`;
 }
@@ -116,6 +169,7 @@ function mergeComponent(components, candidate) {
   if (
     existing.version !== candidate.version ||
     existing.license !== candidate.license ||
+    existing.repository !== candidate.repository ||
     existing.source !== candidate.source
   ) {
     fail(`ambiguous component identity ${candidate.key}`);
@@ -131,6 +185,7 @@ export function collectCargoComponents({
   artifact,
   repositoryRoot,
   vendoredPathPrefixes,
+  vendoredPathMappings = [],
   includeRoot = false,
   rootSource = null,
 }) {
@@ -180,7 +235,26 @@ export function collectCargoComponents({
         }
         source = rootSource;
       } else {
-        const relative = normalizedRelativePath(repositoryRoot, packageDirectory);
+        let reviewedPackageDirectory = packageDirectory;
+        for (const mapping of vendoredPathMappings) {
+          const preparedRoot = realpathSync(mapping.prepared);
+          if (!isInside(preparedRoot, packageDirectory)) {
+            continue;
+          }
+          const reviewedRoot = realpathSync(mapping.reviewed);
+          reviewedPackageDirectory = path.join(
+            reviewedRoot,
+            path.relative(preparedRoot, packageDirectory),
+          );
+          if (!isInside(reviewedRoot, reviewedPackageDirectory)) {
+            fail(`invalid vendored Cargo path mapping for ${pkg.name}@${pkg.version}`);
+          }
+          break;
+        }
+        const relative = normalizedRelativePath(
+          repositoryRoot,
+          reviewedPackageDirectory,
+        );
         if (!vendoredPathPrefixes.some((prefix) => relative.startsWith(prefix))) {
           fail(`unreviewed local Cargo dependency ${pkg.name}@${pkg.version}: ${relative}`);
         }
@@ -198,6 +272,7 @@ export function collectCargoComponents({
       license: pkg.license,
       licenseFile: pkg.license_file,
       name: pkg.name,
+      repository: pkg.repository,
       source,
       version: pkg.version,
     });
@@ -284,6 +359,7 @@ export function collectNpmComponents({ lock, uiDirectory, artifact }) {
       license: declaredLicense,
       licenseFile: null,
       name: manifest.name,
+      repository: manifest.repository ?? null,
       source: `npm-integrity:${entry.integrity}`,
       version: entry.version,
     });
@@ -302,31 +378,49 @@ export function collectNpmComponents({ lock, uiDirectory, artifact }) {
   return components;
 }
 
-function matchingFiles(directory, expression) {
+function matchingFiles(
+  directory,
+  expression,
+  includeLicenseDirectoryContents = false,
+) {
   const files = [];
-  const visit = (current) => {
+  const visit = (current, includeAllFiles) => {
     const entries = readdirSync(current, { withFileTypes: true }).sort((left, right) =>
       compareText(left.name, right.name),
     );
     for (const entry of entries) {
       const candidate = path.join(current, entry.name);
-      if (entry.isFile() && expression.test(entry.name)) {
+      if (entry.isFile() && (includeAllFiles || expression.test(entry.name))) {
         files.push(candidate);
       } else if (
         entry.isDirectory() &&
         !ignoredSourceDirectories.has(entry.name)
       ) {
-        visit(candidate);
+        visit(
+          candidate,
+          includeAllFiles ||
+            (includeLicenseDirectoryContents &&
+              licenseDirectoryExpression.test(entry.name)),
+        );
       }
     }
   };
-  visit(directory);
+  visit(directory, false);
   return files;
 }
 
-function candidateFiles(component, pattern, includeExplicitLicenseFile = false) {
+function candidateFiles(
+  component,
+  pattern,
+  includeExplicitLicenseFile = false,
+  includeLicenseDirectoryContents = false,
+) {
   const expression = new RegExp(pattern, "i");
-  const candidates = matchingFiles(component.directory, expression);
+  const candidates = matchingFiles(
+    component.directory,
+    expression,
+    includeLicenseDirectoryContents,
+  );
   if (includeExplicitLicenseFile && component.licenseFile !== null) {
     candidates.push(
       path.isAbsolute(component.licenseFile)
@@ -358,6 +452,139 @@ function candidateFiles(component, pattern, includeExplicitLicenseFile = false) 
       };
     })
     .sort((left, right) => compareText(left.fileName, right.fileName));
+}
+
+function reviewedLicenseFallbacks(policy, repositoryRoot) {
+  const reviewed = new Map();
+  const records = policy.cargo.reviewedFallbacks ?? [];
+  if (!Array.isArray(records)) {
+    fail("Cargo reviewed license fallbacks must be an array");
+  }
+  if (records.length > 0 && typeof repositoryRoot !== "string") {
+    fail("reviewed license fallbacks require the repository root");
+  }
+
+  for (const record of records) {
+    if (
+      !Array.isArray(record.components) ||
+      record.components.length === 0 ||
+      typeof record.source !== "string" ||
+      typeof record.repository !== "string" ||
+      !/^[a-f0-9]{40}$/.test(record.revision ?? "") ||
+      typeof record.licensePath !== "string" ||
+      !/^[A-Za-z0-9._/-]+$/.test(record.licensePath) ||
+      record.licensePath.startsWith("/") ||
+      record.licensePath.split("/").includes("..") ||
+      typeof record.checkedInFile !== "string" ||
+      !/^scripts\/ci\/reviewed-license-texts\/[A-Za-z0-9._-]+\.json$/.test(
+        record.checkedInFile,
+      ) ||
+      !/^[a-f0-9]{64}$/.test(record.expectedSha256 ?? "") ||
+      typeof record.reason !== "string" ||
+      record.reason.length === 0
+    ) {
+      fail("invalid Cargo reviewed license fallback policy entry");
+    }
+
+    const reviewedRoot = realpathSync(
+      path.join(repositoryRoot, "scripts/ci/reviewed-license-texts"),
+    );
+    const checkedInPath = path.resolve(repositoryRoot, record.checkedInFile);
+    const checkedInEntry = lstatSync(checkedInPath);
+    const checkedInCanonical = realpathSync(checkedInPath);
+    if (
+      checkedInEntry.isSymbolicLink() ||
+      !checkedInEntry.isFile() ||
+      checkedInCanonical !== checkedInPath ||
+      !isInside(reviewedRoot, checkedInCanonical)
+    ) {
+      fail(`reviewed license material is not a checked-in regular file: ${record.checkedInFile}`);
+    }
+
+    const document = JSON.parse(readFileSync(checkedInCanonical, "utf8"));
+    const expectedDocumentKeys = [
+      "lines",
+      "path",
+      "revision",
+      "schema",
+      "sha256",
+      "source",
+    ];
+    if (
+      document.schema !== 1 ||
+      JSON.stringify(Object.keys(document).sort(compareText)) !==
+        JSON.stringify(expectedDocumentKeys) ||
+      document.source !== record.repository ||
+      document.revision !== record.revision ||
+      document.path !== record.licensePath ||
+      document.sha256 !== record.expectedSha256 ||
+      !Array.isArray(document.lines) ||
+      document.lines.length === 0 ||
+      document.lines.some(
+        (line) => typeof line !== "string" || line.includes("\n") || line.includes("\r"),
+      )
+    ) {
+      fail(`reviewed license provenance changed: ${record.checkedInFile}`);
+    }
+    const bytes = Buffer.from(document.lines.join("\n"), "utf8");
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (
+      bytes.length === 0 ||
+      bytes.length > 1024 * 1024 ||
+      sha256(bytes) !== record.expectedSha256
+    ) {
+      fail(`reviewed license text digest changed: ${record.checkedInFile}`);
+    }
+
+    for (const component of record.components) {
+      if (
+        JSON.stringify(Object.keys(component).sort(compareText)) !==
+          JSON.stringify(["key", "pathInVcs"]) ||
+        typeof component.key !== "string" ||
+        typeof component.pathInVcs !== "string" ||
+        component.pathInVcs.length === 0
+      ) {
+        fail("invalid Cargo reviewed license component binding");
+      }
+      if (reviewed.has(component.key)) {
+        fail(`duplicate Cargo reviewed license fallback for ${component.key}`);
+      }
+      reviewed.set(component.key, {
+        bytes,
+        component,
+        record,
+      });
+    }
+  }
+  return reviewed;
+}
+
+function applyReviewedLicenseFallback(component, reviewed) {
+  const { bytes, record } = reviewed;
+  if (
+    component.source !== record.source ||
+    component.repository !== record.repository
+  ) {
+    fail(`reviewed license source changed for ${component.key}`);
+  }
+  const vcsInfoPath = path.join(component.directory, ".cargo_vcs_info.json");
+  const vcsInfoEntry = lstatSync(vcsInfoPath);
+  if (vcsInfoEntry.isSymbolicLink() || !vcsInfoEntry.isFile()) {
+    fail(`reviewed license VCS binding is unavailable for ${component.key}`);
+  }
+  const vcsInfo = JSON.parse(readFileSync(vcsInfoPath, "utf8"));
+  if (
+    vcsInfo?.git?.sha1 !== record.revision ||
+    vcsInfo.path_in_vcs !== reviewed.component.pathInVcs
+  ) {
+    fail(`reviewed license source revision changed for ${component.key}`);
+  }
+  component.licenses = [{
+    bytes,
+    fileName: record.licensePath,
+    origin: `reviewed-upstream:${record.repository}@${record.revision}:${record.licensePath}`,
+    sha256: record.expectedSha256,
+  }];
 }
 
 function validatePolicy(components, policy) {
@@ -408,8 +635,13 @@ function inventoryLines(components, materialKind) {
     lines.push(`  source: ${component.source}`);
     lines.push(`  ${materialKind}:`);
     for (const file of files) {
-      const fallback = file.origin === component.key ? "" : ` (fallback from ${file.origin})`;
-      lines.push(`    - ${file.fileName} sha256:${file.sha256}${fallback}`);
+      let attribution = "";
+      if (file.origin.startsWith("reviewed-upstream:")) {
+        attribution = ` (reviewed from ${file.origin.slice("reviewed-upstream:".length)})`;
+      } else if (file.origin !== component.key) {
+        attribution = ` (fallback from ${file.origin})`;
+      }
+      lines.push(`    - ${file.fileName} sha256:${file.sha256}${attribution}`);
     }
   }
   return lines;
@@ -447,7 +679,8 @@ function renderBundle({ title, materialKind, components, inputHashes, policyHash
     title,
     "",
     "This file is generated deterministically from locked dependency graphs and",
-    "the exact text files shipped in their local, content-verified package sources.",
+    "the exact text files shipped in their local, content-verified package sources,",
+    "plus reviewed upstream fallback text bound to source, revision, and SHA-256.",
     "Cargo dev/build-only edges and npm devDependencies are not distributed and",
     "are intentionally excluded. Identical texts are stored once and referenced",
     "by SHA-256 from the component inventory.",
@@ -490,6 +723,7 @@ export function generateThirdPartyBundles({
   inputHashes,
   policy,
   policyHash,
+  repositoryRoot,
 }) {
   const merged = new Map();
   for (const componentMap of componentMaps) {
@@ -520,12 +754,20 @@ export function generateThirdPartyBundles({
       fallbacks.set(key, fallback);
     }
   }
+  const reviewedFallbacks = reviewedLicenseFallbacks(policy, repositoryRoot);
+  for (const key of reviewedFallbacks.keys()) {
+    if (fallbacks.has(key)) {
+      fail(`duplicate Cargo license fallback policy for ${key}`);
+    }
+  }
 
   const usedFallbacks = new Set();
+  const usedReviewedFallbacks = new Set();
   for (const component of components) {
     component.licenses = candidateFiles(
       component,
       policy.cargo.licenseFilePattern,
+      true,
       true,
     );
     component.notices = candidateFiles(component, policy.cargo.noticeFilePattern);
@@ -536,22 +778,34 @@ export function generateThirdPartyBundles({
       continue;
     }
     const fallback = fallbacks.get(component.key);
-    if (fallback === undefined) {
-      fail(`no license text found for ${component.key}`);
+    if (fallback !== undefined) {
+      const source = byKey.get(fallback.licenseTextFrom);
+      if (source === undefined || source.licenses.length === 0) {
+        fail(`license fallback source is unavailable for ${component.key}`);
+      }
+      component.licenses = source.licenses.map((file) => ({
+        ...file,
+        origin: source.key,
+      }));
+      usedFallbacks.add(component.key);
+      continue;
     }
-    const source = byKey.get(fallback.licenseTextFrom);
-    if (source === undefined || source.licenses.length === 0) {
-      fail(`license fallback source is unavailable for ${component.key}`);
+    const reviewed = reviewedFallbacks.get(component.key);
+    if (reviewed !== undefined) {
+      applyReviewedLicenseFallback(component, reviewed);
+      usedReviewedFallbacks.add(component.key);
+      continue;
     }
-    component.licenses = source.licenses.map((file) => ({
-      ...file,
-      origin: source.key,
-    }));
-    usedFallbacks.add(component.key);
+    fail(`no license text found for ${component.key}`);
   }
   for (const key of fallbacks.keys()) {
     if (!usedFallbacks.has(key)) {
       fail(`stale or unused Cargo license fallback for ${key}`);
+    }
+  }
+  for (const key of reviewedFallbacks.keys()) {
+    if (!usedReviewedFallbacks.has(key)) {
+      fail(`stale or unused Cargo reviewed license fallback for ${key}`);
     }
   }
 

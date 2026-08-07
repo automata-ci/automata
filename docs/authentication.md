@@ -8,9 +8,12 @@ bootstrap server.
 | --- | --- |
 | Provider-neutral human, session, RBAC, machine-identity, token-vault, and key-encryption ports | Implemented and externally tested in `automata-auth` |
 | Hardened GitHub OAuth/device/membership HTTP transport | Implemented and externally tested in `automata-github`; not yet wired into the server |
+| Provider-neutral repository workload credential broker | Implemented and externally tested in `automata-credential`; not yet wired into job admission |
+| GitHub App installation-token credential adapter | Implemented and externally tested in `automata-credential-github`; exact repository ID, permissions, and lifetime are revalidated |
 | Durable encrypted login transactions, session hashing, and provider-token persistence | Contract only |
 | Browser cookies, CSRF/origin enforcement, and verified revocation webhooks | Contract only |
-| Runner enrollment and mTLS verification | Contract only |
+| Runner mTLS transport | TLS 1.3 and HTTP/2 transport with mandatory client certificates is implemented; the PostgreSQL-backed certificate-to-runner mapping is composed into the server and tested against current session fencing |
+| Runner enrollment and certificate lifecycle | Contract only |
 | Tenant/resource-scoped authorization in HTTP and CLI handlers | Contract only |
 
 The final system must not couple identity to GitHub or treat an SCM credential
@@ -61,6 +64,16 @@ Webhook signatures are verified before decoding or dispatch.
 - GitHub App installation tokens, user tokens, orchestrator storage keys, and
   broker credentials never enter a job environment or sandbox mount.
 
+Repository SCM credentials use a separate workload broker. The first adapter
+creates a short-lived GitHub App installation token for exactly one provider
+repository ID and the minimum requested permission map. Automata signs the App
+assertion from bounded RSA PKCS#1 or unencrypted PKCS#8 key material, keeps the
+private key and assertion outside the returned credential, and revalidates the
+repository, permissions, and expiration in GitHub's response before the token
+may be used. The issued token is a redacted, zeroizing value and is neither a
+human session nor a general-purpose runner credential.
+
 Primary GitHub references are [generating a GitHub App user access token](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app),
 [refreshing user access tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens),
+[generating an installation access token](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app),
 and [GitHub App security practices](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app).

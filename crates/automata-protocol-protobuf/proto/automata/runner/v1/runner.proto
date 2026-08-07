@@ -1,0 +1,693 @@
+syntax = "proto3";
+
+package automata.runner.v1;
+
+// This file is the authoritative protobuf v1 runner wire contract. The v1
+// package version is independent from message_schema_version,
+// protocol_version, and job_ir_version. All UUID fields MUST contain exactly
+// 16 RFC 9562 network-order bytes. Repeated fields documented as canonical
+// sets or maps MUST be strictly ascending and duplicate-free.
+
+message Unit {}
+
+message RunnerFrame {
+  oneof payload {
+    RunnerHello hello = 1;
+    LeaseRequest lease_request = 2;
+    LeaseResponse lease_response = 3;
+    LeaseHeartbeat heartbeat = 4;
+    JobStateUpdate job_state = 5;
+    JobResultMessage job_result = 6;
+    LogBatch log_batch = 7;
+    CommandAck command_ack = 8;
+  }
+}
+
+message ServerFrame {
+  oneof payload {
+    ServerHello hello = 1;
+    HandshakeRejected handshake_rejected = 2;
+    LeaseOffer lease_offer = 3;
+    LeaseRenewal lease_renewal = 4;
+    CancelJob cancel_job = 5;
+    LogAckMessage log_ack = 6;
+    OperationAck operation_ack = 7;
+    NoWork no_work = 8;
+    ErrorMessage error = 9;
+  }
+}
+
+message ProtocolRange {
+  uint32 minimum = 1;
+  uint32 maximum = 2;
+}
+
+message JobIrVersionRange {
+  uint32 minimum = 1;
+  uint32 maximum = 2;
+}
+
+message CommandCursor {
+  optional uint64 acknowledged_through = 1;
+}
+
+message SessionResume {
+  bytes session_id = 1;
+  CommandCursor command_cursor = 2;
+}
+
+message MessageHeader {
+  uint32 message_schema_version = 1;
+  uint32 protocol_version = 2;
+  bytes session_id = 3;
+  bytes operation_id = 4;
+  optional bytes in_reply_to = 5;
+}
+
+message ServerCommandHeader {
+  uint32 message_schema_version = 1;
+  uint32 protocol_version = 2;
+  bytes session_id = 3;
+  bytes operation_id = 4;
+  uint64 sequence = 5;
+}
+
+message RunnerHello {
+  uint32 message_schema_version = 1;
+  bytes operation_id = 2;
+  ProtocolRange supported_protocol = 3;
+  JobIrVersionRange supported_job_ir = 4;
+  RunnerCapabilities runner = 5;
+  optional SessionResume resume = 6;
+  sint64 sent_at_unix_millis = 7;
+}
+
+enum SessionDisposition {
+  SESSION_DISPOSITION_UNSPECIFIED = 0;
+  SESSION_DISPOSITION_OPENED = 1;
+  SESSION_DISPOSITION_RESUMED = 2;
+}
+
+message NegotiatedSession {
+  uint32 selected_protocol = 1;
+  uint32 selected_job_ir = 2;
+  bytes session_id = 3;
+  SessionDisposition session_disposition = 4;
+  CommandCursor command_cursor = 5;
+}
+
+message ServerTiming {
+  sint64 server_time_unix_millis = 1;
+  uint32 heartbeat_interval_millis = 2;
+  uint32 lease_duration_millis = 3;
+}
+
+message ServerHello {
+  uint32 message_schema_version = 1;
+  bytes operation_id = 2;
+  bytes in_reply_to = 3;
+  NegotiatedSession session = 4;
+  ServerTiming timing = 5;
+}
+
+enum HandshakeErrorCode {
+  HANDSHAKE_ERROR_CODE_UNSPECIFIED = 0;
+  HANDSHAKE_ERROR_CODE_INVALID_HELLO = 1;
+  HANDSHAKE_ERROR_CODE_UNSUPPORTED_PROTOCOL = 2;
+  HANDSHAKE_ERROR_CODE_UNSUPPORTED_JOB_IR = 3;
+  HANDSHAKE_ERROR_CODE_UNAUTHENTICATED = 4;
+  HANDSHAKE_ERROR_CODE_UNAUTHORIZED = 5;
+  HANDSHAKE_ERROR_CODE_SESSION_NOT_RESUMABLE = 6;
+}
+
+message HandshakeRejected {
+  uint32 message_schema_version = 1;
+  bytes operation_id = 2;
+  bytes in_reply_to = 3;
+  HandshakeErrorCode code = 4;
+  ProtocolRange supported_protocol = 5;
+  string message = 6;
+  SessionOrphanAuthorization orphan_recovery = 7;
+}
+
+message OrphanDeliveryPermissions {
+  bool terminal_result = 1;
+  bool log_delivery = 2;
+  bool lease_rejection = 3;
+}
+
+message SessionOrphanAuthorization {
+  bytes session_id = 1;
+  OrphanDeliveryPermissions permissions = 2;
+}
+
+message OperatingSystem {
+  oneof value {
+    Unit linux = 1;
+    Unit windows = 2;
+    Unit macos = 3;
+    string other = 4;
+  }
+}
+
+message Architecture {
+  oneof value {
+    Unit x86_64 = 1;
+    Unit aarch64 = 2;
+    string other = 3;
+  }
+}
+
+message RunnerPlatform {
+  OperatingSystem operating_system = 1;
+  Architecture architecture = 2;
+}
+
+message ResourceCapacity {
+  uint32 cpu_millis = 1;
+  uint64 memory_bytes = 2;
+  uint64 ephemeral_disk_bytes = 3;
+  uint32 gpu_count = 4;
+}
+
+enum IsolationLevel {
+  ISOLATION_LEVEL_UNSPECIFIED = 0;
+  ISOLATION_LEVEL_PROCESS = 1;
+  ISOLATION_LEVEL_SHARED_KERNEL = 2;
+  ISOLATION_LEVEL_VIRTUAL_MACHINE = 3;
+}
+
+message SandboxCapabilities {
+  IsolationLevel maximum_isolation = 1;
+  // Canonical set: strictly ascending UTF-8 strings.
+  repeated string features = 2;
+}
+
+message ContainerCapabilities {
+  // Canonical set: strictly ascending UTF-8 strings.
+  repeated string features = 1;
+}
+
+message EnvironmentProfile {
+  string id = 1;
+  bytes sha256_digest = 2;
+}
+
+message RunnerCapabilities {
+  uint32 schema_version = 1;
+  bytes runner_id = 2;
+  RunnerPlatform platform = 3;
+  // Canonical sets: strictly ascending UTF-8 strings.
+  repeated string labels = 4;
+  repeated string groups = 5;
+  uint32 max_parallel_jobs = 6;
+  ResourceCapacity resources_per_job = 7;
+  SandboxCapabilities sandbox = 8;
+  ContainerCapabilities containers = 9;
+  repeated string features = 10;
+  // Canonical set: strictly ascending by (id, sha256_digest).
+  repeated EnvironmentProfile environment_profiles = 11;
+}
+
+message RunnerRequirements {
+  uint32 schema_version = 1;
+  // Canonical sets: strictly ascending UTF-8 strings.
+  repeated string labels = 2;
+  repeated string eligible_groups = 3;
+  optional OperatingSystem operating_system = 4;
+  optional Architecture architecture = 5;
+  ResourceCapacity minimum_resources = 6;
+  IsolationLevel minimum_isolation = 7;
+  repeated string sandbox_features = 8;
+  repeated string container_features = 9;
+  repeated string features = 10;
+  optional EnvironmentProfile environment_profile = 11;
+}
+
+message LeaseRequest {
+  MessageHeader header = 1;
+  uint32 slot = 2;
+  // Present on every successor and absent only on the first request for a slot.
+  optional bytes acknowledges_operation_id = 3;
+}
+
+message Lease {
+  uint32 schema_version = 1;
+  bytes lease_id = 2;
+  bytes attempt_id = 3;
+  bytes runner_id = 4;
+  uint64 fencing_token = 5;
+  sint64 issued_at_unix_millis = 6;
+  sint64 expires_at_unix_millis = 7;
+}
+
+message LeaseGuard {
+  bytes lease_id = 1;
+  uint64 fencing_token = 2;
+}
+
+enum LeaseRejectionReason {
+  LEASE_REJECTION_REASON_UNSPECIFIED = 0;
+  LEASE_REJECTION_REASON_CAPACITY_CHANGED = 1;
+  LEASE_REJECTION_REASON_CAPABILITY_CHANGED = 2;
+  LEASE_REJECTION_REASON_SHUTTING_DOWN = 3;
+  LEASE_REJECTION_REASON_INVALID_JOB = 4;
+}
+
+message LeaseDisposition {
+  oneof value {
+    Unit accepted = 1;
+    LeaseRejectionReason rejected = 2;
+  }
+}
+
+message LeaseOffer {
+  ServerCommandHeader header = 1;
+  uint32 slot = 2;
+  Lease lease = 3;
+  JobIrEnvelope job = 4;
+  JobRuntimeAuthorities runtime_authorities = 5;
+}
+
+// Short-lived bearer material is sent only over the authenticated runner
+// transport and must be protected in the runner spool before lease acceptance.
+message JobRuntimeAuthority {
+  string name = 1;
+  bytes run_id = 2;
+  bytes job_id = 3;
+  bytes attempt_id = 4;
+  uint64 fencing_token = 5;
+  string endpoint = 6;
+  string credential = 7;
+  sint64 issued_at_unix_millis = 8;
+  sint64 expires_at_unix_millis = 9;
+  RuntimeAuthorityEndpointSecurity endpoint_security = 10;
+}
+
+enum RuntimeAuthorityEndpointSecurity {
+  RUNTIME_AUTHORITY_ENDPOINT_SECURITY_UNSPECIFIED = 0;
+  RUNTIME_AUTHORITY_ENDPOINT_SECURITY_TLS = 1;
+  RUNTIME_AUTHORITY_ENDPOINT_SECURITY_LOOPBACK_DEVELOPMENT = 2;
+  RUNTIME_AUTHORITY_ENDPOINT_SECURITY_TRUSTED_PRIVATE_DEVELOPMENT = 3;
+}
+
+message JobRuntimeAuthorities {
+  uint32 schema_version = 1;
+  // Canonical map: strictly ascending and duplicate-free by authority name.
+  repeated JobRuntimeAuthority authorities = 2;
+}
+
+message LeaseResponse {
+  MessageHeader header = 1;
+  bytes attempt_id = 2;
+  uint32 slot = 3;
+  LeaseGuard guard = 4;
+  LeaseDisposition disposition = 5;
+}
+
+enum JobLifecycle {
+  JOB_LIFECYCLE_UNSPECIFIED = 0;
+  JOB_LIFECYCLE_QUEUED = 1;
+  JOB_LIFECYCLE_LEASED = 2;
+  JOB_LIFECYCLE_PREPARING = 3;
+  JOB_LIFECYCLE_RUNNING = 4;
+  JOB_LIFECYCLE_CANCELLING = 5;
+  JOB_LIFECYCLE_FINALIZING = 6;
+  JOB_LIFECYCLE_SUCCEEDED = 7;
+  JOB_LIFECYCLE_FAILED = 8;
+  JOB_LIFECYCLE_CANCELLED = 9;
+  JOB_LIFECYCLE_TIMED_OUT = 10;
+  JOB_LIFECYCLE_SKIPPED = 11;
+  JOB_LIFECYCLE_LOST = 12;
+}
+
+message LeaseHeartbeat {
+  MessageHeader header = 1;
+  bytes attempt_id = 2;
+  LeaseGuard guard = 3;
+  JobLifecycle lifecycle = 4;
+  sint64 sent_at_unix_millis = 5;
+}
+
+message LeaseRenewal {
+  MessageHeader header = 1;
+  bytes attempt_id = 2;
+  LeaseGuard guard = 3;
+  sint64 expires_at_unix_millis = 4;
+}
+
+message JobStateUpdate {
+  MessageHeader header = 1;
+  bytes attempt_id = 2;
+  LeaseGuard guard = 3;
+  JobLifecycle lifecycle = 4;
+  sint64 occurred_at_unix_millis = 5;
+}
+
+message CancelJob {
+  ServerCommandHeader header = 1;
+  bytes attempt_id = 2;
+  LeaseGuard guard = 3;
+  string reason = 4;
+  sint64 requested_at_unix_millis = 5;
+}
+
+message JobSource {
+  string provider = 1;
+  string repository = 2;
+  string revision = 3;
+  string workflow_path = 4;
+  string event_name = 5;
+}
+
+message JobContentReference {
+  string object_key = 1;
+  bytes sha256 = 2;
+  uint64 encoded_size = 3;
+  string media_type = 4;
+}
+
+message JobExecutionContext {
+  string workflow_name = 1;
+  string git_ref = 2;
+  string workspace = 3;
+  optional string actor = 4;
+  optional uint64 run_number = 5;
+  optional uint32 run_attempt = 6;
+  JobContentReference event = 7;
+}
+
+message ExpressionDialect {
+  string name = 1;
+  uint32 version = 2;
+}
+
+message ExpressionLiteral {
+  oneof value {
+    Unit null = 1;
+    bool boolean = 2;
+    fixed64 number_ieee754_bits = 3;
+    string string_value = 4;
+  }
+}
+
+enum ExpressionComparisonOperator {
+  EXPRESSION_COMPARISON_OPERATOR_UNSPECIFIED = 0;
+  EXPRESSION_COMPARISON_OPERATOR_EQUAL = 1;
+  EXPRESSION_COMPARISON_OPERATOR_NOT_EQUAL = 2;
+  EXPRESSION_COMPARISON_OPERATOR_GREATER_THAN = 3;
+  EXPRESSION_COMPARISON_OPERATOR_GREATER_THAN_OR_EQUAL = 4;
+  EXPRESSION_COMPARISON_OPERATOR_LESS_THAN = 5;
+  EXPRESSION_COMPARISON_OPERATOR_LESS_THAN_OR_EQUAL = 6;
+}
+
+enum ExpressionLogicalOperator {
+  EXPRESSION_LOGICAL_OPERATOR_UNSPECIFIED = 0;
+  EXPRESSION_LOGICAL_OPERATOR_AND = 1;
+  EXPRESSION_LOGICAL_OPERATOR_OR = 2;
+}
+
+message ExpressionComparisonInstruction {
+  ExpressionComparisonOperator operator = 1;
+}
+
+message ExpressionLogicalInstruction {
+  ExpressionLogicalOperator operator = 1;
+  uint32 operand_count = 2;
+}
+
+message ExpressionCallInstruction {
+  string name = 1;
+  uint32 argument_count = 2;
+}
+
+message ExpressionInstruction {
+  oneof value {
+    ExpressionLiteral literal = 1;
+    string named_value = 2;
+    Unit wildcard = 3;
+    Unit index = 4;
+    Unit not = 5;
+    ExpressionComparisonInstruction compare = 6;
+    ExpressionLogicalInstruction logical = 7;
+    ExpressionCallInstruction call = 8;
+  }
+}
+
+message ExpressionProgram {
+  uint32 schema_version = 1;
+  ExpressionDialect dialect = 2;
+  string source = 3;
+  repeated ExpressionInstruction instructions = 4;
+}
+
+message ValueSource {
+  reserved 2;
+  oneof value {
+    string literal = 1;
+    string secret_reference = 3;
+    ExpressionProgram expression = 4;
+  }
+}
+
+message ValueEntry {
+  string key = 1;
+  ValueSource value = 2;
+}
+
+message ContainerCredentials {
+  ValueSource username = 1;
+  ValueSource password = 2;
+}
+
+enum TransportProtocol {
+  TRANSPORT_PROTOCOL_UNSPECIFIED = 0;
+  TRANSPORT_PROTOCOL_TCP = 1;
+  TRANSPORT_PROTOCOL_UDP = 2;
+}
+
+message ContainerPort {
+  uint32 container_port = 1;
+  TransportProtocol protocol = 2;
+}
+
+message MountSource {
+  oneof value {
+    string workspace_relative = 1;
+    string temporary_volume = 2;
+    string host_path = 3;
+  }
+}
+
+message VolumeMount {
+  MountSource source = 1;
+  string target = 2;
+  bool read_only = 3;
+}
+
+message ContainerSpec {
+  string image = 1;
+  optional ContainerCredentials credentials = 2;
+  // Canonical map: entries strictly ascending by key.
+  repeated ValueEntry environment = 3;
+  repeated ContainerPort ports = 4;
+  repeated VolumeMount volumes = 5;
+  repeated string options = 6;
+}
+
+message ContainerEntry {
+  string key = 1;
+  ContainerSpec value = 2;
+}
+
+message RepositoryAction {
+  string repository = 1;
+  string revision = 2;
+  optional string subpath = 3;
+}
+
+message ActionReference {
+  oneof value {
+    RepositoryAction repository = 1;
+    string local_path = 2;
+    string container_image = 3;
+  }
+}
+
+message ActionStep {
+  ActionReference reference = 1;
+  // Canonical map: entries strictly ascending by key.
+  repeated ValueEntry inputs = 2;
+}
+
+message ShellSpec {
+  oneof value {
+    Unit default_shell = 1;
+    string named = 2;
+    string command_template = 3;
+  }
+}
+
+message RunStep {
+  string command = 1;
+  ShellSpec shell = 2;
+  optional string working_directory = 3;
+}
+
+message SemanticStep {
+  oneof value {
+    RunStep run = 1;
+    ActionStep action = 2;
+  }
+}
+
+message StepIr {
+  reserved 3;
+  string id = 1;
+  string name = 2;
+  bool continue_on_error = 4;
+  optional uint32 timeout_seconds = 5;
+  // Canonical map: entries strictly ascending by key.
+  repeated ValueEntry environment = 6;
+  SemanticStep kind = 7;
+  ExpressionProgram condition = 8;
+}
+
+message JobIr {
+  reserved 5;
+  bytes job_id = 1;
+  bytes run_id = 2;
+  string name = 3;
+  RunnerRequirements requirements = 4;
+  optional uint32 timeout_seconds = 6;
+  // Canonical maps: entries strictly ascending by key.
+  repeated ValueEntry environment = 7;
+  optional string working_directory = 8;
+  optional ContainerSpec container = 9;
+  repeated ContainerEntry services = 10;
+  repeated StepIr steps = 11;
+  ExpressionProgram condition = 12;
+}
+
+message JobIrEnvelope {
+  uint32 schema_version = 1;
+  bytes workflow_id = 2;
+  JobSource source = 3;
+  JobIr job = 4;
+  JobExecutionContext execution = 5;
+}
+
+enum JobConclusion {
+  JOB_CONCLUSION_UNSPECIFIED = 0;
+  JOB_CONCLUSION_SUCCESS = 1;
+  JOB_CONCLUSION_FAILURE = 2;
+  JOB_CONCLUSION_CANCELLED = 3;
+  JOB_CONCLUSION_TIMED_OUT = 4;
+  JOB_CONCLUSION_SKIPPED = 5;
+}
+
+message StringEntry {
+  string key = 1;
+  string value = 2;
+}
+
+message StepResult {
+  string step_id = 1;
+  JobConclusion outcome = 2;
+  JobConclusion conclusion = 3;
+  sint64 started_at_unix_millis = 4;
+  sint64 completed_at_unix_millis = 5;
+}
+
+message JobResult {
+  uint32 schema_version = 1;
+  bytes attempt_id = 2;
+  JobConclusion conclusion = 3;
+  // Canonical map: entries strictly ascending by key.
+  repeated StringEntry outputs = 4;
+  repeated StepResult steps = 5;
+  sint64 completed_at_unix_millis = 6;
+}
+
+message JobResultMessage {
+  MessageHeader header = 1;
+  LeaseGuard guard = 2;
+  JobResult result = 3;
+}
+
+enum LogChannel {
+  LOG_CHANNEL_UNSPECIFIED = 0;
+  LOG_CHANNEL_STDOUT = 1;
+  LOG_CHANNEL_STDERR = 2;
+  LOG_CHANNEL_SYSTEM = 3;
+}
+
+message LogFrame {
+  uint32 schema_version = 1;
+  bytes stream_id = 2;
+  bytes attempt_id = 3;
+  uint64 sequence = 4;
+  sint64 emitted_at_unix_millis = 5;
+  LogChannel channel = 6;
+  bytes payload = 7;
+  bool end_of_stream = 8;
+}
+
+message LogBatch {
+  MessageHeader header = 1;
+  LeaseGuard guard = 2;
+  repeated LogFrame frames = 3;
+}
+
+message LogAck {
+  uint32 schema_version = 1;
+  bytes stream_id = 2;
+  optional uint64 contiguous_through = 3;
+}
+
+message LogAckMessage {
+  MessageHeader header = 1;
+  LogAck ack = 2;
+}
+
+message CommandAck {
+  MessageHeader header = 1;
+  CommandCursor command_cursor = 2;
+}
+
+message OperationAck {
+  MessageHeader header = 1;
+}
+
+message NoWork {
+  MessageHeader header = 1;
+  uint32 retry_after_millis = 2;
+}
+
+enum RemoteErrorCode {
+  REMOTE_ERROR_CODE_UNSPECIFIED = 0;
+  REMOTE_ERROR_CODE_INVALID_MESSAGE = 1;
+  REMOTE_ERROR_CODE_UNSUPPORTED_PROTOCOL = 2;
+  REMOTE_ERROR_CODE_UNSUPPORTED_JOB_IR = 3;
+  REMOTE_ERROR_CODE_UNAUTHENTICATED = 4;
+  REMOTE_ERROR_CODE_UNAUTHORIZED = 5;
+  REMOTE_ERROR_CODE_SESSION_NOT_FOUND = 6;
+  REMOTE_ERROR_CODE_STALE_SESSION = 7;
+  REMOTE_ERROR_CODE_INVALID_SLOT = 8;
+  REMOTE_ERROR_CODE_OPERATION_KEY_REUSED = 9;
+  REMOTE_ERROR_CODE_COMMAND_CURSOR_CONFLICT = 10;
+  REMOTE_ERROR_CODE_LEASE_NOT_FOUND = 11;
+  REMOTE_ERROR_CODE_STALE_FENCING_TOKEN = 12;
+  REMOTE_ERROR_CODE_CONFLICT = 13;
+  REMOTE_ERROR_CODE_RETRY_LATER = 14;
+  REMOTE_ERROR_CODE_INTERNAL = 15;
+}
+
+message ErrorMessage {
+  MessageHeader header = 1;
+  RemoteErrorCode code = 2;
+  string message = 3;
+  bool retryable = 4;
+  // Canonical map: entries strictly ascending by key.
+  repeated StringEntry details = 5;
+}

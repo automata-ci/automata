@@ -5,8 +5,9 @@ use std::{collections::BTreeSet, error::Error, fmt, slice};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Architecture, ContainerFeature, IsolationLevel, OperatingSystem, RunnerCapabilities,
-    RunnerFeature, RunnerGroup, RunnerLabel, RunnerRequirements, SandboxFeature,
+    Architecture, ContainerFeature, EnvironmentProfile, IsolationLevel, OperatingSystem,
+    RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunnerCapabilities, RunnerFeature, RunnerGroup,
+    RunnerLabel, RunnerRequirements, SandboxFeature,
 };
 use crate::CORE_SCHEMA_VERSION;
 
@@ -35,9 +36,9 @@ impl RunnerCapabilities {
                 received: self.schema_version(),
             });
         }
-        if requirements.schema_version() != CORE_SCHEMA_VERSION {
+        if requirements.schema_version() != RUNNER_REQUIREMENTS_SCHEMA_VERSION {
             mismatches.push(RequirementMismatch::RequirementsSchemaVersion {
-                supported: CORE_SCHEMA_VERSION,
+                supported: RUNNER_REQUIREMENTS_SCHEMA_VERSION,
                 received: requirements.schema_version(),
             });
         }
@@ -122,12 +123,28 @@ impl RunnerCapabilities {
         for feature in requirements.features().difference(self.features()) {
             mismatches.push(RequirementMismatch::MissingRunnerFeature(feature.clone()));
         }
+        compare_environment_profile(self, requirements, &mut mismatches);
 
         if mismatches.is_empty() {
             Ok(())
         } else {
             Err(RequirementMismatches::new(mismatches))
         }
+    }
+}
+
+fn compare_environment_profile(
+    capabilities: &RunnerCapabilities,
+    requirements: &RunnerRequirements,
+    mismatches: &mut Vec<RequirementMismatch>,
+) {
+    if let Some(required) = requirements.environment_profile()
+        && !capabilities.environment_profiles().contains(required)
+    {
+        mismatches.push(RequirementMismatch::EnvironmentProfile {
+            required: required.clone(),
+            available: capabilities.environment_profiles().clone(),
+        });
     }
 }
 
@@ -183,6 +200,10 @@ pub enum RequirementMismatch {
     MissingSandboxFeature(SandboxFeature),
     MissingContainerFeature(ContainerFeature),
     MissingRunnerFeature(RunnerFeature),
+    EnvironmentProfile {
+        required: EnvironmentProfile,
+        available: BTreeSet<EnvironmentProfile>,
+    },
 }
 
 /// Quantitative resource names used in mismatch reporting.

@@ -428,17 +428,13 @@ fn token_set_from_response(
         .map(|seconds| now.checked_add(seconds))
         .transpose()?;
     let scopes = parse_scopes(&response.scope)?;
-    let metadata = ProviderTokenMetadata::new(
-        provider_id,
-        provider_subject,
-        grant_kind,
-        "bearer",
-        scopes,
-        now,
-        access_expires_at,
-        refresh_expires_at,
-    )
-    .map_err(|_| GithubFlowError::InvalidProviderResponse)?;
+    let metadata = ProviderTokenMetadata::builder(provider_id, grant_kind, "bearer", now)
+        .provider_subject(provider_subject)
+        .scopes(scopes)
+        .access_expires_at(access_expires_at)
+        .refresh_expires_at(refresh_expires_at)
+        .build()
+        .map_err(|_| GithubFlowError::InvalidProviderResponse)?;
     ProviderTokenSet::new(
         ProviderAccessToken::new(response.access_token),
         response.refresh_token.map(ProviderRefreshToken::new),

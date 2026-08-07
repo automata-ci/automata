@@ -10,15 +10,6 @@ use module::ModuleOption;
 use proc_macro::TokenStream as TokenStream1;
 use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Error, Item};
 
-#[cfg(test)]
-macro_rules! assert_eq_tokens {
-    ($actual:expr, $expected:expr) => {
-        let actual = $actual.to_string();
-        let expected = $expected.to_string();
-        difference::assert_diff!(&actual, &expected, " ", 0);
-    };
-}
-
 mod attrs;
 mod class;
 mod common;

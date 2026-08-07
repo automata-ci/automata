@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
     spanned::Spanned,
-    Error, ItemImpl, LitStr, Result, Token, Type,
+    Error, ItemImpl, LitStr, Result, Token,
 };
 
 use crate::{
@@ -15,6 +15,8 @@ use crate::{
 
 mod accessor;
 use accessor::JsAccessor;
+mod class_name;
+use class_name::get_class_name;
 mod method;
 use method::Method;
 
@@ -58,25 +60,6 @@ impl Parse for ImplOption {
         } else {
             Err(syn::Error::new(input.span(), "invalid impl attribute"))
         }
-    }
-}
-
-pub fn get_class_name(ty: &Type) -> String {
-    match ty {
-        Type::Array(_) => todo!(),
-        Type::Paren(x) => get_class_name(&x.elem),
-        Type::Path(x) => x.path.segments.first().unwrap().ident.to_string(),
-        Type::Tuple(x) => {
-            let name = x
-                .elems
-                .iter()
-                .map(get_class_name)
-                .collect::<Vec<_>>()
-                .join("_");
-
-            format!("tuple_{name}")
-        }
-        _ => todo!(),
     }
 }
 
@@ -244,7 +227,7 @@ pub(crate) fn expand(options: OptionList<ImplOption>, item: ItemImpl) -> Result<
         TokenStream::new()
     };
 
-    let class_name = get_class_name(&self_ty);
+    let class_name = get_class_name(&self_ty)?;
     let impl_mod_name = format_ident!("__impl_methods_{class_name}__");
 
     let res = quote! {

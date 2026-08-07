@@ -3,10 +3,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use automata_core::{JobIrVersion, JobIrVersionRange};
+
 /// Lowest protocol version spoken by this build.
-pub const PROTOCOL_MIN_VERSION: ProtocolVersion = ProtocolVersion(1);
+pub const PROTOCOL_MIN_VERSION: ProtocolVersion = ProtocolVersion(4);
 /// Highest protocol version spoken by this build.
-pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion(1);
+pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion(4);
 /// Complete supported range for this build.
 pub const SUPPORTED_PROTOCOL_RANGE: ProtocolRange = ProtocolRange {
     min: PROTOCOL_MIN_VERSION,
@@ -139,6 +141,25 @@ pub const fn negotiate_protocol(
     }
 }
 
+/// Negotiates the newest `JobIR` schema accepted by both peers.
+///
+/// # Errors
+///
+/// Returns [`JobIrNegotiationError::NoCommonVersion`] when the inclusive
+/// ranges do not overlap.
+pub fn negotiate_job_ir(
+    local: JobIrVersionRange,
+    remote: JobIrVersionRange,
+) -> Result<JobIrVersion, JobIrNegotiationError> {
+    let common_min = local.minimum().max(remote.minimum());
+    let common_max = local.maximum().min(remote.maximum());
+    if common_min <= common_max {
+        Ok(common_max)
+    } else {
+        Err(JobIrNegotiationError::NoCommonVersion { local, remote })
+    }
+}
+
 /// Invalid protocol range.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ProtocolRangeError {
@@ -162,5 +183,15 @@ pub enum ProtocolNegotiationError {
     NoCommonVersion {
         local: ProtocolRange,
         remote: ProtocolRange,
+    },
+}
+
+/// Failed `JobIR` schema negotiation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum JobIrNegotiationError {
+    #[error("no common JobIR schema version between local {local:?} and remote {remote:?}")]
+    NoCommonVersion {
+        local: JobIrVersionRange,
+        remote: JobIrVersionRange,
     },
 }

@@ -1,0 +1,15 @@
+Upstream: actions/runner v2.336.0
+Repository: https://github.com/actions/runner
+Commit: 98aabcd429c4e8402406c56ce2d26387fed3b9ce
+License: MIT
+
+Semantic references reviewed for the hand-authored expression fixtures:
+- src/Sdk/DTExpressions2/Expressions2/ExpressionParser.cs
+- src/Sdk/DTExpressions2/Expressions2/Tokens/LexicalAnalyzer.cs
+- src/Sdk/DTExpressions2/Expressions2/ExpressionConstants.cs
+- src/Sdk/DTExpressions2/Expressions2/Sdk/ExpressionUtility.cs
+- src/Sdk/DTPipelines/Pipelines/ObjectTemplating/PipelineTemplateConverter.cs
+- src/Sdk/DTPipelines/workflow-v1.0.json
+
+No upstream source code is copied into the fixture. The cases encode operator,
+literal, function-arity, phase-context, depth, and implicit-success behavior.

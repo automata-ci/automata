@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use automata_core::{
-    Architecture, ContainerCapabilities, ContainerFeature, IsolationLevel, OperatingSystem,
-    RequirementMismatch, ResourceCapacity, ResourceKind, RunnerCapabilities, RunnerFeature,
-    RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, SandboxCapabilities,
-    SandboxFeature, SelectorError,
+    Architecture, ContainerCapabilities, ContainerFeature, EnvironmentProfile,
+    EnvironmentProfileId, IsolationLevel, OperatingSystem, RequirementMismatch, ResourceCapacity,
+    ResourceKind, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel,
+    RunnerPlatform, RunnerRequirements, SandboxCapabilities, SandboxFeature, SelectorError,
+    Sha256Digest,
 };
 
 fn label(value: &str) -> RunnerLabel {
@@ -13,6 +14,13 @@ fn label(value: &str) -> RunnerLabel {
 
 fn group(value: &str) -> RunnerGroup {
     RunnerGroup::new(value).expect("valid test group")
+}
+
+fn profile(digest_byte: u8) -> EnvironmentProfile {
+    EnvironmentProfile::new(
+        EnvironmentProfileId::new("github.com/ubuntu-24.04").expect("valid profile ID"),
+        Sha256Digest::from_bytes([digest_byte; 32]),
+    )
 }
 
 fn capable_runner() -> RunnerCapabilities {
@@ -142,4 +150,63 @@ fn feature_mismatches_use_the_extensible_identifier_wire_shape() {
         serde_json::from_str::<RequirementMismatch>(&json).expect("deserialize mismatch"),
         mismatch,
     );
+}
+
+#[test]
+fn environment_profile_requires_the_exact_attested_profile() {
+    let required = profile(0x11);
+    let requirements = RunnerRequirements::default().with_environment_profile(required.clone());
+
+    let labels_and_features_only = capable_runner()
+        .with_labels([label("ubuntu-24.04")])
+        .with_features([
+            RunnerFeature::SHELL_STEPS,
+            RunnerFeature::new("github.com/ubuntu-24-04@v1").expect("valid feature"),
+        ]);
+    let mismatch = labels_and_features_only
+        .satisfies(&requirements)
+        .expect_err("labels and features cannot impersonate an attested profile");
+    assert!(mismatch.iter().any(|item| matches!(
+        item,
+        RequirementMismatch::EnvironmentProfile {
+            required: actual,
+            available,
+        } if actual == &required && available.is_empty()
+    )));
+
+    let wrong_digest = capable_runner().with_environment_profiles([profile(0x22)]);
+    let mismatch = wrong_digest
+        .satisfies(&requirements)
+        .expect_err("the same profile ID with a different digest must not match");
+    assert!(mismatch.iter().any(|item| matches!(
+        item,
+        RequirementMismatch::EnvironmentProfile {
+            required: actual,
+            available,
+        } if actual == &required && available.contains(&profile(0x22))
+    )));
+
+    assert_eq!(
+        capable_runner()
+            .with_environment_profiles([required])
+            .satisfies(&requirements),
+        Ok(())
+    );
+}
+
+#[test]
+fn environment_profiles_have_strict_namespaced_serde() {
+    let value = profile(0x33);
+    let json = serde_json::to_value(&value).expect("serialize profile");
+    assert_eq!(json["id"], "github.com/ubuntu-24.04");
+    assert_eq!(
+        serde_json::from_value::<EnvironmentProfile>(json.clone()).expect("deserialize profile"),
+        value
+    );
+
+    let mut unknown = json;
+    unknown["future"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<EnvironmentProfile>(unknown).is_err());
+    assert!(EnvironmentProfileId::new("ubuntu-24.04").is_err());
+    assert!(EnvironmentProfileId::new("GitHub.com/ubuntu-24.04").is_err());
 }
