@@ -15,6 +15,7 @@ mod docker;
 #[cfg(not(unix))]
 #[path = "docker_unsupported.rs"]
 mod docker;
+mod docker_contract;
 mod endpoint;
 mod error;
 mod naming;
