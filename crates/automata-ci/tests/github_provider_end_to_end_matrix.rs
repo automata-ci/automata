@@ -357,8 +357,7 @@ impl AutonomousWorkflowPhaseExecutor for MatrixExecutorTrace {
         shutdown: CancellationToken,
         deadline: AutonomousWorkflowDeadline,
     ) -> AutonomousWorkflowExecutionFuture<'a> {
-        self.inner
-            .execute_preparation(lease, shutdown, deadline)
+        self.inner.execute_preparation(lease, shutdown, deadline)
     }
 
     fn execute_activation<'a>(

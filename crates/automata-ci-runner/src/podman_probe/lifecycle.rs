@@ -1196,6 +1196,10 @@ impl ProbeContext {
         Ok(())
     }
 
+    fn verify_for_use(&self, _expected_payload: &[u8]) -> Result<(), String> {
+        Err("active Podman probing is unsupported on this platform".to_owned())
+    }
+
     fn remove(&mut self) -> Result<(), String> {
         let entries = fs::read_dir(&self.path)
             .map_err(|error| format!("could not scan the owned probe context: {error}"))?

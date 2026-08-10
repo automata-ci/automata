@@ -16,10 +16,12 @@ workspace = true
 
 [dependencies]
 automata-ci-execution.workspace = true
-rustix = { workspace = true, features = ["event"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event"] }
 
 [dev-dependencies]
 static_assertions.workspace = true

@@ -22,6 +22,12 @@ Install [Git](https://git-scm.com/),
 repository pins Rust 1.97.1 and its required components in
 `rust-toolchain.toml`.
 
+On Windows, use rustup's 64-bit MSVC host and install the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/)
+**Desktop development with C++** workload. Run the source-build commands below
+from PowerShell. The same checkout and Cargo commands build native
+`automata.exe` and `automata-runner.exe` binaries.
+
 ```console
 git clone https://github.com/automata-ci/automata.git
 cd automata
@@ -32,6 +38,31 @@ cargo install --path crates/automata-ci-runner --locked
 The first build downloads and compiles Rust dependencies, then embeds the
 checked-in server-side renderer and browser assets, so it may take a few
 minutes.
+
+### Windows source-build boundary
+
+A native Windows source build provides a deliberately limited preview and
+diagnostic surface. It supports:
+
+- `automata preview` on a loopback address;
+- `automata admin status` against that preview; and
+- passive `automata-runner doctor` diagnostics, including an optional preview
+  health check.
+
+It does not make Windows an execution host or a production control-plane
+platform. The following boundaries fail closed on Windows:
+
+- `automata auth` and `automata secret` operator commands;
+- file-backed credential and secret sources;
+- static runner registration files and the full `automata server` deployment
+  composition;
+- `automata-runner doctor --active`, which requires rootless Podman network
+  isolation; and
+- `automata-runner run` and native job execution.
+
+Linux with rootless Podman remains the only supported job-execution host. A
+successful Windows build or passive doctor report is evidence only for the
+preview and diagnostics listed above.
 
 A compiled runner is useful for diagnostics, but it is not proof that the host
 can execute jobs. The initial execution-host path is Linux with rootless Podman,
@@ -53,9 +84,20 @@ guess a version, or assume that a documented registry name has been published.
 
 ## Verify the installation
 
+On Linux:
+
 ```console
 command -v automata
 command -v automata-runner
+automata --version
+automata-runner --version
+```
+
+On Windows PowerShell:
+
+```powershell
+Get-Command automata
+Get-Command automata-runner
 automata --version
 automata-runner --version
 ```
@@ -83,6 +125,15 @@ curl --fail http://127.0.0.1:8080/readyz
 automata admin status
 ```
 
+On Windows PowerShell, use the native HTTP command and the same explicit
+loopback origin:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/healthz
+Invoke-RestMethod http://127.0.0.1:8080/readyz
+automata --server-url http://127.0.0.1:8080 admin status
+```
+
 `/healthz` returns process identity and build information as JSON. `/readyz`
 returns `ready` in preview mode. `automata admin status` reads both endpoints
 and reports process health separately from dependency readiness.
@@ -98,7 +149,8 @@ The report separates host capability problems from server reachability. Add
 and remove temporary rootless Podman resources. This ambient doctor check is
 useful preparation, but `automata-runner run` performs its own mandatory probe
 with the configured Podman binary and clean provider environment before it
-opens a control-plane session.
+opens a control-plane session. On Windows, `--active` and `run` return an error
+instead of attempting Linux isolation or job execution.
 
 Stop the preview with `Ctrl-C`.
 

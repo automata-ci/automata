@@ -1,10 +1,19 @@
 //! Command-line interface for both control-plane service roles and operators.
 
+#[cfg(unix)]
+mod auth;
+#[cfg(not(unix))]
+#[path = "auth_unsupported.rs"]
 mod auth;
 mod commands;
+#[cfg(unix)]
 mod credential_store;
 mod execution;
 mod output;
+#[cfg(unix)]
+mod secret;
+#[cfg(not(unix))]
+#[path = "secret_unsupported.rs"]
 mod secret;
 mod values;
 
