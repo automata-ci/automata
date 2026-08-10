@@ -252,6 +252,9 @@ pub trait GithubRuntimeAuthorityMintBroker: fmt::Debug + Send + Sync {
     fn configuration_fingerprint(&self) -> Sha256Digest;
 
     /// Returns the hard complete-request wall-clock ceiling.
+    ///
+    /// The duration must be a nonzero whole number of milliseconds so the
+    /// provider timeout and durable database authorization are identical.
     fn maximum_mint_duration(&self) -> Duration;
 
     /// Performs exactly one provider mint attempt.

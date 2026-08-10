@@ -56,7 +56,9 @@ const MAX_GITHUB_RUNTIME_AUTHORITY_LIFECYCLE_BROKERS: usize = 256;
 #[async_trait::async_trait]
 pub trait GithubRuntimeAuthorityLifecycleBroker: fmt::Debug + Send + Sync {
     /// Returns the hard request bound for the exact attested identity, or
-    /// `None` when no byte-identical live route exists.
+    /// `None` when no byte-identical live route exists. A returned duration
+    /// must be a nonzero whole number of milliseconds so provider and durable
+    /// database bounds are byte-for-byte equivalent.
     fn maximum_request_duration(
         &self,
         identity: &GithubRuntimeAuthorityIdentity,
@@ -1195,6 +1197,42 @@ mod tests {
         assert_eq!(broker.revocations.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test]
+    async fn fractional_millisecond_provider_window_never_revalidates_or_calls_provider() {
+        let repository = Arc::new(IdleRepository::default());
+        let repository_port: Arc<dyn GithubRuntimeAuthorityRepository> = repository.clone();
+        let broker = Arc::new(RevalidationBroker::default());
+        broker.fractional_duration.store(true, Ordering::SeqCst);
+        let codec = lifecycle_test_codec();
+        let supervisor = Arc::new(
+            GithubRuntimeAuthorityLifecycleSupervisor::new(
+                repository_port.clone(),
+                tokio::runtime::Handle::current(),
+                1,
+                Duration::from_millis(1),
+            )
+            .expect("supervisor"),
+        );
+        let coordinator = GithubRuntimeAuthorityLifecycleCoordinator::new(
+            repository_port,
+            broker.clone(),
+            codec.clone(),
+            Arc::new(FixedClock(UnixMillis::new(1_200))),
+            GithubRuntimeAuthorityWorkerId::from_uuid(uuid::Uuid::from_u128(93))
+                .expect("worker"),
+            supervisor,
+        );
+        let claim = lifecycle_test_claim(codec.as_ref()).await;
+
+        assert!(matches!(
+            coordinator.revocation_mutation(&claim).await,
+            Err(GithubRuntimeAuthorityLifecycleError::Inconsistent)
+        ));
+        assert_eq!(broker.route_checks.load(Ordering::SeqCst), 1);
+        assert_eq!(repository.revalidations.load(Ordering::SeqCst), 0);
+        assert_eq!(broker.revocations.load(Ordering::SeqCst), 0);
+    }
+
     #[derive(Debug)]
     struct FixedClock(UnixMillis);
 
@@ -1541,6 +1579,7 @@ mod tests {
     struct RevalidationBroker {
         route_checks: AtomicUsize,
         revocations: AtomicUsize,
+        fractional_duration: AtomicBool,
     }
 
     impl fmt::Debug for RevalidationBroker {
@@ -1556,7 +1595,11 @@ mod tests {
             _identity: &GithubRuntimeAuthorityIdentity,
         ) -> Option<Duration> {
             self.route_checks.fetch_add(1, Ordering::SeqCst);
-            Some(Duration::from_millis(25))
+            if self.fractional_duration.load(Ordering::SeqCst) {
+                Some(Duration::from_micros(1_500))
+            } else {
+                Some(Duration::from_millis(25))
+            }
         }
 
         async fn revoke(
