@@ -437,17 +437,20 @@ impl PendingCredentialCommit for GatedPendingCommit {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ParkAfterCommitPending {
-    attempts: AtomicUsize,
+    attempts: Arc<AtomicUsize>,
+    replay_started: CancellationToken,
+    release_replay: CancellationToken,
 }
 
 #[async_trait]
 impl PendingCredentialCommit for ParkAfterCommitPending {
     async fn replay(&self) -> bool {
-        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            panic!("scripted ParkAfterCommit task loss")
-        }
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(attempt, 0, "scripted ParkAfterCommit task loss");
+        self.replay_started.cancel();
+        self.release_replay.cancelled().await;
         true
     }
 }
@@ -456,14 +459,200 @@ impl PendingCredentialCommit for ParkAfterCommitPending {
 async fn park_after_commit_task_loss_replays_exactly_and_reuses_permit() {
     let supervisor = credential_commit_supervisor();
     let reservation = supervisor.try_reserve().expect("initial reservation");
-    let completion = supervisor.supervise(reservation, Box::new(ParkAfterCommitPending::default()));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let replay_started = CancellationToken::new();
+    let release_replay = CancellationToken::new();
+    let completion = supervisor.supervise(
+        reservation,
+        Box::new(ParkAfterCommitPending {
+            attempts: Arc::clone(&attempts),
+            replay_started: replay_started.clone(),
+            release_replay: release_replay.clone(),
+        }),
+    );
 
-    completion.await.expect("watchdog retained exact custody");
+    assert!(
+        completion.await.is_err(),
+        "repository panic must be visible without detaching its Store future"
+    );
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    replay_started.cancelled().await;
+    assert!(
+        supervisor.try_reserve().is_none(),
+        "panicked Finish custody retains the sole bounded permit"
+    );
+    release_replay.cancel();
     assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert!(
         supervisor.try_reserve().is_some(),
         "task cancellation must not strand bounded capacity"
     );
+}
+
+#[derive(Debug)]
+struct ParkOuterCommitTaskPending {
+    started: CancellationToken,
+    release: CancellationToken,
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for ParkOuterCommitTaskPending {
+    async fn replay(&self) -> bool {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.started.cancel();
+        self.release.cancelled().await;
+        true
+    }
+}
+
+async fn assert_concrete_commit_wrapper_re_drives_after_outer_task_loss(
+    wrap: impl FnOnce(Box<dyn PendingCredentialCommit>) -> Box<dyn PendingCredentialCommit>,
+) {
+    let supervisor = credential_commit_supervisor();
+    let reservation = supervisor.try_reserve().expect("initial reservation");
+    let started = CancellationToken::new();
+    let release = CancellationToken::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let completion = supervisor.supervise(
+        reservation,
+        wrap(Box::new(ParkOuterCommitTaskPending {
+            started: started.clone(),
+            release: release.clone(),
+            attempts: Arc::clone(&attempts),
+        })),
+    );
+    started.cancelled().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    assert!(supervisor.abort_pending_task(), "pending outer task exists");
+    assert!(
+        completion.await.is_err(),
+        "task loss must become visible to the maintenance caller"
+    );
+    assert!(
+        !supervisor.drain(Duration::from_millis(5)).await,
+        "supervisor-owned exact custody must prevent a false idle result"
+    );
+    assert!(
+        supervisor.try_reserve().is_none(),
+        "lost-task custody must retain its bounded permit"
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attempts.load(Ordering::SeqCst) != 2 {
+            supervisor.redrive_retained();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the exact retained Finish operation was re-driven");
+    for _ in 0..32 {
+        supervisor.redrive_retained();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "one active driver must serialize concurrent recovery attempts"
+    );
+    let hammer_started = CancellationToken::new();
+    let stop_hammer = CancellationToken::new();
+    let hammer = tokio::spawn({
+        let supervisor = Arc::clone(&supervisor);
+        let hammer_started = hammer_started.clone();
+        let stop_hammer = stop_hammer.clone();
+        async move {
+            hammer_started.cancel();
+            while !stop_hammer.is_cancelled() {
+                supervisor.redrive_retained();
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    hammer_started.cancelled().await;
+    release.cancel();
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    stop_hammer.cancel();
+    hammer.await.expect("Finish redrive hammer");
+    assert!(
+        supervisor.try_reserve().is_some(),
+        "exact re-drive confirmation releases bounded capacity"
+    );
+    for _ in 0..32 {
+        supervisor.redrive_retained();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "confirmed Finish custody must never restart after removal"
+    );
+}
+
+#[tokio::test]
+async fn mint_finish_wrapper_re_drives_after_outer_task_loss() {
+    assert_concrete_commit_wrapper_re_drives_after_outer_task_loss(|pending| {
+        Box::new(PendingMintCommit { pending })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn revocation_finish_wrapper_re_drives_after_outer_task_loss() {
+    assert_concrete_commit_wrapper_re_drives_after_outer_task_loss(|pending| {
+        Box::new(PendingRevocationCommit { pending })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn removed_finish_custody_rejects_its_exact_stale_driver() {
+    let supervisor = credential_commit_supervisor();
+    let reservation = supervisor.try_reserve().expect("initial reservation");
+    let started = CancellationToken::new();
+    let release = CancellationToken::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let completion = supervisor.supervise(
+        reservation,
+        Box::new(PendingMintCommit {
+            pending: Box::new(ParkOuterCommitTaskPending {
+                started: started.clone(),
+                release: release.clone(),
+                attempts: Arc::clone(&attempts),
+            }),
+        }),
+    );
+
+    started.cancelled().await;
+    let stale_custody = supervisor
+        .custody
+        .lock()
+        .expect("service-credential custody lock")
+        .clone()
+        .expect("Finish custody retained before confirmation");
+    release.cancel();
+    completion.await.expect("confirmed Finish commit");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !stale_custody.removed.load(Ordering::Acquire)
+            || stale_custody.driver_active.load(Ordering::Acquire)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Finish custody removed with no active driver");
+
+    let confirmed_calls = attempts.load(Ordering::SeqCst);
+    assert_eq!(confirmed_calls, 1);
+    assert!(!supervisor.start_driver(&stale_custody, None));
+    tokio::task::yield_now().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), confirmed_calls);
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+
+    drop(stale_custody);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert!(supervisor.try_reserve().is_some());
 }
 
 struct PanicAfterCredentialHandoffMaintenance {

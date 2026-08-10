@@ -151,6 +151,86 @@ async fn assert_database_test_clock_survives_connection_replacement(
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn exact_revisions_overlap_while_same_revision_and_retirement_stay_isolated() -> TestResult {
+    run_with_database(|database| async move {
+        assert_revision_overlap_catalog(&database).await?;
+        let fixture = seed_fixture(&database, "revision-overlap", 100).await?;
+        let revision_7 = revision_overlap_identity(&fixture, Uuid::new_v4(), 7, 7, 0x41)?;
+        insert_authority_direct(&database, &revision_7, 100).await?;
+
+        let same_revision = revision_overlap_identity(&fixture, Uuid::new_v4(), 7, 7, 0x42)?;
+        let error = insert_authority_direct(&database, &same_revision, 101)
+            .await
+            .expect_err("one repository scope revision has one exact authority");
+        assert_unique_constraint(
+            &error,
+            "github_server_service_authorities_repository_scope_revision_uni",
+        );
+
+        let next_policy = revision_overlap_identity(&fixture, Uuid::new_v4(), 7, 8, 0x41)?;
+        insert_authority_direct(&database, &next_policy, 102).await?;
+        let revision_8 = revision_overlap_identity(&fixture, Uuid::new_v4(), 8, 8, 0x41)?;
+        insert_authority_direct(&database, &revision_8, 103).await?;
+        assert_revision_lock_isolation(&database, &revision_7, &revision_8).await?;
+
+        let active_configurations: (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(DISTINCT configuration_fingerprint) \
+             FROM github_server_service_authorities \
+             WHERE id IN ($1, $2, $3) AND state = 'active'",
+        )
+        .bind(revision_7.authority_id().as_uuid())
+        .bind(next_policy.authority_id().as_uuid())
+        .bind(revision_8.authority_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            active_configurations,
+            (3, 1),
+            "App and policy revisions may overlap with one config-only fingerprint"
+        );
+
+        set_database_test_clock(&database, 200).await?;
+        let retired = database
+            .store()
+            .retire_github_server_service_authority(RetireGithubServerServiceAuthority::new(
+                GithubServerServiceAuthoritySelector::from_identity(&revision_7),
+                UnixMillis::new(200),
+            )?)
+            .await?;
+        assert_eq!(retired.identity(), &revision_7);
+        assert_eq!(retired.state(), GithubServerServiceAuthorityState::Retired);
+        let exact_states: (bool, bool, bool) = sqlx::query_as(
+            "SELECT \
+                 EXISTS (SELECT 1 FROM github_server_service_authorities \
+                         WHERE id = $1 AND state = 'retired'), \
+                 EXISTS (SELECT 1 FROM github_server_service_authorities \
+                         WHERE id = $2 AND state = 'active'), \
+                 EXISTS (SELECT 1 FROM github_server_service_authorities \
+                         WHERE id = $3 AND state = 'active')",
+        )
+        .bind(revision_7.authority_id().as_uuid())
+        .bind(next_policy.authority_id().as_uuid())
+        .bind(revision_8.authority_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(exact_states, (true, true, true));
+
+        let retired_revision_reuse =
+            revision_overlap_identity(&fixture, Uuid::new_v4(), 7, 7, 0x43)?;
+        let error = insert_authority_direct(&database, &retired_revision_reuse, 201)
+            .await
+            .expect_err("retirement cannot free immutable revision identity");
+        assert_unique_constraint(
+            &error,
+            "github_server_service_authorities_repository_scope_revision_uni",
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn maintenance_bootstraps_and_recovers_generation_after_lost_claim() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_fixture(&database, "maintenance-restart", 10).await?;
@@ -1866,6 +1946,211 @@ fn authority_identity_with_app_configuration_revision(
         GithubServerServiceRevision::new(1)?,
         Sha256Digest::from_bytes([configuration_byte; 32]),
     )?)
+}
+
+fn revision_overlap_identity(
+    fixture: &Fixture,
+    id: Uuid,
+    app_configuration_revision: u64,
+    policy_revision: u64,
+    configuration_byte: u8,
+) -> TestResult<GithubServerServiceAuthorityIdentity> {
+    Ok(GithubServerServiceAuthorityIdentity::new(
+        fixture.tenant.clone(),
+        GithubServerServiceAuthorityId::from_uuid(id)?,
+        fixture.repository_id,
+        fixture.connection_id,
+        ProviderInstallationId::new(INSTALLATION_ID)?,
+        GithubServerServiceAppId::new(APP_ID)?,
+        ProviderRepositoryId::new(GITHUB_REPOSITORY_ID)?,
+        GithubRepositoryName::new("automata-ci/automata")?,
+        GithubServerServiceScope::ChecksWrite,
+        GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766")?,
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([11; 32]),
+        GithubServerServiceRevision::new(app_configuration_revision)?,
+        GithubServerServiceRevision::new(policy_revision)?,
+        Sha256Digest::from_bytes([configuration_byte; 32]),
+    )?)
+}
+
+async fn assert_revision_overlap_catalog(database: &TestDatabase) -> TestResult {
+    let obsolete_index_count: i64 = sqlx::query_scalar(
+        r"
+        SELECT count(*)
+        FROM pg_catalog.pg_class AS catalog_relation
+        JOIN pg_catalog.pg_namespace AS catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        WHERE catalog_namespace.nspname = current_schema()
+          AND catalog_relation.relname =
+              'github_server_service_authorities_one_active_scope'
+        ",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        obsolete_index_count, 0,
+        "obsolete active-scope index remains"
+    );
+
+    let constraints: Vec<(String, Vec<String>)> = sqlx::query_as(
+        r"
+        SELECT catalog_constraint.conname,
+               array_agg(catalog_attribute.attname::TEXT
+                         ORDER BY constraint_key.ordinality)
+        FROM pg_catalog.pg_constraint AS catalog_constraint
+        JOIN pg_catalog.pg_class AS catalog_relation
+          ON catalog_relation.oid = catalog_constraint.conrelid
+        JOIN pg_catalog.pg_namespace AS catalog_namespace
+          ON catalog_namespace.oid = catalog_relation.relnamespace
+        CROSS JOIN LATERAL
+          pg_catalog.unnest(catalog_constraint.conkey)
+          WITH ORDINALITY AS constraint_key(attnum, ordinality)
+        JOIN pg_catalog.pg_attribute AS catalog_attribute
+          ON catalog_attribute.attrelid = catalog_constraint.conrelid
+         AND catalog_attribute.attnum = constraint_key.attnum
+        WHERE catalog_namespace.nspname = current_schema()
+          AND catalog_relation.relname = 'github_server_service_authorities'
+          AND catalog_constraint.contype = 'u'
+          AND catalog_constraint.conname IN (
+              'github_server_service_authorities_exact_config_unique',
+              'github_server_service_authorities_repository_scope_revision_uni'
+          )
+        GROUP BY catalog_constraint.conname
+        ORDER BY catalog_constraint.conname
+        ",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        constraints,
+        vec![
+            (
+                "github_server_service_authorities_exact_config_unique".into(),
+                vec![
+                    "tenant_id".into(),
+                    "repository_id".into(),
+                    "provider_connection_id".into(),
+                    "provider_installation_id".into(),
+                    "service_scope".into(),
+                    "app_configuration_revision".into(),
+                    "policy_revision".into(),
+                    "configuration_fingerprint".into(),
+                ],
+            ),
+            (
+                "github_server_service_authorities_repository_scope_revision_uni".into(),
+                vec![
+                    "tenant_id".into(),
+                    "repository_id".into(),
+                    "service_scope".into(),
+                    "app_configuration_revision".into(),
+                    "policy_revision".into(),
+                ],
+            ),
+        ]
+    );
+    Ok(())
+}
+
+async fn assert_revision_lock_isolation(
+    database: &TestDatabase,
+    revision_7: &GithubServerServiceAuthorityIdentity,
+    revision_8: &GithubServerServiceAuthorityIdentity,
+) -> TestResult {
+    let mut blocker = database.pool().begin().await?;
+    let locked_revision_7: Uuid = sqlx::query_scalar(
+        "SELECT id FROM github_server_service_authorities WHERE id = $1 FOR UPDATE",
+    )
+    .bind(revision_7.authority_id().as_uuid())
+    .fetch_one(&mut *blocker)
+    .await?;
+    assert_eq!(locked_revision_7, revision_7.authority_id().as_uuid());
+
+    let mut contender = database.pool().begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *contender)
+        .await?;
+    let locked_revision_8 = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM github_server_service_authorities WHERE id = $1 FOR UPDATE NOWAIT",
+        )
+        .bind(revision_8.authority_id().as_uuid())
+        .fetch_one(&mut *contender),
+    )
+    .await??;
+    assert_eq!(locked_revision_8, revision_8.authority_id().as_uuid());
+
+    let blocked_revision_7 = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM github_server_service_authorities WHERE id = $1 FOR UPDATE NOWAIT",
+    )
+    .bind(revision_7.authority_id().as_uuid())
+    .fetch_one(&mut *contender)
+    .await
+    .expect_err("revision 7 row lock must still be held");
+    let database_error = blocked_revision_7
+        .as_database_error()
+        .expect("database lock error");
+    assert_eq!(database_error.code().as_deref(), Some("55P03"));
+    contender.rollback().await?;
+    blocker.rollback().await?;
+    Ok(())
+}
+
+async fn insert_authority_direct(
+    database: &TestDatabase,
+    identity: &GithubServerServiceAuthorityIdentity,
+    created_at: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        INSERT INTO github_server_service_authorities (
+            id, tenant_id, repository_id, provider_connection_id,
+            provider_installation_id, github_app_id, github_app_client_id,
+            github_app_jwt_issuer_kind, github_repository_id,
+            github_repository_name, service_scope, permission_policy,
+            policy_digest, policy_revision, app_key_spki_sha256,
+            app_configuration_revision, configuration_fingerprint,
+            identity_digest, state, created_at_ms, state_updated_at_ms
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            $12::JSONB, $13, $14, $15, $16, $17, $18,
+            'active', $19, $19
+        )
+        ",
+    )
+    .bind(identity.authority_id().as_uuid())
+    .bind(identity.tenant().as_str())
+    .bind(identity.repository_id().as_uuid())
+    .bind(identity.connection_id().as_uuid())
+    .bind(i64::try_from(identity.installation_id().get()).expect("installation fits i64"))
+    .bind(i64::try_from(identity.github_app_id().get()).expect("App ID fits i64"))
+    .bind(identity.app_client_id().as_str())
+    .bind(identity.jwt_issuer().as_str())
+    .bind(i64::try_from(identity.github_repository_id().get()).expect("repository fits i64"))
+    .bind(identity.github_repository_name().as_str())
+    .bind(identity.scope().as_str())
+    .bind(identity.scope().permissions_json())
+    .bind(identity.policy_digest().as_bytes().as_slice())
+    .bind(i64::try_from(identity.policy_revision().get()).expect("policy revision fits i64"))
+    .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
+    .bind(
+        i64::try_from(identity.app_configuration_revision().get())
+            .expect("App configuration revision fits i64"),
+    )
+    .bind(identity.configuration_fingerprint().as_bytes().as_slice())
+    .bind(identity.identity_digest().as_bytes().as_slice())
+    .bind(created_at)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+fn assert_unique_constraint(error: &sqlx::Error, expected: &str) {
+    let database = error.as_database_error().expect("database error");
+    assert_eq!(database.code().as_deref(), Some("23505"));
+    assert_eq!(database.constraint(), Some(expected));
 }
 
 fn authority_selector(

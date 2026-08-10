@@ -3,6 +3,20 @@
 -- No row from the earlier incomplete identity can be interpreted safely: it
 -- omitted the exact App/JWT issuer and had no immutable operation receipts.
 
+-- Configuration fingerprints describe an installation-wide broker policy,
+-- while the App/policy revisions are separate immutable authority identity.
+-- Multiple exact revisions must remain active while already-admitted work
+-- drains, but one revision cannot claim two authorities for the same scope.
+DROP INDEX github_server_service_authorities_one_active_scope;
+
+ALTER TABLE github_server_service_authorities
+    DROP CONSTRAINT github_server_service_authorities_exact_config_unique,
+    ADD CONSTRAINT github_server_service_authorities_exact_config_unique UNIQUE (
+        tenant_id, repository_id, provider_connection_id,
+        provider_installation_id, service_scope, app_configuration_revision,
+        policy_revision, configuration_fingerprint
+    );
+
 LOCK TABLE github_runtime_authority_issuances IN ACCESS EXCLUSIVE MODE;
 
 DO $automata$

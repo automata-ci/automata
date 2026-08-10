@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 use crate::{
     config::{
         GITHUB_API_VERSION, GithubAppConfigurationError, GithubAppCredentialConfig,
-        TransportSecurity,
+        TransportSecurity, whole_milliseconds,
     },
     response::{
         CreatedBodyCompletion, RecoveredInstallationToken, decode_token_response,
@@ -141,6 +141,11 @@ impl GithubAppCredentialBroker {
     /// timeouts, and transport-security mode. App issuer, installation, and key
     /// SPKI remain distinct immutable identity fields and are intentionally not
     /// folded into this policy evidence.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if crate-internal code bypasses [`crate::GithubAppHttpLimits`]
+    /// validation and constructs a fractional-millisecond timeout.
     #[must_use]
     pub fn broker_policy_fingerprint(&self) -> automata_ci_store::Sha256Digest {
         let mut digest = Sha256::new();
@@ -156,11 +161,15 @@ impl GithubAppCredentialBroker {
         );
         update_fingerprint_part(
             &mut digest,
-            &self.config.limits.connect_timeout.as_millis().to_be_bytes(),
+            &whole_milliseconds(self.config.limits.connect_timeout)
+                .expect("validated connect timeout is an exact whole-millisecond value")
+                .to_be_bytes(),
         );
         update_fingerprint_part(
             &mut digest,
-            &self.config.limits.request_timeout.as_millis().to_be_bytes(),
+            &whole_milliseconds(self.config.limits.request_timeout)
+                .expect("validated request timeout is an exact whole-millisecond value")
+                .to_be_bytes(),
         );
         update_fingerprint_part(
             &mut digest,

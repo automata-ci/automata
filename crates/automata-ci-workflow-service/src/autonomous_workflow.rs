@@ -195,6 +195,8 @@ pub enum AutonomousWorkflowExecutionOutcome {
 pub enum AutonomousWorkflowRenewalOutcome {
     /// The phase repository returned the exact next claim generation.
     Renewed,
+    /// The current claim already covered the fixed deadline and was revalidated by exact consume.
+    Revalidated,
     /// A typed repository-operation failure was reconciled by exact consume.
     Reconciled,
 }
@@ -828,6 +830,56 @@ impl AutonomousWorkflowCustody {
             deadline,
             expected_successor,
             submitted: false,
+        };
+        Ok(())
+    }
+
+    fn begin_orchestration_revalidation(
+        &self,
+        consumed: &ConsumedSelectedLogicalJobOrchestration,
+        deadline: AutonomousWorkflowDeadline,
+        request: ConsumeSelectedLogicalJobOrchestration,
+    ) -> Result<(), AutonomousWorkflowLeaseError> {
+        let mut state = self
+            .orchestration
+            .lock()
+            .expect("custody lock is not poisoned");
+        if !matches!(
+            &*state,
+            OrchestrationCustody::Active { consumed: active, .. }
+                if active.as_ref() == consumed
+        ) {
+            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        }
+        *state = OrchestrationCustody::Selected {
+            request: Box::new(request),
+            deadline: Some(deadline),
+            expected_successor: None,
+        };
+        Ok(())
+    }
+
+    fn begin_materialization_revalidation(
+        &self,
+        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
+        deadline: AutonomousWorkflowDeadline,
+        request: ConsumeSelectedLogicalInstanceMaterialization,
+    ) -> Result<(), AutonomousWorkflowLeaseError> {
+        let mut state = self
+            .materialization
+            .lock()
+            .expect("custody lock is not poisoned");
+        if !matches!(
+            &*state,
+            MaterializationCustody::Active { consumed: active, .. }
+                if active.as_ref() == consumed
+        ) {
+            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        }
+        *state = MaterializationCustody::Selected {
+            request: Box::new(request),
+            deadline: Some(deadline),
+            expected_successor: None,
         };
         Ok(())
     }
@@ -1505,7 +1557,7 @@ impl AutonomousPreparationLease {
         self.deadline.checkpoint(shutdown)
     }
 
-    /// Renews exact preparation authority, reconciling ambiguity by consume.
+    /// Renews exact preparation authority when it extends custody, otherwise revalidates it.
     ///
     /// # Errors
     ///
@@ -1516,14 +1568,18 @@ impl AutonomousPreparationLease {
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
         self.before_io(shutdown)?;
-        let request = RenewLogicalActivationPreparation::new(
-            self.authority().claim().clone(),
-            renewal_duration(
-                &self.deadline,
-                MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS,
-            ),
-        )
-        .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
+        let Some(duration_ms) = extending_renewal_duration(
+            &self.deadline,
+            MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS,
+            self.authority().claim().claimed_at(),
+            self.authority().claim().expires_at(),
+        )?
+        else {
+            return self.revalidate(shutdown).await;
+        };
+        let request =
+            RenewLogicalActivationPreparation::new(self.authority().claim().clone(), duration_ms)
+                .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
         self.custody.begin_preparation_renewal(
             self.consumed.clone(),
             self.deadline.clone(),
@@ -1568,6 +1624,20 @@ impl AutonomousPreparationLease {
         self.reconcile(reconcile, expected_successor, shutdown)
             .await?;
         Ok(outcome)
+    }
+
+    async fn revalidate(
+        &mut self,
+        shutdown: &CancellationToken,
+    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
+        let request = ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
+        self.custody.begin_orchestration_revalidation(
+            &self.consumed,
+            self.deadline.clone(),
+            request.clone(),
+        )?;
+        self.reconcile(request, None, shutdown).await?;
+        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
     }
 
     async fn reconcile(
@@ -1719,7 +1789,7 @@ impl AutonomousActivationLease {
         self.deadline.checkpoint(shutdown)
     }
 
-    /// Renews exact activation authority, reconciling ambiguity by consume.
+    /// Renews exact activation authority when it extends custody, otherwise revalidates it.
     ///
     /// # Errors
     ///
@@ -1730,11 +1800,17 @@ impl AutonomousActivationLease {
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
         self.before_io(shutdown)?;
-        let request = RenewLogicalJobActivation::new(
-            self.authority().claim().clone(),
-            renewal_duration(&self.deadline, MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS),
-        )
-        .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
+        let Some(duration_ms) = extending_renewal_duration(
+            &self.deadline,
+            MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS,
+            self.authority().claim().claimed_at(),
+            self.authority().claim().expires_at(),
+        )?
+        else {
+            return self.revalidate(shutdown).await;
+        };
+        let request = RenewLogicalJobActivation::new(self.authority().claim().clone(), duration_ms)
+            .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
         self.custody.begin_activation_renewal(
             self.consumed.clone(),
             self.deadline.clone(),
@@ -1779,6 +1855,20 @@ impl AutonomousActivationLease {
         self.reconcile(reconcile, expected_successor, shutdown)
             .await?;
         Ok(outcome)
+    }
+
+    async fn revalidate(
+        &mut self,
+        shutdown: &CancellationToken,
+    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
+        let request = ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
+        self.custody.begin_orchestration_revalidation(
+            &self.consumed,
+            self.deadline.clone(),
+            request.clone(),
+        )?;
+        self.reconcile(request, None, shutdown).await?;
+        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
     }
 
     async fn reconcile(
@@ -1925,7 +2015,7 @@ impl AutonomousMaterializationLease {
         self.deadline.checkpoint(shutdown)
     }
 
-    /// Renews exact materialization authority, reconciling ambiguity by consume.
+    /// Renews exact materialization authority when it extends custody, otherwise revalidates it.
     ///
     /// # Errors
     ///
@@ -1936,11 +2026,18 @@ impl AutonomousMaterializationLease {
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
         self.before_io(shutdown)?;
-        let request = RenewLogicalInstanceMaterialization::new(
-            self.authority().claim().clone(),
-            renewal_duration(&self.deadline, MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS),
-        )
-        .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
+        let Some(duration_ms) = extending_renewal_duration(
+            &self.deadline,
+            MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS,
+            self.authority().claim().claimed_at(),
+            self.authority().claim().expires_at(),
+        )?
+        else {
+            return self.revalidate(shutdown).await;
+        };
+        let request =
+            RenewLogicalInstanceMaterialization::new(self.authority().claim().clone(), duration_ms)
+                .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
         self.custody.begin_materialization_renewal(
             self.consumed.clone(),
             self.deadline.clone(),
@@ -1986,6 +2083,21 @@ impl AutonomousMaterializationLease {
         self.reconcile(reconcile, expected_successor, shutdown)
             .await?;
         Ok(outcome)
+    }
+
+    async fn revalidate(
+        &mut self,
+        shutdown: &CancellationToken,
+    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
+        let request =
+            ConsumeSelectedLogicalInstanceMaterialization::new(self.consumed.selected().clone());
+        self.custody.begin_materialization_revalidation(
+            &self.consumed,
+            self.deadline.clone(),
+            request.clone(),
+        )?;
+        self.reconcile(request, None, shutdown).await?;
+        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
     }
 
     async fn reconcile(
@@ -4204,6 +4316,32 @@ fn renewal_duration(deadline: &AutonomousWorkflowDeadline, maximum_millis: i64) 
     renewal_duration_for_remaining(deadline.remaining(), maximum_millis)
 }
 
+fn extending_renewal_duration(
+    deadline: &AutonomousWorkflowDeadline,
+    maximum_millis: i64,
+    claimed_at: UnixMillis,
+    expires_at: UnixMillis,
+) -> Result<Option<i64>, AutonomousWorkflowLeaseError> {
+    strictly_extending_duration(
+        renewal_duration(deadline, maximum_millis),
+        claimed_at,
+        expires_at,
+    )
+}
+
+fn strictly_extending_duration(
+    proposed: i64,
+    claimed_at: UnixMillis,
+    expires_at: UnixMillis,
+) -> Result<Option<i64>, AutonomousWorkflowLeaseError> {
+    let durable_interval = expires_at
+        .get()
+        .checked_sub(claimed_at.get())
+        .filter(|interval| *interval > 0)
+        .ok_or(AutonomousWorkflowLeaseError::AuthorityRejected)?;
+    Ok((proposed > durable_interval).then_some(proposed))
+}
+
 fn renewal_duration_for_remaining(remaining: Duration, maximum_millis: i64) -> i64 {
     const STORE_HANDOFF_MILLIS: u128 = 1_000;
 
@@ -4784,5 +4922,36 @@ mod tests {
                 maximum
             );
         }
+    }
+
+    #[test]
+    fn renewal_submission_requires_a_strict_durable_interval_extension() {
+        let claimed_at = UnixMillis::new(10_000);
+        let expires_at = UnixMillis::new(12_000);
+
+        assert_eq!(
+            strictly_extending_duration(2_001, claimed_at, expires_at),
+            Ok(Some(2_001))
+        );
+        assert_eq!(
+            strictly_extending_duration(2_000, claimed_at, expires_at),
+            Ok(None)
+        );
+        assert_eq!(
+            strictly_extending_duration(1_999, claimed_at, expires_at),
+            Ok(None)
+        );
+        assert_eq!(
+            strictly_extending_duration(2_000, claimed_at, claimed_at),
+            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
+        );
+        assert_eq!(
+            strictly_extending_duration(
+                i64::MAX,
+                UnixMillis::new(i64::MIN),
+                UnixMillis::new(i64::MAX),
+            ),
+            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
+        );
     }
 }

@@ -52,6 +52,10 @@ fn successor_is_current_only_ciphertext_custody() {
 fn database_time_successor_has_permanent_reciprocal_operation_evidence() {
     for required in [
         "github_runtime_authority_v3_current_only_empty_upgrade",
+        "DROP INDEX github_server_service_authorities_one_active_scope",
+        "DROP CONSTRAINT github_server_service_authorities_exact_config_unique",
+        "provider_installation_id, service_scope, app_configuration_revision",
+        "policy_revision, configuration_fingerprint",
         "github_runtime_authority_operation_transitions",
         "automata_capture_github_runtime_authority_operation_transition",
         "github_runtime_authority_operation_transition_receipt",

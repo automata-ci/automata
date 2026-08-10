@@ -84,13 +84,19 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
             100,
         )
         .await?;
+        let accepted_at = database
+            .store()
+            .load_current_github_provider_manifest(&fixture.tenant, fixture.connection)
+            .await?
+            .activated_at()
+            .expect("bootstrapped manifest is current");
         let request = acceptance(
             &fixture,
             "delivery-main",
             OWNER_ID,
             OWNER_ID,
             HEAD_SHA,
-            200,
+            accepted_at.get(),
             7,
         );
         let accepted = database
@@ -101,7 +107,7 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
         assert_eq!(accepted.repository_owner_id().get(), OWNER_ID);
         assert_eq!(accepted.manifest_revision().get(), 1);
         assert_eq!(accepted.manifest_digest(), fixture.manifest.digest());
-        assert_eq!(accepted.accepted_at(), UnixMillis::new(200));
+        assert_eq!(accepted.accepted_at(), accepted_at);
         assert_eq!(accepted.evidence().manifest(), &fixture.manifest);
         assert_eq!(
             accepted.evidence().checks_authority().authority_id(),
@@ -179,7 +185,7 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
             OWNER_ID + 1,
             OWNER_ID + 1,
             HEAD_SHA,
-            200,
+            accepted_at.get(),
             7,
         );
         assert!(matches!(
@@ -195,7 +201,7 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
             OWNER_ID,
             OWNER_ID,
             [8; 20],
-            200,
+            accepted_at.get(),
             7,
         );
         assert!(matches!(
@@ -226,6 +232,12 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
                 ),
             )
             .await?;
+        let rotated_activated_at = database
+            .store()
+            .load_current_github_provider_manifest(&fixture.tenant, fixture.connection)
+            .await?
+            .activated_at()
+            .expect("rotated manifest is current");
         let historical_replay = database
             .store()
             .accept_manifest_pinned_github_delivery(request)
@@ -241,7 +253,7 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                301,
+                rotated_activated_at.get(),
                 8,
             ))
             .await?;
@@ -260,6 +272,59 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
             .expect_err("delivery evidence must be immutable"),
             "github_provider_delivery_evidence_immutable",
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn public_api_decodes_historical_manifest_profile_and_runner_policy() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-main",
+            0x100,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let activated_at = database
+            .store()
+            .load_current_github_provider_manifest(&fixture.tenant, fixture.connection)
+            .await?
+            .activated_at()
+            .expect("bootstrapped manifest is current");
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-main",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                activated_at.get(),
+                7,
+            ))
+            .await?;
+        let expected_manifest = fixture.manifest.clone();
+        let expected_policy = expected_manifest.runner_policy().object();
+
+        let evidence = database
+            .store()
+            .load_manifest_pinned_github_delivery_evidence(&fixture.tenant, accepted.delivery_id())
+            .await?;
+        let loaded_manifest = evidence.manifest();
+        let loaded_policy = loaded_manifest.runner_policy().object();
+        assert_eq!(
+            loaded_manifest.authority_profile(),
+            automata_ci_core::JobAuthorityProfile::Standard
+        );
+        assert_eq!(loaded_manifest.revision(), expected_manifest.revision());
+        assert_eq!(loaded_policy.digest(), expected_policy.digest());
+        assert_eq!(loaded_policy.object_key(), expected_policy.object_key());
+        assert_eq!(loaded_policy.encoded_size(), expected_policy.encoded_size());
+        assert_eq!(loaded_policy.media_type(), expected_policy.media_type());
         Ok(())
     })
     .await

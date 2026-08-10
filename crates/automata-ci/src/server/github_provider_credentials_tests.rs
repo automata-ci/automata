@@ -1,23 +1,37 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use automata_ci_store::{
-    GithubCheckAppId, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectIdentity,
-    GithubCheckSubjectKey, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceGeneration,
-    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
-    ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RepositoryId, Sha256Digest, TenantScope,
+use automata_ci_credential_github::GithubServerServiceMintCutoffOutcome;
+use automata_ci_key_management::{
+    EnvelopeCodec, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
+use automata_ci_store::{
+    BeginGithubServerServiceMint, ClaimNextGithubServerServiceMaintenance,
+    FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
+    GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
+    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
+    GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
+    GithubServerServiceWorkerId, ProtectedGithubServerServiceCredential, ProviderConnectionId,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
+    ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest, TenantScope,
+};
+use sha2::{Digest as _, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
@@ -175,7 +189,7 @@ impl GithubServerServiceCoordinatorClock for FakeClock {
 
 struct FakeExactRelease {
     attempts: Arc<AtomicUsize>,
-    outcome: Mutex<Option<GithubProviderExactReleaseOutcome>>,
+    pending: Mutex<Option<Arc<dyn GithubProviderPendingHandoffRelease>>>,
 }
 
 impl fmt::Debug for FakeExactRelease {
@@ -183,20 +197,19 @@ impl fmt::Debug for FakeExactRelease {
         formatter
             .debug_struct("FakeExactRelease")
             .field("attempts", &self.attempts.load(Ordering::SeqCst))
-            .field("outcome", &"[REDACTED]")
+            .field("pending", &"[EXACT PENDING RELEASE]")
             .finish()
     }
 }
 
-#[async_trait]
 impl GithubProviderExactHandoffRelease for FakeExactRelease {
-    async fn release(self: Box<Self>) -> GithubProviderExactReleaseOutcome {
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        self.outcome
+        self.pending
             .lock()
-            .expect("release outcome lock")
+            .expect("pending release lock")
             .take()
-            .expect("one exact release attempt")
+            .expect("one exact release freeze")
     }
 }
 
@@ -212,13 +225,125 @@ struct GatedExactRelease {
     finish: Arc<Semaphore>,
 }
 
-#[async_trait]
 impl GithubProviderExactHandoffRelease for GatedExactRelease {
-    async fn release(self: Box<Self>) -> GithubProviderExactReleaseOutcome {
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease> {
+        Arc::new(GatedPendingRelease {
+            attempts: Arc::clone(&self.attempts),
+            finish: Arc::clone(&self.finish),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct GatedPendingRelease {
+    attempts: Arc<AtomicUsize>,
+    finish: Arc<Semaphore>,
+}
+
+#[async_trait]
+impl GithubProviderPendingHandoffRelease for GatedPendingRelease {
+    async fn replay(&self) -> bool {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         let permit = self.finish.acquire().await.expect("test gate remains open");
         permit.forget();
-        GithubProviderExactReleaseOutcome::Released
+        true
+    }
+}
+
+struct ConcreteIssuerReleaseRepository {
+    handoff: Mutex<Option<GithubServerServiceCredentialHandoff>>,
+    releases: Mutex<Vec<ReleaseGithubServerServiceHandoff>>,
+    entered: Semaphore,
+    finish: Semaphore,
+}
+
+impl ConcreteIssuerReleaseRepository {
+    fn new(handoff: GithubServerServiceCredentialHandoff) -> Self {
+        Self {
+            handoff: Mutex::new(Some(handoff)),
+            releases: Mutex::new(Vec::new()),
+            entered: Semaphore::new(0),
+            finish: Semaphore::new(0),
+        }
+    }
+
+    async fn wait_until_release_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("concrete release entry semaphore")
+            .forget();
+    }
+
+    fn release_requests(&self) -> Vec<ReleaseGithubServerServiceHandoff> {
+        self.releases.lock().expect("release request lock").clone()
+    }
+}
+
+#[async_trait]
+impl GithubServerServiceCredentialRepository for ConcreteIssuerReleaseRepository {
+    async fn claim_next_github_server_service_maintenance(
+        &self,
+        _request: ClaimNextGithubServerServiceMaintenance,
+    ) -> Result<Option<GithubServerServiceMaintenanceOutcome>, GithubServerServiceStoreError> {
+        unreachable!("maintenance is outside the concrete release test")
+    }
+
+    async fn begin_github_server_service_mint(
+        &self,
+        _request: BeginGithubServerServiceMint,
+    ) -> Result<GithubServerServiceMintCutoffOutcome, GithubServerServiceStoreError> {
+        unreachable!("mint is outside the concrete release test")
+    }
+
+    async fn finish_github_server_service_mint(
+        &self,
+        _request: &FinishGithubServerServiceMint,
+    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
+        unreachable!("mint is outside the concrete release test")
+    }
+
+    async fn finish_github_server_service_revocation(
+        &self,
+        _request: FinishGithubServerServiceRevocation,
+    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
+        unreachable!("revocation is outside the concrete release test")
+    }
+
+    async fn acquire_github_server_service_handoff(
+        &self,
+        _request: AcquireGithubServerServiceHandoff,
+    ) -> Result<GithubServerServiceCredentialHandoff, GithubServerServiceStoreError> {
+        Ok(self
+            .handoff
+            .lock()
+            .expect("concrete handoff lock")
+            .take()
+            .expect("one concrete handoff"))
+    }
+
+    async fn release_github_server_service_handoff(
+        &self,
+        request: ReleaseGithubServerServiceHandoff,
+    ) -> Result<(), GithubServerServiceStoreError> {
+        self.releases
+            .lock()
+            .expect("release request lock")
+            .push(request);
+        self.entered.add_permits(1);
+        self.finish
+            .acquire()
+            .await
+            .expect("concrete release finish semaphore")
+            .forget();
+        Ok(())
+    }
+
+    async fn quarantine_github_server_service_credential(
+        &self,
+        _request: QuarantineGithubServerServiceCredential,
+    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
+        unreachable!("quarantine is outside the concrete release test")
     }
 }
 
@@ -226,6 +351,20 @@ impl GithubProviderExactHandoffRelease for GatedExactRelease {
 impl GithubProviderPendingHandoffRelease for FakePendingRelease {
     async fn replay(&self) -> bool {
         self.attempts.fetch_add(1, Ordering::SeqCst) + 1 >= self.confirm_on
+    }
+}
+
+#[derive(Debug)]
+struct SwitchablePendingRelease {
+    attempts: Arc<AtomicUsize>,
+    confirmed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl GithubProviderPendingHandoffRelease for SwitchablePendingRelease {
+    async fn replay(&self) -> bool {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.confirmed.load(Ordering::SeqCst)
     }
 }
 
@@ -264,6 +403,92 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
         Sha256Digest::from_bytes([0x61; 32]),
     )
     .expect("authority")
+}
+
+fn concrete_release_codec() -> Arc<EnvelopeCodec> {
+    let key = LocalKeyMaterial::new(
+        KeyId::new("product-release-test-key-v1").expect("key ID"),
+        SecretBytes::new(vec![0x5a; 32]).expect("key material"),
+    )
+    .expect("local key material");
+    let keys = LocalAes256GcmKeyring::new(key, Vec::new(), Vec::new()).expect("local keyring");
+    Arc::new(EnvelopeCodec::new(Arc::new(keys)))
+}
+
+async fn concrete_release_handoff(
+    codec: &Arc<EnvelopeCodec>,
+    identity: GithubServerServiceAuthorityIdentity,
+    request: &AcquireGithubServerServiceHandoff,
+) -> GithubServerServiceCredentialHandoff {
+    const REQUESTED_AT: i64 = 1_000_000;
+    const REQUEST_DEADLINE: i64 = 1_120_000;
+    const PROVIDER_EXPIRES_AT: i64 = 4_600_000;
+    const TOKEN: &[u8] = b"ghs_product-release-test-token";
+    const FRAME_DOMAIN: &[u8] = b"automata-ci/github-server-service-installation-token/v1\0";
+
+    let mut frame =
+        Vec::with_capacity(FRAME_DOMAIN.len() + std::mem::size_of::<u32>() + TOKEN.len());
+    frame.extend_from_slice(FRAME_DOMAIN);
+    frame.extend_from_slice(
+        &u32::try_from(TOKEN.len())
+            .expect("bounded token")
+            .to_be_bytes(),
+    );
+    frame.extend_from_slice(TOKEN);
+    let generation = GithubServerServiceGeneration::new(1).expect("generation");
+    let metadata = GithubServerServiceEnvelopeMetadata::new(
+        identity.clone(),
+        generation,
+        UnixMillis::new(REQUESTED_AT),
+        UnixMillis::new(REQUEST_DEADLINE),
+        UnixMillis::new(PROVIDER_EXPIRES_AT),
+        u64::try_from(frame.len()).expect("frame length"),
+        Sha256Digest::from_bytes(Sha256::digest(&frame).into()),
+    )
+    .expect("envelope metadata");
+    let wrapping_context = identity
+        .wrapping_encryption_context(generation)
+        .expect("wrapping context");
+    let payload_context = metadata.encryption_context().expect("payload context");
+    let envelope = codec
+        .prepare(&wrapping_context)
+        .await
+        .expect("prepared envelope")
+        .seal_prepared(
+            &payload_context,
+            SecretBytes::new(frame).expect("token frame"),
+        );
+    let protected = ProtectedGithubServerServiceCredential::new(metadata.clone(), envelope)
+        .expect("protected credential");
+    let conservative_expiry = REQUEST_DEADLINE
+        + GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS
+        + 60_000
+        + GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS;
+    let receipt = GithubServerServiceIssuanceReceipt::from_durable_parts(
+        GithubServerServiceIssuanceKey::new(identity.authority_id(), generation),
+        GithubServerServiceIssuanceState::Ready,
+        1,
+        0,
+        UnixMillis::new(REQUESTED_AT),
+        UnixMillis::new(REQUEST_DEADLINE),
+        UnixMillis::new(conservative_expiry),
+        Some(UnixMillis::new(PROVIDER_EXPIRES_AT)),
+        metadata.safe_erase_after(),
+        Some(UnixMillis::new(1_005_000)),
+        UnixMillis::new(1_005_000),
+    )
+    .expect("ready receipt");
+    GithubServerServiceCredentialHandoff::from_durable_parts(
+        request.proposed_handoff_id(),
+        request.consumer(),
+        identity,
+        receipt,
+        request.required_through(),
+        UnixMillis::new(1_010_000),
+        request.observed_at(),
+        protected,
+    )
+    .expect("concrete handoff")
 }
 
 #[derive(Clone, Copy)]
@@ -638,12 +863,10 @@ async fn pending_release_is_replayed_exactly_and_drain_waits_for_confirmation() 
         reservation,
         Box::new(FakeExactRelease {
             attempts: Arc::clone(&release_attempts),
-            outcome: Mutex::new(Some(GithubProviderExactReleaseOutcome::Pending(Box::new(
-                FakePendingRelease {
-                    attempts: Arc::clone(&replay_attempts),
-                    confirm_on: 2,
-                },
-            )))),
+            pending: Mutex::new(Some(Arc::new(FakePendingRelease {
+                attempts: Arc::clone(&replay_attempts),
+                confirm_on: 2,
+            }))),
         }),
         UnixMillis::new(REQUIRED_THROUGH),
     );
@@ -695,6 +918,209 @@ async fn delivery_release_awaits_the_first_exact_attempt_without_owning_the_task
 }
 
 #[tokio::test]
+async fn release_watchdog_task_loss_retains_exact_custody_and_never_false_drains() {
+    let supervisor = GithubProviderCredentialReleaseSupervisor::new(
+        Arc::new(FakeClock::new(OBSERVED_AT)),
+        Handle::current(),
+        1,
+        Duration::from_millis(1),
+    )
+    .expect("release supervisor");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let finish = Arc::new(Semaphore::new(0));
+    let reservation = supervisor.try_reserve().expect("release reservation");
+    let initial_attempt = supervisor.supervise(
+        reservation,
+        Box::new(GatedExactRelease {
+            attempts: Arc::clone(&attempts),
+            finish: Arc::clone(&finish),
+        }),
+        UnixMillis::new(REQUIRED_THROUGH),
+    );
+    while attempts.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(supervisor.abort_pending_task(), "release watchdog exists");
+    assert!(
+        initial_attempt.await.is_err(),
+        "watchdog loss must be visible before initial classification"
+    );
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    assert_eq!(supervisor.available_capacity(), 0);
+    assert_eq!(supervisor.pending_release_count(), 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    for _ in 0..32 {
+        supervisor.redrive_retained();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "one active release driver must serialize concurrent recovery attempts"
+    );
+    finish.add_permits(1);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert_eq!(supervisor.available_capacity(), 1);
+    for _ in 0..32 {
+        supervisor.redrive_retained();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "confirmed release custody must never restart after removal"
+    );
+}
+
+#[tokio::test]
+async fn removed_release_custody_rejects_its_exact_stale_driver() {
+    let supervisor = GithubProviderCredentialReleaseSupervisor::new(
+        Arc::new(FakeClock::new(OBSERVED_AT)),
+        Handle::current(),
+        1,
+        Duration::from_millis(1),
+    )
+    .expect("release supervisor");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let finish = Arc::new(Semaphore::new(0));
+    let reservation = supervisor.try_reserve().expect("release reservation");
+    let initial_attempt = supervisor.supervise(
+        reservation,
+        Box::new(GatedExactRelease {
+            attempts: Arc::clone(&attempts),
+            finish: Arc::clone(&finish),
+        }),
+        UnixMillis::new(REQUIRED_THROUGH),
+    );
+
+    while attempts.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let stale_custody = supervisor
+        .custody
+        .lock()
+        .expect("provider credential release custody lock")
+        .first()
+        .cloned()
+        .expect("release custody retained before confirmation");
+    finish.add_permits(1);
+    initial_attempt.await.expect("confirmed exact release");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !stale_custody.removed.load(Ordering::Acquire)
+            || stale_custody.driver_active.load(Ordering::Acquire)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("release custody removed with no active driver");
+
+    let confirmed_calls = attempts.load(Ordering::SeqCst);
+    assert_eq!(confirmed_calls, 1);
+    assert!(!supervisor.start_driver(&stale_custody, None));
+    tokio::task::yield_now().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), confirmed_calls);
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    assert_eq!(supervisor.available_capacity(), 0);
+
+    drop(stale_custody);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert_eq!(supervisor.pending_release_count(), 0);
+    assert_eq!(supervisor.available_capacity(), 1);
+    assert!(supervisor.try_reserve().is_some());
+}
+
+#[tokio::test]
+async fn concrete_issuer_release_clamps_negative_clock_and_replays_exactly() {
+    let codec = concrete_release_codec();
+    let identity = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x6f0);
+    let request = AcquireGithubServerServiceHandoff::new(
+        GithubServerServiceAuthoritySelector::from_identity(&identity),
+        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0x6f1)).expect("handoff ID"),
+        consumer(GithubServerServiceAction::FetchPrivateRepositoryRevision),
+        UnixMillis::new(1_020_000),
+        UnixMillis::new(2_000_000),
+    )
+    .expect("acquire request");
+    let handoff = concrete_release_handoff(&codec, identity, &request).await;
+    let repository = Arc::new(ConcreteIssuerReleaseRepository::new(handoff));
+    let repository_port: Arc<dyn GithubServerServiceCredentialRepository> = repository.clone();
+    let clock = Arc::new(FakeClock::new(-1));
+    let clock_port: Arc<dyn GithubServerServiceCoordinatorClock> = clock.clone();
+    let issuer = Arc::new(GithubServerServiceCredentialIssuer::new(
+        repository_port.clone(),
+        codec,
+        clock_port.clone(),
+    ));
+    let credential = issuer.acquire(request).await.expect("concrete credential");
+    let (secret, binding) = credential.into_secret_and_binding();
+    drop(secret);
+    let required_through = binding.required_through();
+    let supervisor = Arc::new(
+        GithubProviderCredentialReleaseSupervisor::new(
+            clock_port,
+            Handle::current(),
+            1,
+            Duration::from_millis(1),
+        )
+        .expect("release supervisor"),
+    );
+    let reservation = supervisor.try_reserve().expect("release reservation");
+    let initial_attempt = supervisor.supervise(
+        reservation,
+        Box::new(IssuerHandoffRelease {
+            issuer,
+            repository: repository_port,
+            binding,
+        }),
+        required_through,
+    );
+
+    repository.wait_until_release_entered().await;
+    assert!(supervisor.abort_pending_task(), "release driver exists");
+    assert!(
+        initial_attempt.await.is_err(),
+        "outer task loss is visible to the first observer"
+    );
+    clock.set(-2);
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    repository.wait_until_release_entered().await;
+    let requests = repository.release_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].released_at(), UnixMillis::new(1_020_000));
+
+    let hammer_started = CancellationToken::new();
+    let stop_hammer = CancellationToken::new();
+    let hammer = tokio::spawn({
+        let supervisor = Arc::clone(&supervisor);
+        let hammer_started = hammer_started.clone();
+        let stop_hammer = stop_hammer.clone();
+        async move {
+            hammer_started.cancel();
+            while !stop_hammer.is_cancelled() {
+                supervisor.redrive_retained();
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    hammer_started.cancelled().await;
+    repository.finish.add_permits(1);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    stop_hammer.cancel();
+    hammer.await.expect("redrive hammer");
+    assert_eq!(repository.release_requests(), requests);
+    assert_eq!(supervisor.pending_release_count(), 0);
+    assert_eq!(supervisor.available_capacity(), 1);
+    drop(
+        supervisor
+            .try_reserve()
+            .expect("confirmed exact erasure returns capacity for reuse"),
+    );
+}
+
+#[tokio::test]
 async fn dropped_delivery_release_capability_keeps_exact_binding_supervised() {
     let supervisor = Arc::new(
         GithubProviderCredentialReleaseSupervisor::new(
@@ -712,7 +1138,10 @@ async fn dropped_delivery_release_capability_keeps_exact_binding_supervised() {
             reservation: Some(supervisor.try_reserve().expect("release reservation")),
             operation: Some(Box::new(FakeExactRelease {
                 attempts: Arc::clone(&attempts),
-                outcome: Mutex::new(Some(GithubProviderExactReleaseOutcome::Released)),
+                pending: Mutex::new(Some(Arc::new(FakePendingRelease {
+                    attempts: Arc::new(AtomicUsize::new(0)),
+                    confirm_on: 1,
+                }))),
             })),
             required_through: UnixMillis::new(REQUIRED_THROUGH),
             drop_release_armed: Arc::new(AtomicBool::new(true)),
@@ -735,17 +1164,16 @@ async fn unconfirmed_release_remains_observable_when_its_horizon_closes() {
         .expect("release supervisor"),
     );
     let replay_attempts = Arc::new(AtomicUsize::new(0));
+    let confirmed = Arc::new(AtomicBool::new(false));
     let reservation = supervisor.try_reserve().expect("release reservation");
     let initial_attempt = supervisor.supervise(
         reservation,
         Box::new(FakeExactRelease {
             attempts: Arc::new(AtomicUsize::new(0)),
-            outcome: Mutex::new(Some(GithubProviderExactReleaseOutcome::Pending(Box::new(
-                FakePendingRelease {
-                    attempts: Arc::clone(&replay_attempts),
-                    confirm_on: usize::MAX,
-                },
-            )))),
+            pending: Mutex::new(Some(Arc::new(SwitchablePendingRelease {
+                attempts: Arc::clone(&replay_attempts),
+                confirmed: Arc::clone(&confirmed),
+            }))),
         }),
         UnixMillis::new(REQUIRED_THROUGH),
     );
@@ -754,11 +1182,21 @@ async fn unconfirmed_release_remains_observable_when_its_horizon_closes() {
         tokio::task::yield_now().await;
     }
     clock.set(REQUIRED_THROUGH);
-    tokio::time::timeout(Duration::from_secs(1), supervisor.wait_for_idle())
-        .await
-        .expect("expired release drain completes");
-    assert_eq!(supervisor.pending_release_count(), 0);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while supervisor.expired_unconfirmed_release_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("expired release remains observable");
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    assert_eq!(supervisor.pending_release_count(), 1);
     assert_eq!(supervisor.expired_unconfirmed_release_count(), 1);
+    assert_eq!(supervisor.available_capacity(), 0);
+    confirmed.store(true, Ordering::SeqCst);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert_eq!(supervisor.pending_release_count(), 0);
+    assert_eq!(supervisor.expired_unconfirmed_release_count(), 0);
     assert_eq!(supervisor.available_capacity(), 1);
 }
 

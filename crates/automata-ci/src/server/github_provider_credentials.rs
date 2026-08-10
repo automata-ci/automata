@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -16,9 +16,8 @@ use automata_ci_core::UnixMillis;
 use automata_ci_credential_github::{
     GithubServerServiceCoordinatorClock, GithubServerServiceCredentialIssuer,
     GithubServerServiceCredentialRepository, GithubServerServiceHandoffBinding,
-    GithubServerServiceHandoffError, GithubServerServiceHandoffReleaseOutcome,
-    PendingGithubServerServiceCorruptionCleanup, PendingGithubServerServiceHandoffRelease,
-    github_server_service_credential_request,
+    GithubServerServiceHandoffError, PendingGithubServerServiceCorruptionCleanup,
+    PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
@@ -66,8 +65,10 @@ pub enum GithubProviderCredentialAdapterConfigurationError {
 /// A permit is reserved before Store can grant a handoff. Once the final
 /// provider future ends, the move-only release capability transfers the exact
 /// binding into this supervisor. An uncertain first release retains its exact
-/// request in the task and replays it without mutation until Store confirms it
-/// or the immutable handoff horizon closes.
+/// request in the bounded supervisor registry and replays it without mutation
+/// until Store confirms it. Crossing the immutable handoff horizon is recorded
+/// but never authorizes dropping custody. Watchdog task loss therefore remains
+/// non-drained and observable.
 pub struct GithubProviderCredentialReleaseSupervisor {
     clock: Arc<dyn GithubServerServiceCoordinatorClock>,
     runtime: Handle,
@@ -75,8 +76,9 @@ pub struct GithubProviderCredentialReleaseSupervisor {
     permits: Arc<Semaphore>,
     capacity: usize,
     pending: Arc<AtomicUsize>,
-    inconsistent: Arc<AtomicUsize>,
     expired_unconfirmed: Arc<AtomicUsize>,
+    custody: Arc<Mutex<Vec<Arc<SupervisedHandoffRelease>>>>,
+    drained: Arc<tokio::sync::Notify>,
 }
 
 impl GithubProviderCredentialReleaseSupervisor {
@@ -107,8 +109,9 @@ impl GithubProviderCredentialReleaseSupervisor {
             permits: Arc::new(Semaphore::new(capacity)),
             capacity,
             pending: Arc::new(AtomicUsize::new(0)),
-            inconsistent: Arc::new(AtomicUsize::new(0)),
             expired_unconfirmed: Arc::new(AtomicUsize::new(0)),
+            custody: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            drained: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -130,13 +133,7 @@ impl GithubProviderCredentialReleaseSupervisor {
         self.pending.load(Ordering::Acquire)
     }
 
-    /// Returns release bindings the issuer could not represent consistently.
-    #[must_use]
-    pub fn inconsistent_release_count(&self) -> usize {
-        self.inconsistent.load(Ordering::Acquire)
-    }
-
-    /// Returns ambiguous releases retained until their immutable horizon closed.
+    /// Returns unconfirmed releases that crossed their immutable use horizon.
     #[must_use]
     pub fn expired_unconfirmed_release_count(&self) -> usize {
         self.expired_unconfirmed.load(Ordering::Acquire)
@@ -150,13 +147,23 @@ impl GithubProviderCredentialReleaseSupervisor {
     /// the authoritative durable handoff or extend its immutable horizon.
     pub async fn wait_for_idle(&self) {
         let permit_count = u32::try_from(self.capacity).unwrap_or(u32::MAX);
-        let Ok(permits) = Arc::clone(&self.permits)
-            .acquire_many_owned(permit_count)
-            .await
-        else {
-            return;
-        };
-        drop(permits);
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            self.redrive_retained();
+            let permits = Arc::clone(&self.permits).acquire_many_owned(permit_count);
+            tokio::pin!(permits);
+            tokio::select! {
+                permits = &mut permits => {
+                    if let Ok(permits) = permits {
+                        drop(permits);
+                    }
+                    return;
+                }
+                () = &mut notified => {}
+            }
+        }
     }
 
     /// Waits up to `timeout` for all live or release-pending handoffs to end.
@@ -169,6 +176,7 @@ impl GithubProviderCredentialReleaseSupervisor {
     }
 
     fn try_reserve(&self) -> Option<GithubProviderCredentialReleaseReservation> {
+        self.redrive_retained();
         Arc::clone(&self.permits)
             .try_acquire_owned()
             .ok()
@@ -181,46 +189,126 @@ impl GithubProviderCredentialReleaseSupervisor {
         operation: Box<dyn GithubProviderExactHandoffRelease>,
         required_through: UnixMillis,
     ) -> oneshot::Receiver<()> {
+        let (initial_attempt_sender, initial_attempt_receiver) = oneshot::channel();
+        let pending = operation.freeze();
+        drop(operation);
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        let custody = Arc::new(SupervisedHandoffRelease {
+            _reservation: reservation,
+            _pending_observation: PendingReleaseObservation {
+                count: Arc::clone(&self.pending),
+            },
+            pending,
+            task_abort: Mutex::new(None),
+            driver_active: Arc::new(AtomicBool::new(false)),
+            required_through,
+            expiry_observed: AtomicBool::new(false),
+            removed: AtomicBool::new(false),
+        });
+        self.custody
+            .lock()
+            .expect("provider credential release custody lock")
+            .push(Arc::clone(&custody));
+
+        let started = self.start_driver(&custody, Some(initial_attempt_sender));
+        assert!(started, "new release custody starts one driver");
+        initial_attempt_receiver
+    }
+
+    fn start_driver(
+        &self,
+        custody: &Arc<SupervisedHandoffRelease>,
+        initial_attempt_sender: Option<oneshot::Sender<()>>,
+    ) -> bool {
+        if custody.removed.load(Ordering::Acquire) {
+            return false;
+        }
+        if custody
+            .driver_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if custody.removed.load(Ordering::Acquire) {
+            custody.driver_active.store(false, Ordering::Release);
+            self.drained.notify_waiters();
+            return false;
+        }
         let clock = Arc::clone(&self.clock);
-        let pending_count = Arc::clone(&self.pending);
-        let inconsistent_count = Arc::clone(&self.inconsistent);
+        let retained = Arc::clone(&self.custody);
+        let task_custody = Arc::clone(custody);
         let expired_count = Arc::clone(&self.expired_unconfirmed);
         let retry_interval = self.retry_interval;
-        let (initial_attempt_sender, initial_attempt_receiver) = oneshot::channel();
-        self.runtime.spawn(async move {
-            let _reservation = reservation;
-            match operation.release().await {
-                GithubProviderExactReleaseOutcome::Released => {
-                    let _send_result = initial_attempt_sender.send(());
-                }
-                GithubProviderExactReleaseOutcome::Inconsistent => {
-                    inconsistent_count.fetch_add(1, Ordering::AcqRel);
-                    let _send_result = initial_attempt_sender.send(());
-                }
-                GithubProviderExactReleaseOutcome::Pending(pending) => {
-                    pending_count.fetch_add(1, Ordering::AcqRel);
-                    let _pending_observation = PendingReleaseObservation {
-                        count: pending_count,
-                    };
-                    let _send_result = initial_attempt_sender.send(());
-                    loop {
-                        if clock.now() >= required_through {
-                            expired_count.fetch_add(1, Ordering::AcqRel);
-                            break;
-                        }
-                        tokio::time::sleep(retry_interval).await;
-                        if clock.now() >= required_through {
-                            expired_count.fetch_add(1, Ordering::AcqRel);
-                            break;
-                        }
-                        if pending.replay().await {
-                            break;
-                        }
+        let driver_active = ReleaseDriverObservation {
+            active: Arc::clone(&custody.driver_active),
+            drained: Arc::clone(&self.drained),
+        };
+        let task = self.runtime.spawn(async move {
+            let _driver_active = driver_active;
+            let mut initial_attempt_sender = initial_attempt_sender;
+            loop {
+                if task_custody.pending.replay().await {
+                    if let Some(initial_attempt_sender) = initial_attempt_sender.take() {
+                        let _ = initial_attempt_sender.send(());
                     }
+                    break;
                 }
+                if let Some(initial_attempt_sender) = initial_attempt_sender.take() {
+                    let _ = initial_attempt_sender.send(());
+                }
+                if clock.now() >= task_custody.required_through
+                    && !task_custody.expiry_observed.swap(true, Ordering::AcqRel)
+                {
+                    expired_count.fetch_add(1, Ordering::AcqRel);
+                }
+                tokio::time::sleep(retry_interval).await;
             }
+            if task_custody.expiry_observed.swap(false, Ordering::AcqRel) {
+                expired_count.fetch_sub(1, Ordering::AcqRel);
+            }
+            task_custody.removed.store(true, Ordering::Release);
+            drop(take_release_custody(&retained, &task_custody));
+            drop(task_custody);
         });
-        initial_attempt_receiver
+        *custody
+            .task_abort
+            .lock()
+            .expect("provider credential release task lock") = Some(task.abort_handle());
+        true
+    }
+
+    fn redrive_retained(&self) {
+        let custody = self
+            .custody
+            .lock()
+            .expect("provider credential release custody lock")
+            .clone();
+        for custody in custody {
+            let _ = self.start_driver(&custody, None);
+        }
+    }
+
+    #[cfg(test)]
+    fn abort_pending_task(&self) -> bool {
+        let custody = self
+            .custody
+            .lock()
+            .expect("provider credential release custody lock")
+            .first()
+            .cloned();
+        let Some(custody) = custody else {
+            return false;
+        };
+        let task = custody
+            .task_abort
+            .lock()
+            .expect("provider credential release task lock")
+            .clone();
+        task.is_some_and(|task| {
+            task.abort();
+            true
+        })
     }
 }
 
@@ -234,15 +322,55 @@ impl fmt::Debug for GithubProviderCredentialReleaseSupervisor {
             .field("available_capacity", &self.available_capacity())
             .field("pending_release_count", &self.pending_release_count())
             .field(
-                "inconsistent_release_count",
-                &self.inconsistent_release_count(),
-            )
-            .field(
                 "expired_unconfirmed_release_count",
                 &self.expired_unconfirmed_release_count(),
             )
+            .field(
+                "retained_custody",
+                &self
+                    .custody
+                    .lock()
+                    .expect("provider credential release custody lock")
+                    .len(),
+            )
             .finish_non_exhaustive()
     }
+}
+
+struct SupervisedHandoffRelease {
+    _reservation: GithubProviderCredentialReleaseReservation,
+    _pending_observation: PendingReleaseObservation,
+    pending: Arc<dyn GithubProviderPendingHandoffRelease>,
+    task_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    driver_active: Arc<AtomicBool>,
+    required_through: UnixMillis,
+    expiry_observed: AtomicBool,
+    removed: AtomicBool,
+}
+
+struct ReleaseDriverObservation {
+    active: Arc<AtomicBool>,
+    drained: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for ReleaseDriverObservation {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        self.drained.notify_waiters();
+    }
+}
+
+fn take_release_custody(
+    retained: &Mutex<Vec<Arc<SupervisedHandoffRelease>>>,
+    target: &Arc<SupervisedHandoffRelease>,
+) -> Option<Arc<SupervisedHandoffRelease>> {
+    let mut retained = retained
+        .lock()
+        .expect("provider credential release custody lock");
+    let position = retained
+        .iter()
+        .position(|entry| Arc::ptr_eq(entry, target))?;
+    Some(retained.swap_remove(position))
 }
 
 struct GithubProviderCredentialReleaseReservation {
@@ -264,15 +392,8 @@ trait GithubProviderPendingHandoffRelease: fmt::Debug + Send + Sync {
     async fn replay(&self) -> bool;
 }
 
-enum GithubProviderExactReleaseOutcome {
-    Released,
-    Pending(Box<dyn GithubProviderPendingHandoffRelease>),
-    Inconsistent,
-}
-
-#[async_trait]
 trait GithubProviderExactHandoffRelease: fmt::Debug + Send + Sync {
-    async fn release(self: Box<Self>) -> GithubProviderExactReleaseOutcome;
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease>;
 }
 
 struct IssuerHandoffRelease {
@@ -281,21 +402,19 @@ struct IssuerHandoffRelease {
     binding: GithubServerServiceHandoffBinding,
 }
 
-#[async_trait]
 impl GithubProviderExactHandoffRelease for IssuerHandoffRelease {
-    async fn release(self: Box<Self>) -> GithubProviderExactReleaseOutcome {
-        match self.issuer.release_binding(self.binding).await {
-            Ok(GithubServerServiceHandoffReleaseOutcome::Released) => {
-                GithubProviderExactReleaseOutcome::Released
-            }
-            Ok(GithubServerServiceHandoffReleaseOutcome::Pending(pending)) => {
-                GithubProviderExactReleaseOutcome::Pending(Box::new(CorePendingHandoffRelease {
-                    repository: self.repository,
-                    pending,
-                }))
-            }
-            Err(_) => GithubProviderExactReleaseOutcome::Inconsistent,
-        }
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease> {
+        // Production bindings are privately constructed from a validated durable
+        // handoff. Core clamps the sampled clock to that nonnegative acquisition
+        // timestamp, so ReleaseGithubServerServiceHandoff cannot reject it.
+        let pending = self
+            .issuer
+            .prepare_release_binding(self.binding.clone())
+            .expect("a validated handoff binding always forms an exact release");
+        Arc::new(CorePendingHandoffRelease {
+            repository: Arc::clone(&self.repository),
+            pending,
+        })
     }
 }
 
@@ -338,16 +457,12 @@ impl fmt::Debug for CorePendingCorruptionCleanup {
 }
 
 struct RetainedPendingRelease {
-    pending: Option<Box<dyn GithubProviderPendingHandoffRelease>>,
+    pending: Arc<dyn GithubProviderPendingHandoffRelease>,
 }
 
-#[async_trait]
 impl GithubProviderExactHandoffRelease for RetainedPendingRelease {
-    async fn release(mut self: Box<Self>) -> GithubProviderExactReleaseOutcome {
-        self.pending.take().map_or(
-            GithubProviderExactReleaseOutcome::Inconsistent,
-            GithubProviderExactReleaseOutcome::Pending,
-        )
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease> {
+        Arc::clone(&self.pending)
     }
 }
 
@@ -479,10 +594,10 @@ impl GithubProviderCredentialHandoffIssuer for ExactCredentialHandoffIssuer {
                 drop(self.releases.supervise(
                     reservation,
                     Box::new(RetainedPendingRelease {
-                        pending: Some(Box::new(CorePendingCorruptionCleanup {
+                        pending: Arc::new(CorePendingCorruptionCleanup {
                             repository: Arc::clone(&self.repository),
                             pending: *pending,
-                        })),
+                        }),
                     }),
                     UnixMillis::new(i64::MAX),
                 ));

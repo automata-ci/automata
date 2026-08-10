@@ -2949,6 +2949,63 @@ async fn commit_replay_requires_identical_time_disposition_metadata_and_envelope
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn permanent_terminal_replay_precedes_mutable_issuance_and_graph_locks() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        supersede_ready_authority(&database, &fixture).await?;
+        let revocation = database
+            .store()
+            .claim_github_runtime_authority_revocation(revocation_claim(
+                AuthorityFixture::owner(1_750),
+                5_000,
+            )?)
+            .await?
+            .expect("revocation claim");
+        let confirm = ConfirmGithubRuntimeAuthorityRevocation::provider_no_content(
+            &revocation,
+            revocation.claimed_at(),
+        )?;
+        let terminal = database
+            .store()
+            .confirm_github_runtime_authority_revocation(confirm)
+            .await?;
+        assert_eq!(terminal.state(), GithubRuntimeAuthorityState::Revoked);
+
+        for lock_sql in [
+            "SELECT attempt_id FROM github_runtime_authority_issuances \
+             WHERE attempt_id = $1 AND fencing_token = 7 FOR UPDATE",
+            "SELECT id FROM job_attempts WHERE id = $1 FOR UPDATE",
+        ] {
+            let mut blocker = database.pool().begin().await?;
+            let locked = sqlx::query(lock_sql)
+                .bind(fixture.identity.key().attempt_id().as_uuid())
+                .fetch_all(&mut *blocker)
+                .await?;
+            assert_eq!(locked.len(), 1, "mutable lock fixture must select one row");
+
+            let store = database.store().clone();
+            let mut replay = tokio::spawn(async move {
+                store
+                    .confirm_github_runtime_authority_revocation(confirm)
+                    .await
+            });
+            let replay_result = tokio::time::timeout(Duration::from_millis(500), &mut replay).await;
+            blocker.rollback().await?;
+            let Ok(joined) = replay_result else {
+                replay.await??;
+                return Err("permanent replay waited for a mutable issuance or graph lock".into());
+            };
+            let replayed = joined??;
+            assert_eq!(replayed, terminal);
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn lease_extension_invalidates_without_mutating_authority_horizons() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;

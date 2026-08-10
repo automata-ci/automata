@@ -80,6 +80,19 @@ fn identifiers_limits_and_key_material_are_validated() {
     assert!(GithubInstallationId::new(0).is_err());
     assert!(GithubAppHttpLimits::new(0, Duration::from_secs(1), Duration::from_secs(2)).is_err());
     assert!(GithubAppHttpLimits::new(10, Duration::from_secs(3), Duration::from_secs(2)).is_err());
+    for (connect_timeout, request_timeout) in [
+        (Duration::from_micros(1_500), Duration::from_millis(2)),
+        (Duration::from_millis(1), Duration::from_micros(2_500)),
+        (Duration::from_nanos(1), Duration::from_millis(1)),
+    ] {
+        assert!(
+            GithubAppHttpLimits::new(10, connect_timeout, request_timeout).is_err(),
+            "fractional-millisecond provider bounds must fail before client construction"
+        );
+    }
+    assert!(
+        GithubAppHttpLimits::new(10, Duration::from_millis(1), Duration::from_millis(2)).is_ok()
+    );
     let invalid_issuer = ProviderResourceId::new("bad:issuer").unwrap();
     assert!(
         GithubAppCredentialConfig::github_dot_com(invalid_issuer, installation(), "automata/0.1.0")

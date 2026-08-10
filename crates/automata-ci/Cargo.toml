@@ -79,7 +79,12 @@ automata-ci-build-support.workspace = true
 
 [dev-dependencies]
 automata-ci-protocol-protobuf.workspace = true
+automata-ci-scm.workspace = true
+pem-rfc7468.workspace = true
 rcgen.workspace = true
+ring.workspace = true
+sqlx.workspace = true
+tar.workspace = true
 
 [lints]
 workspace = true

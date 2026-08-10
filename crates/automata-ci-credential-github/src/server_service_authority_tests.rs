@@ -106,6 +106,7 @@ impl GithubServerServiceCredentialRequestResolver for ExactResolver {
 struct FakeBroker {
     mode: BrokerMode,
     installation_id: u64,
+    maximum_request_duration: Duration,
     mint_calls: AtomicUsize,
     revoke_calls: AtomicUsize,
 }
@@ -119,9 +120,15 @@ impl FakeBroker {
         Self {
             mode,
             installation_id,
+            maximum_request_duration: Duration::from_secs(1),
             mint_calls: AtomicUsize::new(0),
             revoke_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn with_maximum_request_duration(mut self, maximum_request_duration: Duration) -> Self {
+        self.maximum_request_duration = maximum_request_duration;
+        self
     }
 
     fn candidate() -> GithubInstallationTokenRevocationCandidate {
@@ -140,7 +147,7 @@ impl fmt::Debug for FakeBroker {
 #[async_trait]
 impl GithubServerServiceCredentialBroker for FakeBroker {
     fn maximum_request_duration(&self, installation_id: u64) -> Option<Duration> {
-        (installation_id == self.installation_id).then(|| Duration::from_secs(1))
+        (installation_id == self.installation_id).then_some(self.maximum_request_duration)
     }
 
     async fn mint_once(
@@ -208,6 +215,7 @@ struct FakeRepository {
     private_identity: GithubServerServiceAuthorityIdentity,
     codec: Arc<EnvelopeCodec>,
     corrupt_handoff: AtomicBool,
+    begin_calls: AtomicUsize,
     acquire_calls: AtomicUsize,
     quarantine_calls: Mutex<Vec<QuarantineGithubServerServiceCredential>>,
     release_calls: Mutex<Vec<ReleaseGithubServerServiceHandoff>>,
@@ -228,6 +236,7 @@ impl FakeRepository {
             ),
             codec,
             corrupt_handoff: AtomicBool::new(false),
+            begin_calls: AtomicUsize::new(0),
             acquire_calls: AtomicUsize::new(0),
             quarantine_calls: Mutex::new(Vec::new()),
             release_calls: Mutex::new(Vec::new()),
@@ -262,6 +271,7 @@ impl GithubServerServiceCredentialRepository for FakeRepository {
         &self,
         request: BeginGithubServerServiceMint,
     ) -> Result<GithubServerServiceMintCutoffOutcome, GithubServerServiceStoreError> {
+        self.begin_calls.fetch_add(1, Ordering::SeqCst);
         let evidence = GithubServerServiceMintCutoffEvidence {
             receipt: minting_receipt(&request),
             claim_expires_at: request.claim_expires_at(),
@@ -509,6 +519,69 @@ async fn already_started_and_finally_late_cutoffs_never_poll_the_provider() {
 }
 
 #[tokio::test]
+async fn fractional_broker_duration_never_reaches_mint_cutoff_or_provider() {
+    let codec = codec();
+    let repository = Arc::new(FakeRepository::new(codec.clone()));
+    let broker = Arc::new(
+        FakeBroker::new(BrokerMode::Rejected)
+            .with_maximum_request_duration(Duration::from_micros(1_500)),
+    );
+    let coordinator = coordinator(
+        repository.clone(),
+        broker.clone(),
+        codec,
+        Arc::new(ScriptedClock::new([1_001_000])),
+    );
+
+    assert_eq!(
+        coordinator
+            .coordinate_claimed_mint(claimed_mint(repository.checks_identity.clone(), 1_120_000,))
+            .await
+            .expect_err("fractional broker duration must fail closed"),
+        GithubServerServiceCoordinatorError::Inconsistent
+    );
+    assert_eq!(repository.begin_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(broker.mint_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fractional_broker_duration_never_reaches_revocation_provider() {
+    let codec = codec();
+    let repository = Arc::new(FakeRepository::new(codec.clone()));
+    let broker = Arc::new(
+        FakeBroker::new(BrokerMode::RevocationRetry)
+            .with_maximum_request_duration(Duration::from_micros(1_500)),
+    );
+    let coordinator = coordinator(
+        repository.clone(),
+        broker.clone(),
+        codec.clone(),
+        Arc::new(ScriptedClock::new([1_030_000])),
+    );
+    let claimed = claimed_revocation(&codec, repository.private_identity.clone()).await;
+
+    let outcome = coordinator
+        .coordinate_maintenance(GithubServerServiceMaintenanceOutcome::Revocation(Box::new(
+            claimed,
+        )))
+        .await
+        .expect("fractional duration retains a closed retry result");
+    assert!(matches!(
+        outcome,
+        GithubServerServiceCoordinationOutcome::RevocationCommitPending(_)
+    ));
+    assert_eq!(broker.revoke_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        repository
+            .revocation_dispositions
+            .lock()
+            .expect("revocation dispositions")
+            .is_empty(),
+        "the retained Finish request must remain unpolled"
+    );
+}
+
+#[tokio::test]
 async fn unique_unknown_expiry_is_protected_as_revoke_only() {
     let codec = codec();
     let repository = Arc::new(FakeRepository::new(codec.clone()));
@@ -604,6 +677,15 @@ async fn installation_router_rejects_ambiguity_and_has_no_default() {
         .expect_err("duplicate installation"),
         GithubServerServiceInstallationRouterError::DuplicateInstallationId
     );
+    let fractional: Arc<dyn GithubServerServiceCredentialBroker> = Arc::new(
+        FakeBroker::new(BrokerMode::Rejected)
+            .with_maximum_request_duration(Duration::from_micros(1_500)),
+    );
+    assert_eq!(
+        GithubServerServiceInstallationRouter::new([(INSTALLATION_ID, fractional)])
+            .expect_err("fractional broker duration"),
+        GithubServerServiceInstallationRouterError::BrokerMismatch
+    );
     let router = GithubServerServiceInstallationRouter::new([(INSTALLATION_ID, erased)])
         .expect("exact router");
     assert_eq!(router.len(), 1);
@@ -688,6 +770,43 @@ async fn protected_handoffs_round_trip_and_replay_the_natural_key_winner() {
         issuer.release(second).await.expect("second release"),
         GithubServerServiceHandoffReleaseOutcome::Released
     ));
+}
+
+#[tokio::test]
+async fn prepared_handoff_release_replays_one_frozen_timestamp_after_clock_advance() {
+    let codec = codec();
+    let repository = Arc::new(FakeRepository::new(codec.clone()));
+    let clock = Arc::new(ScriptedClock::new([1_030_000, 1_040_000]));
+    let issuer = GithubServerServiceCredentialIssuer::new(repository.clone(), codec, clock.clone());
+    let credential = issuer
+        .acquire(acquire_request(
+            &repository.private_identity,
+            handoff_id(0x603),
+            consumer(
+                GithubServerServiceAction::FetchPrivateRepositoryRevision,
+                0x503,
+            ),
+        ))
+        .await
+        .expect("exact handoff");
+    let (secret, binding) = credential.into_secret_and_binding();
+    drop(secret);
+    let pending = issuer
+        .prepare_release_binding(binding)
+        .expect("frozen release request");
+    assert_eq!(clock.now(), UnixMillis::new(1_040_000));
+
+    pending
+        .replay(repository.as_ref())
+        .await
+        .expect("first exact release");
+    pending
+        .replay(repository.as_ref())
+        .await
+        .expect("same exact release replay");
+    let releases = repository.release_calls.lock().expect("release calls");
+    assert_eq!(releases.len(), 2);
+    assert_eq!(releases[0], releases[1]);
 }
 
 #[tokio::test]

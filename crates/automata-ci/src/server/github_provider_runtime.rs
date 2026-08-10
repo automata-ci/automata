@@ -11,8 +11,8 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicI64, AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1103,16 +1103,20 @@ impl CredentialMaintenancePort for ServerServiceCredentialMaintenance {
             GithubServerServiceCoordinationOutcome::MintCommitPending(pending) => {
                 CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
                     PendingMintCommit {
-                        pending,
-                        repository: self.repository.clone(),
+                        pending: Box::new(CorePendingMintCommit {
+                            pending,
+                            repository: self.repository.clone(),
+                        }),
                     },
                 )))
             }
             GithubServerServiceCoordinationOutcome::RevocationCommitPending(pending) => {
                 CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
                     PendingRevocationCommit {
-                        pending,
-                        repository: self.repository.clone(),
+                        pending: Box::new(CorePendingRevocationCommit {
+                            pending,
+                            repository: self.repository.clone(),
+                        }),
                     },
                 )))
             }
@@ -1136,14 +1140,13 @@ impl fmt::Debug for ServerServiceCredentialMaintenance {
 }
 
 struct PendingMintCommit {
-    pending: Box<PendingGithubServerServiceMintCommit>,
-    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    pending: Box<dyn PendingCredentialCommit>,
 }
 
 #[async_trait]
 impl PendingCredentialCommit for PendingMintCommit {
     async fn replay(&self) -> bool {
-        self.pending.replay(self.repository.as_ref()).await.is_ok()
+        self.pending.replay().await
     }
 }
 
@@ -1152,20 +1155,40 @@ impl fmt::Debug for PendingMintCommit {
         formatter
             .debug_struct("PendingMintCommit")
             .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+struct CorePendingMintCommit {
+    pending: Box<PendingGithubServerServiceMintCommit>,
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for CorePendingMintCommit {
+    async fn replay(&self) -> bool {
+        self.pending.replay(self.repository.as_ref()).await.is_ok()
+    }
+}
+
+impl fmt::Debug for CorePendingMintCommit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorePendingMintCommit")
+            .field("pending", &self.pending)
             .field("repository", &"[CREDENTIAL REPOSITORY]")
             .finish()
     }
 }
 
 struct PendingRevocationCommit {
-    pending: Box<PendingGithubServerServiceRevocationCommit>,
-    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    pending: Box<dyn PendingCredentialCommit>,
 }
 
 #[async_trait]
 impl PendingCredentialCommit for PendingRevocationCommit {
     async fn replay(&self) -> bool {
-        self.pending.replay(self.repository.as_ref()).await.is_ok()
+        self.pending.replay().await
     }
 }
 
@@ -1173,6 +1196,27 @@ impl fmt::Debug for PendingRevocationCommit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PendingRevocationCommit")
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+struct CorePendingRevocationCommit {
+    pending: Box<PendingGithubServerServiceRevocationCommit>,
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for CorePendingRevocationCommit {
+    async fn replay(&self) -> bool {
+        self.pending.replay(self.repository.as_ref()).await.is_ok()
+    }
+}
+
+impl fmt::Debug for CorePendingRevocationCommit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorePendingRevocationCommit")
             .field("pending", &self.pending)
             .field("repository", &"[CREDENTIAL REPOSITORY]")
             .finish()
@@ -1186,6 +1230,7 @@ struct CredentialMaintenanceCommitSupervisor {
     permits: Arc<Semaphore>,
     outstanding: Arc<AtomicUsize>,
     drained: Arc<tokio::sync::Notify>,
+    custody: Arc<Mutex<Option<Arc<SupervisedCredentialCommit>>>>,
 }
 
 impl CredentialMaintenanceCommitSupervisor {
@@ -1196,10 +1241,12 @@ impl CredentialMaintenanceCommitSupervisor {
             permits: Arc::new(Semaphore::new(MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS)),
             outstanding: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(tokio::sync::Notify::new()),
+            custody: Arc::new(Mutex::new(None)),
         }
     }
 
     fn try_reserve(&self) -> Option<CredentialMaintenanceCommitReservation> {
+        self.redrive_retained();
         self.outstanding.fetch_add(1, Ordering::AcqRel);
         let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
             self.outstanding.fetch_sub(1, Ordering::AcqRel);
@@ -1218,25 +1265,121 @@ impl CredentialMaintenanceCommitSupervisor {
         reservation: CredentialMaintenanceCommitReservation,
         pending: Box<dyn PendingCredentialCommit>,
     ) -> oneshot::Receiver<()> {
-        let pending: Arc<dyn PendingCredentialCommit> = Arc::from(pending);
-        let attempt_runtime = self.runtime.clone();
-        let retry_interval = self.retry_interval;
+        let custody = Arc::new(SupervisedCredentialCommit {
+            _reservation: reservation,
+            pending: Arc::from(pending),
+            task_abort: Mutex::new(None),
+            driver_active: Arc::new(AtomicBool::new(false)),
+            removed: AtomicBool::new(false),
+        });
+        {
+            let mut retained = self
+                .custody
+                .lock()
+                .expect("service-credential custody lock");
+            assert!(
+                retained.is_none(),
+                "a bounded service-credential permit admits only one exact request"
+            );
+            *retained = Some(Arc::clone(&custody));
+        }
+
         let (result_sender, result_receiver) = oneshot::channel();
-        self.runtime.spawn(async move {
-            let _reservation = reservation;
+        let started = self.start_driver(&custody, Some(result_sender));
+        assert!(started, "new service-credential custody starts one driver");
+        result_receiver
+    }
+
+    fn start_driver(
+        &self,
+        custody: &Arc<SupervisedCredentialCommit>,
+        result_sender: Option<oneshot::Sender<()>>,
+    ) -> bool {
+        if custody.removed.load(Ordering::Acquire) {
+            return false;
+        }
+        if custody
+            .driver_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if custody.removed.load(Ordering::Acquire) {
+            custody.driver_active.store(false, Ordering::Release);
+            self.drained.notify_waiters();
+            return false;
+        }
+        let retained = Arc::clone(&self.custody);
+        let task_custody = Arc::clone(custody);
+        let retry_interval = self.retry_interval;
+        let driver_active = CredentialCommitDriverObservation {
+            active: Arc::clone(&custody.driver_active),
+            drained: Arc::clone(&self.drained),
+        };
+        let task = self.runtime.spawn(async move {
+            let _driver_active = driver_active;
             loop {
-                let attempt_pending = pending.clone();
-                let attempt = attempt_runtime
-                    .spawn(async move { attempt_pending.replay().await })
-                    .await;
-                if attempt.is_ok_and(|confirmed| confirmed) {
-                    let _ = result_sender.send(());
+                if task_custody.pending.replay().await {
                     break;
                 }
                 tokio::time::sleep(retry_interval).await;
             }
+            task_custody.removed.store(true, Ordering::Release);
+            let removed = {
+                let mut retained = retained.lock().expect("service-credential custody lock");
+                if retained
+                    .as_ref()
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &task_custody))
+                {
+                    retained.take()
+                } else {
+                    None
+                }
+            };
+            drop(removed);
+            drop(task_custody);
+            if let Some(result_sender) = result_sender {
+                let _ = result_sender.send(());
+            }
         });
-        result_receiver
+        *custody
+            .task_abort
+            .lock()
+            .expect("service-credential task lock") = Some(task.abort_handle());
+        true
+    }
+
+    fn redrive_retained(&self) {
+        let custody = self
+            .custody
+            .lock()
+            .expect("service-credential custody lock")
+            .clone();
+        if let Some(custody) = custody {
+            let _ = self.start_driver(&custody, None);
+        }
+    }
+
+    #[cfg(test)]
+    fn abort_pending_task(&self) -> bool {
+        let custody = self
+            .custody
+            .lock()
+            .expect("service-credential custody lock")
+            .clone();
+        let Some(custody) = custody else {
+            return false;
+        };
+        let task = custody
+            .task_abort
+            .lock()
+            .expect("service-credential task lock")
+            .clone();
+        task.is_some_and(|task| {
+            task.abort();
+            true
+        })
     }
 
     fn close(&self) {
@@ -1246,6 +1389,9 @@ impl CredentialMaintenanceCommitSupervisor {
     async fn wait_for_idle(&self) {
         loop {
             let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            self.redrive_retained();
             if self.outstanding.load(Ordering::Acquire) == 0 {
                 return;
             }
@@ -1267,7 +1413,35 @@ impl fmt::Debug for CredentialMaintenanceCommitSupervisor {
             .field("retry_interval", &self.retry_interval)
             .field("outstanding", &self.outstanding.load(Ordering::Acquire))
             .field("available_capacity", &self.permits.available_permits())
+            .field(
+                "retained_custody",
+                &self
+                    .custody
+                    .lock()
+                    .expect("service-credential custody lock")
+                    .is_some(),
+            )
             .finish_non_exhaustive()
+    }
+}
+
+struct SupervisedCredentialCommit {
+    _reservation: CredentialMaintenanceCommitReservation,
+    pending: Arc<dyn PendingCredentialCommit>,
+    task_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    driver_active: Arc<AtomicBool>,
+    removed: AtomicBool,
+}
+
+struct CredentialCommitDriverObservation {
+    active: Arc<AtomicBool>,
+    drained: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for CredentialCommitDriverObservation {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        self.drained.notify_waiters();
     }
 }
 

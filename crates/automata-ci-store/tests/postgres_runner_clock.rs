@@ -1178,6 +1178,10 @@ async fn lease_offer_receipt_completion_persists_successor_continuity_after_encr
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep the exact primary projection, post-decrypt expiry, and KMS-free fallback replay in one linear regression"
+)]
 async fn lease_offer_receipt_replay_resamples_horizon_after_decryption() -> TestResult {
     run_with_database(|database| async move {
         let fixture = claim_attempt(&database, 10_000).await?;

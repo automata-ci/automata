@@ -38,6 +38,7 @@ use crate::{
     GithubAppCredentialBroker, GithubInstallationTokenIndeterminateReason,
     GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
     GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
+    config::whole_milliseconds,
 };
 
 const SERVER_SERVICE_TOKEN_FRAME_DOMAIN: &[u8] =
@@ -279,7 +280,11 @@ impl GithubServerServiceInstallationRouter {
             if brokers.len() >= MAX_GITHUB_SERVER_SERVICE_INSTALLATION_BROKERS {
                 return Err(GithubServerServiceInstallationRouterError::TooMany);
             }
-            if broker.maximum_request_duration(installation_id).is_none() {
+            if broker
+                .maximum_request_duration(installation_id)
+                .and_then(exact_request_millis)
+                .is_none()
+            {
                 return Err(GithubServerServiceInstallationRouterError::BrokerMismatch);
             }
             if brokers.insert(installation_id, broker).is_some() {
@@ -1311,6 +1316,25 @@ impl GithubServerServiceCredentialIssuer {
         &self,
         binding: GithubServerServiceHandoffBinding,
     ) -> Result<GithubServerServiceHandoffReleaseOutcome, GithubServerServiceHandoffError> {
+        let pending = self.prepare_release_binding(binding)?;
+        match pending.replay(self.repository.as_ref()).await {
+            Ok(()) => Ok(GithubServerServiceHandoffReleaseOutcome::Released),
+            Err(_) => Ok(GithubServerServiceHandoffReleaseOutcome::Pending(pending)),
+        }
+    }
+
+    /// Freezes an exact release request before its first Store poll.
+    ///
+    /// Replaying the returned value never resamples the coordinator clock or
+    /// changes any binding field.
+    ///
+    /// # Errors
+    ///
+    /// Returns only when the exact release request cannot be constructed.
+    pub fn prepare_release_binding(
+        &self,
+        binding: GithubServerServiceHandoffBinding,
+    ) -> Result<PendingGithubServerServiceHandoffRelease, GithubServerServiceHandoffError> {
         let released_at = self.clock.now().max(binding.acquired_at);
         let request = ReleaseGithubServerServiceHandoff::new(
             binding.selector,
@@ -1319,16 +1343,7 @@ impl GithubServerServiceCredentialIssuer {
             released_at,
         )
         .map_err(|_| GithubServerServiceHandoffError::Inconsistent)?;
-        match self
-            .repository
-            .release_github_server_service_handoff(request.clone())
-            .await
-        {
-            Ok(()) => Ok(GithubServerServiceHandoffReleaseOutcome::Released),
-            Err(_) => Ok(GithubServerServiceHandoffReleaseOutcome::Pending(
-                PendingGithubServerServiceHandoffRelease { request },
-            )),
-        }
+        Ok(PendingGithubServerServiceHandoffRelease { request })
     }
 }
 
@@ -1579,10 +1594,7 @@ fn request_fits_live_window(
     request_deadline: UnixMillis,
     maximum_duration: Duration,
 ) -> bool {
-    let duration = i64::try_from(maximum_duration.as_millis())
-        .ok()
-        .filter(|duration| *duration > 0);
-    duration
+    exact_request_millis(maximum_duration)
         .and_then(|duration| observed_at.get().checked_add(duration))
         .is_some_and(|completion| {
             observed_at < claim_expires_at
@@ -1590,6 +1602,12 @@ fn request_fits_live_window(
                 && completion <= claim_expires_at.get()
                 && completion <= request_deadline.get()
         })
+}
+
+fn exact_request_millis(duration: Duration) -> Option<i64> {
+    whole_milliseconds(duration)
+        .and_then(|milliseconds| i64::try_from(milliseconds).ok())
+        .filter(|milliseconds| *milliseconds > 0)
 }
 
 fn bounded_retry_at(

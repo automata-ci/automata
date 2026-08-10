@@ -14,6 +14,15 @@ const MAX_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_USER_AGENT_BYTES: usize = 256;
 const MAX_ISSUER_BYTES: usize = 128;
 
+/// Returns the exact whole-millisecond representation accepted by durable
+/// provider policy, without rounding a finer timeout down.
+pub(crate) fn whole_milliseconds(duration: Duration) -> Option<u128> {
+    duration
+        .as_nanos()
+        .is_multiple_of(1_000_000)
+        .then_some(duration.as_millis())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Bounded response-size and wall-clock limits for GitHub HTTP operations.
 ///
@@ -30,8 +39,8 @@ impl GithubAppHttpLimits {
     ///
     /// # Errors
     ///
-    /// Rejects zero or excessive values and connect timeouts longer than the
-    /// complete request timeout.
+    /// Rejects zero, sub-millisecond or fractional-millisecond, or excessive
+    /// values and connect timeouts longer than the complete request timeout.
     pub fn new(
         max_response_bytes: usize,
         connect_timeout: Duration,
@@ -42,6 +51,8 @@ impl GithubAppHttpLimits {
         }
         if connect_timeout.is_zero()
             || request_timeout.is_zero()
+            || whole_milliseconds(connect_timeout).is_none()
+            || whole_milliseconds(request_timeout).is_none()
             || connect_timeout > request_timeout
             || request_timeout > MAX_TIMEOUT
         {

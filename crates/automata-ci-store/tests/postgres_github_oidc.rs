@@ -913,13 +913,7 @@ async fn seed_current_profiled_execution(
     Ok((execution, fixture.manifest))
 }
 
-async fn insert_runtime_authority_candidate(
-    database: &TestDatabase,
-    execution: &GithubOidcExecutionIdentity,
-    substitution: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r"
+const INSERT_RUNTIME_AUTHORITY_CANDIDATE_SQL: &str = r"
         INSERT INTO github_runtime_authority_issuances (
             tenant_id, attempt_id, fencing_token, lease_id,
             lease_issued_at_ms, lease_expires_at_ms, run_id, job_id,
@@ -931,7 +925,21 @@ async fn insert_runtime_authority_candidate(
             github_app_jwt_issuer_kind, github_app_jwt_issuer_value,
             github_repository_id, github_repository_name,
             authority_namespace, policy_digest, issuer_fingerprint,
-            configuration_fingerprint, requested_at_ms,
+            configuration_fingerprint,
+            preparation_selection_id, preparation_selection_owner_id,
+            preparation_selection_generation,
+            preparation_selection_descriptor_digest,
+            preparation_selection_claimed_at_ms,
+            preparation_selection_expires_at_ms,
+            activation_selection_id, activation_selection_owner_id,
+            activation_selection_generation, activation_selection_input_digest,
+            activation_selection_claimed_at_ms, activation_selection_expires_at_ms,
+            materialization_selection_id, materialization_selection_owner_id,
+            materialization_selection_generation,
+            materialization_selection_descriptor_digest,
+            materialization_selection_claimed_at_ms,
+            materialization_selection_expires_at_ms,
+            requested_at_ms,
             request_deadline_at_ms, conservative_expiry_at_ms,
             mint_claim_owner_id, mint_claimed_at_ms,
             mint_claim_expires_at_ms, state_updated_at_ms
@@ -966,6 +974,17 @@ async fn insert_runtime_authority_candidate(
                CASE WHEN $2 = 'configuration_fingerprint'
                     THEN decode(repeat('fc', 32), 'hex')
                     ELSE checks_authority.configuration_fingerprint END,
+               preparation.origin_selection_id, preparation.owner_id,
+               preparation.generation, preparation.descriptor_digest,
+               preparation.claimed_at_ms, preparation.expires_at_ms,
+               logical_job.activation_origin_selection_id,
+               publication.activation_owner_id, publication.activation_generation,
+               publication.activation_input_digest,
+               publication.activation_claimed_at_ms,
+               publication.activation_expires_at_ms,
+               materialization.origin_selection_id, materialization.owner_id,
+               materialization.generation, materialization.descriptor_digest,
+               materialization.claimed_at_ms, materialization.expires_at_ms,
                attempt.lease_issued_at_ms,
                LEAST(attempt.lease_expires_at_ms,
                      attempt.lease_issued_at_ms + 120000),
@@ -979,6 +998,25 @@ async fn insert_runtime_authority_candidate(
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
+        JOIN workflow_plan_v2_concrete_jobs AS concrete
+          ON concrete.job_id = job.id
+         AND concrete.initial_attempt_id = attempt.id
+        JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+          ON preparation.run_id = concrete.run_id
+         AND preparation.invocation_id = concrete.invocation_id
+         AND preparation.logical_job_id = concrete.logical_job_id
+        JOIN workflow_plan_v2_jobs AS logical_job
+          ON logical_job.run_id = concrete.run_id
+         AND logical_job.invocation_id = concrete.invocation_id
+         AND logical_job.id = concrete.logical_job_id
+        JOIN workflow_plan_v2_activation_publications AS publication
+          ON publication.run_id = concrete.run_id
+         AND publication.invocation_id = concrete.invocation_id
+         AND publication.logical_job_id = concrete.logical_job_id
+        JOIN workflow_plan_v2_materialization_claims AS materialization
+          ON materialization.instance_id = concrete.instance_id
+         AND materialization.expected_job_id = concrete.job_id
+         AND materialization.expected_attempt_id = concrete.initial_attempt_id
         JOIN github_workflow_run_subject_evidence AS subject
           ON subject.tenant_id = repository.tenant_id
          AND subject.repository_id = repository.id
@@ -998,13 +1036,19 @@ async fn insert_runtime_authority_candidate(
           ON checks_authority.tenant_id = delivery.tenant_id
          AND checks_authority.id = delivery.checks_authority_id
         WHERE attempt.id = $1
-        ",
-    )
-    .bind(execution.attempt_id().as_uuid())
-    .bind(substitution)
-    .execute(database.pool())
-    .await
-    .map(|_| ())
+        ";
+
+async fn insert_runtime_authority_candidate(
+    database: &TestDatabase,
+    execution: &GithubOidcExecutionIdentity,
+    substitution: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(INSERT_RUNTIME_AUTHORITY_CANDIDATE_SQL)
+        .bind(execution.attempt_id().as_uuid())
+        .bind(substitution)
+        .execute(database.pool())
+        .await
+        .map(|_| ())
 }
 
 async fn rebase_runtime_authority_lease_to_database_time(

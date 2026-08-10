@@ -1,8 +1,8 @@
 use std::{
     fmt,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -42,7 +42,7 @@ use tokio::{
 
 use crate::{
     GithubAppCredentialBroker, GithubInstallationTokenMintOutcome,
-    GithubInstallationTokenRevocationCandidate,
+    GithubInstallationTokenRevocationCandidate, config::whole_milliseconds,
 };
 
 const INSTALLATION_TOKEN_FRAME_DOMAIN: &[u8] = b"automata-ci/github-installation-token/v1\0";
@@ -475,6 +475,8 @@ pub struct GithubRuntimeAuthorityCommitSupervisor {
     outstanding: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
     drained: Arc<tokio::sync::Notify>,
+    protected_custody: Arc<Mutex<Vec<Arc<SupervisedProtectedCommit>>>>,
+    unprotected_custody: Arc<Mutex<Vec<Arc<SupervisedUnprotectedCandidate>>>>,
 }
 
 impl GithubRuntimeAuthorityCommitSupervisor {
@@ -504,10 +506,13 @@ impl GithubRuntimeAuthorityCommitSupervisor {
             outstanding: Arc::new(AtomicUsize::new(0)),
             pending: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(tokio::sync::Notify::new()),
+            protected_custody: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            unprotected_custody: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
         })
     }
 
     pub(crate) fn try_reserve(&self) -> Option<GithubRuntimeAuthorityCommitReservation> {
+        self.redrive_retained();
         self.outstanding.fetch_add(1, Ordering::AcqRel);
         let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
             self.outstanding.fetch_sub(1, Ordering::AcqRel);
@@ -526,23 +531,76 @@ impl GithubRuntimeAuthorityCommitSupervisor {
         reservation: GithubRuntimeAuthorityCommitReservation,
         pending: PendingGithubRuntimeAuthorityCommit,
     ) -> oneshot::Receiver<GithubRuntimeAuthorityReceipt> {
-        let repository = Arc::clone(&self.repository);
-        let pending_observation =
-            SupervisorPendingObservation::new(Arc::clone(&self.pending), Arc::clone(&self.drained));
-        let retry_interval = self.retry_interval;
+        let custody = Arc::new(SupervisedProtectedCommit {
+            _reservation: reservation,
+            _pending_observation: SupervisorPendingObservation::new(
+                Arc::clone(&self.pending),
+                Arc::clone(&self.drained),
+            ),
+            pending,
+            task_abort: Mutex::new(None),
+            driver_active: Arc::new(AtomicBool::new(false)),
+            removed: AtomicBool::new(false),
+        });
+        self.protected_custody
+            .lock()
+            .expect("runtime-authority protected custody lock")
+            .push(Arc::clone(&custody));
+
         let (result_sender, result_receiver) = oneshot::channel();
-        self.runtime.spawn(async move {
-            let _reservation = reservation;
-            let _pending_observation = pending_observation;
+        let started = self.start_protected_driver(&custody, Some(result_sender));
+        assert!(started, "new protected custody starts one driver");
+        result_receiver
+    }
+
+    fn start_protected_driver(
+        &self,
+        custody: &Arc<SupervisedProtectedCommit>,
+        result_sender: Option<oneshot::Sender<GithubRuntimeAuthorityReceipt>>,
+    ) -> bool {
+        if custody.removed.load(Ordering::Acquire) {
+            return false;
+        }
+        if custody
+            .driver_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if custody.removed.load(Ordering::Acquire) {
+            custody.driver_active.store(false, Ordering::Release);
+            self.drained.notify_waiters();
+            return false;
+        }
+        let repository = Arc::clone(&self.repository);
+        let retained = Arc::clone(&self.protected_custody);
+        let task_custody = Arc::clone(custody);
+        let retry_interval = self.retry_interval;
+        let driver_active = SupervisorDriverObservation {
+            active: Arc::clone(&custody.driver_active),
+            drained: Arc::clone(&self.drained),
+        };
+        let task = self.runtime.spawn(async move {
+            let _driver_active = driver_active;
             let receipt = loop {
-                match pending.replay(repository.as_ref()).await {
+                match task_custody.pending.replay(repository.as_ref()).await {
                     Ok(receipt) => break receipt,
                     Err(_) => tokio::time::sleep(retry_interval).await,
                 }
             };
-            let _ = result_sender.send(receipt);
+            task_custody.removed.store(true, Ordering::Release);
+            drop(take_supervised_custody(&retained, &task_custody));
+            drop(task_custody);
+            if let Some(result_sender) = result_sender {
+                let _ = result_sender.send(receipt);
+            }
         });
-        result_receiver
+        *custody
+            .task_abort
+            .lock()
+            .expect("runtime-authority protected task lock") = Some(task.abort_handle());
+        true
     }
 
     fn retain_unprotected(
@@ -550,16 +608,57 @@ impl GithubRuntimeAuthorityCommitSupervisor {
         reservation: GithubRuntimeAuthorityCommitReservation,
         custody: UnprotectedGithubRuntimeAuthorityCandidate,
     ) {
+        let custody = Arc::new(SupervisedUnprotectedCandidate {
+            _reservation: reservation,
+            _pending_observation: SupervisorPendingObservation::new(
+                Arc::clone(&self.pending),
+                Arc::clone(&self.drained),
+            ),
+            custody,
+            task_abort: Mutex::new(None),
+            driver_active: Arc::new(AtomicBool::new(false)),
+            removed: AtomicBool::new(false),
+        });
+        self.unprotected_custody
+            .lock()
+            .expect("runtime-authority unprotected custody lock")
+            .push(Arc::clone(&custody));
+
+        let started = self.start_unprotected_driver(&custody);
+        assert!(started, "new unprotected custody starts one driver");
+    }
+
+    fn start_unprotected_driver(&self, custody: &Arc<SupervisedUnprotectedCandidate>) -> bool {
+        if custody.removed.load(Ordering::Acquire) {
+            return false;
+        }
+        if custody
+            .driver_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if custody.removed.load(Ordering::Acquire) {
+            custody.driver_active.store(false, Ordering::Release);
+            self.drained.notify_waiters();
+            return false;
+        }
         let repository = Arc::clone(&self.repository);
-        let pending_observation =
-            SupervisorPendingObservation::new(Arc::clone(&self.pending), Arc::clone(&self.drained));
+        let retained = Arc::clone(&self.unprotected_custody);
+        let task_custody = Arc::clone(custody);
         let retry_interval = self.retry_interval;
-        self.runtime.spawn(async move {
-            let _reservation = reservation;
-            let _pending_observation = pending_observation;
-            let request = AuthenticateGithubRuntimeAuthorityUnprotectedErasure::new(&custody.claim);
-            let expected_key = custody.claim.identity().key();
-            let earliest_erasure = custody.claim.identity().conservative_expiry();
+        let driver_active = SupervisorDriverObservation {
+            active: Arc::clone(&custody.driver_active),
+            drained: Arc::clone(&self.drained),
+        };
+        let task = self.runtime.spawn(async move {
+            let _driver_active = driver_active;
+            let request = AuthenticateGithubRuntimeAuthorityUnprotectedErasure::new(
+                &task_custody.custody.claim,
+            );
+            let expected_key = task_custody.custody.claim.identity().key();
+            let earliest_erasure = task_custody.custody.claim.identity().conservative_expiry();
             loop {
                 if let Ok(Some(receipt)) = repository
                     .authenticate_github_runtime_authority_unprotected_erasure(request.clone())
@@ -574,8 +673,78 @@ impl GithubRuntimeAuthorityCommitSupervisor {
                 }
                 tokio::time::sleep(retry_interval).await;
             }
-            drop(custody);
+            task_custody.removed.store(true, Ordering::Release);
+            drop(take_supervised_custody(&retained, &task_custody));
+            drop(task_custody);
         });
+        *custody
+            .task_abort
+            .lock()
+            .expect("runtime-authority unprotected task lock") = Some(task.abort_handle());
+        true
+    }
+
+    fn redrive_retained(&self) {
+        let protected = self
+            .protected_custody
+            .lock()
+            .expect("runtime-authority protected custody lock")
+            .clone();
+        for custody in protected {
+            let _ = self.start_protected_driver(&custody, None);
+        }
+        let unprotected = self
+            .unprotected_custody
+            .lock()
+            .expect("runtime-authority unprotected custody lock")
+            .clone();
+        for custody in unprotected {
+            let _ = self.start_unprotected_driver(&custody);
+        }
+    }
+
+    #[cfg(test)]
+    fn abort_protected_task(&self) -> bool {
+        let custody = self
+            .protected_custody
+            .lock()
+            .expect("runtime-authority protected custody lock")
+            .first()
+            .cloned();
+        let Some(custody) = custody else {
+            return false;
+        };
+        let task = custody
+            .task_abort
+            .lock()
+            .expect("runtime-authority protected task lock")
+            .clone();
+        task.is_some_and(|task| {
+            task.abort();
+            true
+        })
+    }
+
+    #[cfg(test)]
+    fn abort_unprotected_task(&self) -> bool {
+        let custody = self
+            .unprotected_custody
+            .lock()
+            .expect("runtime-authority unprotected custody lock")
+            .first()
+            .cloned();
+        let Some(custody) = custody else {
+            return false;
+        };
+        let task = custody
+            .task_abort
+            .lock()
+            .expect("runtime-authority unprotected task lock")
+            .clone();
+        task.is_some_and(|task| {
+            task.abort();
+            true
+        })
     }
 
     /// Returns the number of protected or unprotected candidates under custody.
@@ -595,6 +764,9 @@ impl GithubRuntimeAuthorityCommitSupervisor {
     pub async fn wait_for_idle(&self) {
         loop {
             let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            self.redrive_retained();
             if self.outstanding.load(Ordering::Acquire) == 0 {
                 return;
             }
@@ -621,8 +793,62 @@ impl fmt::Debug for GithubRuntimeAuthorityCommitSupervisor {
             .field("outstanding", &self.outstanding.load(Ordering::Acquire))
             .field("available_capacity", &self.permits.available_permits())
             .field("pending", &self.pending_count())
+            .field(
+                "protected_custody",
+                &self
+                    .protected_custody
+                    .lock()
+                    .expect("runtime-authority protected custody lock")
+                    .len(),
+            )
+            .field(
+                "unprotected_custody",
+                &self
+                    .unprotected_custody
+                    .lock()
+                    .expect("runtime-authority unprotected custody lock")
+                    .len(),
+            )
             .finish_non_exhaustive()
     }
+}
+
+struct SupervisedProtectedCommit {
+    _reservation: GithubRuntimeAuthorityCommitReservation,
+    _pending_observation: SupervisorPendingObservation,
+    pending: PendingGithubRuntimeAuthorityCommit,
+    task_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    driver_active: Arc<AtomicBool>,
+    removed: AtomicBool,
+}
+
+struct SupervisedUnprotectedCandidate {
+    _reservation: GithubRuntimeAuthorityCommitReservation,
+    _pending_observation: SupervisorPendingObservation,
+    custody: UnprotectedGithubRuntimeAuthorityCandidate,
+    task_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    driver_active: Arc<AtomicBool>,
+    removed: AtomicBool,
+}
+
+struct SupervisorDriverObservation {
+    active: Arc<AtomicBool>,
+    drained: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for SupervisorDriverObservation {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        self.drained.notify_waiters();
+    }
+}
+
+fn take_supervised_custody<T>(retained: &Mutex<Vec<Arc<T>>>, target: &Arc<T>) -> Option<Arc<T>> {
+    let mut retained = retained.lock().expect("runtime-authority custody lock");
+    let position = retained
+        .iter()
+        .position(|entry| Arc::ptr_eq(entry, target))?;
+    Some(retained.swap_remove(position))
 }
 
 pub(crate) struct GithubRuntimeAuthorityCommitReservation {
@@ -1176,11 +1402,8 @@ fn ensure_mint_window(
     begin_at: UnixMillis,
     maximum_duration: Duration,
 ) -> Result<i64, GithubRuntimeAuthorityCoordinatorError> {
-    if maximum_duration.as_nanos() % 1_000_000 != 0 {
-        return Err(GithubRuntimeAuthorityCoordinatorError::MintWindowExhausted);
-    }
-    let duration = i64::try_from(maximum_duration.as_millis())
-        .ok()
+    let duration = whole_milliseconds(maximum_duration)
+        .and_then(|duration| i64::try_from(duration).ok())
         .filter(|duration| *duration > 0)
         .ok_or(GithubRuntimeAuthorityCoordinatorError::MintWindowExhausted)?;
     let completes_by = begin_at
@@ -1589,10 +1812,7 @@ mod tests {
         }
 
         fn maximum_mint_duration(&self) -> Duration {
-            Duration::from_micros(
-                self.maximum_mint_duration_micros
-                    .load(Ordering::SeqCst),
-            )
+            Duration::from_micros(self.maximum_mint_duration_micros.load(Ordering::SeqCst))
         }
 
         async fn mint_once(
@@ -1814,6 +2034,7 @@ mod tests {
         begin_ambiguous_once: bool,
         force_already_started: bool,
         unprotected_erasure_authenticated: bool,
+        unprotected_erasure_calls: usize,
         commits: Vec<CommitSnapshot>,
     }
 
@@ -1821,6 +2042,7 @@ mod tests {
     struct FakeStore {
         inner: Mutex<FakeStoreState>,
         commit_gate: Option<Arc<CommitGate>>,
+        unprotected_erasure_gate: Option<Arc<CommitGate>>,
         begin_database_clock: Option<Arc<AtomicI64>>,
     }
 
@@ -1881,6 +2103,13 @@ mod tests {
                 .unprotected_erasure_authenticated = true;
         }
 
+        fn unprotected_erasure_calls(&self) -> usize {
+            self.inner
+                .lock()
+                .expect("store lock")
+                .unprotected_erasure_calls
+        }
+
         fn with_commit_failure() -> Self {
             let store = Self::default();
             store.inner.lock().expect("store lock").commit_failures = 1;
@@ -1916,10 +2145,19 @@ mod tests {
                 Self {
                     inner: Mutex::new(FakeStoreState::default()),
                     commit_gate: Some(gate.clone()),
+                    unprotected_erasure_gate: None,
                     begin_database_clock: None,
                 },
                 gate,
             )
+        }
+
+        fn with_gated_unprotected_erasure()
+        -> (Self, ClaimedGithubRuntimeAuthorityMint, Arc<CommitGate>) {
+            let (mut store, claim) = Self::with_minting_claim();
+            let gate = Arc::new(CommitGate::default());
+            store.unprotected_erasure_gate = Some(gate.clone());
+            (store, claim, gate)
         }
 
         fn receipt(
@@ -2053,6 +2291,18 @@ mod tests {
             request: AuthenticateGithubRuntimeAuthorityUnprotectedErasure,
         ) -> Result<Option<GithubRuntimeAuthorityReceipt>, GithubRuntimeAuthorityStoreError>
         {
+            {
+                let mut state = self.inner.lock().expect("store lock");
+                state.unprotected_erasure_calls += 1;
+            }
+            if let Some(gate) = &self.unprotected_erasure_gate {
+                gate.entered.add_permits(1);
+                gate.release
+                    .acquire()
+                    .await
+                    .map_err(GithubRuntimeAuthorityStoreError::operation)?
+                    .forget();
+            }
             let mut state = self.inner.lock().expect("store lock");
             if state.claim.as_ref() != Some(request.claim())
                 || !matches!(
@@ -2362,7 +2612,7 @@ mod tests {
         );
         assert_eq!(harness.keys.wrap_calls.load(Ordering::SeqCst), 1);
         assert_eq!(harness.store.begin_calls(), 0);
-        assert_eq!(harness.store.begin_provider_request_millis(), []);
+        assert!(harness.store.begin_provider_request_millis().is_empty());
         assert_eq!(harness.broker.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -2709,17 +2959,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_watchdog_task_loss_retains_custody_and_never_false_drains() {
+        let (store, gate) = FakeStore::with_gated_commit();
+        let harness = Arc::new(Harness::new(FakeBrokerMode::Ready, store, false));
+        let request = tokio::spawn({
+            let harness = Arc::clone(&harness);
+            async move { harness.run().await }
+        });
+
+        gate.wait_until_entered().await;
+        assert!(
+            harness.supervisor.abort_protected_task(),
+            "protected watchdog exists"
+        );
+        assert_eq!(
+            request.await.expect("coordinator task").unwrap_err(),
+            GithubRuntimeAuthorityCoordinatorError::Repository
+        );
+        assert_eq!(harness.supervisor.pending_count(), 1);
+        assert!(!harness.supervisor.drain(Duration::from_millis(5)).await);
+        assert!(
+            harness.supervisor.try_reserve().is_none(),
+            "lost-task protected custody retains its bounded permit"
+        );
+        gate.wait_until_entered().await;
+        let hammer_started = tokio_util::sync::CancellationToken::new();
+        let stop_hammer = tokio_util::sync::CancellationToken::new();
+        let hammer = tokio::spawn({
+            let supervisor = Arc::clone(&harness.supervisor);
+            let hammer_started = hammer_started.clone();
+            let stop_hammer = stop_hammer.clone();
+            async move {
+                hammer_started.cancel();
+                while !stop_hammer.is_cancelled() {
+                    supervisor.redrive_retained();
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        hammer_started.cancelled().await;
+        gate.release();
+        assert!(harness.supervisor.drain(Duration::from_secs(1)).await);
+        stop_hammer.cancel();
+        hammer.await.expect("protected redrive hammer");
+        assert_eq!(harness.supervisor.pending_count(), 0);
+        assert_eq!(
+            harness.store.state(),
+            Some(GithubRuntimeAuthorityState::Ready)
+        );
+        assert_eq!(harness.broker.calls.load(Ordering::SeqCst), 1);
+        assert!(harness.supervisor.try_reserve().is_some());
+        for _ in 0..32 {
+            harness.supervisor.redrive_retained();
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(harness.store.snapshots().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn removed_protected_custody_rejects_its_exact_stale_driver() {
+        let (store, gate) = FakeStore::with_gated_commit();
+        let harness = Arc::new(Harness::new(FakeBrokerMode::Ready, store, false));
+        let request = tokio::spawn({
+            let harness = Arc::clone(&harness);
+            async move { harness.run().await }
+        });
+
+        gate.wait_until_entered().await;
+        let stale_custody = harness
+            .supervisor
+            .protected_custody
+            .lock()
+            .expect("runtime-authority protected custody lock")
+            .first()
+            .cloned()
+            .expect("protected custody retained before confirmation");
+        gate.release();
+        let outcome = request
+            .await
+            .expect("coordinator task")
+            .expect("protected commit");
+        assert!(matches!(
+            outcome,
+            GithubRuntimeAuthorityCoordinationOutcome::Transitioned(_)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stale_custody.removed.load(Ordering::Acquire)
+                || stale_custody.driver_active.load(Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("protected custody removed with no active driver");
+
+        let confirmed_calls = harness.store.snapshots().len();
+        assert!(
+            !harness
+                .supervisor
+                .start_protected_driver(&stale_custody, None)
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(harness.store.snapshots().len(), confirmed_calls);
+        assert_eq!(harness.broker.calls.load(Ordering::SeqCst), 1);
+        assert!(!harness.supervisor.drain(Duration::from_millis(5)).await);
+
+        drop(stale_custody);
+        assert!(harness.supervisor.drain(Duration::from_secs(1)).await);
+        assert!(harness.supervisor.try_reserve().is_some());
+    }
+
+    #[tokio::test]
     async fn unprotected_candidate_releases_custody_at_its_authenticated_horizon() {
         let (repository, claim) = FakeStore::with_minting_claim();
         let repository = Arc::new(repository);
         let repository_port: Arc<dyn GithubRuntimeAuthorityRepository> = repository.clone();
-        let supervisor = GithubRuntimeAuthorityCommitSupervisor::new(
-            repository_port,
-            Handle::current(),
-            1,
-            Duration::from_millis(1),
-        )
-        .expect("supervisor");
+        let supervisor = Arc::new(
+            GithubRuntimeAuthorityCommitSupervisor::new(
+                repository_port,
+                Handle::current(),
+                1,
+                Duration::from_millis(1),
+            )
+            .expect("supervisor"),
+        );
         let reservation = supervisor.try_reserve().expect("initial capacity");
         supervisor.retain_unprotected(
             reservation,
@@ -2741,6 +3104,128 @@ mod tests {
             supervisor.try_reserve().is_some(),
             "the bounded permit must be reusable after authenticated erasure"
         );
+    }
+
+    #[tokio::test]
+    async fn unprotected_watchdog_task_loss_retains_custody_and_never_false_drains() {
+        let (repository, claim, gate) = FakeStore::with_gated_unprotected_erasure();
+        let repository = Arc::new(repository);
+        let repository_port: Arc<dyn GithubRuntimeAuthorityRepository> = repository.clone();
+        let supervisor = Arc::new(
+            GithubRuntimeAuthorityCommitSupervisor::new(
+                repository_port,
+                Handle::current(),
+                1,
+                Duration::from_millis(1),
+            )
+            .expect("supervisor"),
+        );
+        let reservation = supervisor.try_reserve().expect("initial capacity");
+        supervisor.retain_unprotected(
+            reservation,
+            UnprotectedGithubRuntimeAuthorityCandidate {
+                claim: Box::new(claim),
+                _candidate: FakeBroker::candidate(),
+                _prepared: None,
+            },
+        );
+
+        gate.wait_until_entered().await;
+        assert_eq!(repository.unprotected_erasure_calls(), 1);
+        assert!(
+            supervisor.abort_unprotected_task(),
+            "unprotected watchdog exists"
+        );
+        assert_eq!(supervisor.pending_count(), 1);
+        assert!(!supervisor.drain(Duration::from_millis(5)).await);
+        assert!(
+            supervisor.try_reserve().is_none(),
+            "lost-task unprotected custody retains its bounded permit"
+        );
+        gate.wait_until_entered().await;
+        assert_eq!(repository.unprotected_erasure_calls(), 2);
+        repository.authenticate_unprotected_erasure();
+        let hammer_started = tokio_util::sync::CancellationToken::new();
+        let stop_hammer = tokio_util::sync::CancellationToken::new();
+        let hammer = tokio::spawn({
+            let supervisor = Arc::clone(&supervisor);
+            let hammer_started = hammer_started.clone();
+            let stop_hammer = stop_hammer.clone();
+            async move {
+                hammer_started.cancel();
+                while !stop_hammer.is_cancelled() {
+                    supervisor.redrive_retained();
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        hammer_started.cancelled().await;
+        gate.release();
+        assert!(supervisor.drain(Duration::from_secs(1)).await);
+        stop_hammer.cancel();
+        hammer.await.expect("unprotected redrive hammer");
+        assert_eq!(supervisor.pending_count(), 0);
+        assert!(supervisor.try_reserve().is_some());
+        for _ in 0..32 {
+            supervisor.redrive_retained();
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(repository.unprotected_erasure_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn removed_unprotected_custody_rejects_its_exact_stale_driver() {
+        let (repository, claim, gate) = FakeStore::with_gated_unprotected_erasure();
+        let repository = Arc::new(repository);
+        let repository_port: Arc<dyn GithubRuntimeAuthorityRepository> = repository.clone();
+        let supervisor = Arc::new(
+            GithubRuntimeAuthorityCommitSupervisor::new(
+                repository_port,
+                Handle::current(),
+                1,
+                Duration::from_millis(1),
+            )
+            .expect("supervisor"),
+        );
+        let reservation = supervisor.try_reserve().expect("initial capacity");
+        supervisor.retain_unprotected(
+            reservation,
+            UnprotectedGithubRuntimeAuthorityCandidate {
+                claim: Box::new(claim),
+                _candidate: FakeBroker::candidate(),
+                _prepared: None,
+            },
+        );
+
+        gate.wait_until_entered().await;
+        let stale_custody = supervisor
+            .unprotected_custody
+            .lock()
+            .expect("runtime-authority unprotected custody lock")
+            .first()
+            .cloned()
+            .expect("unprotected custody retained before erasure confirmation");
+        repository.authenticate_unprotected_erasure();
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stale_custody.removed.load(Ordering::Acquire)
+                || stale_custody.driver_active.load(Ordering::Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unprotected custody removed with no active driver");
+
+        let confirmed_calls = repository.unprotected_erasure_calls();
+        assert!(!supervisor.start_unprotected_driver(&stale_custody));
+        tokio::task::yield_now().await;
+        assert_eq!(repository.unprotected_erasure_calls(), confirmed_calls);
+        assert!(!supervisor.drain(Duration::from_millis(5)).await);
+
+        drop(stale_custody);
+        assert!(supervisor.drain(Duration::from_secs(1)).await);
+        assert!(supervisor.try_reserve().is_some());
     }
 
     #[tokio::test]
