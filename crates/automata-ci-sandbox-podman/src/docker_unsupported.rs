@@ -1,8 +1,8 @@
-use automata_ci_execution::{ResourceLimits, SandboxHandle};
+use std::sync::Arc;
 
-use crate::{PodmanConfigurationError, PodmanOptions, state::JobEnginePaths};
+pub(crate) use crate::docker_contract::{DOCKER_SOCKET_DIRECTORY_TARGET, JobDockerLaunch};
 
-pub(crate) const DOCKER_SOCKET_DIRECTORY_TARGET: &str = "/run/automata-engine";
+use crate::{PodmanConfigurationError, PodmanObserver, PodmanOptions, state::JobEnginePaths};
 
 #[derive(Debug)]
 pub(crate) struct JobDockerListener;
@@ -21,10 +21,8 @@ impl JobDockerService {
         _options: &PodmanOptions,
         _paths: &JobEnginePaths,
         _listener: JobDockerListener,
-        _sandbox: &SandboxHandle,
-        _outer_process_id: u32,
-        _outer_cgroup: String,
-        _resources: ResourceLimits,
+        _launch: JobDockerLaunch<'_>,
+        _observer: Arc<dyn PodmanObserver>,
     ) -> Result<Self, PodmanConfigurationError> {
         Err(PodmanConfigurationError::UnsupportedPlatform)
     }

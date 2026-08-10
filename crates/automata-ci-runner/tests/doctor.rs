@@ -5,8 +5,13 @@ use std::{
     time::Duration,
 };
 
+#[cfg(not(target_os = "linux"))]
+use automata_ci_runner::capability_probe::{
+    PODMAN_NETWORK_ISOLATION, ProbeReasonCode, ProbeStatus,
+};
 use automata_ci_runner::doctor::{
-    ServerHttpPolicy, ServerHttpPolicyError, ServerStatus, inspect, probe_server_with_policy,
+    ServerHttpPolicy, ServerHttpPolicyError, ServerStatus, inspect, inspect_with_options,
+    probe_server_with_policy,
 };
 
 #[test]
@@ -174,6 +179,29 @@ async fn serializes_capability_evidence_separately_from_advertised_capabilities(
             .iter()
             .all(|probe| probe["status"].is_string() && probe["detail"].is_string())
     );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn active_doctor_reports_unsupported_platform_without_advertising_isolation() {
+    let report = inspect_with_options(None, true).await;
+    let probe = report
+        .capability_probes()
+        .iter()
+        .find(|probe| probe.capability() == PODMAN_NETWORK_ISOLATION)
+        .expect("active diagnostics must include Podman isolation evidence");
+
+    assert_eq!(probe.status(), ProbeStatus::Unavailable);
+    assert_eq!(
+        probe
+            .reason()
+            .expect("unsupported evidence must include a reason")
+            .code(),
+        ProbeReasonCode::ActiveProbeUnsupportedPlatform
+    );
+    assert!(!probe.is_usable());
+    assert!(!report.capabilities().contains(PODMAN_NETWORK_ISOLATION));
+    assert!(!report.is_healthy());
 }
 
 fn serve_once(status: &'static str) -> (String, JoinHandle<()>) {

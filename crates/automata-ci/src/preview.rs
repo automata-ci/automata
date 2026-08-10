@@ -22,6 +22,10 @@ pub async fn serve(args: &PreviewArgs) -> Result<()> {
     let listener = TcpListener::bind(args.listen)
         .await
         .context("failed to bind preview listener")?;
+    serve_listener(listener).await
+}
+
+async fn serve_listener(listener: TcpListener) -> Result<()> {
     let address = listener
         .local_addr()
         .context("failed to inspect preview listener")?;
@@ -37,4 +41,43 @@ pub async fn serve(args: &PreviewArgs) -> Result<()> {
         .with_graceful_shutdown(shutdown::wait())
         .await
         .context("preview HTTP service failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+
+    use super::*;
+    use crate::cli::{StatusHttpPolicy, fetch_control_plane_status};
+
+    #[tokio::test]
+    async fn preview_listener_serves_status() {
+        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("preview listener must bind");
+        let address = listener
+            .local_addr()
+            .expect("preview listener address must be available");
+        let task = tokio::spawn(serve_listener(listener));
+
+        let policy =
+            StatusHttpPolicy::new(Duration::from_secs(5), Duration::from_secs(60), 64 * 1024)
+                .expect("preview test status policy must be valid");
+        let status = fetch_control_plane_status(&format!("http://{address}"), policy)
+            .await
+            .expect("preview status must be available");
+
+        assert_eq!(status["health"]["status"], "ok");
+        assert_eq!(status["health"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["readiness"]["ready"], true);
+
+        task.abort();
+        let error = task
+            .await
+            .expect_err("aborted preview task must not complete");
+        assert!(error.is_cancelled());
+    }
 }
