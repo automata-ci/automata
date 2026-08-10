@@ -5,4 +5,4 @@ import "./styles.css";
 
 const request = readRenderRequest(document);
 
-hydrateRoot(document, <HtmlDocument request={request} enableEnhancements />);
+hydrateRoot(document, <HtmlDocument request={request} />);

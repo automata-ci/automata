@@ -1,0 +1,24 @@
+[package]
+name = "automata-ci-credential"
+description = "Provider-neutral workload credential contracts for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-scm.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,43 @@
+.repository-settings-navigation {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-muted);
+  scrollbar-width: none;
+}
+
+.repository-settings-navigation::-webkit-scrollbar {
+  display: none;
+}
+
+.repository-settings-navigation > a {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 9px 12px 8px;
+  color: var(--fg-muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.repository-settings-navigation > a:hover {
+  color: var(--fg-default);
+  text-decoration: none;
+}
+
+.repository-settings-navigation > a[aria-current="page"] {
+  color: var(--fg-default);
+}
+
+.repository-settings-navigation > a[aria-current="page"]::after {
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  background: var(--active-tab);
+  border-radius: var(--radius-round);
+  content: "";
+}

@@ -58,15 +58,20 @@ target_directory="$(
 )"
 automata_binary="${target_directory}/${target}/release/automata"
 runner_binary="${target_directory}/${target}/release/automata-runner"
-readonly target_directory automata_binary runner_binary
+service_proxy_binary="${target_directory}/${target}/release/automata-ci-service-proxy"
+readonly target_directory automata_binary runner_binary service_proxy_binary
 [[ -x "${automata_binary}" ]] || die "missing executable ${automata_binary}"
 [[ -x "${runner_binary}" ]] || die "missing executable ${runner_binary}"
+[[ -x "${service_proxy_binary}" ]] || \
+    die "missing executable ${service_proxy_binary}"
 
-automata_raw="${repository_root}/crates/automata/automata_bin.cdx.json"
-runner_raw="${repository_root}/crates/automata-runner/automata-runner_bin.cdx.json"
-readonly automata_raw runner_raw
+automata_raw="${repository_root}/crates/automata-ci/automata_bin.cdx.json"
+runner_raw="${repository_root}/crates/automata-ci-runner/automata-runner_bin.cdx.json"
+service_proxy_raw="${repository_root}/crates/automata-ci-service-proxy/automata-ci-service-proxy_bin.cdx.json"
+readonly automata_raw runner_raw service_proxy_raw
 [[ ! -e "${automata_raw}" ]] || die "refusing to overwrite ${automata_raw}"
 [[ ! -e "${runner_raw}" ]] || die "refusing to overwrite ${runner_raw}"
+[[ ! -e "${service_proxy_raw}" ]] || die "refusing to overwrite ${service_proxy_raw}"
 
 scratch_root="$(
     automata_canonical_target_child \
@@ -77,7 +82,7 @@ mkdir -p -- "${scratch_root}"
 scratch_directory="$(mktemp -d "${scratch_root}/release.XXXXXXXX")"
 readonly scratch_directory
 cleanup() {
-    rm -f -- "${automata_raw}" "${runner_raw}"
+    rm -f -- "${automata_raw}" "${runner_raw}" "${service_proxy_raw}"
     rm -rf -- "${scratch_directory}"
 }
 trap cleanup EXIT
@@ -112,16 +117,22 @@ generate_rust_sbom() {
 
 generate_rust_sbom \
     automata \
-    "${repository_root}/crates/automata/Cargo.toml" \
+    "${repository_root}/crates/automata-ci/Cargo.toml" \
     "${automata_raw}" \
     "${automata_binary}" \
     automata.cdx.json
 generate_rust_sbom \
     automata-runner \
-    "${repository_root}/crates/automata-runner/Cargo.toml" \
+    "${repository_root}/crates/automata-ci-runner/Cargo.toml" \
     "${runner_raw}" \
     "${runner_binary}" \
     automata-runner.cdx.json
+generate_rust_sbom \
+    automata-ci-service-proxy \
+    "${repository_root}/crates/automata-ci-service-proxy/Cargo.toml" \
+    "${service_proxy_raw}" \
+    "${service_proxy_binary}" \
+    automata-ci-service-proxy.cdx.json
 
 npm --prefix "${repository_root}/ui" sbom \
     --omit=dev \
@@ -138,7 +149,7 @@ node "${script_directory}/normalize-cyclonedx.mjs" \
 renderer_sbom="${repository_root}/ui/renderer/renderer.cdx.json"
 [[ -f "${renderer_sbom}" ]] || die "missing embedded renderer SBOM"
 mapfile -t renderer_components < <(
-    find "${repository_root}/ui/renderer/assets" -maxdepth 1 -type f \
+    find "${repository_root}/crates/automata-ci-ui-renderer/assets" -maxdepth 1 -type f \
         -name 'renderer-*.wasm' -print | LC_ALL=C sort
 )
 [[ "${#renderer_components[@]}" -eq 1 ]] || \
@@ -154,7 +165,13 @@ cmp --silent "${renderer_sbom}" "${scratch_directory}/renderer.cdx.json" || \
     die "embedded renderer SBOM is stale or noncanonical"
 
 mkdir -p -- "${output_directory}"
-for name in automata.cdx.json automata-runner.cdx.json renderer.cdx.json ui-runtime.cdx.json; do
+for name in \
+    automata.cdx.json \
+    automata-runner.cdx.json \
+    automata-ci-service-proxy.cdx.json \
+    renderer.cdx.json \
+    ui-runtime.cdx.json
+do
     install -m 0444 -- "${scratch_directory}/${name}" "${output_directory}/${name}"
 done
-printf 'Created four CycloneDX SBOMs in %s\n' "${output_directory}"
+printf 'Created five CycloneDX SBOMs in %s\n' "${output_directory}"

@@ -1,0 +1,178 @@
+.workflow-navigation,
+.run-navigation {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workflow-navigation__desktop,
+.run-navigation__desktop {
+  position: sticky;
+  top: 24px;
+  min-width: 0;
+  max-height: calc(100vh - 48px);
+  padding: 3px 24px 3px 3px;
+  overflow-y: auto;
+}
+
+.workflow-navigation__mobile,
+.run-navigation__mobile {
+  display: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workflow-navigation__title,
+.run-navigation__title {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-inline: 8px;
+}
+
+.workflow-navigation__primary,
+.workflow-navigation__workflows,
+.run-navigation__summary-link,
+.run-navigation__jobs {
+  display: grid;
+  gap: 2px;
+}
+
+.workflow-navigation__primary a,
+.workflow-navigation__workflow,
+.run-navigation__summary-link > a,
+.run-navigation__summary-link > span,
+.run-navigation__job {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.workflow-navigation__primary a > span,
+.workflow-navigation__workflow > span,
+.run-navigation__summary-link > a > span,
+.run-navigation__summary-link > span > span,
+.run-navigation__job > span:not(.status) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-navigation__section,
+.run-navigation__section {
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.workflow-navigation__section-heading,
+.run-navigation__section-heading {
+  display: block;
+  margin: 0 8px 6px;
+}
+
+.workflow-navigation .pagination,
+.run-navigation .pagination {
+  justify-content: space-between;
+  padding: 12px 8px 0;
+}
+
+.workflow-navigation__disclosure-summary,
+.run-navigation__disclosure-summary {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  list-style: none;
+}
+
+.workflow-navigation__disclosure-summary::-webkit-details-marker,
+.run-navigation__disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+.workflow-navigation__disclosure-label,
+.run-navigation__disclosure-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-navigation__disclosure-current,
+.run-navigation__disclosure-current {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workflow-navigation__disclosure-current > span,
+.run-navigation__disclosure-current > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-navigation__menu,
+.run-navigation__menu {
+  min-width: 0;
+  max-width: 100%;
+  max-height: min(50vh, 360px);
+  padding: 6px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.breadcrumbs {
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.breadcrumbs__list {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.breadcrumbs__item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.breadcrumbs__item:last-child {
+  flex: 1 1 auto;
+}
+
+.breadcrumbs__item > a,
+.breadcrumbs__item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pagination {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+}

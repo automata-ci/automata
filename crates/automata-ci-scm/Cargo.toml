@@ -1,0 +1,28 @@
+[package]
+name = "automata-ci-scm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Provider-neutral immutable SCM snapshot contracts for Automata"
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-core.workspace = true
+bytes.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+static_assertions.workspace = true
+
+[lints]
+workspace = true

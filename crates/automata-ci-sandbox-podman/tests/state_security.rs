@@ -1,0 +1,229 @@
+#![cfg(target_os = "linux")]
+
+mod support;
+
+use std::{path::PathBuf, sync::Arc};
+
+use automata_ci_sandbox_podman::{
+    PodmanCommandExecutor, PodmanOpenError, PodmanStateRoot, PodmanStateRootError,
+    RootlessPodmanProvider,
+};
+
+use support::{FakePodman, ScratchRoot, options};
+
+#[test]
+fn state_root_rejects_relative_root_traversal_and_temporary_components() {
+    assert_eq!(
+        PodmanStateRoot::existing("target/agent-scratch/relative").expect_err("relative"),
+        PodmanStateRootError::Relative
+    );
+    assert_eq!(
+        PodmanStateRoot::existing(PathBuf::from("/")).expect_err("filesystem root"),
+        PodmanStateRootError::FilesystemRoot
+    );
+    let traversal =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/agent-scratch/../escape");
+    assert_eq!(
+        PodmanStateRoot::existing(traversal).expect_err("traversal"),
+        PodmanStateRootError::Traversal
+    );
+
+    let scratch = ScratchRoot::new("temporary-component");
+    let temporary = scratch.path().join("tmp").join("adapter");
+    std::fs::create_dir_all(&temporary).expect("create nested scratch");
+    set_mode(&temporary, 0o700);
+    assert_eq!(
+        PodmanStateRoot::existing(temporary).expect_err("temporary hierarchy"),
+        PodmanStateRootError::TemporaryHierarchy
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_and_broad_permissions_are_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = ScratchRoot::new("path-attacks");
+    let real = scratch.path().join("real");
+    std::fs::create_dir(&real).expect("real directory");
+    set_mode(&real, 0o700);
+    let alias = scratch.path().join("alias");
+    symlink(&real, &alias).expect("create symlink in scratch");
+    assert_eq!(
+        PodmanStateRoot::existing(alias).expect_err("symlink"),
+        PodmanStateRootError::NotCanonical
+    );
+
+    let broad = scratch.path().join("broad");
+    std::fs::create_dir(&broad).expect("broad directory");
+    set_mode(&broad, 0o750);
+    assert_eq!(
+        PodmanStateRoot::existing(broad).expect_err("broad permissions"),
+        PodmanStateRootError::NotOwnerOnly
+    );
+}
+
+#[test]
+fn one_adapter_exclusively_owns_a_state_root() {
+    let scratch = ScratchRoot::new("lock");
+    let first_fake = Arc::new(FakePodman::default());
+    let first = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        Arc::clone(&first_fake) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect("first provider");
+    let second_fake = Arc::new(FakePodman::default());
+    let error = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        second_fake as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("second provider must not share state root");
+    assert_eq!(
+        error,
+        PodmanOpenError::StateRoot(PodmanStateRootError::AlreadyLocked)
+    );
+    drop(first);
+}
+
+#[test]
+fn provider_open_creates_exact_owner_only_shared_engine_roots() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let scratch = ScratchRoot::new("shared-engine-roots");
+    let configured = options(scratch.path());
+    let expected_graph_root = scratch.path().join("podman-graph");
+    let expected_run_root = configured.shared_run_root();
+    assert_eq!(configured.shared_graph_root(), expected_graph_root);
+    assert_eq!(configured.shared_run_root(), expected_run_root);
+    let provider = RootlessPodmanProvider::open_with_executor(
+        configured,
+        Arc::new(FakePodman::default()) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect("provider opens with private shared roots");
+    assert!(!scratch.path().join("transfers").exists());
+
+    for path in [expected_graph_root, expected_run_root] {
+        let metadata = std::fs::symlink_metadata(path).expect("shared engine root metadata");
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+    }
+    drop(provider);
+}
+
+#[test]
+fn provider_open_rejects_insecure_shared_engine_roots() {
+    use std::os::unix::fs::symlink;
+
+    let broad = ScratchRoot::new("broad-shared-engine-root");
+    let broad_graph = broad.path().join("podman-graph");
+    std::fs::create_dir(&broad_graph).expect("broad graph root");
+    set_mode(&broad_graph, 0o750);
+    let error = RootlessPodmanProvider::open_with_executor(
+        options(broad.path()),
+        Arc::new(FakePodman::default()) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("broad graph root must fail closed");
+    assert_eq!(
+        error,
+        PodmanOpenError::StateRoot(PodmanStateRootError::NotOwnerOnly)
+    );
+
+    let linked = ScratchRoot::new("linked-shared-engine-root");
+    let outside = linked.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside directory");
+    set_mode(&outside, 0o700);
+    let configured = options(linked.path());
+    let runtime_root = linked.path().join("runtime/automata-ci-podman");
+    std::fs::create_dir(&runtime_root).expect("runtime root");
+    set_mode(&runtime_root, 0o700);
+    symlink(&outside, runtime_root.join("shared-run")).expect("linked run root");
+    let error = RootlessPodmanProvider::open_with_executor(
+        configured,
+        Arc::new(FakePodman::default()) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("linked run root must fail closed");
+    assert_eq!(
+        error,
+        PodmanOpenError::StateRoot(PodmanStateRootError::PathSecurity)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reopen_rejects_obsolete_environment_staging_without_reading_it() {
+    let scratch = ScratchRoot::new("transfer-recovery");
+    let fake = Arc::new(FakePodman::default());
+    let provider = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        Arc::clone(&fake) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect("initial provider");
+    drop(provider);
+
+    let transfers = scratch.path().join("transfers");
+    assert!(!transfers.exists());
+    std::fs::create_dir(&transfers).expect("obsolete transfer directory");
+    set_mode(&transfers, 0o700);
+    let abandoned_file = transfers.join(format!("exec-env-{}", "a".repeat(32)));
+    std::fs::write(&abandoned_file, b"abandoned-sensitive-bytes").expect("abandoned input");
+    set_mode(&abandoned_file, 0o600);
+
+    let error = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        fake as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("obsolete durable environment staging must fail closed");
+    assert_eq!(
+        error,
+        PodmanOpenError::StateRoot(PodmanStateRootError::PathSecurity)
+    );
+    assert_eq!(
+        std::fs::read(&abandoned_file).expect("obsolete bytes remain untouched"),
+        b"abandoned-sensitive-bytes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reopen_rejects_a_top_level_transfer_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = ScratchRoot::new("transfer-link-attack");
+    let fake = Arc::new(FakePodman::default());
+    let provider = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        Arc::clone(&fake) as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect("initial provider");
+    drop(provider);
+    let outside = scratch.path().join("outside");
+    std::fs::write(&outside, b"outside-survives").expect("outside fixture");
+    let attack = scratch.path().join("transfers");
+    symlink(&outside, &attack).expect("top-level transfer symlink");
+
+    let error = RootlessPodmanProvider::open_with_executor(
+        options(scratch.path()),
+        fake as Arc<dyn PodmanCommandExecutor>,
+    )
+    .expect_err("top-level symlink must fail closed");
+    assert_eq!(
+        error,
+        PodmanOpenError::StateRoot(PodmanStateRootError::PathSecurity)
+    );
+    assert_eq!(
+        std::fs::read(&outside).expect("outside survives"),
+        b"outside-survives"
+    );
+}
+
+fn set_mode(path: &std::path::Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("permissions");
+    }
+    #[cfg(not(unix))]
+    let _ignored = (path, mode);
+}

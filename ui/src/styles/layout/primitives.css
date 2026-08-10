@@ -1,0 +1,42 @@
+.layout-wide,
+.layout-width {
+  width: min(100%, var(--content-width));
+  margin-inline: auto;
+  padding-inline: 32px;
+}
+
+.page {
+  flex: 1 0 auto;
+  min-height: calc(100vh - 230px);
+  padding-block: 24px 48px;
+}
+
+.actions-layout {
+  display: grid;
+  grid-template-columns: 256px minmax(0, 1fr);
+  align-items: start;
+}
+
+.actions-content {
+  container: actions-content / inline-size;
+  min-width: 0;
+  padding-left: 32px;
+}
+
+.page-heading {
+  display: flex;
+  min-height: 44px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.page-heading h1 {
+  max-width: 760px;
+  margin: 0;
+}
+
+.page-heading > * {
+  min-width: 0;
+}

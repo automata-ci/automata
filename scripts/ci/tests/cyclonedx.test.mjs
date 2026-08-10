@@ -13,15 +13,15 @@ function fixture() {
     serialNumber: "urn:uuid:nondeterministic",
     metadata: {
       component: {
-        name: "automata",
-        "bom-ref": "path+file:///work/automata/crates/automata#0.1.0",
+        name: "automata-ci",
+        "bom-ref": "path+file:///work/automata/crates/automata-ci#0.1.0",
         type: "application",
       },
       timestamp: "2026-01-02T03:04:05Z",
     },
     bomFormat: "CycloneDX",
     dependencies: [
-      { ref: "path+file:///work/automata/crates/automata#0.1.0" },
+      { ref: "path+file:///work/automata/crates/automata-ci#0.1.0" },
     ],
   };
 }

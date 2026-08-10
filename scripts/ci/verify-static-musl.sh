@@ -172,7 +172,8 @@ published_address="$($runtime port "$container_name" 8080/tcp)" \
   || die "scratch server did not publish exactly one IPv4 loopback port: $published_address"
 
 health_url="http://${published_address}/healthz"
-page_url="http://${published_address}/"
+root_url="http://${published_address}/"
+page_url="http://${published_address}/repositories"
 deadline=$((SECONDS + 60))
 until health_document="$(curl --fail --silent --show-error --max-time 2 "$health_url" 2>/dev/null)"; do
   if (( SECONDS >= deadline )); then
@@ -186,10 +187,51 @@ done
 [[ "$health_document" == *"\"commit\":\"${expected_git_sha}\""* ]] \
   || die "scratch server health response omitted the expected commit"
 
-page_document="$(curl --fail --silent --show-error --max-time 10 "$page_url")" \
-  || die "scratch server did not return its server-rendered home page"
+root_status="$(
+  curl \
+    --silent \
+    --show-error \
+    --max-time 10 \
+    --dump-header "$scratch_dir/root.headers" \
+    --output "$scratch_dir/root.body" \
+    --write-out '%{http_code}' \
+    "$root_url"
+)" || die "scratch server did not return its canonical home redirect"
+[[ "$root_status" == 308 ]] \
+  || die "scratch server home returned HTTP $root_status instead of the canonical 308 redirect"
+awk '
+  {
+    sub(/\r$/, "")
+  }
+  tolower(substr($0, 1, 9)) == "location:" {
+    location_count += 1
+    location = substr($0, 10)
+    sub(/^[[:space:]]*/, "", location)
+    sub(/[[:space:]]*$/, "", location)
+    if (location == "/repositories") {
+      canonical_location_count += 1
+    }
+  }
+  END {
+    exit !(location_count == 1 && canonical_location_count == 1)
+  }
+' "$scratch_dir/root.headers" \
+  || die "scratch server home redirect did not contain exactly one canonical /repositories location"
+
+page_status="$(
+  curl \
+    --silent \
+    --show-error \
+    --max-time 10 \
+    --output "$scratch_dir/repositories.body" \
+    --write-out '%{http_code}' \
+    "$page_url"
+)" || die "scratch server did not return its server-rendered repository directory"
+[[ "$page_status" == 200 ]] \
+  || die "scratch server repository directory returned HTTP $page_status instead of 200"
+page_document="$(<"$scratch_dir/repositories.body")"
 [[ "$page_document" == '<!doctype html><html lang="en">'* ]] \
-  || die "scratch server home page is not a complete server-rendered HTML document"
-[[ "$page_document" == *'<h1>Workflow runs</h1>'* ]] \
-  || die "scratch server home page omitted its essential React-rendered content"
-printf 'Static scratch server returned health and complete React SSR HTML.\n'
+  || die "scratch server repository directory is not a complete server-rendered HTML document"
+[[ "$page_document" == *'<h1>Repositories</h1>'* ]] \
+  || die "scratch server repository directory omitted its essential React-rendered content"
+printf 'Static scratch server returned health, its canonical redirect, and complete React SSR HTML.\n'

@@ -1,4 +1,4 @@
-import rendererContract from "../../renderer/contract.json";
+import rendererContract from "../../../crates/automata-ci-ui-renderer/contract.json";
 
 /** Maximum wire size of serialized render requests, measured as UTF-8 bytes. */
 export const MAX_SERIALIZED_RENDER_REQUEST_BYTES = rendererContract.maxRequestUtf8Bytes;
@@ -31,15 +31,20 @@ export function utf8ByteLength(value: string): number {
 
 export const RENDER_REQUEST_LIMITS = {
   artifactCount: 500,
-  csrfTokenLength: 8_192,
+  bindingCount: 500,
   idLength: 256,
   jobCount: 200,
+  logLineCount: 10_000,
+  logLineTextLength: 65_536,
   longTextLength: 4_096,
   navigationCount: 32,
-  operationCount: 16,
-  optionCount: 64,
+  permissionCount: 500,
+  repositoryCount: 25,
+  roleCount: 500,
   runCount: 250,
-  shortTextLength: 512,
-  stepCount: 1_000,
+  secretCount: 50,
+  shortTextLength: 1_024,
   stylesheetCount: 32,
+  userCount: 500,
+  workflowCount: 250,
 } as const;

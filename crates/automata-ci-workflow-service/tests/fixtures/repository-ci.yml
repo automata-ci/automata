@@ -1,0 +1,348 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AUTOMATA_BUILD_GIT_SHA: ${{ github.sha }}
+  AUTOMATA_EXPECTED_GIT_SHA: ${{ github.sha }}
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
+
+jobs:
+  verify:
+    name: Verify workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
+        env:
+          POSTGRES_DB: automata_ci
+          POSTGRES_PASSWORD: automata-ci-local-only
+          POSTGRES_USER: automata_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --dbname=automata_ci --username=automata_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Show pinned toolchain
+        run: |
+          install -d -m 0700 -- "$TMPDIR"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends jq postgresql-client shellcheck
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Verify product binary policy
+        run: ./scripts/ci/verify-product-targets.sh
+
+      - name: Lint workflows and shell scripts
+        run: |
+          ./scripts/ci/install-actionlint.sh target/ci-tools
+          target/ci-tools/actionlint .github/workflows/*.yml
+          shellcheck -x \
+            scripts/install.sh \
+            scripts/ci/*.sh \
+            scripts/ci/lib/*.sh \
+            scripts/ci/tests/*.sh \
+            scripts/dev/*.sh \
+            images/github-hosted-ubuntu-24.04-x64/*.sh \
+            scripts/ui/*.sh \
+            scripts/ui/tests/*.sh \
+            crates/automata-ci-protocol-protobuf/tools/*.sh
+          ./scripts/ui/tests/renderer-profile-launcher.contract.sh
+          ./scripts/ui/tests/renderer-preflight.test.sh
+          ./scripts/ui/tests/renderer-provenance.test.sh
+          ./scripts/dev/git-bridge-firewall.test.sh
+          ./scripts/dev/results-firewall.test.sh
+          ./scripts/dev/git-http-server.test.sh
+          ./scripts/ci/tests/container-context.test.sh
+          ./scripts/ci/tests/install.test.sh
+          python3 scripts/ci/tests/release-handoff.test.py
+          python3 scripts/ci/tests/service-proxy-candidate.test.py
+
+      - name: Verify Prometheus metrics contract
+        env:
+          AUTOMATA_METRICS_CONTAINER_RUNTIME: docker
+        run: ./scripts/ci/verify-metrics.sh
+
+      - name: Verify native Prometheus metrics contract
+        env:
+          AUTOMATA_METRICS_CONTAINER_RUNTIME: docker
+        run: ./scripts/ci/verify-native-metrics.sh
+
+      - name: Lint
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          cargo test --workspace --all-targets --all-features --locked
+          cargo test --workspace --doc --all-features --locked
+
+      - name: Check public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+      - name: Verify isolated PostgreSQL 18 test database
+        env:
+          PGPASSWORD: automata-ci-local-only
+        run: |
+          server_version="$(
+            psql \
+              --host=127.0.0.1 \
+              --port=5432 \
+              --username=automata_ci \
+              --dbname=automata_ci \
+              --tuples-only \
+              --no-align \
+              --command="SHOW server_version_num"
+          )"
+          [[ "$server_version" == "180004" ]] || {
+            printf 'expected PostgreSQL 18.4, got server_version_num=%s\n' \
+              "$server_version" >&2
+            exit 1
+          }
+
+      - name: Test PostgreSQL invariants
+        env:
+          AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
+        run: |
+          cargo test -p automata-ci-store --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-runner-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-secret-postgres --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-results-github --test postgres_cache --all-features --locked -- --ignored --test-threads=1
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Test vendored renderer macro diagnostics
+        run: ./scripts/ui/tests/rquickjs-macro-diagnostics.test.sh
+
+      - name: Audit dependencies
+        run: |
+          cargo deny --locked --workspace --all-features check advisories bans licenses sources
+          crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
+
+  frontend:
+    name: React SSR frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Install pinned Chromium
+        run: npx --no-install playwright install --with-deps chromium
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=low
+
+      - name: Test and build server-rendered frontend
+        run: npm run check
+
+      - name: Test the public UI demo and screenshots
+        run: npm run screenshots
+
+      - name: Verify embedded renderer provenance
+        working-directory: .
+        run: ./scripts/ui/verify-renderer-assets.sh ui/dist
+
+      - name: Test deterministic SBOM normalization
+        working-directory: .
+        run: node --test scripts/ci/tests/*.test.mjs
+
+  renderer:
+    name: Reproduce embedded renderer
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reproduce embedded renderer component and assets
+        run: |
+          ./scripts/ui/reproduce-renderer-in-profile.sh
+          git diff --exit-code -- \
+            crates/automata-ci-ui-renderer/assets \
+            crates/automata-ci-ui-renderer/src/generated_assets.rs \
+            ui/renderer
+
+  dist:
+    name: Static Linux distribution
+    needs:
+      - verify
+      - frontend
+      - renderer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read workspace version
+        run: |
+          version="$(./scripts/ci/workspace-version.sh)"
+          {
+            printf 'AUTOMATA_EXPECTED_VERSION=%s\n' "$version"
+            printf 'AUTOMATA_RELEASE_CREATED=%s\n' "$(git show -s --format=%cI HEAD)"
+            printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show -s --format=%ct HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - name: Install musl and ELF tooling
+        run: |
+          install -d -m 0700 -- "$TMPDIR"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends binutils musl-tools podman
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install pinned SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Build distribution binaries
+        env:
+          AUTOMATA_RELEASE_BUILD: "1"
+        run: ./scripts/ci/build-static-musl.sh
+
+      - name: Verify static binaries
+        env:
+          AUTOMATA_SCRATCH_RUNTIME: docker
+        run: |
+          ./scripts/ci/verify-static-musl.sh
+          ./scripts/ci/verify-service-proxy-static.sh
+
+      - name: Generate binary and embedded-runtime SBOMs
+        run: ./scripts/ci/generate-sboms.sh
+
+      - name: Prepare locked third-party license sources
+        run: ./scripts/ci/prepare-third-party-license-sources.sh
+
+      - name: Generate and reproduce third-party notices offline
+        run: |
+          ./scripts/ci/generate-third-party-licenses.sh
+          ./scripts/ci/generate-third-party-licenses.sh \
+            target/third-party-license-reproduction
+          diff --recursive --brief \
+            target/distribution-input/licenses \
+            target/third-party-license-reproduction
+
+      - name: Package and reproduce deterministic distribution
+        run: |
+          ./scripts/ci/package-static-musl.sh
+          cp \
+            "target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256" \
+            target/distribution-first.sha256
+          ./scripts/ci/package-static-musl.sh
+          cmp \
+            target/distribution-first.sha256 \
+            "target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256"
+
+      - name: Prepare digest-bound private service-proxy image candidate
+        env:
+          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman
+        run: |
+          ./scripts/ci/prepare-service-proxy-context.sh \
+            target/service-proxy-context \
+            "$AUTOMATA_EXPECTED_VERSION" \
+            "$AUTOMATA_EXPECTED_GIT_SHA" \
+            "$AUTOMATA_RELEASE_CREATED" \
+            "$SOURCE_DATE_EPOCH"
+          ./scripts/ci/build-service-proxy-candidate.sh \
+            target/service-proxy-context \
+            target/service-proxy-publication
+          ./scripts/ci/build-service-proxy-candidate.sh \
+            target/service-proxy-context \
+            target/service-proxy-publication-reproduction
+          cmp \
+            target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            target/service-proxy-publication-reproduction/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+
+      - name: Upload unpublished service-proxy image candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: automata-service-proxy-candidate-x86_64-unknown-linux-musl
+          path: target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload bootstrap distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: automata-x86_64-unknown-linux-musl
+          path: |
+            target/distribution/*.tar.gz
+            target/distribution/*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

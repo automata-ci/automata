@@ -1,0 +1,28 @@
+[package]
+name = "automata-ci-metrics"
+description = "Bounded Prometheus and OpenMetrics telemetry foundation for Automata"
+exclude = ["examples/metrics_fixture.rs"]
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+axum.workspace = true
+prometheus-client = { workspace = true, features = ["prometheus_protobuf", "protobuf-protox"] }
+prost = { version = "=0.14.4", default-features = false }
+rustix = { workspace = true, features = ["param"] }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

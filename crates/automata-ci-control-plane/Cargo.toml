@@ -1,0 +1,24 @@
+[package]
+name = "automata-ci-control-plane"
+description = "Pure control-plane scheduling domain and policy ports for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-core.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

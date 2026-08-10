@@ -1,0 +1,38 @@
+FROM scratch
+
+ARG AUTOMATA_CREATED
+ARG AUTOMATA_REVISION
+ARG AUTOMATA_SERVICE_PROXY_BINARY_SHA256
+ARG AUTOMATA_SERVICE_PROXY_SBOM_SHA256
+ARG AUTOMATA_SERVICE_PROXY_SOURCE_SHA256
+ARG AUTOMATA_VERSION
+
+LABEL org.opencontainers.image.title="Automata CI service proxy" \
+      org.opencontainers.image.description="Namespace-local bounded TCP and UDP proxy for job service containers" \
+      org.opencontainers.image.source="https://github.com/automata-ci/automata" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.created="${AUTOMATA_CREATED}" \
+      org.opencontainers.image.revision="${AUTOMATA_REVISION}" \
+      org.opencontainers.image.version="${AUTOMATA_VERSION}" \
+      io.automata.service-proxy.protocol-version="1" \
+      io.automata.service-proxy.binary.sha256="${AUTOMATA_SERVICE_PROXY_BINARY_SHA256}" \
+      io.automata.service-proxy.sbom.sha256="${AUTOMATA_SERVICE_PROXY_SBOM_SHA256}" \
+      io.automata.service-proxy.source.sha256="${AUTOMATA_SERVICE_PROXY_SOURCE_SHA256}"
+
+COPY --chmod=0555 automata-ci-service-proxy \
+    /usr/libexec/automata-ci-service-proxy
+COPY --chmod=0444 LICENSE \
+    /usr/share/licenses/automata-ci-service-proxy/LICENSE
+COPY --chmod=0444 THIRD_PARTY_LICENSES.txt \
+    /usr/share/licenses/automata-ci-service-proxy/THIRD_PARTY_LICENSES.txt
+COPY --chmod=0444 THIRD_PARTY_NOTICES.txt \
+    /usr/share/licenses/automata-ci-service-proxy/THIRD_PARTY_NOTICES.txt
+COPY --chmod=0444 VERSION \
+    /usr/share/doc/automata-ci-service-proxy/VERSION
+COPY --chmod=0444 source-provenance.json \
+    /usr/share/doc/automata-ci-service-proxy/source-provenance.json
+COPY --chmod=0444 sbom/automata-ci-service-proxy.cdx.json \
+    /usr/share/sbom/automata-ci-service-proxy.cdx.json
+
+USER 65532:65532
+ENTRYPOINT ["/usr/libexec/automata-ci-service-proxy"]

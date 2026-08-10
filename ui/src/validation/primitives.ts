@@ -1,9 +1,19 @@
-import type { AssetKind } from "../safeUrls";
+import type { AssetKind, GitHubScmTarget } from "../safeUrls";
 import {
+  isSafeGitHubScmUrl,
   isSafeSameOriginAssetPath,
   isSafeSameOriginRoutePath,
 } from "../safeUrls";
-import { RENDER_REQUEST_LIMITS } from "./limits";
+import {
+  hasForbiddenDisplayCharacter,
+  hasVisibleDisplayCharacter,
+} from "../unicode";
+import { RENDER_REQUEST_LIMITS, utf8ByteLength } from "./limits";
+
+const CONTROL_CHARACTER_EXCEPT_TAB = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/u;
+const BIDI_FORMATTING_CHARACTER =
+  /[\u061c\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u;
+const GENERATED_CSRF_TOKEN = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -86,7 +96,34 @@ export function expectTextField(
   parentPath: string,
   maximumLength: number = RENDER_REQUEST_LIMITS.shortTextLength,
 ): string {
-  return expectString(record[key], `${parentPath}.${key}`, maximumLength);
+  return expectDisplayText(record[key], `${parentPath}.${key}`, maximumLength);
+}
+
+export function expectDisplayText(
+  value: unknown,
+  path: string,
+  maximumLength: number = RENDER_REQUEST_LIMITS.shortTextLength,
+): string {
+  const text = expectString(value, path, maximumLength, 1);
+  if (!hasVisibleDisplayCharacter(text) || hasForbiddenDisplayCharacter(text)) {
+    invalid(path, "non-blank display text without control or bidi formatting characters");
+  }
+  return text;
+}
+
+export function expectLogText(
+  value: unknown,
+  path: string,
+  maximumLength: number,
+): string {
+  const text = expectString(value, path, maximumLength);
+  if (
+    CONTROL_CHARACTER_EXCEPT_TAB.test(text) ||
+    BIDI_FORMATTING_CHARACTER.test(text)
+  ) {
+    invalid(path, "printable log text with tabs but no control or bidi formatting characters");
+  }
+  return text;
 }
 
 export function expectIdField(
@@ -108,14 +145,22 @@ export function expectString(
   maximumLength: number,
   minimumLength = 0,
 ): string {
-  if (
-    typeof value !== "string" ||
-    value.length < minimumLength ||
-    value.length > maximumLength
-  ) {
-    invalid(path, `a string between ${minimumLength} and ${maximumLength} characters`);
+  if (typeof value !== "string") {
+    invalid(path, `a string between ${minimumLength} and ${maximumLength} UTF-8 bytes`);
+  }
+  const byteLength = utf8ByteLength(value);
+  if (byteLength < minimumLength || byteLength > maximumLength) {
+    invalid(path, `a string between ${minimumLength} and ${maximumLength} UTF-8 bytes`);
   }
   return value;
+}
+
+export function expectGeneratedCsrfToken(value: unknown, path: string): string {
+  const token = expectString(value, path, 43, 43);
+  if (!GENERATED_CSRF_TOKEN.test(token)) {
+    invalid(path, "a canonical generated CSRF token");
+  }
+  return token;
 }
 
 export function expectRouteField(
@@ -126,10 +171,8 @@ export function expectRouteField(
   return expectRoute(record[key], `${parentPath}.${key}`);
 }
 
-export function expectNullableRoute(value: unknown, path: string): void {
-  if (value !== null) {
-    expectRoute(value, path);
-  }
+export function expectNullableRoute(value: unknown, path: string): string | null {
+  return value === null ? null : expectRoute(value, path);
 }
 
 export function expectAssetPath(
@@ -139,6 +182,27 @@ export function expectAssetPath(
 ): string {
   if (typeof value !== "string" || !isSafeSameOriginAssetPath(value, kind)) {
     invalid(path, `a safe same-origin ${kind} path`);
+  }
+  return value;
+}
+
+export function expectGitHubScmUrl(
+  value: unknown,
+  path: string,
+  repositoryOwner: string,
+  repositoryName: string,
+  target: GitHubScmTarget,
+): string {
+  if (
+    typeof value !== "string" ||
+    !isSafeGitHubScmUrl(
+      value,
+      repositoryOwner,
+      repositoryName,
+      target,
+    )
+  ) {
+    invalid(path, "a canonical trusted GitHub SCM URL for this repository");
   }
   return value;
 }
@@ -171,14 +235,15 @@ export function expectLiteral(
   }
 }
 
-export function expectOneOf(
+export function expectOneOf<const Allowed extends readonly string[]>(
   value: unknown,
   path: string,
-  allowed: readonly string[],
-): void {
+  allowed: Allowed,
+): Allowed[number] {
   if (typeof value !== "string" || !allowed.includes(value)) {
     invalid(path, allowed.map((item) => JSON.stringify(item)).join(", "));
   }
+  return value as Allowed[number];
 }
 
 export function expectUnique<T>(seen: Set<T>, value: T, path: string): void {

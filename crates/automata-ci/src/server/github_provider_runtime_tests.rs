@@ -1,0 +1,1066 @@
+use std::{
+    collections::VecDeque,
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
+use serde_json::{Value, json};
+
+use super::*;
+
+static CONFIG_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+fn uuid(value: u128) -> String {
+    let encoded = format!("{value:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &encoded[0..8],
+        &encoded[8..12],
+        &encoded[12..16],
+        &encoded[16..20],
+        &encoded[20..32]
+    )
+}
+
+fn authority(id: u128) -> Value {
+    json!({
+        "authority_id": uuid(id),
+        "policy_revision": 7
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repository(
+    tenant: &str,
+    connection: u128,
+    installation: u64,
+    repository_id: u64,
+    owner_id: u64,
+    name: &str,
+    visibility: &str,
+    checks_authority: u128,
+    private_authority: Option<u128>,
+) -> Value {
+    json!({
+        "tenant_id": tenant,
+        "connection_id": uuid(connection),
+        "installation_id": installation,
+        "repository_id": repository_id,
+        "repository_owner_id": owner_id,
+        "repository": name,
+        "visibility": visibility,
+        "manifest_revision": 1,
+        "policy_revision": 7,
+        "runtime_policy_revision": 1,
+        "authority_profile": "standard",
+        "runner_policy": {
+            "workspace": {"derivation": 1, "root": "/__w", "schema": 1},
+            "mappings": [{
+                "container_features": ["automata.core/job-containers@v1"],
+                "architecture": "x86_64",
+                "operating_system": "linux",
+                "environment_profile": {
+                    "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "id": "automata.example/ubuntu-24-04"
+                },
+                "selector": "Ubuntu-24.04"
+            }],
+            "schema": 1
+        },
+        "check_name": "Automata CI",
+        "authorities": {
+            "checks_write": authority(checks_authority),
+            "private_repository_source_read": private_authority
+                .map_or(Value::Null, authority)
+        }
+    })
+}
+
+fn document(repositories: &[Value]) -> Value {
+    json!({
+        "schema": 1,
+        "app": {
+            "id": 42,
+            "client_id": "Iv1.automata-provider-runtime",
+            "jwt_issuer": "app_client_id",
+            "private_key_source": "env:AUTOMATA_PROVIDER_RUNTIME_TEST_APP_KEY",
+            "configuration_revision": 5
+        },
+        "webhook": {
+            "hmac_secret_source": "env:AUTOMATA_PROVIDER_RUNTIME_TEST_WEBHOOK_KEY",
+            "verifier_revision": 11
+        },
+        "repositories": repositories
+    })
+}
+
+fn config_file() -> PathBuf {
+    let sequence = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "automata-github-provider-runtime-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("temporary configuration directory");
+    directory.join("provider.json")
+}
+
+fn load_config(document: &Value) -> GithubProviderConfig {
+    let path = config_file();
+    fs::write(
+        &path,
+        serde_json::to_vec(document).expect("configuration JSON"),
+    )
+    .expect("write configuration");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("owner-only configuration");
+    }
+    GithubProviderConfig::load(&super::super::SecretSource::File(path))
+        .expect("valid provider configuration")
+}
+
+#[test]
+fn non_regressing_clock_clamps_backward_observations() {
+    let clock = NonRegressingGithubProviderClock::default();
+
+    assert_eq!(clock.observe(41).get(), 41);
+    assert_eq!(clock.observe(9).get(), 41);
+    assert_eq!(clock.observe(-1).get(), 41);
+    assert_eq!(clock.observe(73).get(), 73);
+}
+
+#[test]
+fn public_only_and_mixed_registries_select_closed_source_modes() {
+    let public = load_config(&document(&[repository(
+        "tenant-public",
+        0x201,
+        202,
+        302,
+        402,
+        "octo/public-repository",
+        "public",
+        0x501,
+        None,
+    )]));
+    let public_shape = GithubProviderRuntimeShape::from_config(&public);
+    assert_eq!(public_shape.repository_count(), 1);
+    assert_eq!(public_shape.installation_count(), 1);
+    assert_eq!(public_shape.tenant_count(), 1);
+    assert_eq!(
+        public_shape.source_mode(),
+        GithubProviderSourceMode::PublicOnly
+    );
+
+    let mixed = load_config(&document(&[
+        repository(
+            "tenant-public",
+            0x211,
+            202,
+            312,
+            412,
+            "octo/public-repository",
+            "public",
+            0x511,
+            None,
+        ),
+        repository(
+            "tenant-private",
+            0x212,
+            101,
+            311,
+            411,
+            "octo/private-repository",
+            "private",
+            0x512,
+            Some(0x612),
+        ),
+    ]));
+    let mixed_shape = GithubProviderRuntimeShape::from_config(&mixed);
+    assert_eq!(mixed_shape.repository_count(), 2);
+    assert_eq!(mixed_shape.installation_count(), 2);
+    assert_eq!(mixed_shape.tenant_count(), 2);
+    assert_eq!(
+        mixed_shape.source_mode(),
+        GithubProviderSourceMode::PublicAndPrivate
+    );
+}
+
+#[test]
+fn fair_sweep_visits_every_stable_item_before_idle_delay() {
+    let mut sweep = FairSweep::new(Arc::<[u8]>::from([1, 2, 3]));
+
+    assert_eq!(sweep.next(), 1);
+    assert!(!sweep.observe(true));
+    assert_eq!(sweep.next(), 2);
+    assert!(!sweep.observe(true));
+    assert_eq!(sweep.next(), 3);
+    assert!(sweep.observe(true));
+    assert_eq!(sweep.next(), 1);
+    assert!(!sweep.observe(true));
+    assert_eq!(sweep.next(), 2);
+    assert!(!sweep.observe(false));
+    assert_eq!(sweep.next(), 3);
+    assert!(!sweep.observe(true));
+    assert_eq!(sweep.next(), 1);
+}
+
+#[test]
+fn runtime_policy_rejects_unbounded_values() {
+    assert_eq!(
+        GithubProviderRuntimePolicy::new(
+            Duration::ZERO,
+            MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        ),
+        Err(GithubProviderRuntimePolicyError)
+    );
+    assert_eq!(
+        GithubProviderRuntimePolicy::new(
+            Duration::from_secs(1),
+            MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES + 1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        ),
+        Err(GithubProviderRuntimePolicyError)
+    );
+    assert_eq!(
+        GithubProviderRuntimePolicy::new(
+            Duration::from_secs(1),
+            1,
+            Duration::from_mins(1) + Duration::from_millis(1),
+            Duration::from_secs(1),
+        ),
+        Err(GithubProviderRuntimePolicyError)
+    );
+    assert_eq!(
+        GithubProviderRuntimePolicy::new(
+            Duration::from_secs(1),
+            1,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        ),
+        Err(GithubProviderRuntimePolicyError)
+    );
+    assert_eq!(
+        GithubProviderRuntimePolicy::new(
+            Duration::from_secs(1),
+            1,
+            Duration::from_secs(1),
+            MAX_DRAIN_TIMEOUT + Duration::from_millis(1),
+        ),
+        Err(GithubProviderRuntimePolicyError)
+    );
+}
+
+#[derive(Debug)]
+struct FakePendingCommit {
+    log: Arc<Mutex<Vec<String>>>,
+    failures_remaining: AtomicUsize,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for FakePendingCommit {
+    async fn replay(&self) -> bool {
+        self.log.lock().expect("log lock").push("replay".to_owned());
+        self.failures_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+    }
+}
+
+enum FakeMaintenanceStep {
+    Pending {
+        replay_failures: usize,
+        cancel: bool,
+    },
+    Worked {
+        cancel: bool,
+    },
+}
+
+struct FakeCredentialMaintenance {
+    log: Arc<Mutex<Vec<String>>>,
+    steps: Mutex<VecDeque<FakeMaintenanceStep>>,
+    stop: CancellationToken,
+}
+
+impl fmt::Debug for FakeCredentialMaintenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FakeCredentialMaintenance")
+    }
+}
+
+#[async_trait]
+impl CredentialMaintenancePort for FakeCredentialMaintenance {
+    async fn coordinate_next(
+        &self,
+        tenant: TenantScope,
+        custody: CredentialMaintenanceCustody,
+    ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push(format!("coordinate:{}", tenant.as_str()));
+        let step = self
+            .steps
+            .lock()
+            .expect("step lock")
+            .pop_front()
+            .expect("scripted maintenance step");
+        Ok(match step {
+            FakeMaintenanceStep::Pending {
+                replay_failures,
+                cancel,
+            } => {
+                if cancel {
+                    self.stop.cancel();
+                }
+                CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
+                    FakePendingCommit {
+                        log: self.log.clone(),
+                        failures_remaining: AtomicUsize::new(replay_failures),
+                    },
+                )))
+            }
+            FakeMaintenanceStep::Worked { cancel } => {
+                if cancel {
+                    self.stop.cancel();
+                }
+                CredentialMaintenanceOutcome::Worked
+            }
+        })
+    }
+}
+
+fn tenants() -> Arc<[TenantScope]> {
+    vec![
+        TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant"),
+        TenantScope::from_authenticated_tenant_id("tenant-b").expect("tenant"),
+    ]
+    .into()
+}
+
+fn credential_commit_supervisor() -> Arc<CredentialMaintenanceCommitSupervisor> {
+    Arc::new(CredentialMaintenanceCommitSupervisor::new(
+        tokio::runtime::Handle::current(),
+        Duration::from_millis(1),
+    ))
+}
+
+#[tokio::test]
+async fn pending_commit_replays_exactly_before_more_fair_maintenance() {
+    let stop = CancellationToken::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let maintenance: Arc<dyn CredentialMaintenancePort> = Arc::new(FakeCredentialMaintenance {
+        log: log.clone(),
+        steps: Mutex::new(VecDeque::from([
+            FakeMaintenanceStep::Pending {
+                replay_failures: 1,
+                cancel: false,
+            },
+            FakeMaintenanceStep::Worked { cancel: true },
+        ])),
+        stop: stop.clone(),
+    });
+
+    run_credential_maintenance_loop(
+        maintenance,
+        credential_commit_supervisor(),
+        tenants(),
+        Duration::from_millis(1),
+        stop,
+    )
+    .await
+    .expect("maintenance stops cleanly");
+
+    assert_eq!(
+        *log.lock().expect("log lock"),
+        [
+            "coordinate:tenant-a",
+            "replay",
+            "replay",
+            "coordinate:tenant-b"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn shutdown_replays_a_closed_commit_before_maintenance_stops() {
+    let stop = CancellationToken::new();
+    let supervisor = credential_commit_supervisor();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let maintenance: Arc<dyn CredentialMaintenancePort> = Arc::new(FakeCredentialMaintenance {
+        log: log.clone(),
+        steps: Mutex::new(VecDeque::from([FakeMaintenanceStep::Pending {
+            replay_failures: 0,
+            cancel: true,
+        }])),
+        stop: stop.clone(),
+    });
+
+    run_credential_maintenance_loop(
+        maintenance,
+        supervisor.clone(),
+        tenants(),
+        Duration::from_millis(1),
+        stop,
+    )
+    .await
+    .expect("pending commit moves under independent custody during shutdown");
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+
+    assert_eq!(
+        *log.lock().expect("log lock"),
+        ["coordinate:tenant-a", "replay"]
+    );
+}
+
+#[derive(Debug)]
+struct GatedPendingCommit {
+    confirmed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for GatedPendingCommit {
+    async fn replay(&self) -> bool {
+        self.confirmed.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParkAfterCommitPending {
+    attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl PendingCredentialCommit for ParkAfterCommitPending {
+    async fn replay(&self) -> bool {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("scripted ParkAfterCommit task loss")
+        }
+        true
+    }
+}
+
+#[tokio::test]
+async fn park_after_commit_task_loss_replays_exactly_and_reuses_permit() {
+    let supervisor = credential_commit_supervisor();
+    let reservation = supervisor.try_reserve().expect("initial reservation");
+    let completion = supervisor.supervise(reservation, Box::new(ParkAfterCommitPending::default()));
+
+    completion.await.expect("watchdog retained exact custody");
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert!(
+        supervisor.try_reserve().is_some(),
+        "task cancellation must not strand bounded capacity"
+    );
+}
+
+struct PanicAfterCredentialHandoffMaintenance {
+    confirmed: Arc<AtomicBool>,
+    handed_off: CancellationToken,
+}
+
+impl fmt::Debug for PanicAfterCredentialHandoffMaintenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PanicAfterCredentialHandoffMaintenance")
+    }
+}
+
+#[async_trait]
+impl CredentialMaintenancePort for PanicAfterCredentialHandoffMaintenance {
+    async fn coordinate_next(
+        &self,
+        _tenant: TenantScope,
+        custody: CredentialMaintenanceCustody,
+    ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
+        let _completion = custody.supervise(Box::new(GatedPendingCommit {
+            confirmed: self.confirmed.clone(),
+        }));
+        self.handed_off.cancel();
+        panic!("scripted credential-maintenance caller task loss after custody handoff")
+    }
+}
+
+#[tokio::test]
+async fn caller_task_loss_after_handoff_preserves_exact_commit_and_reuses_permit() {
+    let stop = CancellationToken::new();
+    let confirmed = Arc::new(AtomicBool::new(false));
+    let handed_off = CancellationToken::new();
+    let supervisor = credential_commit_supervisor();
+    let maintenance: Arc<dyn CredentialMaintenancePort> =
+        Arc::new(PanicAfterCredentialHandoffMaintenance {
+            confirmed: confirmed.clone(),
+            handed_off: handed_off.clone(),
+        });
+    let run = tokio::spawn(run_credential_maintenance_loop(
+        maintenance,
+        supervisor.clone(),
+        tenants(),
+        Duration::from_millis(1),
+        stop,
+    ));
+
+    handed_off.cancelled().await;
+    assert!(run.await.expect_err("caller task must be lost").is_panic());
+    assert!(
+        !supervisor.drain(Duration::from_millis(5)).await,
+        "the watchdog must retain an unconfirmed exact commit"
+    );
+    confirmed.store(true, Ordering::Release);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert!(
+        supervisor.try_reserve().is_some(),
+        "caller task loss must not strand bounded capacity"
+    );
+}
+
+struct GatedPendingMaintenance {
+    confirmed: Arc<AtomicBool>,
+    stop: CancellationToken,
+}
+
+struct FatalPendingMaintenance {
+    confirmed: Arc<AtomicBool>,
+    pending_started: CancellationToken,
+}
+
+impl fmt::Debug for FatalPendingMaintenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FatalPendingMaintenance")
+    }
+}
+
+#[async_trait]
+impl CredentialMaintenancePort for FatalPendingMaintenance {
+    async fn coordinate_next(
+        &self,
+        _tenant: TenantScope,
+        custody: CredentialMaintenanceCustody,
+    ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
+        self.pending_started.cancel();
+        Ok(CredentialMaintenanceOutcome::Pending(custody.supervise(
+            Box::new(GatedPendingCommit {
+                confirmed: self.confirmed.clone(),
+            }),
+        )))
+    }
+}
+
+impl fmt::Debug for GatedPendingMaintenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GatedPendingMaintenance")
+    }
+}
+
+#[async_trait]
+impl CredentialMaintenancePort for GatedPendingMaintenance {
+    async fn coordinate_next(
+        &self,
+        _tenant: TenantScope,
+        custody: CredentialMaintenanceCustody,
+    ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
+        self.stop.cancel();
+        Ok(CredentialMaintenanceOutcome::Pending(custody.supervise(
+            Box::new(GatedPendingCommit {
+                confirmed: self.confirmed.clone(),
+            }),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn shutdown_hands_an_unconfirmed_exact_commit_to_independent_custody() {
+    let stop = CancellationToken::new();
+    let confirmed = Arc::new(AtomicBool::new(false));
+    let supervisor = credential_commit_supervisor();
+    let maintenance: Arc<dyn CredentialMaintenancePort> = Arc::new(GatedPendingMaintenance {
+        confirmed: confirmed.clone(),
+        stop: stop.clone(),
+    });
+    let run = run_credential_maintenance_loop(
+        maintenance,
+        supervisor.clone(),
+        tenants(),
+        Duration::from_millis(1),
+        stop,
+    );
+    tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("maintenance observes stop after handing off custody")
+        .expect("maintenance stops cleanly");
+    assert!(!supervisor.drain(Duration::from_millis(5)).await);
+    confirmed.store(true, Ordering::Release);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert!(
+        supervisor.try_reserve().is_some(),
+        "the bounded permit is reusable after independent confirmation"
+    );
+}
+
+struct FakeReleaseDrain {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+struct GatedReleaseDrain {
+    entered: CancellationToken,
+    release: CancellationToken,
+}
+
+struct FakeJobRuntimeAuthorityDrain {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+struct ServiceCredentialJobRuntimeAuthorityDrain {
+    log: Arc<Mutex<Vec<String>>>,
+    service_credentials: Arc<CredentialMaintenanceCommitSupervisor>,
+}
+
+struct TimedOutJobRuntimeAuthorityDrain;
+
+impl fmt::Debug for FakeJobRuntimeAuthorityDrain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FakeJobRuntimeAuthorityDrain")
+    }
+}
+
+impl fmt::Debug for ServiceCredentialJobRuntimeAuthorityDrain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ServiceCredentialJobRuntimeAuthorityDrain")
+    }
+}
+
+impl fmt::Debug for TimedOutJobRuntimeAuthorityDrain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TimedOutJobRuntimeAuthorityDrain")
+    }
+}
+
+#[async_trait]
+impl JobRuntimeAuthorityDrainPort for FakeJobRuntimeAuthorityDrain {
+    fn close(&self) {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push("job-authority-close".to_owned());
+    }
+
+    async fn drain(&self, _timeout: Duration) -> bool {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push("job-authority-drain".to_owned());
+        true
+    }
+}
+
+#[async_trait]
+impl JobRuntimeAuthorityDrainPort for ServiceCredentialJobRuntimeAuthorityDrain {
+    fn close(&self) {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push("job-authority-close".to_owned());
+        self.service_credentials.close();
+    }
+
+    async fn drain(&self, timeout: Duration) -> bool {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push("job-authority-drain".to_owned());
+        self.service_credentials.drain(timeout).await
+    }
+}
+
+#[async_trait]
+impl JobRuntimeAuthorityDrainPort for TimedOutJobRuntimeAuthorityDrain {
+    fn close(&self) {}
+
+    async fn drain(&self, _timeout: Duration) -> bool {
+        false
+    }
+}
+
+impl fmt::Debug for FakeReleaseDrain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FakeReleaseDrain")
+    }
+}
+
+#[async_trait]
+impl ReleaseDrainPort for FakeReleaseDrain {
+    async fn drain(&self, _timeout: Duration) -> bool {
+        self.log
+            .lock()
+            .expect("log lock")
+            .push("release-drain".to_owned());
+        true
+    }
+}
+
+impl fmt::Debug for GatedReleaseDrain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GatedReleaseDrain")
+    }
+}
+
+#[async_trait]
+impl ReleaseDrainPort for GatedReleaseDrain {
+    async fn drain(&self, timeout: Duration) -> bool {
+        self.entered.cancel();
+        tokio::time::timeout(timeout, self.release.cancelled())
+            .await
+            .is_ok()
+    }
+}
+
+fn stopped_loop(
+    name: &'static str,
+    stop: CancellationToken,
+    log: Arc<Mutex<Vec<String>>>,
+    exit: fn(Result<(), GithubDeliveryServiceError>) -> RuntimeLoopExit,
+) -> RuntimeLoopFuture<'static> {
+    runtime_loop(async move {
+        stop.cancelled().await;
+        log.lock().expect("log lock").push(name.to_owned());
+        exit(Ok(()))
+    })
+}
+
+#[tokio::test]
+async fn shutdown_stops_all_consumers_before_release_drain() {
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let stop = CancellationToken::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let loops = FuturesUnordered::new();
+    loops.push(stopped_loop(
+        "delivery-stop",
+        stop.clone(),
+        log.clone(),
+        RuntimeLoopExit::Delivery,
+    ));
+    loops.push(runtime_loop({
+        let stop = stop.clone();
+        let log = log.clone();
+        async move {
+            stop.cancelled().await;
+            log.lock().expect("log lock").push("checks-stop".to_owned());
+            RuntimeLoopExit::Checks(Ok(()))
+        }
+    }));
+    loops.push(runtime_loop({
+        let stop = stop.clone();
+        let log = log.clone();
+        async move {
+            stop.cancelled().await;
+            log.lock()
+                .expect("log lock")
+                .push("maintenance-stop".to_owned());
+            RuntimeLoopExit::Credentials(Ok(()))
+        }
+    }));
+    let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
+        Arc::new(FakeJobRuntimeAuthorityDrain { log: log.clone() });
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log: log.clone() });
+    let (fatal_notification, fatal_signal) = oneshot::channel();
+
+    supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        job_authority_drain,
+        release_drain,
+        Duration::from_secs(1),
+        Some(fatal_notification),
+    )
+    .await
+    .expect("ordered shutdown");
+    assert!(
+        fatal_signal.await.is_err(),
+        "operator shutdown must not send a provider-fatal notification"
+    );
+
+    let log = log.lock().expect("log lock");
+    assert_eq!(log.last().map(String::as_str), Some("release-drain"));
+    let job_drain = log
+        .iter()
+        .position(|entry| entry == "job-authority-drain")
+        .expect("job-authority drain");
+    let release_drain = log
+        .iter()
+        .position(|entry| entry == "release-drain")
+        .expect("release drain");
+    assert!(job_drain < release_drain);
+    let stopped = &log[..job_drain];
+    assert!(stopped.iter().any(|entry| entry == "delivery-stop"));
+    assert!(stopped.iter().any(|entry| entry == "checks-stop"));
+    assert!(stopped.iter().any(|entry| entry == "maintenance-stop"));
+}
+
+#[tokio::test]
+async fn job_authority_drain_timeout_is_visible_and_blocks_release_drain() {
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let stop = CancellationToken::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let loops = FuturesUnordered::new();
+    loops.push(stopped_loop(
+        "delivery-stop",
+        stop.clone(),
+        log.clone(),
+        RuntimeLoopExit::Delivery,
+    ));
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log: log.clone() });
+
+    let result = supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        Arc::new(TimedOutJobRuntimeAuthorityDrain),
+        release_drain,
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(GithubProviderRuntimeError::DrainTimeout)
+    ));
+    assert!(
+        !log.lock()
+            .expect("log lock")
+            .iter()
+            .any(|entry| entry == "release-drain"),
+        "service-credential releases remain ordered behind job-authority custody"
+    );
+}
+
+#[tokio::test]
+async fn loop_timeout_closes_custody_and_never_starts_release_drain() {
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let stop = CancellationToken::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let loops = FuturesUnordered::new();
+    loops.push(runtime_loop(async move {
+        std::future::pending::<()>().await;
+        RuntimeLoopExit::Checks(Ok(()))
+    }));
+    let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
+        Arc::new(FakeJobRuntimeAuthorityDrain { log: log.clone() });
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log: log.clone() });
+
+    let result = supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        job_authority_drain,
+        release_drain,
+        Duration::from_millis(20),
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(GithubProviderRuntimeError::DrainTimeout)
+    ));
+    let log = log.lock().expect("log lock");
+    assert!(log.iter().any(|entry| entry == "job-authority-close"));
+    assert!(!log.iter().any(|entry| entry == "job-authority-drain"));
+    assert!(!log.iter().any(|entry| entry == "release-drain"));
+}
+
+#[tokio::test]
+async fn service_credential_release_drain_timeout_is_visible() {
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let stop = CancellationToken::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let loops = FuturesUnordered::new();
+    loops.push(stopped_loop(
+        "delivery-stop",
+        stop.clone(),
+        log.clone(),
+        RuntimeLoopExit::Delivery,
+    ));
+    let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
+        Arc::new(FakeJobRuntimeAuthorityDrain { log });
+    let release_entered = CancellationToken::new();
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(GatedReleaseDrain {
+        entered: release_entered.clone(),
+        release: CancellationToken::new(),
+    });
+
+    let result = supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        job_authority_drain,
+        release_drain,
+        Duration::from_millis(20),
+        None,
+    )
+    .await;
+
+    assert!(release_entered.is_cancelled());
+    assert!(matches!(
+        result,
+        Err(GithubProviderRuntimeError::DrainTimeout)
+    ));
+}
+
+#[tokio::test]
+async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finish() {
+    let shutdown = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let pending_started = CancellationToken::new();
+    let confirmed = Arc::new(AtomicBool::new(false));
+    let maintenance: Arc<dyn CredentialMaintenancePort> = Arc::new(FatalPendingMaintenance {
+        confirmed: confirmed.clone(),
+        pending_started: pending_started.clone(),
+    });
+    let commit_supervisor = credential_commit_supervisor();
+    let loop_commit_supervisor = commit_supervisor.clone();
+    let loops = FuturesUnordered::new();
+    loops.push(runtime_loop({
+        let stop = stop.clone();
+        async move {
+            RuntimeLoopExit::Credentials(
+                run_credential_maintenance_loop(
+                    maintenance,
+                    loop_commit_supervisor,
+                    tenants(),
+                    Duration::from_millis(1),
+                    stop,
+                )
+                .await,
+            )
+        }
+    }));
+    loops.push(runtime_loop(async move {
+        pending_started.cancelled().await;
+        RuntimeLoopExit::Checks(Ok(()))
+    }));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
+        Arc::new(ServiceCredentialJobRuntimeAuthorityDrain {
+            log,
+            service_credentials: commit_supervisor,
+        });
+    let release_entered = CancellationToken::new();
+    let release = CancellationToken::new();
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(GatedReleaseDrain {
+        entered: release_entered.clone(),
+        release: release.clone(),
+    });
+    let (fatal_notification, fatal_signal) = oneshot::channel();
+    let runtime = tokio::spawn(supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        job_authority_drain,
+        release_drain,
+        Duration::from_secs(1),
+        Some(fatal_notification),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), fatal_signal)
+        .await
+        .expect("first fatal exit must notify before drain")
+        .expect("fatal notifier must remain owned");
+    assert!(
+        !runtime.is_finished(),
+        "fatal notification must not detach the pending commit"
+    );
+    assert!(
+        !release_entered.is_cancelled(),
+        "credential release waits behind the pending commit"
+    );
+
+    confirmed.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(1), release_entered.cancelled())
+        .await
+        .expect("credential release drain must remain awaited");
+    assert!(
+        !runtime.is_finished(),
+        "provider service remains owned through credential release"
+    );
+    release.cancel();
+    assert!(matches!(
+        runtime.await.expect("runtime supervisor joins"),
+        Err(GithubProviderRuntimeError::UnexpectedStop)
+    ));
+}
+
+#[tokio::test]
+async fn shutdown_timeout_is_visible_for_an_unconfirmed_service_credential_commit() {
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+    let stop = CancellationToken::new();
+    let pending_started = CancellationToken::new();
+    let maintenance: Arc<dyn CredentialMaintenancePort> = Arc::new(FatalPendingMaintenance {
+        confirmed: Arc::new(AtomicBool::new(false)),
+        pending_started: pending_started.clone(),
+    });
+    let commit_supervisor = credential_commit_supervisor();
+    let loop_commit_supervisor = commit_supervisor.clone();
+    let loops = FuturesUnordered::new();
+    loops.push(runtime_loop({
+        let stop = stop.clone();
+        async move {
+            RuntimeLoopExit::Credentials(
+                run_credential_maintenance_loop(
+                    maintenance,
+                    loop_commit_supervisor,
+                    tenants(),
+                    Duration::from_millis(1),
+                    stop,
+                )
+                .await,
+            )
+        }
+    }));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort> =
+        Arc::new(ServiceCredentialJobRuntimeAuthorityDrain {
+            log: log.clone(),
+            service_credentials: commit_supervisor,
+        });
+    let release_drain: Arc<dyn ReleaseDrainPort> = Arc::new(FakeReleaseDrain { log });
+    let runtime = tokio::spawn(supervise_runtime_loops(
+        loops,
+        shutdown,
+        stop,
+        job_authority_drain,
+        release_drain,
+        Duration::from_millis(20),
+        None,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), pending_started.cancelled())
+        .await
+        .expect("maintenance produced an exact pending commit");
+    shutdown_signal.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), runtime)
+        .await
+        .expect("the whole-provider drain is bounded")
+        .expect("runtime supervisor joins");
+    assert!(matches!(
+        result,
+        Err(GithubProviderRuntimeError::DrainTimeout)
+    ));
+}

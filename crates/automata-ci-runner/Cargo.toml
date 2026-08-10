@@ -1,0 +1,67 @@
+[package]
+name = "automata-ci-runner"
+description = "Automata workflow runner for rootless Linux execution hosts"
+publish.workspace = true
+readme = "README.md"
+keywords = ["ci", "github-actions", "self-hosted", "runner", "automation"]
+categories = ["command-line-utilities", "development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "automata-runner"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+automata-ci-action.workspace = true
+automata-ci-action-github.workspace = true
+automata-ci-blob.workspace = true
+automata-ci-blob-s3.workspace = true
+automata-ci-core.workspace = true
+automata-ci-execution.workspace = true
+automata-ci-expression-github.workspace = true
+automata-ci-github.workspace = true
+automata-ci-github-runtime.workspace = true
+automata-ci-job-executor-github.workspace = true
+automata-ci-metrics.workspace = true
+automata-ci-protocol.workspace = true
+automata-ci-runner-crypto.workspace = true
+automata-ci-runner-journal.workspace = true
+automata-ci-runner-runtime.workspace = true
+automata-ci-runner-spool.workspace = true
+automata-ci-runner-transport.workspace = true
+automata-ci-sandbox-podman.workspace = true
+automata-ci-scm.workspace = true
+automata-ci-workflow-github.workspace = true
+axum.workspace = true
+clap.workspace = true
+http.workspace = true
+reqwest.workspace = true
+prometheus-client.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[build-dependencies]
+automata-ci-build-support.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,53 @@
+name: GitHub Actions compatibility gap
+description: Report a workflow or action behavior that differs from GitHub Actions.
+title: "compat: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility claims require reproducible evidence. Use public or synthetic fixtures only; never paste repository secrets or private workflow content.
+  - type: input
+    id: version
+    attributes:
+      label: Automata version
+      description: Paste the exact version output or commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: upstream
+    attributes:
+      label: GitHub Actions reference run
+      description: Link a public upstream run or documentation page when possible.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Minimal workflow or action
+      description: Provide a minimized public fixture that demonstrates the behavior.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: difference
+    attributes:
+      label: Observed difference
+      description: State GitHub's result, Automata's result, and the exact diagnostic or output difference.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Execution environment
+      description: Include runner profile/image digest, OS, architecture, and relevant labels or capabilities.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reviewed `docs/compatibility.md` and this behavior is not already explicitly unsupported.
+          required: true
+        - label: The fixture and diagnostics contain no secrets or private repository content.
+          required: true

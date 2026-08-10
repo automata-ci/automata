@@ -1,5 +1,0 @@
-job-ir-v4
-workflow-id=00000000-0000-4000-8000-000000000001
-source={"provider":"github","repository":"GoNeuralAI/automata","revision":"0123456789abcdef0123456789abcdef01234567","workflow_path":".github/workflows/ci.yml","event_name":"push"}
-job=00000000-0000-4000-8000-000000000003 run=00000000-0000-4000-8000-000000000002 name="Static Linux distribution" condition={"schema_version":1,"dialect":{"name":"github-actions","version":1},"source":"success()","instructions":[{"kind":"call","name":"success","argument_count":0}]} timeout=Some(2700) wd=- steps=11
-json-sha256=8b0889dedbb43f7cdc23e5282cb9bf3c1eeee314e45c499c409d24f0dbf95ed8

@@ -91,6 +91,21 @@
       {
         "components": [
           {
+            "key": "cargo:asn1-rs-impl@0.2.0",
+            "pathInVcs": "impl"
+          }
+        ],
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "repository": "https://github.com/rusticata/asn1-rs.git",
+        "revision": "a20e5f7319c896737ad0f2557037817b91ad854f",
+        "licensePath": "LICENSE-MIT",
+        "checkedInFile": "scripts/ci/reviewed-license-texts/rusticata-asn1-rs-impl-v0.2.0.json",
+        "expectedSha256": "9206df1d7be3fb30bcb3e920853805f4984858318d245297209268fac172d5ea",
+        "reason": "The locked proc-macro crate archive omits its repository-root licenses; this reviewed MIT text is bound to the exact Cargo VCS revision and workspace path."
+      },
+      {
+        "components": [
+          {
             "key": "cargo:base64-simd@0.8.0",
             "pathInVcs": "crates/base64-simd"
           },
@@ -123,6 +138,10 @@
       "MIT"
     ],
     "allowedProductionPackages": [
+      {
+        "name": "@phosphor-icons/web",
+        "version": "2.1.2"
+      },
       {
         "name": "react",
         "version": "19.2.8"

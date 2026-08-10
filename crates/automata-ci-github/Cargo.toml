@@ -1,0 +1,32 @@
+[package]
+name = "automata-ci-github"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Hardened GitHub HTTP adapters for Automata"
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-scm.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

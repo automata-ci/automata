@@ -1,0 +1,58 @@
+.status {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-default);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status__icon {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  color: var(--neutral-emphasis);
+  font-size: 24px;
+}
+
+.status__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status--success .status__icon {
+  color: var(--success-fg);
+}
+
+.status--failure .status__icon {
+  color: var(--danger-fg);
+}
+
+.status--warning .status__icon,
+.status--running .status__icon {
+  color: var(--attention-fg);
+}
+
+.status--running .status__icon {
+  animation: status-spin 1s linear infinite;
+}
+
+.status__arc {
+  border: 2px solid var(--border-muted);
+  border-color: color-mix(in srgb, currentColor 14%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+}
+
+.status--queued .status__icon {
+  color: var(--fg-muted);
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

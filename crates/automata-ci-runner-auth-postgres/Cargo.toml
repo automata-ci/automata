@@ -1,0 +1,31 @@
+[package]
+name = "automata-ci-runner-auth-postgres"
+description = "PostgreSQL durable runner machine authority adapter for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-core.workspace = true
+automata-ci-runner-auth.workspace = true
+automata-ci-runner-control.workspace = true
+automata-ci-store.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+automata-ci-protocol.workspace = true
+sha2.workspace = true
+static_assertions.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

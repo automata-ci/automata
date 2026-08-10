@@ -1,0 +1,73 @@
+:root {
+  color-scheme: light dark;
+  font-synthesis: none;
+
+  --font-sans:
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+    Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --content-width: 1280px;
+  --header-width: 1440px;
+  --radius-control: 6px;
+  --radius-round: 999px;
+
+  --canvas-default: light-dark(#ffffff, #0d1117);
+  --canvas-subtle: light-dark(#f6f8fa, #151b23);
+  --canvas-inset: light-dark(#eff2f5, #010409);
+  --border-default: light-dark(#d1d9e0, #3d444d);
+  --border-muted: light-dark(#d8dee4, #30363d);
+  --fg-default: light-dark(#1f2328, #f0f6fc);
+  --fg-muted: light-dark(#59636e, #9198a1);
+  --fg-subtle: light-dark(#6e7781, #7d8590);
+  --accent-fg: light-dark(#0969da, #4493f8);
+  --accent-emphasis: light-dark(#0969da, #1f6feb);
+  --accent-emphasis-hover: light-dark(#0860ca, #1a65d6);
+  --accent-muted: light-dark(rgb(9 105 218 / 12%), rgb(56 139 253 / 18%));
+  --fg-on-emphasis: #ffffff;
+  --success-fg: light-dark(#1a7f37, #3fb950);
+  --danger-fg: light-dark(#d1242f, #f85149);
+  --attention-fg: light-dark(#9a6700, #d29922);
+  --neutral-emphasis: light-dark(#656d76, #8b949e);
+  --control-bg: light-dark(#f6f8fa, #21262d);
+  --control-hover: light-dark(#eff2f5, #30363d);
+  --header-bg: light-dark(#f6f8fa, #010409);
+  --focus-ring: light-dark(#0969da, #58a6ff);
+  --active-tab: light-dark(#fd8c73, #f78166);
+  --control-shadow: light-dark(0 1px 0 rgb(31 35 40 / 4%), 0 0 transparent);
+  --control-inset-shadow: light-dark(
+    inset 0 1px 0 rgb(31 35 40 / 4%),
+    inset 0 0 0 1px rgb(240 246 252 / 2%)
+  );
+  --overlay-shadow: light-dark(
+    0 8px 24px rgb(140 149 159 / 20%),
+    0 8px 24px rgb(1 4 9 / 80%)
+  );
+  --brand-mark-fg: light-dark(#ffffff, #0d1117);
+  --brand-mark-bg: light-dark(#24292f, #f0f6fc);
+  --avatar-fg: #ffffff;
+  --avatar-bg: #57606a;
+
+  --log-canvas: #0d1117;
+  --log-border: #30363d;
+  --log-border-muted: #21262d;
+  --log-fg: #e6edf3;
+  --log-muted: #8b949e;
+  --log-accent: #58a6ff;
+  --log-danger: #ff7b72;
+  --log-system: #d2a8ff;
+  --log-highlight: rgb(56 139 253 / 12%);
+  --log-message-min-width: 520px;
+  --log-output-min-width: 760px;
+
+  background: var(--canvas-default);
+  color: var(--fg-default);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}

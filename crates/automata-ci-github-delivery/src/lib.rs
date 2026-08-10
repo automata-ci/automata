@@ -1,0 +1,756 @@
+//! Verified GitHub push acceptance into Automata's durable provider inbox.
+//!
+//! This boundary authenticates and normalizes an exact webhook request before
+//! it performs any write. It then persists the authenticated raw JSON in the
+//! immutable blob store and, only after that write completes, records a
+//! credential-free object descriptor in the provider-delivery inbox. Provider
+//! I/O, object reads, workflow discovery, and compilation belong to a later
+//! worker and never run in the inbox acceptance call.
+//!
+//! # Request digest
+//!
+//! The request digest is SHA-256 over the domain
+//! `automata.github-delivery-ingress.request.v3\0`, an unsigned big-endian
+//! 16-bit field count, and thirteen ordered fields. Each field is encoded as an
+//! unsigned big-endian 16-bit label length and label bytes followed by an
+//! unsigned big-endian 64-bit value length and value bytes. In order, those
+//! fields are the exact singleton signature, event, and delivery headers; the
+//! exact authenticated body; and the tenant, provider, connection UUID,
+//! installation ID, repository and repository-owner IDs, authenticated
+//! repository visibility, canonical owner/name, and delivery ID from the
+//! complete [`ProviderDeliveryIdentity`]. Numeric provider IDs are encoded as unsigned
+//! big-endian 64-bit values and the UUID uses its canonical 16 bytes. This
+//! encoding makes header or routing drift a durable replay conflict instead
+//! of silently aliasing changed evidence.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+mod changed_files;
+mod checks_publisher;
+mod processor;
+mod service;
+mod worker;
+
+pub use checks_publisher::{
+    GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
+    GithubChecksCredentialRequest, GithubChecksCredentialValueError, GithubChecksPublisher,
+    GithubChecksPublisherConfig, GithubChecksPublisherConfigurationError,
+    GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubChecksServerServiceCredential,
+};
+
+pub use changed_files::GithubRestPushChangedFilesProvider;
+
+pub use processor::{
+    GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
+    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+};
+
+pub use service::{
+    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
+    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
+    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
+    GithubDeliverySourceCredentialValueError, GithubServerServiceCredentialRelease,
+};
+
+pub use worker::{
+    GithubDeliveryClaimSnapshot, GithubDeliverySourceAuthority, GithubDeliveryWorker,
+    GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError,
+    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
+    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
+    GithubDeliveryWorkflowRequest,
+};
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
+
+use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType};
+use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_github::{
+    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubPush,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+};
+use automata_ci_store::{
+    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
+    GithubCheckHeadSha, GithubProviderWebhookVerifierFingerprint, GithubServerServiceRevision,
+    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId, ProviderDeliveryIdentity,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
+};
+use bytes::Bytes;
+use http::HeaderMap;
+use sha2::{Digest as _, Sha256};
+use thiserror::Error;
+
+/// Canonical media type retained for an authenticated raw GitHub push event.
+pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
+/// Maximum exact repository connections accepted by one webhook verifier.
+pub const MAX_GITHUB_DELIVERY_CONNECTIONS: usize = 256;
+
+const PROVIDER: &str = "github";
+const RAW_OBJECT_KEY_PREFIX: &str = "provider-deliveries/github/push/sha256";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.github-delivery-ingress.request.v3\0";
+const REQUEST_DIGEST_FIELD_COUNT: u16 = 13;
+const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
+
+/// One configured GitHub delivery connection and its exact repository binding.
+///
+/// Stable numeric provider identities remain authoritative. The configured
+/// owner and repository name are authenticated display/routing evidence and
+/// must agree exactly with the normalized push payload.
+pub struct GithubDeliveryConnection {
+    tenant: TenantScope,
+    connection_id: ProviderConnectionId,
+    installation_id: ProviderInstallationId,
+    repository_id: ProviderRepositoryId,
+    repository_owner_id: ProviderRepositoryOwnerId,
+    repository_visibility: ProviderRepositoryVisibility,
+    repository_owner: Box<str>,
+    repository_name: Box<str>,
+}
+
+impl GithubDeliveryConnection {
+    /// Constructs one exact configured connection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an owner or repository name outside the same canonical shape
+    /// accepted from GitHub push payloads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tenant: TenantScope,
+        connection_id: ProviderConnectionId,
+        installation_id: ProviderInstallationId,
+        repository_id: ProviderRepositoryId,
+        repository_owner_id: ProviderRepositoryOwnerId,
+        repository_visibility: ProviderRepositoryVisibility,
+        repository_owner: impl Into<Box<str>>,
+        repository_name: impl Into<Box<str>>,
+    ) -> Result<Self, GithubDeliveryConfigurationError> {
+        let repository_owner = repository_owner.into();
+        let repository_name = repository_name.into();
+        validate_repository_component(&repository_owner)?;
+        validate_repository_component(&repository_name)?;
+        if has_ascii_case_insensitive_suffix(&repository_name, ".git") {
+            return Err(GithubDeliveryConfigurationError::InvalidRepositoryIdentity);
+        }
+        Ok(Self {
+            tenant,
+            connection_id,
+            installation_id,
+            repository_id,
+            repository_owner_id,
+            repository_visibility,
+            repository_owner,
+            repository_name,
+        })
+    }
+
+    /// Returns the authenticated tenant scope bound to this connection.
+    #[must_use]
+    pub const fn tenant(&self) -> &TenantScope {
+        &self.tenant
+    }
+
+    /// Returns the server-owned connection identity.
+    #[must_use]
+    pub const fn connection_id(&self) -> ProviderConnectionId {
+        self.connection_id
+    }
+
+    /// Returns the expected GitHub App installation identity.
+    #[must_use]
+    pub const fn installation_id(&self) -> ProviderInstallationId {
+        self.installation_id
+    }
+
+    /// Returns the expected stable GitHub repository identity.
+    #[must_use]
+    pub const fn repository_id(&self) -> ProviderRepositoryId {
+        self.repository_id
+    }
+
+    /// Returns the expected stable GitHub repository-owner identity.
+    #[must_use]
+    pub const fn repository_owner_id(&self) -> ProviderRepositoryOwnerId {
+        self.repository_owner_id
+    }
+
+    /// Returns the expected authenticated repository visibility.
+    #[must_use]
+    pub const fn repository_visibility(&self) -> ProviderRepositoryVisibility {
+        self.repository_visibility
+    }
+
+    /// Returns the configured canonical repository owner.
+    #[must_use]
+    pub fn repository_owner(&self) -> &str {
+        &self.repository_owner
+    }
+
+    /// Returns the configured canonical repository name.
+    #[must_use]
+    pub fn repository_name(&self) -> &str {
+        &self.repository_name
+    }
+
+    fn matches_selected(
+        &self,
+        push: &VerifiedGithubPush,
+        signed_repository_owner_id: ProviderRepositoryOwnerId,
+    ) -> bool {
+        push.installation_id().get() == self.installation_id.get()
+            && push.repository().id().get() == self.repository_id.get()
+            && signed_repository_owner_id == self.repository_owner_id
+            && provider_visibility(push.repository().visibility()) == self.repository_visibility
+            && push.repository().owner() == self.repository_owner()
+            && push.repository().name() == self.repository_name()
+    }
+
+    const fn selector(&self) -> (ProviderInstallationId, ProviderRepositoryId) {
+        (self.installation_id, self.repository_id)
+    }
+
+    fn repository_identity(&self) -> String {
+        let mut identity =
+            String::with_capacity(self.repository_owner.len() + 1 + self.repository_name.len());
+        identity.push_str(&self.repository_owner);
+        identity.push('/');
+        identity.push_str(&self.repository_name);
+        identity
+    }
+}
+
+impl fmt::Debug for GithubDeliveryConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubDeliveryConnection")
+            .field("tenant", &"[redacted]")
+            .field("connection_id", &self.connection_id)
+            .field("installation_id", &self.installation_id)
+            .field("repository_id", &self.repository_id)
+            .field("repository_owner_id", &self.repository_owner_id)
+            .field("repository_visibility", &self.repository_visibility)
+            .field("repository_owner", &"[redacted]")
+            .field("repository_name", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Sanitized invalid connection configuration.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum GithubDeliveryConfigurationError {
+    /// The verifier could not produce valid public key-revision evidence.
+    #[error("the GitHub webhook verifier evidence is invalid")]
+    InvalidVerifierEvidence,
+    /// A webhook verifier was configured without any repository connections.
+    #[error("the GitHub delivery connection registry is empty")]
+    EmptyConnectionRegistry,
+    /// A webhook verifier was configured with more than the closed connection limit.
+    #[error("the GitHub delivery connection registry exceeds its limit")]
+    TooManyConnections,
+    /// The configured owner or repository name is not canonical.
+    #[error("the configured GitHub repository identity is invalid")]
+    InvalidRepositoryIdentity,
+    /// More than one entry used the same server-owned connection identity.
+    #[error("the GitHub delivery connection identity is duplicated")]
+    DuplicateConnectionId,
+    /// More than one entry used the same numeric installation/repository selector.
+    #[error("the GitHub delivery numeric repository selector is duplicated")]
+    DuplicateRepositorySelector,
+    /// More than one entry used the same stable numeric repository identity.
+    #[error("the GitHub delivery numeric repository identity is duplicated")]
+    DuplicateRepositoryId,
+    /// More than one entry used the same canonical owner/repository identity.
+    #[error("the GitHub delivery repository identity is duplicated")]
+    DuplicateRepositoryIdentity,
+}
+
+/// Trusted wall clock shared by delivery claim, renewal, and reclaim authority.
+///
+/// Values must be non-negative and nondecreasing within one service process,
+/// every replica must use a coherently synchronized authority, and `now` must
+/// return promptly without blocking the asynchronous supervisor. Renewal
+/// periodically pairs this clock with a monotonic deadline and only narrows
+/// custody. A deployment that permits an arbitrary forward wall step to cross
+/// predecessor expiry between the final guard sample and the repository's
+/// row-lock/commit point must enforce current time inside that repository
+/// transaction; application-side polling cannot undo an already committed
+/// successor.
+pub trait GithubDeliveryClock: fmt::Debug + Send + Sync {
+    /// Returns the trusted current Unix time in milliseconds.
+    fn now(&self) -> UnixMillis;
+}
+
+/// Successful durable acceptance evidence.
+///
+/// The provider inbox owns the authoritative receipt. This narrow result gives
+/// an HTTP boundary enough stable, credential-free evidence to observe the
+/// accepted request without exposing the authenticated body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedGithubDelivery {
+    receipt: ManifestPinnedGithubDeliveryReceipt,
+    request_digest: Sha256Digest,
+    raw_event: AdmissionObject,
+}
+
+impl AcceptedGithubDelivery {
+    /// Returns the authoritative durable inbox receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &ManifestPinnedGithubDeliveryReceipt {
+        &self.receipt
+    }
+
+    /// Returns the canonical digest of all verified request evidence.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
+    }
+
+    /// Returns the immutable descriptor of the authenticated raw JSON.
+    #[must_use]
+    pub const fn raw_event(&self) -> &AdmissionObject {
+        &self.raw_event
+    }
+}
+
+/// Verified GitHub webhook ingress backed by immutable object and inbox ports.
+pub struct GithubDeliveryIngress {
+    verifier: GithubWebhookVerifier,
+    verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
+    verifier_revision: GithubServerServiceRevision,
+    connections: Arc<[GithubDeliveryConnection]>,
+    connection_by_selector: BTreeMap<(ProviderInstallationId, ProviderRepositoryId), usize>,
+    objects: Arc<dyn ImmutableBlobStore>,
+    deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+    clock: Arc<dyn GithubDeliveryClock>,
+}
+
+impl GithubDeliveryIngress {
+    /// Constructs one bounded verify-once ingress registry.
+    ///
+    /// Connections are retained in numeric selector order. One shared verifier
+    /// authenticates the request before its signed installation/repository pair
+    /// selects exactly one entry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty or excessive registry and any duplicate connection,
+    /// numeric selector, stable repository ID, or canonical repository identity.
+    pub fn new(
+        verifier: GithubWebhookVerifier,
+        verifier_revision: GithubServerServiceRevision,
+        mut connections: Vec<GithubDeliveryConnection>,
+        objects: Arc<dyn ImmutableBlobStore>,
+        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+        clock: Arc<dyn GithubDeliveryClock>,
+    ) -> Result<Self, GithubDeliveryConfigurationError> {
+        if connections.is_empty() {
+            return Err(GithubDeliveryConfigurationError::EmptyConnectionRegistry);
+        }
+        if connections.len() > MAX_GITHUB_DELIVERY_CONNECTIONS {
+            return Err(GithubDeliveryConfigurationError::TooManyConnections);
+        }
+        connections.sort_unstable_by_key(GithubDeliveryConnection::selector);
+
+        let mut connection_ids = BTreeSet::new();
+        for connection in &connections {
+            if !connection_ids.insert(connection.connection_id) {
+                return Err(GithubDeliveryConfigurationError::DuplicateConnectionId);
+            }
+        }
+
+        let mut connection_by_selector = BTreeMap::new();
+        for (index, connection) in connections.iter().enumerate() {
+            if connection_by_selector
+                .insert(connection.selector(), index)
+                .is_some()
+            {
+                return Err(GithubDeliveryConfigurationError::DuplicateRepositorySelector);
+            }
+        }
+
+        let mut repository_ids = BTreeSet::new();
+        for connection in &connections {
+            if !repository_ids.insert(connection.repository_id) {
+                return Err(GithubDeliveryConfigurationError::DuplicateRepositoryId);
+            }
+        }
+
+        let mut repository_identities = BTreeSet::new();
+        for connection in &connections {
+            if !repository_identities.insert(connection.repository_identity()) {
+                return Err(GithubDeliveryConfigurationError::DuplicateRepositoryIdentity);
+            }
+        }
+
+        let verifier_fingerprint = GithubProviderWebhookVerifierFingerprint::from_sha256(
+            Sha256Digest::from_bytes(*verifier.fingerprint().as_bytes()),
+        )
+        .map_err(|_| GithubDeliveryConfigurationError::InvalidVerifierEvidence)?;
+
+        Ok(Self {
+            verifier,
+            verifier_fingerprint,
+            verifier_revision,
+            connections: connections.into(),
+            connection_by_selector,
+            objects,
+            deliveries,
+            clock,
+        })
+    }
+
+    /// Returns configured connections in stable numeric selector order.
+    #[must_use]
+    pub fn connections(&self) -> &[GithubDeliveryConnection] {
+        &self.connections
+    }
+
+    /// Authenticates and durably accepts one exact GitHub push request.
+    ///
+    /// The raw object put always completes before the provider-inbox port is
+    /// invoked. Thus an inbox transaction can never include blob or provider
+    /// I/O. Exact durable replays return the same credential-free acceptance
+    /// evidence; changed evidence under the same delivery identity fails
+    /// closed in the provider inbox.
+    ///
+    /// # Errors
+    ///
+    /// Rejects failed webhook verification, configured identity drift,
+    /// invalid trusted time, immutable-object failures, and durable inbox
+    /// failures using only sanitized error classes.
+    pub async fn accept(
+        &self,
+        headers: &HeaderMap,
+        raw_body: Bytes,
+    ) -> Result<AcceptedGithubDelivery, GithubDeliveryIngressError> {
+        let push = self
+            .verifier
+            .verify(headers, raw_body)
+            .map_err(GithubDeliveryIngressError::Webhook)?;
+        let installation_id = ProviderInstallationId::new(push.installation_id().get())
+            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let repository_id = ProviderRepositoryId::new(push.repository().id().get())
+            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let signed_repository_owner_id =
+            ProviderRepositoryOwnerId::new(push.repository().owner_id().get())
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let connection_index = self
+            .connection_by_selector
+            .get(&(installation_id, repository_id))
+            .copied()
+            .ok_or(GithubDeliveryIngressError::ConfiguredIdentityMismatch)?;
+        let connection = self
+            .connections
+            .get(connection_index)
+            .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        if !connection.matches_selected(&push, signed_repository_owner_id) {
+            return Err(GithubDeliveryIngressError::ConfiguredIdentityMismatch);
+        }
+
+        let accepted_at = self.clock.now();
+        if accepted_at.get() < 0 {
+            return Err(GithubDeliveryIngressError::InvalidTrustedTime);
+        }
+
+        let repository_visibility = provider_visibility(push.repository().visibility());
+        let repository = ProviderRepositoryCoordinates::new(
+            connection.repository_id,
+            repository_visibility,
+            connection.repository_identity(),
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let identity = ProviderDeliveryIdentity::new(
+            connection.tenant.clone(),
+            PROVIDER,
+            connection.connection_id,
+            connection.installation_id,
+            repository,
+            push.delivery_id(),
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+
+        let request_digest =
+            canonical_request_digest(headers, &push, &identity, signed_repository_owner_id)?;
+        let body_digest = Sha256Digest::from_bytes(*push.body_sha256().as_bytes());
+        let object_key = format!("{RAW_OBJECT_KEY_PREFIX}/{body_digest}.json");
+        let blob_key = BlobKey::new(object_key.clone())
+            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let media_type = MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE)
+            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let payload = BlobPayload::from_bytes(blob_key, media_type, push.raw_body().clone());
+        if payload.descriptor().digest() != body_digest {
+            return Err(GithubDeliveryIngressError::InvariantViolation);
+        }
+        self.objects
+            .put_if_absent(payload)
+            .await
+            .map_err(|error| GithubDeliveryIngressError::RawObject { kind: error.kind() })?;
+
+        let raw_event = AdmissionObject::new_event(
+            body_digest,
+            ObjectKey::new(object_key)
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+            u64::try_from(push.raw_body().len())
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+            GITHUB_PUSH_EVENT_MEDIA_TYPE,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let delivery =
+            AcceptProviderDelivery::new(identity, request_digest, raw_event.clone(), accepted_at)
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let request = AcceptManifestPinnedGithubDelivery::new(
+            delivery,
+            signed_repository_owner_id,
+            connection.repository_owner_id,
+            check_head_sha(&push)?,
+            self.verifier_fingerprint,
+            self.verifier_revision,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let receipt = self
+            .deliveries
+            .accept_manifest_pinned_github_delivery(request)
+            .await
+            .map_err(|error| GithubDeliveryIngressError::from_subject_store(&error))?;
+        Ok(AcceptedGithubDelivery {
+            receipt,
+            request_digest,
+            raw_event,
+        })
+    }
+}
+
+impl fmt::Debug for GithubDeliveryIngress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubDeliveryIngress")
+            .field("verifier", &self.verifier)
+            .field("verifier_fingerprint", &self.verifier_fingerprint)
+            .field("verifier_revision", &self.verifier_revision)
+            .field("connection_count", &self.connections.len())
+            .field("connections", &"[configured connections]")
+            .field("selector_count", &self.connection_by_selector.len())
+            .field("objects", &"[immutable blob store]")
+            .field("deliveries", &"[provider delivery repository]")
+            .field("clock", &self.clock)
+            .finish()
+    }
+}
+
+/// Sanitized delivery-ingress failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum GithubDeliveryIngressError {
+    /// Webhook authentication or normalization failed.
+    #[error(transparent)]
+    Webhook(GithubWebhookError),
+    /// Authenticated provider identity disagreed with connection authority.
+    #[error("the authenticated GitHub delivery does not match the configured connection")]
+    ConfiguredIdentityMismatch,
+    /// The injected trusted clock returned a pre-epoch timestamp.
+    #[error("the trusted GitHub delivery clock returned an invalid timestamp")]
+    InvalidTrustedTime,
+    /// The authenticated raw object could not be durably persisted.
+    #[error("authenticated GitHub delivery object persistence failed")]
+    RawObject {
+        /// Stable provider-neutral object-store failure class.
+        kind: BlobStoreErrorKind,
+    },
+    /// The provider-delivery inbox backend was unavailable.
+    #[error("the durable provider delivery inbox is unavailable")]
+    InboxUnavailable,
+    /// The same delivery identity was reused with changed immutable evidence.
+    #[error("the GitHub delivery replay conflicts with durable evidence")]
+    ReplayConflict,
+    /// The provider inbox rejected an invalid acceptance transition.
+    #[error("the durable provider delivery inbox rejected the acceptance")]
+    InboxRejected,
+    /// Trusted construction unexpectedly violated an internal invariant.
+    #[error("trusted GitHub delivery construction violated an invariant")]
+    InvariantViolation,
+}
+
+impl GithubDeliveryIngressError {
+    fn from_subject_store(error: &GithubSubjectEvidenceStoreError) -> Self {
+        match error {
+            GithubSubjectEvidenceStoreError::Operation(_) => Self::InboxUnavailable,
+            GithubSubjectEvidenceStoreError::ReplayConflict => Self::ReplayConflict,
+            GithubSubjectEvidenceStoreError::AuthorityRejected
+            | GithubSubjectEvidenceStoreError::NotFound
+            | GithubSubjectEvidenceStoreError::CorruptData => Self::InboxRejected,
+        }
+    }
+}
+
+fn canonical_request_digest(
+    headers: &HeaderMap,
+    push: &VerifiedGithubPush,
+    identity: &ProviderDeliveryIdentity,
+    repository_owner_id: ProviderRepositoryOwnerId,
+) -> Result<Sha256Digest, GithubDeliveryIngressError> {
+    let mut digest = Sha256::new();
+    digest.update(REQUEST_DIGEST_DOMAIN);
+    digest.update(REQUEST_DIGEST_FIELD_COUNT.to_be_bytes());
+
+    // Version 3 is an ordered sequence of labeled, length-prefixed byte
+    // strings. Labels use a u16 big-endian byte length; values use a u64
+    // big-endian byte length. Numeric identities use unsigned big-endian bytes
+    // and UUIDs use their canonical 16-byte representation. The three headers
+    // are exact singleton bytes validated by `GithubWebhookVerifier`.
+    update_digest_field(
+        &mut digest,
+        b"header:x-hub-signature-256",
+        verified_header(headers, X_HUB_SIGNATURE_256)?,
+    );
+    update_digest_field(
+        &mut digest,
+        b"header:x-github-event",
+        verified_header(headers, X_GITHUB_EVENT)?,
+    );
+    update_digest_field(
+        &mut digest,
+        b"header:x-github-delivery",
+        verified_header(headers, X_GITHUB_DELIVERY)?,
+    );
+    update_digest_field(&mut digest, b"body", push.raw_body());
+    update_digest_field(
+        &mut digest,
+        b"identity:tenant",
+        identity.tenant().as_str().as_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:provider",
+        identity.provider().as_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:connection-id",
+        identity.connection_id().as_uuid().as_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:installation-id",
+        &identity.installation_id().get().to_be_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:repository-id",
+        &identity.repository_id().get().to_be_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:repository-owner-id",
+        &repository_owner_id.get().to_be_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:repository-visibility",
+        match identity.repository_visibility() {
+            ProviderRepositoryVisibility::Public => b"public",
+            ProviderRepositoryVisibility::Private => b"private",
+        },
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:repository",
+        identity.repository_identity().as_bytes(),
+    );
+    update_digest_field(
+        &mut digest,
+        b"identity:delivery-id",
+        identity.delivery_id().as_bytes(),
+    );
+
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+fn check_head_sha(
+    push: &VerifiedGithubPush,
+) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
+    let value = if push.deleted() {
+        push.before_commit_sha()
+    } else {
+        push.after_commit_sha()
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() != 40 {
+        return Err(GithubDeliveryIngressError::InvariantViolation);
+    }
+    let mut decoded = [0_u8; 20];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    GithubCheckHeadSha::new(decoded).map_err(|_| GithubDeliveryIngressError::InvariantViolation)
+}
+
+const fn decode_hex_nibble(value: u8) -> Result<u8, GithubDeliveryIngressError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(GithubDeliveryIngressError::InvariantViolation),
+    }
+}
+
+const fn provider_visibility(
+    visibility: GithubRepositoryVisibility,
+) -> ProviderRepositoryVisibility {
+    match visibility {
+        GithubRepositoryVisibility::Public => ProviderRepositoryVisibility::Public,
+        GithubRepositoryVisibility::Private => ProviderRepositoryVisibility::Private,
+    }
+}
+
+fn update_digest_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {
+    let label_length = u16::try_from(label.len()).expect("fixed digest label fits in u16");
+    let value_length = u64::try_from(value.len()).expect("bounded digest field fits in u64");
+    digest.update(label_length.to_be_bytes());
+    digest.update(label);
+    digest.update(value_length.to_be_bytes());
+    digest.update(value);
+}
+
+fn verified_header<'headers>(
+    headers: &'headers HeaderMap,
+    name: &'static str,
+) -> Result<&'headers [u8], GithubDeliveryIngressError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values
+        .next()
+        .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+    if values.next().is_some() {
+        return Err(GithubDeliveryIngressError::InvariantViolation);
+    }
+    Ok(value.as_bytes())
+}
+
+fn validate_repository_component(value: &str) -> Result<(), GithubDeliveryConfigurationError> {
+    if value.is_empty()
+        || value.len() > MAX_REPOSITORY_COMPONENT_BYTES
+        || matches!(value, "." | "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(GithubDeliveryConfigurationError::InvalidRepositoryIdentity);
+    }
+    Ok(())
+}
+
+fn has_ascii_case_insensitive_suffix(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,129 +1,229 @@
-import type { RunListPageModel } from "../models";
+import type { ReactNode } from "react";
+import type {
+  RunFiltersModel,
+  RunListItemModel,
+  RunListPageModel,
+} from "../models";
+import { ActionsLayout } from "../components/ActionsLayout";
+import { CommitLink } from "../components/CommitLink";
+import { EmptyState } from "../components/EmptyState";
+import { Icon } from "../components/Icon";
+import { MetadataSeparator } from "../components/MetadataSeparator";
+import { Pagination } from "../components/Pagination";
 import { Shell } from "../components/Shell";
+import { SourceRefLink } from "../components/SourceRefLink";
 import { StatusBadge } from "../components/StatusBadge";
+import { WorkflowNavigation } from "../components/WorkflowNavigation";
+import { enforceBranchFilterValidity } from "../components/textInputConstraints";
+import { durationCopy, formatEventName } from "../presentation/runPresentation";
+import { RENDER_REQUEST_LIMITS } from "../validation/limits";
+
+const STATUS_OPTIONS = [
+  { value: "all", label: "All statuses" },
+  { value: "queued", label: "Queued" },
+  { value: "in_progress", label: "In progress" },
+  { value: "completed", label: "Completed" },
+] as const;
 
 export interface RunListPageProps {
   readonly model: RunListPageModel;
+  readonly shellUtility?: ReactNode;
 }
 
-export function RunListPage({ model }: RunListPageProps) {
+export function RunListPage({ model, shellUtility }: RunListPageProps) {
+  const view = deriveRunListView(model);
+
   return (
-    <Shell shell={model.shell} repository={model.repository}>
-      <main className="layout-width page" id="main-content">
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">Actions</p>
-            <h1>{model.heading}</h1>
-            <p>{model.summary}</p>
-          </div>
-        </div>
-
-        <form className="filters" action={model.filters.action} method="get" role="search">
-          <div className="field">
-            <label htmlFor="run-status">Status</label>
-            <select id="run-status" name="status" defaultValue={model.filters.status}>
-              {model.filters.statusOptions.map((option) => (
-                <option value={option.value} key={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field field--grow">
-            <label htmlFor="run-branch">Branch</label>
-            <input
-              id="run-branch"
-              name="branch"
-              type="search"
-              defaultValue={model.filters.branch}
-              placeholder="Filter by branch"
+    <Shell
+      shell={model.shell}
+      repository={model.repository}
+      utility={shellUtility}
+    >
+      <main className="layout-wide page">
+        <ActionsLayout
+          navigation={
+            <WorkflowNavigation
+              navigation={model.workflowNavigation}
+              repository={model.repository}
             />
-          </div>
-          <button className="button button--secondary" type="submit">
-            Apply filters
-          </button>
-          <a className="text-link" href={model.filters.clearHref}>
-            Clear
-          </a>
-        </form>
+          }
+        >
+          <header className="page-heading">
+            <div>
+              <h1>{model.heading}</h1>
+              <p>{model.summary}</p>
+            </div>
+          </header>
 
-        <section className="panel" aria-labelledby="runs-heading">
-          <div className="panel__heading">
-            <h2 id="runs-heading">Recent runs</h2>
-            <span>{model.pagination.label}</span>
-          </div>
-          {model.runs.length === 0 ? (
-            <div className="empty-state">
-              <h3>No workflow runs match these filters</h3>
-              <p>Clear the filters to see all runs for this repository.</p>
-              <a className="button button--secondary" href={model.filters.clearHref}>
-                View all runs
-              </a>
+          <RunFilters
+            filters={model.filters}
+            hasActiveFilters={view.hasActiveFilters}
+          />
+
+          <section className="panel" aria-labelledby="runs-heading">
+            <div className="panel__heading">
+              <h2 id="runs-heading">{view.panelHeading}</h2>
+              <span>{model.pagination.label}</span>
             </div>
-          ) : (
-            <div className="table-scroll">
-              <table className="runs-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Run</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Source</th>
-                    <th scope="col">Started</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {model.runs.map((run) => (
-                    <tr key={run.id}>
-                      <td>
-                        <a className="run-name" href={run.href}>
-                          {run.name}
-                        </a>
-                        <span className="subdued">{run.workflowName}</span>
-                      </td>
-                      <td>
-                        <StatusBadge status={run.status} />
-                        <span className="subdued">{run.durationLabel}</span>
-                      </td>
-                      <td>
-                        <span className="branch-pill">{run.branch}</span>
-                        <a className="commit-link" href={run.commit.href} title={run.commit.message}>
-                          {run.commit.shortSha}
-                        </a>
-                        <span className="subdued">
-                          {run.event} by {run.actor}
-                        </span>
-                      </td>
-                      <td>
-                        <time dateTime={run.startedAt.iso}>{run.startedAt.label}</time>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <nav className="pagination" aria-label="Workflow run pages">
-            {model.pagination.previousHref === null ? (
-              <span className="button button--quiet" aria-disabled="true">
-                Previous
-              </span>
+            {model.runs.length === 0 ? (
+              <EmptyState
+                action={
+                  view.hasActiveFilters ? (
+                    <a className="button" href={model.filters.clearHref}>
+                      Clear filters
+                    </a>
+                  ) : undefined
+                }
+                description={view.emptyDescription}
+                heading={view.emptyHeading}
+                icon="actions"
+              />
             ) : (
-              <a className="button button--quiet" href={model.pagination.previousHref}>
-                Previous
-              </a>
+              <ul className="run-list">
+                {model.runs.map((run) => (
+                  <RunRow key={run.id} run={run} />
+                ))}
+              </ul>
             )}
-            {model.pagination.nextHref === null ? (
-              <span className="button button--quiet" aria-disabled="true">
-                Next
-              </span>
-            ) : (
-              <a className="button button--quiet" href={model.pagination.nextHref}>
-                Next
-              </a>
-            )}
-          </nav>
-        </section>
+            <Pagination
+              label="Workflow run pages"
+              pagination={model.pagination}
+            />
+          </section>
+        </ActionsLayout>
       </main>
     </Shell>
+  );
+}
+
+interface RunListView {
+  readonly emptyDescription: string;
+  readonly emptyHeading: string;
+  readonly hasActiveFilters: boolean;
+  readonly panelHeading: string;
+}
+
+function deriveRunListView(model: RunListPageModel): RunListView {
+  const hasActiveFilters =
+    model.filters.status !== "all" || model.filters.branch.length > 0;
+  const selectedWorkflowName = model.workflowNavigation?.selectedWorkflow?.name;
+  const workflowScope =
+    selectedWorkflowName === undefined
+      ? "workflow runs"
+      : `${selectedWorkflowName} workflow runs`;
+
+  return {
+    hasActiveFilters,
+    panelHeading:
+      selectedWorkflowName === undefined ? "All workflow runs" : workflowScope,
+    emptyHeading: hasActiveFilters
+      ? `No ${workflowScope} match these filters`
+      : `No ${workflowScope} yet`,
+    emptyDescription: hasActiveFilters
+      ? selectedWorkflowName === undefined
+        ? "Try changing the branch, tag, or status filter."
+        : `Try changing the branch, tag, or status filter for ${selectedWorkflowName}.`
+      : selectedWorkflowName === undefined
+        ? model.summary
+        : `No runs have been recorded for ${selectedWorkflowName}.`,
+  };
+}
+
+function RunFilters({
+  filters,
+  hasActiveFilters,
+}: {
+  readonly filters: RunFiltersModel;
+  readonly hasActiveFilters: boolean;
+}) {
+  return (
+    <form
+      aria-label="Filter workflow runs"
+      className="filters"
+      action={filters.action}
+      method="get"
+      role="search"
+    >
+      <div className="filter-search">
+        <Icon name="search" />
+        <label className="sr-only" htmlFor="run-branch">
+          Filter runs by branch or Git ref
+        </label>
+        <input
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          defaultValue={filters.branch}
+          id="run-branch"
+          maxLength={RENDER_REQUEST_LIMITS.shortTextLength}
+          name="branch"
+          onInput={(event) => enforceBranchFilterValidity(event.currentTarget)}
+          placeholder="Branch or refs/tags/v1.0.0"
+          spellCheck={false}
+          type="search"
+        />
+      </div>
+      <label className="select-control" htmlFor="run-status">
+        <span className="sr-only">Filter by status</span>
+        <select id="run-status" name="status" defaultValue={filters.status}>
+          {STATUS_OPTIONS.map((option) => (
+            <option value={option.value} key={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button className="button" type="submit">
+        Filter
+      </button>
+      {hasActiveFilters ? (
+        <a className="text-link" href={filters.clearHref}>
+          Clear filters
+        </a>
+      ) : null}
+    </form>
+  );
+}
+
+function RunRow({ run }: { readonly run: RunListItemModel }) {
+  return (
+    <li className="run-row">
+      <div className="run-row__status">
+        <StatusBadge labelMode="none" status={run.status} />
+      </div>
+      <div className="run-row__content">
+        <a className="run-name" href={run.href}>
+          {run.name}
+        </a>
+        <p className="run-row__context">
+          <a href={run.workflowHref}>{run.workflowName}</a>
+          <MetadataSeparator />
+          <a href={run.href}>#{run.number}</a>
+          <MetadataSeparator />
+          <span>
+            {formatEventName(run.event)}
+            {run.actor === null ? null : ` by ${run.actor}`}
+          </span>
+        </p>
+        <div className="run-row__meta">
+          {run.sourceRef === null ? null : (
+            <SourceRefLink
+              className="run-row__source-ref"
+              refModel={run.sourceRef}
+            />
+          )}
+          <CommitLink
+            className="run-row__commit"
+            commit={run.commit}
+            messageClassName="run-row__commit-message"
+          />
+          <time dateTime={run.createdAt.iso}>{run.createdAt.label}</time>
+        </div>
+      </div>
+      <div className="run-row__result">
+        <span>{run.status.label}</span>
+        <span>{durationCopy(run.status, run.durationLabel)}</span>
+      </div>
+    </li>
   );
 }

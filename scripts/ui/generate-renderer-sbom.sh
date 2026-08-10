@@ -22,27 +22,37 @@ wrapper_directory="$(
 )"
 raw_sbom="${wrapper_directory}/renderer_cdylib.cdx.json"
 output_path="${1:-${repository_root}/ui/renderer/renderer.cdx.json}"
-readonly wrapper_directory raw_sbom output_path
+component_path="${2:-}"
+readonly wrapper_directory raw_sbom output_path component_path
 
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
 }
 
-(( $# <= 1 )) || die "usage: $0 [OUTPUT_PATH]"
+(( $# <= 2 )) || die "usage: $0 [OUTPUT_PATH [COMPONENT_PATH]]"
 [[ -f "${wrapper_directory}/Cargo.toml" ]] || \
     die "renderer wrapper source is missing; run regenerate-renderer.sh first"
 [[ ! -e "${raw_sbom}" ]] || die "refusing to overwrite ${raw_sbom}"
 [[ "$(cargo cyclonedx --version)" == "${expected_cyclonedx_version}" ]] || \
     die "cargo-cyclonedx 0.5.9 is required"
 
-mapfile -t components < <(
-    find "${repository_root}/ui/renderer/assets" -maxdepth 1 -type f \
-        -name 'renderer-*.wasm' -print | LC_ALL=C sort
-)
-[[ "${#components[@]}" -eq 1 ]] || die "expected exactly one renderer component"
-component_sha256="$(sha256sum "${components[0]}" | awk '{print $1}')"
-readonly component_sha256
+if [[ -n "${component_path}" ]]; then
+    [[ -f "${component_path}" && ! -L "${component_path}" ]] || \
+        die "renderer component must be one regular staged file"
+    component="${component_path}"
+else
+    mapfile -t components < <(
+        find "${repository_root}/crates/automata-ci-ui-renderer/assets" -maxdepth 1 -type f \
+            -name 'renderer-*.wasm' -print | LC_ALL=C sort
+    )
+    [[ "${#components[@]}" -eq 1 ]] || die "expected exactly one renderer component"
+    component="${components[0]}"
+fi
+component_sha256="$(sha256sum "${component}" | awk '{print $1}')"
+[[ "${component##*/}" == "renderer-${component_sha256}.wasm" ]] || \
+    die "renderer component filename is not addressed by its SHA-256"
+readonly component component_sha256
 
 scratch_root="$(
     automata_canonical_target_child \

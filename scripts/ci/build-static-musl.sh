@@ -45,11 +45,20 @@ export AUTOMATA_RELEASE_BUILD="${AUTOMATA_RELEASE_BUILD:-1}"
 
 cd "$repo_root"
 
-# Explicit --bin arguments are an invariant: this job must produce only the two
-# distributed Automata executables, irrespective of future workspace members.
+# Explicit --bin arguments are an invariant: the public distribution still has
+# exactly two executables, irrespective of future workspace members.
 cargo build \
   --locked \
   --release \
   --target "$target" \
   --bin automata \
   --bin automata-runner
+
+# This non-publishable binary exists only as input to its scratch helper image.
+# It is deliberately outside the public distribution archive above.
+cargo build \
+  --locked \
+  --release \
+  --target "$target" \
+  --package automata-ci-service-proxy \
+  --bin automata-ci-service-proxy

@@ -1,0 +1,24 @@
+[package]
+name = "automata-ci-workflow-github"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Loss-aware GitHub Actions workflow frontend for Automata"
+publish.workspace = true
+
+[dependencies]
+automata-ci-core.workspace = true
+flate2.workspace = true
+saphyr-parser.workspace = true
+tar.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "automata-ci-service-proxy"
+description = "Bounded namespace-local service port proxy for Automata job sandboxes"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[package.metadata.automata-ci]
+artifact-role = "image-helper"
+
+[[bin]]
+name = "automata-ci-service-proxy"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["event"] }
+
+[lints]
+workspace = true

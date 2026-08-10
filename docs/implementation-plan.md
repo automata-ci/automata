@@ -7,24 +7,32 @@ behavior have passed that gate.
 
 ## Architectural seams
 
-GitHub Actions is the first workflow frontend. It compiles source YAML, event
-data, reusable workflows, matrices, expressions, and action metadata into an
-immutable, content-addressed `JobIr`. The scheduler and providers never parse
-GitHub YAML or evaluate GitHub expressions.
+GitHub Actions is the first workflow dialect. Its frontend parses and validates
+source YAML into a dialect-owned source plan. A separate compiler lowers that
+plan and event provenance into immutable WorkflowPlan v2 logical state; fenced
+activation later expands bounded strategies and projects concrete JobIR v5.
+The scheduler and providers never parse GitHub YAML or evaluate GitHub
+expressions.
 
 ```text
-GitHub frontend -> WorkflowPlan / JobIr -> durable scheduler -> runner lease
-                                                               |
+GitHub frontend -> compiler -> WorkflowPlan -> fenced activation -> JobIR
+                                                                  |
+                                                         durable scheduler
+                                                                  |
+                                                            runner lease
+                                                                  |
                                                        SandboxProvider
-                                                               |
+                                                                  |
                                       ExecutionEndpoint + ContainerEngine
 ```
 
 The principal internal ports are deliberately narrower than a provider API:
 
-- `WorkflowFrontend` owns GitHub parsing, validation, phase-correct expression
-  evaluation, DAG and matrix expansion, reusable workflows, and action
-  pre/main/post planning.
+- `WorkflowFrontend` owns bounded GitHub source parsing and dialect validation.
+  `WorkflowCompiler` lowers the source plan into the logical workflow contract;
+  fenced activation expands strategies and projects executable jobs. Reusable
+  workflow execution and complete action pre/main/post orchestration remain
+  separate, capability-gated phases.
 - `SchedulerPolicy` matches runner group and label routing separately from
   typed requirements and scores eligible capacity without provisioning it.
 - `FleetController` asynchronously reconciles runner supply. Kubernetes,
@@ -39,20 +47,21 @@ The principal internal ports are deliberately narrower than a provider API:
   Docker options are rejected, never dropped.
 - `BlobStore`, `ArtifactStore`, `CacheStore`, `SecretVault`, `ScmProvider`,
   `RepositoryCredentialBroker`, and `AuthenticationProvider` are
-  provider-neutral ports. Adapters use owned, versioned data and do not leak
-  backend handles into durable records.
+  provider-neutral ports. Adapters use owned, versioned data. Opaque
+  secret-provider handles may be retained durably only as authenticated,
+  encrypted provider-reference envelopes; plaintext handles never enter
+  durable records, diagnostics, or audits.
 
 Rust traits are used only within one release and address space. Guest agents,
 privileged helpers, third-party providers, and remote runners use versioned RPC
 over Unix sockets, vsock, or mTLS; Rust dynamic libraries are not a plugin ABI.
-The G0 protocol crate retains a strictly bounded, versioned JSON codec for
-fixtures and bootstrap hardening. The production boundary is the checked,
-fully typed `automata.runner.v1` protobuf adapter; it has no opaque JSON fields,
-runtime `protoc`, or Rust-layout serialization. The adapter is wired into a
-bounded, mutually authenticated TLS 1.3 and HTTP/2 runner transport. The G1
-product composition binds that transport to the durable application handler,
-PostgreSQL-backed runner machine authority, and the two product binaries. The
-dogfood gate below remains the acceptance boundary for compatibility claims.
+The production boundary is the checked, fully typed `automata.runner.v1`
+protobuf adapter; it has no opaque JSON fields, runtime `protoc`, or Rust-layout
+serialization. The adapter is wired into a bounded, mutually authenticated TLS
+1.3 and HTTP/2 runner transport. The G1 product composition binds that transport
+to the durable application handler, PostgreSQL-backed runner machine authority,
+and the two product binaries. The end-to-end gate below remains the acceptance
+boundary for compatibility claims.
 
 ## Durable correctness rules
 
@@ -76,12 +85,16 @@ encrypted local storage rather than blocking heartbeats or cancellation.
 
 ## Deployment and trust boundaries
 
-The distribution contains exactly two product executables, both statically
-linked:
+The target distribution contains exactly two product executables, both
+statically linked:
 
-- `automata` runs any control-plane role and also provides the administration
-  CLI;
-- `automata-runner` supervises host or guest execution.
+- `automata` can run any control-plane role and also provides the
+  administration CLI;
+- `automata-runner` can supervise host or guest execution.
+
+The current v0.1 composition starts all control-plane roles together and has no
+role selector. Its runner supports rootless Linux host execution; guest-agent
+and non-Linux execution remain target-state work.
 
 First-party adapters are compiled in and selected by configuration. Neither
 binary needs a language runtime or shared library. Podman, KVM, Kubernetes,
@@ -90,12 +103,33 @@ application dependencies. The archive also preserves third-party license,
 NOTICE, and copyright texts for both binaries and their embedded renderer/UI
 assets; these compliance documents are data, not additional product binaries.
 
-Human authentication is provider-pluggable. The first adapter uses a GitHub
-App: browser sessions use the web flow and the CLI defaults to device flow.
+Human authentication is provider-pluggable. The first server adapter uses a
+GitHub App and exposes browser and device-flow endpoints. On Linux with an
+available Secret Service, `automata auth login`, `auth status`, and `auth
+logout` are operational.
 GitHub tokens are encrypted provider credentials, not general Automata bearer
-tokens. Explicit organization/team mappings grant Automata roles; membership
-never implies administrator. Runner mTLS identity, workload tokens, SCM
-credentials, and human sessions are separate trust domains.
+tokens.
+Explicit organization/team mappings grant Automata roles; membership never
+implies administrator. Runner mTLS identity, workload tokens, SCM credentials,
+and human sessions are separate trust domains.
+
+Three product-composition boundaries remain explicit. The current-reference
+CacheService-v2 upload/download path, digest verification, seven-day inactivity
+retention, and runtime authority are composed, while base/default-branch
+fallback, REST management, BuildKit compatibility, and physical object garbage
+collection are not. Service-container execution is
+authorized in the durable registration ceiling only by an exact immutable proxy
+pin, then observed only after live provider verification; scheduling intersects
+both inventories so either missing proof removes the feature. The checked-in
+configuration still omits the unpublished helper image. Workload OIDC now
+composes its issuer, durable storage, fail-closed optional control issuer, and
+`/oidc/token` on the non-human Results listener. Migration 0037 completes
+signed ingress with immutable positive numeric-owner evidence, and migration
+0039 revalidates its receipt and current authority at reservation and every
+mint. Workload OIDC nevertheless remains unsupported and unadvertised pending
+external TLS and homogeneous multi-replica/key-fleet readiness. Its unbounded
+authority and issuance-slot ledgers also prevent production retention claims
+until a safe bounded archive or erasure path exists.
 
 The React/Vite UI is entirely server rendered. Its component and hashed client
 assets are embedded in `automata`; rendering runs in a resource-limited WASI
@@ -131,14 +165,28 @@ Kubernetes first creates ephemeral runner Pods with a supported inner engine.
 - Deterministic CycloneDX inventories for both binaries, the embedded WASI
   renderer, and its React runtime, with binary/component digest binding.
 - React/Vite SSR build, PostgreSQL, and RustFS development stack.
-- Arch runner admission diagnoses matching kernel modules and actively proves
-  rootless Netavark nftables, loopback DNAT, and cleanup.
+- Arch production runner admission fails before any listener or control
+  session unless its nftables prerequisites are loaded or loadable from the
+  running kernel's dependency index and an active rootless-Podman lifecycle
+  succeeds. The lifecycle uses the exact configured binary, a cleared
+  `HOME`/`PATH`/`XDG_RUNTIME_DIR`/`TMPDIR` environment, state-root scratch, and
+  the exact `PrivateEgress` or `Disabled` (`--internal`) network policy.
+- The lifecycle verifies created-network identity and policy, exclusive
+  container attachment, loopback readiness, owned-resource cleanup, and
+  post-delete absence. It is intentionally not evidence of profile-image
+  existence or manifest conformance, cgroup/resource enforcement,
+  privilege/root-filesystem policy, or the optional job-scoped Docker API;
+  those remain operator assertions or other runtime checks. The configured
+  Podman binary and helper `PATH` have root-owned, non-group/world-writable
+  ancestry; private Podman process/state trees are runner-owned mode 0700 and
+  never mounted into jobs. Startup revalidates its pre-probe filesystem metadata
+  snapshot before provider construction. This is not a byte attestation.
 - Ordinary `.github/workflows/ci.yml` remains valid GitHub Actions syntax and
   produces consumable checksummed bootstrap artifacts.
 
 Gate: GitHub Actions builds generation-zero artifacts from a reviewed commit.
 
-### G1 — durable single-node dogfood
+### G1 — durable single-node integration
 
 - PostgreSQL schema and migrations for repositories, workflow snapshots,
   runs, jobs, attempts, leases, concurrency groups, and runner registrations.
@@ -170,8 +218,10 @@ Automata-specific test harness or by editing the workflow for Automata.
 
 - Arbitrary JavaScript and composite actions beyond the pinned G1 set, with
   complete pre/main/post ordering.
-- Complete official artifact and cache runtime protocols, multipart uploads,
-  retention, digest validation, and BuildKit cache endpoint.
+- Complete official artifact and cache runtime protocols beyond the composed
+  current-reference CacheService-v2 path: multipart uploads,
+  base/default-branch fallback, REST management, physical object garbage
+  collection, and the BuildKit cache endpoint.
 - Job/service containers, dynamic ports, container actions, shell defaults,
   annotations, summaries, masks, timeouts, and cancellation.
 - Matrix expansion, `needs`, outputs, status functions, implicit success
@@ -183,16 +233,19 @@ passes differential comparison against GitHub at the same commit.
 ### G3 — GitHub control-plane compatibility
 
 - GitHub App installation/user authentication, Check Runs and statuses.
-- Actions-compatible results, artifact, cache, OIDC, and selected REST facade;
-  unsupported GitHub API calls proxy with a job-scoped token.
+- Actions-compatible results, artifact, broader cache, OIDC, and selected REST
+  facade. OIDC's product issuer and non-human Results-listener route are
+  composed, but runner/registration capability support and its operational
+  proof remain gated. Unsupported GitHub API calls currently fail closed; the
+  product has no arbitrary job-scoped fallback proxy.
 - Permissions, protected environments, approvals, secrets/vars, concurrency
   coalescing and cancellation, rerun attempts, schedules, and webhooks.
 - Administration CLI endpoints for the complete declared command tree.
 
-Gate: the safe read-only `world-engine` progression passes: advisory platform
-selection, workflow validation, then dry-run stale-ref cleanup.
+Gate: a safe read-only migration progression passes: event and platform
+selection, workflow validation, then a dry-run maintenance workflow.
 
-### G4 — representative `world-engine` Linux fleet
+### G4 — representative heterogeneous Linux fleet
 
 - General Linux services job with PostgreSQL and Redis.
 - Docker CLI compatibility over a private Podman engine, Buildx, Compose, and
@@ -226,36 +279,36 @@ advertised isolation class.
   Hyper-V/native providers, and signing environments.
 - macOS shell/keychain semantics, native and Virtualization.framework
   providers, arm64 profiles, and GPU resource locks.
-- Workflow-run chaining/API facade behavior required by `world-engine`, plus
+- Workflow-run chaining/API facade behavior required by complex repositories, plus
   release/deployment canaries that cannot address production credentials.
 
 Gate: the full existing fleet runs unchanged workflows with per-platform
 differential reports. Production publish/deploy workflows enter only after
 read-only and staging gates have held over an agreed soak period.
 
-## `world-engine` compatibility ledger
+## Migration acceptance contract
 
-The current corpus contains 29 workflows, 112 jobs, 822 workflow steps, 24
-local actions (23 composite and one Node 24 action), 18 matrix jobs, four
-reusable workflows, and more than 2,100 expression sites. It exercises Linux,
-Windows, macOS, GPU-exclusive routing, 69 artifact uploads, 43 downloads,
-caches, OIDC, environments, concurrency, service containers, GitHub
-scripts/CLI/API calls, and attempt-aware workflow chaining.
+Private migration targets remain outside this public repository. Automata's
+checked-in compatibility suites use synthetic workflows, public upstream action
+fixtures, and generated capability manifests without copying or naming private
+repositories. Operators may run an external acceptance harness against their own
+workflow corpus, but its source, identifiers, counts, and rollout policy are not
+part of Automata's source tree or documentation.
 
-The first diagnostic job is `ci-advisory-tidy.yml / setup` with Linux selected;
-it tests dispatch input expressions and output command files without mutation.
-It is followed by `ci.yml / Validate Workflows`, dry-run stale-ref cleanup, the
-web service job, the Docker build job, artifact/matrix handoff, reusable Linux
-engine builds, GPU shards, non-production workflow-run chains, then Windows and
-macOS. Production, packages, Steam, recovery, and release workflows are never
-used as early probes.
+A migration should begin with non-mutating authorization and validation jobs,
+then dry-run maintenance, service-container checks, Docker builds,
+artifact/cache and matrix handoffs, reusable workflows, specialized runner
+profiles, and non-production workflow chaining. Publish, deploy, recovery, and
+release workflows enter only after read-only and staging gates have held for an
+agreed soak period.
 
 The hardest external boundary is explicit: GitHub does not let another system
 insert arbitrary native Actions run/job/artifact records. Automata supplies its
-own compatible results facade and Check Runs, but hard-coded `api.github.com`
-or `gh` queries for upstream workflow-run records require either a GitHub
-bridge or a targeted endpoint-routing change. This limitation is recorded per
-workflow rather than hidden behind a broad “compatible” label.
+own compatible results facade and plans to report through Check Runs, but
+hard-coded `api.github.com` or `gh` queries for upstream workflow-run records
+require either a GitHub bridge or a targeted endpoint-routing change. This
+limitation is recorded per capability rather than hidden behind a broad
+“compatible” label.
 
 ## Verification disciplines
 

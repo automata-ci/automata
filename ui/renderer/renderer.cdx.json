@@ -619,39 +619,6 @@
       "version": "0.5.7"
     },
     {
-      "author": "Alex Crichton <alex@alexcrichton.com>",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
-      "description": "Fowler–Noll–Vo hash function",
-      "externalReferences": [
-        {
-          "type": "documentation",
-          "url": "https://doc.servo.org/fnv/"
-        },
-        {
-          "type": "vcs",
-          "url": "https://github.com/servo/rust-fnv"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "name": "Apache-2.0 / MIT"
-          }
-        }
-      ],
-      "name": "fnv",
-      "purl": "pkg:cargo/fnv@1.0.7",
-      "scope": "required",
-      "type": "library",
-      "version": "1.0.7"
-    },
-    {
       "author": "Orson Peters <orsonpeters@gmail.com>",
       "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#foldhash@0.1.5",
       "description": "A fast, non-cryptographic, minimally DoS-resistant hashing algorithm.",
@@ -1644,39 +1611,6 @@
       "scope": "required",
       "type": "library",
       "version": "2.3.0"
-    },
-    {
-      "author": "Ted Driggs <ted.driggs@outlook.com>",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#ident_case@1.0.1",
-      "description": "Utility for applying case rules to Rust identifiers.",
-      "externalReferences": [
-        {
-          "type": "documentation",
-          "url": "https://docs.rs/ident_case/1.0.1"
-        },
-        {
-          "type": "vcs",
-          "url": "https://github.com/TedDriggs/ident_case"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT/Apache-2.0"
-          }
-        }
-      ],
-      "name": "ident_case",
-      "purl": "pkg:cargo/ident_case@1.0.1",
-      "scope": "required",
-      "type": "library",
-      "version": "1.0.1"
     },
     {
       "author": "The rust-url developers",
@@ -4000,8 +3934,6 @@
     {
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#convert_case@0.8.0",
-        "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
-        "registry+https://github.com/rust-lang/crates.io-index#ident_case@1.0.1",
         "registry+https://github.com/rust-lang/crates.io-index#indexmap@2.14.0",
         "registry+https://github.com/rust-lang/crates.io-index#proc-macro-crate@3.5.0",
         "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
@@ -4100,9 +4032,6 @@
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#fixedbitset@0.5.7"
-    },
-    {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7"
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#foldhash@0.1.5"
@@ -4336,9 +4265,6 @@
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#id-arena@2.3.0"
-    },
-    {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#ident_case@1.0.1"
     },
     {
       "dependsOn": [
@@ -4826,13 +4752,13 @@
       "externalReferences": [
         {
           "type": "vcs",
-          "url": "https://github.com/GoNeuralAI/automata"
+          "url": "https://github.com/automata-ci/automata"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "61a3ef78b9690e01c2e476d37a52f51182e5e0d809c6f73011ca81a8d2efa2ec"
+          "content": "4171e31d1e40e7215180d65ad32dd369bde8a08b4d75335821c0ffe38aa60639"
         }
       ],
       "licenses": [

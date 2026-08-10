@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a focused capability or product improvement.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or operator problem, not only the proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Explain what success would look like and which current limitation it changes.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Trust and compatibility considerations
+      description: Note affected credentials, isolation, storage, protocol, or GitHub compatibility boundaries.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

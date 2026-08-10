@@ -4,26 +4,37 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^22.13.0 || >=24.0.0"
   },
   "scripts": {
     "clean": "node scripts/clean.mjs",
+    "clean:production": "node scripts/clean.mjs --production",
+    "dev": "vite --host 127.0.0.1 --strictPort --force",
+    "build:preview": "vite build --config vite.preview.config.ts && npm run verify:preview",
+    "preview:site": "vite preview --config vite.preview.config.ts",
+    "screenshots": "npm run build:preview && playwright test --config playwright.config.ts && npm run verify:preview -- --with-screenshots",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:build-verifier",
+    "test:build-verifier": "node --test scripts/tests/javascript-module-boundary.test.mjs",
     "test:unit": "vitest run tests/unit",
+    "test:preview": "vitest run tests/unit/preview-routing.test.ts tests/unit/preview-models.test.ts",
     "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "build:client": "vite build",
     "build:ssr": "vite build --ssr src/entry-server.tsx",
     "verify:build": "node scripts/verify-build.mjs",
-    "build": "npm run clean && npm run typecheck && npm run build:client && npm run build:ssr && npm run verify:build",
+    "verify:preview": "node scripts/verify-preview-build.mjs",
+    "build": "npm run clean:production && npm run typecheck && npm run build:client && npm run build:ssr && npm run verify:build",
     "check": "npm run test && npm run build"
   },
   "dependencies": {
+    "@phosphor-icons/web": "2.1.2",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",

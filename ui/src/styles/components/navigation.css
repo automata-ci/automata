@@ -1,0 +1,120 @@
+.workflow-navigation__desktop,
+.run-navigation__desktop {
+  border-right: 1px solid var(--border-default);
+}
+
+.workflow-navigation__title,
+.run-navigation__title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.workflow-navigation__primary a,
+.workflow-navigation__workflow,
+.run-navigation__summary-link > a,
+.run-navigation__summary-link > span,
+.run-navigation__job {
+  color: var(--fg-default);
+  border-radius: var(--radius-control);
+}
+
+.workflow-navigation__primary a:hover,
+.workflow-navigation__workflow:hover,
+.run-navigation__summary-link > a:hover,
+.run-navigation__job:hover {
+  background: var(--canvas-subtle);
+  text-decoration: none;
+}
+
+.run-navigation__job[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.workflow-navigation__primary a[aria-current="page"],
+.workflow-navigation__workflow[aria-current="page"],
+.run-navigation__summary-link > [aria-current="page"],
+.run-navigation__job[aria-current="page"] {
+  background: var(--canvas-inset);
+  font-weight: 600;
+}
+
+.workflow-navigation__section,
+.run-navigation__section {
+  border-top: 1px solid var(--border-muted);
+}
+
+.workflow-navigation__section-heading,
+.run-navigation__section-heading {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.workflow-navigation__section p,
+.run-navigation__section p {
+  margin: 4px 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.workflow-navigation__workflow-state {
+  flex: none;
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.workflow-navigation__mobile,
+.run-navigation__mobile {
+  background: var(--canvas-default);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  box-shadow: var(--control-shadow);
+}
+
+.workflow-navigation__disclosure-summary,
+.run-navigation__disclosure-summary {
+  color: var(--fg-default);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.workflow-navigation__disclosure-current,
+.run-navigation__disclosure-current {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: right;
+}
+
+.workflow-navigation__disclosure-icon,
+.run-navigation__disclosure-icon {
+  color: var(--fg-subtle);
+  transition: transform 120ms ease;
+  transform: rotate(90deg);
+}
+
+.workflow-navigation__mobile[open] .workflow-navigation__disclosure-icon,
+.run-navigation__mobile[open] .run-navigation__disclosure-icon {
+  transform: rotate(-90deg);
+}
+
+.workflow-navigation__menu,
+.run-navigation__menu {
+  background: var(--canvas-subtle);
+  border-top: 1px solid var(--border-default);
+}
+
+.breadcrumbs {
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.breadcrumbs__separator {
+  color: var(--fg-subtle);
+}
+
+.pagination {
+  border-top: 1px solid var(--border-default);
+}

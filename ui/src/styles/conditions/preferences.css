@@ -1,0 +1,48 @@
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .wordmark__mark,
+  .viewer-link__avatar,
+  .button,
+  .viewer-menu__popover,
+  .panel,
+  .empty-state__icon,
+  .workflow-navigation__mobile,
+  .run-navigation__mobile {
+    border: 1px solid CanvasText;
+  }
+
+  .rbac-management__navigation,
+  .rbac-table-region,
+  .rbac-status,
+  .rbac-table tbody tr {
+    border: 1px solid CanvasText;
+  }
+
+  .rbac-management__navigation a[aria-current="page"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .rbac-table tbody tr:target > * {
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  .repo-nav a[aria-current="page"]::after {
+    background: Highlight;
+  }
+
+  .status__icon {
+    color: CanvasText !important;
+  }
+}

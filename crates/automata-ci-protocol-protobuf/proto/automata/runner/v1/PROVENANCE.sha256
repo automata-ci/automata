@@ -1,0 +1,17 @@
+# Update only after reviewing the schema and regenerated DTO diff.
+package=automata.runner.v1
+schema=proto/automata/runner/v1/runner.proto
+schema_sha256=e1a2ae80df7db9ca50e597ce1aebd0fac15878e2666d14170dba158b6a2a95dd
+generated=src/generated/automata.runner.v1.rs
+generated_sha256=4f32cc17e17f242eca02db507cfaf4717e46b2a3b17a8ed7652ad015376e3d5d
+generator_manifest=tools/codegen.Cargo.toml
+generator_manifest_sha256=5a35efa09a803cbfbd782d2e9df28736b907976e60bcce1d0032598fb7dd1167
+generator_source=tools/codegen.rs
+generator_source_sha256=ebe3c01e0e0805e04aa6777baa66cd76037fa6738c1d46a8f84f8165401e7c85
+generator_lock=tools/codegen.Cargo.lock
+generator_lock_sha256=e8c0c509debc800272e38faef7c78724fa4030db9b9fd5a8a2b03574b1c8f64d
+verifier=tools/protobuf-codegen.sh
+verifier_sha256=f59a378c93732d408bab04aa4271a9c59556c3cceac644ab2fbe0bd1864870fb
+prost_runtime=0.14.4
+prost_build=0.14.4
+protox=0.9.1

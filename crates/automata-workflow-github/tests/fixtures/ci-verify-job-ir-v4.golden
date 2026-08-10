@@ -1,5 +1,0 @@
-job-ir-v4
-workflow-id=00000000-0000-4000-8000-000000000001
-source={"provider":"github","repository":"GoNeuralAI/automata","revision":"0123456789abcdef0123456789abcdef01234567","workflow_path":".github/workflows/ci.yml","event_name":"push"}
-job=00000000-0000-4000-8000-000000000003 run=00000000-0000-4000-8000-000000000002 name="Verify workspace" condition={"schema_version":1,"dialect":{"name":"github-actions","version":1},"source":"success()","instructions":[{"kind":"call","name":"success","argument_count":0}]} timeout=Some(1800) wd=- steps=12
-json-sha256=e8cdcb19f835c399bae37a98a5225de0afbf2233922a6ab6865b20497ee200ba

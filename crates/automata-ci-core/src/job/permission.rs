@@ -1,0 +1,175 @@
+//! Resolved provider permission requests carried by executable jobs.
+
+use serde::{Deserialize, Serialize};
+
+use super::JobValidationError;
+use crate::PermissionLevel;
+
+/// Maximum number of explicitly named permission grants in one job request.
+pub const MAX_JOB_PERMISSION_GRANTS: usize = 64;
+/// Maximum UTF-8 bytes in one canonical provider permission name.
+pub const MAX_JOB_PERMISSION_NAME_BYTES: usize = 64;
+
+const ID_TOKEN_PERMISSION: &str = "id-token";
+
+/// One source-span-free provider permission grant retained in executable `JobIR`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobPermissionGrant {
+    name: String,
+    level: PermissionLevel,
+}
+
+impl JobPermissionGrant {
+    /// Creates one named provider permission grant.
+    ///
+    /// Canonical name, ordering, and security invariants remain enforced at the
+    /// enclosing [`super::JobIrEnvelope`] validation boundary.
+    #[must_use]
+    pub fn new(name: impl Into<String>, level: PermissionLevel) -> Self {
+        Self {
+            name: name.into(),
+            level,
+        }
+    }
+
+    /// Returns the canonical provider permission name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the requested access level.
+    #[must_use]
+    pub const fn level(&self) -> PermissionLevel {
+        self.level
+    }
+}
+
+/// Fully resolved source permission request for one executable job.
+///
+/// Resolution chooses the job declaration over the workflow declaration. An
+/// absent declaration at both layers remains [`Self::ProviderDefault`] rather
+/// than being guessed or expanded by the planner. An explicit mapping is a
+/// complete request: permission names omitted from it are denied, and an empty
+/// mapping denies every provider permission. Mappings are canonical, strictly
+/// name-sorted vectors so every provider adapter consumes one deterministic
+/// request independently of source spans.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "mode",
+    content = "permissions",
+    rename_all = "snake_case"
+)]
+pub enum JobPermissionRequest {
+    /// Requests the provider's default permissions because neither source layer declared any.
+    ProviderDefault,
+    /// Requests read access across all permissions supported by the provider.
+    ReadAll,
+    /// Requests write access across all permissions supported by the provider.
+    WriteAll,
+    /// Requests a total canonical map; omitted names, including every name in an empty map, are denied.
+    Mapping(Vec<JobPermissionGrant>),
+}
+
+impl JobPermissionRequest {
+    /// Creates an explicit mapping and sorts it into canonical name order.
+    ///
+    /// Duplicate, malformed, excessive, or security-invalid entries remain
+    /// visible and are rejected by `JobIR` validation.
+    #[must_use]
+    pub fn mapping(grants: impl IntoIterator<Item = JobPermissionGrant>) -> Self {
+        let mut grants = grants.into_iter().collect::<Vec<_>>();
+        grants.sort_by(|left, right| left.name.cmp(&right.name));
+        Self::Mapping(grants)
+    }
+
+    /// Returns the complete explicit grant map when present.
+    ///
+    /// Consumers must deny names omitted from this slice. An empty slice denies
+    /// every provider permission.
+    #[must_use]
+    pub fn grants(&self) -> Option<&[JobPermissionGrant]> {
+        match self {
+            Self::Mapping(grants) => Some(grants),
+            Self::ProviderDefault | Self::ReadAll | Self::WriteAll => None,
+        }
+    }
+
+    /// Resolves the explicitly requested level for one provider permission.
+    ///
+    /// Provider defaults remain unresolved and therefore return `None`.
+    /// `read-all` and `write-all` resolve to their respective levels, while an
+    /// explicit mapping is total and returns `None` for an omitted name. An
+    /// invalid mapping also returns `None`, so authorization consumers fail
+    /// closed even if they are handed a value before the enclosing `JobIR`
+    /// validation boundary.
+    #[must_use]
+    pub fn requested_level(&self, name: &str) -> Option<PermissionLevel> {
+        match self {
+            Self::ProviderDefault => None,
+            Self::ReadAll => Some(PermissionLevel::Read),
+            Self::WriteAll => Some(PermissionLevel::Write),
+            Self::Mapping(grants) => {
+                if self.validate().is_err() {
+                    return None;
+                }
+                grants
+                    .binary_search_by(|grant| grant.name.as_str().cmp(name))
+                    .ok()
+                    .map(|index| grants[index].level)
+            }
+        }
+    }
+
+    pub(super) fn validate(&self) -> Result<(), JobValidationError> {
+        let Self::Mapping(grants) = self else {
+            return Ok(());
+        };
+        if grants.len() > MAX_JOB_PERMISSION_GRANTS {
+            return Err(JobValidationError::TooManyPermissionGrants {
+                maximum: MAX_JOB_PERMISSION_GRANTS,
+            });
+        }
+
+        let mut previous = None;
+        for grant in grants {
+            if !canonical_permission_name(&grant.name) {
+                return Err(JobValidationError::InvalidPermissionName);
+            }
+            if previous.is_some_and(|name| name >= grant.name.as_str()) {
+                return Err(JobValidationError::NonCanonicalPermissionMapping);
+            }
+            if grant.name == ID_TOKEN_PERMISSION && grant.level == PermissionLevel::Read {
+                return Err(JobValidationError::IdTokenReadPermission);
+            }
+            previous = Some(grant.name.as_str());
+        }
+        Ok(())
+    }
+}
+
+fn canonical_permission_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_JOB_PERMISSION_NAME_BYTES {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
+        return false;
+    }
+    let mut previous_hyphen = false;
+    for byte in bytes {
+        if byte == b'-' {
+            if previous_hyphen {
+                return false;
+            }
+            previous_hyphen = true;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    !previous_hyphen
+}

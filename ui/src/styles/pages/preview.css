@@ -1,0 +1,42 @@
+@layer pages {
+  #root {
+    display: contents;
+  }
+
+  .demo-badge {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    padding-inline: 8px;
+    color: var(--attention-fg);
+    background: var(--canvas-default);
+    border: 1px solid color-mix(in srgb, var(--attention-fg) 35%, transparent);
+    border-radius: var(--radius-round);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .demo-badge__compact {
+    display: none;
+  }
+
+  .preview-not-found {
+    display: grid;
+    min-height: 360px;
+    align-content: center;
+  }
+
+  .preview-not-found h1 {
+    margin: 0;
+    font-size: 20px;
+  }
+
+  .rbac-table tbody tr.preview-hash-target > * {
+    background: var(--accent-muted);
+  }
+
+  .rbac-table tbody tr.preview-hash-target > :first-child {
+    box-shadow: inset 3px 0 var(--accent-fg);
+  }
+}

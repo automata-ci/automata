@@ -2,8 +2,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-const contractPath = `${repositoryRoot}/ui/renderer/contract.json`;
-const generatedPath = `${repositoryRoot}/crates/automata-ui-renderer/src/generated_contract.rs`;
+const contractPath = `${repositoryRoot}/crates/automata-ci-ui-renderer/contract.json`;
+const generatedPath = `${repositoryRoot}/crates/automata-ci-ui-renderer/src/generated_contract.rs`;
 
 const contract = JSON.parse(await readFile(contractPath, "utf8"));
 assertPositiveInteger(contract.schemaVersion, "schemaVersion");

@@ -1,0 +1,232 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 1}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0}, "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "up{job=\"automata-control-plane\",cluster=~\"$cluster\",environment=~\"$environment\"}", "refId": "A"}],
+      "title": "Scrape up", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 1}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0}, "id": 2,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "automata_ci_control_plane_ready{cluster=~\"$cluster\",environment=~\"$environment\"}", "refId": "A"}],
+      "title": "Application ready", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0}, "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "sum(rate(automata_ci_control_plane_http_requests_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "refId": "A"}],
+      "title": "Request rate", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "yellow", "value": 0.001}, {"color": "red", "value": 0.01}]}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 0}, "id": 4,
+      "options": {"orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true},
+      "targets": [{"expr": "sum(rate(automata_ci_control_plane_http_requests_total{cluster=~\"$cluster\",environment=~\"$environment\",status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(automata_ci_control_plane_http_requests_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])), 1e-9)", "refId": "A"}],
+      "title": "5xx ratio", "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 0}, "id": 5,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "max((time() - automata_ci_control_plane_state_sampler_last_success_timestamp_seconds{cluster=~\"$cluster\",environment=~\"$environment\"}) and automata_ci_control_plane_state_sampler_last_success_timestamp_seconds{cluster=~\"$cluster\",environment=~\"$environment\"} > 0)", "refId": "A"}],
+      "title": "State sampler age", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 0}, "id": 6,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "max((time() - automata_ci_control_plane_maintenance_last_success_timestamp_seconds{cluster=~\"$cluster\",environment=~\"$environment\"}) and automata_ci_control_plane_maintenance_last_success_timestamp_seconds{cluster=~\"$cluster\",environment=~\"$environment\"} > 0)", "refId": "A"}],
+      "title": "Maintenance age", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (route, status_class) (rate(automata_ci_control_plane_http_requests_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "legendFormat": "{{route}} {{status_class}}", "refId": "A"}],
+      "title": "HTTP request rate", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, route) (rate(automata_ci_control_plane_http_request_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p95 {{route}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.99, sum by (le, route) (rate(automata_ci_control_plane_http_request_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p99 {{route}}", "refId": "B"}
+      ],
+      "title": "HTTP route latency", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 13}, "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "automata_ci_control_plane_dependency_ready{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{instance}} {{dependency}}", "refId": "A"}],
+      "title": "Dependency readiness", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 13}, "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (outcome) (rate(automata_ci_control_plane_maintenance_passes_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "title": "Maintenance passes", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 13}, "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "automata_ci_postgres_pool_connections{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{instance}} {{state}}", "refId": "A"}],
+      "title": "PostgreSQL pool", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21}, "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max without (instance) (automata_ci_control_plane_job_attempts{cluster=~\"$cluster\",environment=~\"$environment\"})", "legendFormat": "attempt {{lifecycle}}", "refId": "A"},
+        {"expr": "max without (instance) (automata_ci_control_plane_leases{cluster=~\"$cluster\",environment=~\"$environment\"})", "legendFormat": "lease {{state}}", "refId": "B"}
+      ],
+      "title": "Durable attempts and leases", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21}, "id": 13,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "cluster:automata_ci_control_plane_commands_pending:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "commands", "refId": "A"},
+        {"expr": "cluster:automata_ci_control_plane_cancellation_intents_pending:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "cancellations", "refId": "B"}
+      ],
+      "title": "Pending runner control work", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29}, "id": 14,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "cluster:automata_ci_control_plane_commands_oldest_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "oldest command", "refId": "A"},
+        {"expr": "cluster:automata_ci_control_plane_cancellation_intents_oldest_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "oldest cancellation", "refId": "B"}
+      ],
+      "title": "Pending runner control age", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29}, "id": 15,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max without (instance) (automata_ci_control_plane_runners{cluster=~\"$cluster\",environment=~\"$environment\"})", "legendFormat": "runner {{observed_state}} {{desired_state}}", "refId": "A"},
+        {"expr": "max without (instance) (automata_ci_control_plane_runner_sessions{cluster=~\"$cluster\",environment=~\"$environment\"})", "legendFormat": "session {{state}}", "refId": "B"}
+      ],
+      "title": "Durable runner state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37}, "id": 16,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "cluster_state:automata_ci_control_plane_queue_jobs:max{cluster=~\"$cluster\",environment=~\"$environment\",state=\"queued\"}", "legendFormat": "total queued", "refId": "A"},
+        {"expr": "cluster_state:automata_ci_control_plane_queue_jobs:max{cluster=~\"$cluster\",environment=~\"$environment\",state=\"eligible\"}", "legendFormat": "exact eligible", "refId": "B"}
+      ],
+      "title": "Total and exact eligible queue depth", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37}, "id": 17,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "cluster_state:automata_ci_control_plane_queue_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\",state=\"queued\"}", "legendFormat": "oldest total queued", "refId": "A"},
+        {"expr": "cluster_state:automata_ci_control_plane_queue_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\",state=\"eligible\"}", "legendFormat": "oldest exact eligible", "refId": "B"}
+      ],
+      "title": "Total and exact eligible queue age", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 45}, "id": 18,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_reason:automata_ci_control_plane_eligible_queue_blocked_jobs:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{reason}}", "refId": "A"}],
+      "title": "Exact eligible jobs blocked by capacity", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 45}, "id": 19,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_reason:automata_ci_control_plane_eligible_queue_blocked_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{reason}}", "refId": "A"}],
+      "title": "Oldest exact eligible block by capacity", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 53}, "id": 20,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_state:automata_ci_control_plane_workflow_plan_v2_runs:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "WorkflowPlan-v2 run state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 53}, "id": 21,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_state:automata_ci_control_plane_logical_jobs:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "Logical job state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 53}, "id": 22,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_state:automata_ci_control_plane_logical_activations:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "Logical activation state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 61}, "id": 23,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_state:automata_ci_control_plane_logical_activation_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "oldest {{state}}", "refId": "A"}],
+      "title": "Logical activation age", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 61}, "id": 24,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "cluster:automata_ci_control_plane_logical_activation_publications:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "activation publications", "refId": "A"},
+        {"expr": "cluster:automata_ci_control_plane_logical_materialized_instances:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "materialized instances", "refId": "B"}
+      ],
+      "title": "Logical activation outputs", "type": "timeseries"
+    }
+  ],
+  "refresh": "30s", "schemaVersion": 39, "tags": ["automata", "control-plane"],
+  "templating": {"list": [
+    {"current": {}, "label": "Prometheus", "name": "DS_PROMETHEUS", "options": [], "query": "prometheus", "refresh": 1, "type": "datasource"},
+    {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "includeAll": true, "label": "Cluster", "name": "cluster", "options": [], "query": {"query": "label_values(automata_ci_build_info, cluster)", "refId": "StandardVariableQuery"}, "refresh": 1, "type": "query"},
+    {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "includeAll": true, "label": "Environment", "name": "environment", "options": [], "query": {"query": "label_values(automata_ci_build_info, environment)", "refId": "StandardVariableQuery"}, "refresh": 1, "type": "query"}
+  ]},
+  "time": {"from": "now-6h", "to": "now"}, "timezone": "browser",
+  "title": "Automata / Control plane RED", "uid": "automata-control-plane", "version": 2
+}

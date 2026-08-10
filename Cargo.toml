@@ -1,45 +1,56 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/automata-action",
-    "crates/automata-action-cache-file",
-    "crates/automata-action-github",
-    "crates/automata",
-    "crates/automata-auth",
-    "crates/automata-blob",
-    "crates/automata-blob-s3",
-    "crates/automata-control",
-    "crates/automata-control-plane",
-    "crates/automata-core",
-    "crates/automata-credential",
-    "crates/automata-credential-github",
-    "crates/automata-execution",
-    "crates/automata-expression-github",
-    "crates/automata-github",
-    "crates/automata-github-runtime",
-    "crates/automata-job-executor-github",
-    "crates/automata-protocol",
-    "crates/automata-protocol-protobuf",
-    "crates/automata-results-github",
-    "crates/automata-runner",
-    "crates/automata-runner-auth",
-    "crates/automata-runner-auth-postgres",
-    "crates/automata-runner-control",
-    "crates/automata-runner-crypto",
-    "crates/automata-runner-journal",
-    "crates/automata-runner-runtime",
-    "crates/automata-runner-spool",
-    "crates/automata-runner-transport",
-    "crates/automata-sandbox-podman",
-    "crates/automata-scm",
-    "crates/automata-store",
-    "crates/automata-ui-renderer",
-    "crates/automata-workflow-github",
-    "crates/automata-workflow-service",
+    "crates/automata-ci-action",
+    "crates/automata-ci-action-github",
+    "crates/automata-ci",
+    "crates/automata-ci-auth",
+    "crates/automata-ci-auth-postgres",
+    "crates/automata-ci-blob",
+    "crates/automata-ci-blob-s3",
+    "crates/automata-ci-build-support",
+    "crates/automata-ci-control",
+    "crates/automata-ci-control-plane",
+    "crates/automata-ci-core",
+    "crates/automata-ci-credential",
+    "crates/automata-ci-credential-github",
+    "crates/automata-ci-execution",
+    "crates/automata-ci-expression-github",
+    "crates/automata-ci-github",
+    "crates/automata-ci-github-delivery",
+    "crates/automata-ci-github-runtime",
+    "crates/automata-ci-job-executor-github",
+    "crates/automata-ci-key-management",
+    "crates/automata-ci-metrics",
+    "crates/automata-ci-oidc-github",
+    "crates/automata-ci-oidc-github-control",
+    "crates/automata-ci-output-policy",
+    "crates/automata-ci-protocol",
+    "crates/automata-ci-protocol-protobuf",
+    "crates/automata-ci-results-github",
+    "crates/automata-ci-runner",
+    "crates/automata-ci-runner-auth",
+    "crates/automata-ci-runner-auth-postgres",
+    "crates/automata-ci-runner-control",
+    "crates/automata-ci-runner-crypto",
+    "crates/automata-ci-runner-journal",
+    "crates/automata-ci-runner-runtime",
+    "crates/automata-ci-runner-spool",
+    "crates/automata-ci-runner-transport",
+    "crates/automata-ci-sandbox-podman",
+    "crates/automata-ci-scm",
+    "crates/automata-ci-secret",
+    "crates/automata-ci-secret-postgres",
+    "crates/automata-ci-service-proxy",
+    "crates/automata-ci-store",
+    "crates/automata-ci-ui-renderer",
+    "crates/automata-ci-workflow-github",
+    "crates/automata-ci-workflow-service",
 ]
+exclude = ["ui/renderer/vendor/rquickjs-macro-0.10.0"]
 default-members = [
-    "crates/automata",
-    "crates/automata-runner",
+    "crates/automata-ci",
+    "crates/automata-ci-runner",
 ]
 
 [workspace.package]
@@ -48,46 +59,58 @@ edition = "2024"
 rust-version = "1.97"
 authors = ["Alexander Dzhoganov"]
 license = "MIT"
-repository = "https://github.com/GoNeuralAI/automata"
+repository = "https://github.com/automata-ci/automata"
+homepage = "https://automata-ci.github.io/automata/"
+publish = ["crates-io"]
 
 [workspace.dependencies]
+aho-corasick = "1.1.5"
 anyhow = "1.0.99"
 async-trait = "0.1.91"
 aws-sdk-s3 = { version = "=1.141.0", default-features = false, features = ["behavior-version-latest", "http-1x", "rt-tokio"] }
 aws-smithy-http-client = { version = "=1.2.0", default-features = false, features = ["rustls-ring"] }
-automata-auth = { path = "crates/automata-auth", version = "0.1.0" }
-automata-action = { path = "crates/automata-action", version = "0.1.0" }
-automata-action-cache-file = { path = "crates/automata-action-cache-file", version = "0.1.0" }
-automata-action-github = { path = "crates/automata-action-github", version = "0.1.0" }
-automata-blob = { path = "crates/automata-blob", version = "0.1.0" }
-automata-blob-s3 = { path = "crates/automata-blob-s3", version = "0.1.0" }
-automata-control = { path = "crates/automata-control", version = "0.1.0" }
-automata-control-plane = { path = "crates/automata-control-plane", version = "0.1.0" }
-automata-core = { path = "crates/automata-core", version = "0.1.0" }
-automata-credential = { path = "crates/automata-credential", version = "0.1.0" }
-automata-credential-github = { path = "crates/automata-credential-github", version = "0.1.0" }
-automata-execution = { path = "crates/automata-execution", version = "0.1.0" }
-automata-expression-github = { path = "crates/automata-expression-github", version = "0.1.0" }
-automata-github = { path = "crates/automata-github", version = "0.1.0" }
-automata-github-runtime = { path = "crates/automata-github-runtime", version = "0.1.0" }
-automata-job-executor-github = { path = "crates/automata-job-executor-github", version = "0.1.0" }
-automata-protocol = { path = "crates/automata-protocol", version = "0.1.0" }
-automata-protocol-protobuf = { path = "crates/automata-protocol-protobuf", version = "0.1.0" }
-automata-results-github = { path = "crates/automata-results-github", version = "0.1.0" }
-automata-runner-auth = { path = "crates/automata-runner-auth", version = "0.1.0" }
-automata-runner-auth-postgres = { path = "crates/automata-runner-auth-postgres", version = "0.1.0" }
-automata-runner-control = { path = "crates/automata-runner-control", version = "0.1.0" }
-automata-runner-crypto = { path = "crates/automata-runner-crypto", version = "0.1.0" }
-automata-runner-journal = { path = "crates/automata-runner-journal", version = "0.1.0" }
-automata-runner-runtime = { path = "crates/automata-runner-runtime", version = "0.1.0" }
-automata-runner-spool = { path = "crates/automata-runner-spool", version = "0.1.0" }
-automata-runner-transport = { path = "crates/automata-runner-transport", version = "0.1.0" }
-automata-sandbox-podman = { path = "crates/automata-sandbox-podman", version = "0.1.0" }
-automata-scm = { path = "crates/automata-scm", version = "0.1.0" }
-automata-store = { path = "crates/automata-store", version = "0.1.0" }
-automata-ui-renderer = { path = "crates/automata-ui-renderer", version = "0.1.0" }
-automata-workflow-github = { path = "crates/automata-workflow-github", version = "0.1.0" }
-automata-workflow-service = { path = "crates/automata-workflow-service", version = "0.1.0" }
+automata-ci-auth = { path = "crates/automata-ci-auth", version = "0.1.0" }
+automata-ci-auth-postgres = { path = "crates/automata-ci-auth-postgres", version = "0.1.0" }
+automata-ci-action = { path = "crates/automata-ci-action", version = "0.1.0" }
+automata-ci-action-github = { path = "crates/automata-ci-action-github", version = "0.1.0" }
+automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
+automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
+automata-ci-build-support = { path = "crates/automata-ci-build-support", version = "0.1.0" }
+automata-ci-control = { path = "crates/automata-ci-control", version = "0.1.0" }
+automata-ci-control-plane = { path = "crates/automata-ci-control-plane", version = "0.1.0" }
+automata-ci-core = { path = "crates/automata-ci-core", version = "0.1.0" }
+automata-ci-credential = { path = "crates/automata-ci-credential", version = "0.1.0" }
+automata-ci-credential-github = { path = "crates/automata-ci-credential-github", version = "0.1.0" }
+automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
+automata-ci-expression-github = { path = "crates/automata-ci-expression-github", version = "0.1.0" }
+automata-ci-github = { path = "crates/automata-ci-github", version = "0.1.0" }
+automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", version = "0.1.0" }
+automata-ci-github-runtime = { path = "crates/automata-ci-github-runtime", version = "0.1.0" }
+automata-ci-job-executor-github = { path = "crates/automata-ci-job-executor-github", version = "0.1.0" }
+automata-ci-key-management = { path = "crates/automata-ci-key-management", version = "0.1.0" }
+automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
+automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
+automata-ci-oidc-github-control = { path = "crates/automata-ci-oidc-github-control", version = "0.1.0" }
+automata-ci-output-policy = { path = "crates/automata-ci-output-policy", version = "0.1.0" }
+automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
+automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
+automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
+automata-ci-runner-auth = { path = "crates/automata-ci-runner-auth", version = "0.1.0" }
+automata-ci-runner-auth-postgres = { path = "crates/automata-ci-runner-auth-postgres", version = "0.1.0" }
+automata-ci-runner-control = { path = "crates/automata-ci-runner-control", version = "0.1.0" }
+automata-ci-runner-crypto = { path = "crates/automata-ci-runner-crypto", version = "0.1.0" }
+automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", version = "0.1.0" }
+automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }
+automata-ci-runner-spool = { path = "crates/automata-ci-runner-spool", version = "0.1.0" }
+automata-ci-runner-transport = { path = "crates/automata-ci-runner-transport", version = "0.1.0" }
+automata-ci-sandbox-podman = { path = "crates/automata-ci-sandbox-podman", version = "0.1.0" }
+automata-ci-scm = { path = "crates/automata-ci-scm", version = "0.1.0" }
+automata-ci-secret = { path = "crates/automata-ci-secret", version = "0.1.0" }
+automata-ci-secret-postgres = { path = "crates/automata-ci-secret-postgres", version = "0.1.0" }
+automata-ci-store = { path = "crates/automata-ci-store", version = "0.1.0" }
+automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "0.1.0" }
+automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
+automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
 base64 = "0.22.1"
 bytes = "=1.12.1"
@@ -98,16 +121,18 @@ getrandom = "0.3.3"
 http = "1.3.1"
 http-body-util = "=0.1.4"
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http2", "server"] }
-hyper-rustls = { version = "=0.27.9", default-features = false, features = ["http2", "ring", "tls12"] }
+hyper-rustls = { version = "=0.27.9", default-features = false, features = ["http2", "ring"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["client", "client-legacy", "http2", "server", "service", "tokio"] }
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
+prometheus-client = "=0.25.0"
+rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["http2", "json", "rustls-tls-webpki-roots"] }
 ring = { version = "=0.17.14", default-features = false, features = ["std"] }
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 saphyr-parser = { version = "0.0.11", default-features = false }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
+serde_json = { version = "1.0.143", features = ["raw_value"] }
 sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
 static_assertions = "1.1.0"
@@ -115,8 +140,8 @@ subtle = "2.6.1"
 thiserror = "2.0.16"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 tar = { version = "0.4.46", default-features = false }
-tokio = { version = "1.47.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
 tower = { version = "0.5.2", features = ["timeout", "util"] }
 tower-service = "=0.3.3"
@@ -126,6 +151,7 @@ url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
 wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
+x509-parser = { version = "=0.18.1", default-features = false }
 xmlparser = "=0.13.6"
 zeroize = { version = "1.8.1", features = ["derive"] }
 

@@ -1,0 +1,31 @@
+[package]
+name = "automata-ci-store"
+description = "Durable control-plane storage ports and PostgreSQL adapter for Automata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-blob.workspace = true
+automata-ci-core.workspace = true
+automata-ci-key-management.workspace = true
+automata-ci-oidc-github.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

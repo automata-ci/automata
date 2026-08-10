@@ -1,0 +1,38 @@
+[package]
+name = "automata-ci-runner-transport"
+description = "Replica-neutral mTLS HTTP/2 transport for Automata runner control"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-auth.workspace = true
+automata-ci-core.workspace = true
+automata-ci-protocol.workspace = true
+automata-ci-protocol-protobuf.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tower-service.workspace = true
+
+[dev-dependencies]
+http-body-util = { workspace = true, features = ["channel"] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+static_assertions.workspace = true

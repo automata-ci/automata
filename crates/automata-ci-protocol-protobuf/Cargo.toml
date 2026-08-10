@@ -1,0 +1,27 @@
+[package]
+name = "automata-ci-protocol-protobuf"
+description = "Canonical protobuf v1 adapter for the Automata runner protocol"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-core.workspace = true
+automata-ci-protocol.workspace = true
+prost = { version = "=0.14.4", default-features = false, features = ["derive"] }
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+static_assertions.workspace = true

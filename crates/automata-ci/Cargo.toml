@@ -1,0 +1,85 @@
+[package]
+name = "automata-ci"
+description = "Automata control plane and administration CLI"
+publish.workspace = true
+readme = "README.md"
+keywords = ["ci", "github-actions", "self-hosted", "automation", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "automata"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-auth-postgres.workspace = true
+automata-ci-blob.workspace = true
+automata-ci-blob-s3.workspace = true
+automata-ci-control.workspace = true
+automata-ci-control-plane.workspace = true
+automata-ci-core.workspace = true
+automata-ci-credential-github.workspace = true
+automata-ci-github.workspace = true
+automata-ci-github-delivery.workspace = true
+automata-ci-key-management.workspace = true
+automata-ci-metrics.workspace = true
+automata-ci-oidc-github.workspace = true
+automata-ci-oidc-github-control.workspace = true
+automata-ci-protocol.workspace = true
+automata-ci-results-github.workspace = true
+automata-ci-runner-auth.workspace = true
+automata-ci-runner-auth-postgres.workspace = true
+automata-ci-runner-control.workspace = true
+automata-ci-runner-transport.workspace = true
+automata-ci-secret.workspace = true
+automata-ci-secret-postgres.workspace = true
+automata-ci-store.workspace = true
+automata-ci-ui-renderer.workspace = true
+automata-ci-workflow-github.workspace = true
+automata-ci-workflow-service.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+flate2.workspace = true
+getrandom.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+prometheus-client.workspace = true
+rustix.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
+
+[build-dependencies]
+automata-ci-build-support.workspace = true
+
+[dev-dependencies]
+automata-ci-protocol-protobuf.workspace = true
+rcgen.workspace = true
+
+[lints]
+workspace = true

@@ -1,138 +1,307 @@
-import type { RunDetailPageModel } from "../models";
+import type { ReactNode } from "react";
+import type {
+  ArtifactModel,
+  JobModel,
+  ResultCollectionModel,
+  ResultCollectionVisibility,
+  RunDetailModel,
+  RunDetailPageModel,
+  StatusModel,
+} from "../models";
+import { ActionsLayout } from "../components/ActionsLayout";
+import { Breadcrumbs } from "../components/Breadcrumbs";
+import { CommitLink } from "../components/CommitLink";
+import { EmptyState } from "../components/EmptyState";
+import { Icon } from "../components/Icon";
+import { MetadataSeparator } from "../components/MetadataSeparator";
+import { Pagination } from "../components/Pagination";
+import { RunNavigation } from "../components/RunNavigation";
 import { Shell } from "../components/Shell";
+import {
+  SourceRefLink,
+  sourceRefLabel,
+} from "../components/SourceRefLink";
 import { StatusBadge } from "../components/StatusBadge";
+import {
+  durationCopy,
+  emptyArtifactsCopy,
+  emptyJobsCopy,
+  formatEventName,
+} from "../presentation/runPresentation";
 
 export interface RunDetailPageProps {
   readonly model: RunDetailPageModel;
+  readonly shellUtility?: ReactNode;
 }
 
-export function RunDetailPage({ model }: RunDetailPageProps) {
+export function RunDetailPage({ model, shellUtility }: RunDetailPageProps) {
   const { run } = model;
+  const jobs = model.jobs.items;
 
   return (
-    <Shell shell={model.shell} repository={model.repository}>
-      <main className="layout-width page" id="main-content">
-        <nav className="breadcrumbs" aria-label="Breadcrumb">
-          <a href={model.repository.runsHref}>Workflow runs</a>
-          <span aria-hidden="true">/</span>
-          <span aria-current="page">Run {run.id}</span>
-        </nav>
+    <Shell
+      shell={model.shell}
+      repository={model.repository}
+      utility={shellUtility}
+    >
+      <main className="layout-wide page">
+        <ActionsLayout
+          navigation={
+            <RunNavigation
+              jobs={jobs}
+              jobsVisibility={model.jobs.visibility}
+              pagination={null}
+              selectedJobId={null}
+              summaryHref={null}
+            />
+          }
+        >
+          <Breadcrumbs
+            items={[
+              { href: model.repository.runsHref, label: "Actions" },
+              { href: run.workflowHref, label: run.workflowName },
+              { href: null, label: `Run #${run.number}` },
+            ]}
+          />
 
-        <div className="page-heading page-heading--run">
-          <div>
-            <div className="heading-status">
-              <StatusBadge status={run.status} />
-              <span>Attempt {run.attempt}</span>
+          <header className="page-heading page-heading--run">
+            <div>
+              <div className="heading-status">
+                <StatusBadge status={run.status} />
+                <span>Attempt {run.attempt}</span>
+              </div>
+              <h1>{run.name}</h1>
+              <p>
+                {run.actor === null ? (
+                  <>Triggered via {formatEventName(run.event)}</>
+                ) : (
+                  <>
+                    Triggered by <strong>{run.actor}</strong> via{" "}
+                    {formatEventName(run.event)}
+                  </>
+                )}
+              </p>
             </div>
-            <h1>{run.name}</h1>
-            <p>
-              <a href={run.workflowHref}>{run.workflowName}</a>
-              <span aria-hidden="true"> · </span>
-              triggered by {run.actor} via {run.event}
-            </p>
-          </div>
-          <div className="actions" aria-label="Run actions">
-            {model.operations.map((operation) => (
-              <form
-                action={operation.action}
-                method="post"
-                key={`${operation.action}:${operation.label}`}
-                data-confirm={operation.confirmation}
-              >
-                <input type="hidden" name="csrf_token" value={model.csrfToken} />
-                <button className={`button button--${operation.style}`} type="submit">
-                  {operation.label}
-                </button>
-              </form>
-            ))}
-          </div>
-        </div>
+          </header>
 
-        <section className="run-summary" aria-label="Run summary">
-          <div>
-            <span className="summary-label">Branch</span>
-            <a href={run.branchHref}>{run.branch}</a>
-          </div>
-          <div>
-            <span className="summary-label">Commit</span>
-            <a href={run.commit.href} title={run.commit.message}>
-              {run.commit.shortSha}
-            </a>
-          </div>
-          <div>
-            <span className="summary-label">Created</span>
-            <time dateTime={run.createdAt.iso}>{run.createdAt.label}</time>
-          </div>
-          <div>
-            <span className="summary-label">Duration</span>
-            <span>{run.durationLabel}</span>
-          </div>
-        </section>
-
-        <div className="detail-grid">
-          <section className="panel" aria-labelledby="jobs-heading">
-            <div className="panel__heading">
-              <h2 id="jobs-heading">Jobs</h2>
-              <span>{model.jobs.length} total</span>
-            </div>
-            <div className="job-list">
-              {model.jobs.map((job) => (
-                <article className="job" key={job.id}>
-                  <div className="job__heading">
-                    <div>
-                      <a className="job__name" href={job.href}>
-                        {job.name}
-                      </a>
-                      <span className="subdued">{job.runnerLabel}</span>
-                    </div>
-                    <div className="job__result">
-                      <StatusBadge status={job.status} />
-                      <span>{job.durationLabel}</span>
-                    </div>
-                  </div>
-                  {job.steps.length === 0 ? (
-                    <p className="job__empty">Waiting for steps to begin.</p>
-                  ) : (
-                    <ol className="steps">
-                      {job.steps.map((step) => (
-                        <li key={step.number}>
-                          <span className={`step-marker step-marker--${step.status.tone}`} aria-hidden="true" />
-                          <a href={step.logHref}>{step.name}</a>
-                          <span className="steps__status">{step.status.label}</span>
-                          <span>{step.durationLabel}</span>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <aside className="panel artifacts" aria-labelledby="artifacts-heading">
-            <div className="panel__heading">
-              <h2 id="artifacts-heading">Artifacts</h2>
-              <span>{model.artifacts.length}</span>
-            </div>
-            {model.artifacts.length === 0 ? (
-              <p className="artifacts__empty">This run did not produce any artifacts.</p>
-            ) : (
-              <ul className="artifact-list">
-                {model.artifacts.map((artifact) => (
-                  <li key={artifact.id}>
-                    <a href={artifact.downloadHref}>{artifact.name}</a>
-                    <span>{artifact.sizeLabel}</span>
-                    <span title={artifact.digest}>SHA-256 {artifact.digest.slice(0, 12)}…</span>
-                    <span>
-                      Expires <time dateTime={artifact.expiresAt.iso}>{artifact.expiresAt.label}</time>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </aside>
-        </div>
+          <RunSummary run={run} />
+          <JobsSection
+            collection={model.jobs}
+            pagination={model.jobPagination}
+            runStatus={run.status}
+          />
+          <ArtifactsSection
+            collection={model.artifacts}
+            runStatus={run.status}
+          />
+        </ActionsLayout>
       </main>
     </Shell>
   );
+}
+
+function RunSummary({ run }: { readonly run: RunDetailModel }) {
+  return (
+    <section className="panel run-overview" aria-labelledby="summary-heading">
+      <div className="panel__heading">
+        <h2 id="summary-heading">Run summary</h2>
+        <span>#{run.number}</span>
+      </div>
+      <dl className="run-summary">
+        {run.sourceRef === null ? null : (
+          <div>
+            <dt>{sourceRefLabel(run.sourceRef.kind)}</dt>
+            <dd>
+              <SourceRefLink refModel={run.sourceRef} size={15} />
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt>Commit</dt>
+          <dd>
+            <Icon name="commit" size={15} />
+            <CommitLink
+              className="run-summary__commit"
+              commit={run.commit}
+              messageClassName="run-summary__commit-message"
+              showIcon={false}
+            />
+          </dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd>
+            <time dateTime={run.createdAt.iso}>{run.createdAt.label}</time>
+          </dd>
+        </div>
+        <div>
+          <dt>Duration</dt>
+          <dd>{durationCopy(run.status, run.durationLabel)}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function JobsSection({
+  collection,
+  pagination,
+  runStatus,
+}: {
+  readonly collection: ResultCollectionModel<JobModel>;
+  readonly pagination: RunDetailPageModel["jobPagination"];
+  readonly runStatus: StatusModel;
+}) {
+  const { items: jobs, visibility } = collection;
+
+  return (
+    <section aria-labelledby="jobs-heading">
+      <div className="section-heading">
+        <h2 id="jobs-heading">Jobs</h2>
+        <span>{collectionCount(jobs.length, "job", visibility)}</span>
+      </div>
+      {visibility === "restricted" && jobs.length > 0 ? (
+        <p className="results-visibility-notice">
+          Some jobs are hidden because you don’t have access to view them.
+        </p>
+      ) : null}
+      {jobs.length === 0 ? (
+        <EmptyState
+          description={
+            visibility === "restricted"
+              ? "Jobs for this run are unavailable with your current access."
+              : emptyJobsCopy(runStatus)
+          }
+          variant="compact"
+        />
+      ) : (
+        <div className="job-list">
+          {jobs.map((job) => (
+            <JobSummaryLink job={job} key={job.id} />
+          ))}
+        </div>
+      )}
+      <Pagination label="Run job pages" pagination={pagination} />
+    </section>
+  );
+}
+
+function JobSummaryLink({ job }: { readonly job: JobModel }) {
+  const contents = (
+    <>
+      <span className="job__heading">
+        <span className="job__title">
+          <StatusBadge labelMode="accessible" status={job.status} />
+          <span>
+            <strong>{job.name}</strong>
+            {job.runnerLabel === null && job.startedAt === null ? null : (
+              <small>
+                {job.runnerLabel}
+                {job.runnerLabel !== null && job.startedAt !== null ? (
+                  <MetadataSeparator />
+                ) : null}
+                {job.startedAt === null ? null : (
+                  <>
+                    Started{" "}
+                    <time dateTime={job.startedAt.iso}>{job.startedAt.label}</time>
+                  </>
+                )}
+              </small>
+            )}
+          </span>
+        </span>
+        <span className="job__result">
+          <span aria-hidden="true">{job.status.label}</span>
+          <span>{durationCopy(job.status, job.durationLabel)}</span>
+          {job.href === null ? (
+            <span>Logs unavailable</span>
+          ) : (
+            <Icon name="chevron-right" />
+          )}
+        </span>
+      </span>
+    </>
+  );
+  return job.href === null ? (
+    <div
+      aria-disabled="true"
+      className="panel job-summary-link is-unavailable"
+    >
+      {contents}
+    </div>
+  ) : (
+    <a className="panel job-summary-link" href={job.href}>
+      {contents}
+    </a>
+  );
+}
+
+function ArtifactsSection({
+  collection,
+  runStatus,
+}: {
+  readonly collection: ResultCollectionModel<ArtifactModel>;
+  readonly runStatus: StatusModel;
+}) {
+  const { items: artifacts, visibility } = collection;
+
+  return (
+    <section className="panel artifacts" aria-labelledby="artifacts-heading">
+      <div className="panel__heading">
+        <h2 id="artifacts-heading">Artifacts</h2>
+        <span>{collectionCount(artifacts.length, "artifact", visibility)}</span>
+      </div>
+      {visibility === "restricted" && artifacts.length > 0 ? (
+        <p className="results-visibility-notice">
+          Some artifacts are hidden because you don’t have access to view them.
+        </p>
+      ) : null}
+      {artifacts.length === 0 ? (
+        <p className="artifacts__empty">
+          {visibility === "restricted"
+            ? "Artifacts for this run are unavailable with your current access."
+            : emptyArtifactsCopy(runStatus)}
+        </p>
+      ) : (
+        <ul className="artifact-list">
+          {artifacts.map((artifact) => (
+            <li key={artifact.id}>
+              <Icon name="artifact" size={20} />
+              <div className="artifact-list__content">
+                {artifact.downloadHref === null ? (
+                  <span className="artifact-list__identity">
+                    <strong>{artifact.name}</strong>
+                    <small>Download unavailable</small>
+                  </span>
+                ) : (
+                  <a href={artifact.downloadHref}>{artifact.name}</a>
+                )}
+                <code className="artifact-list__digest">
+                  SHA-256 {artifact.digest}
+                </code>
+              </div>
+              <span>{artifact.sizeLabel}</span>
+              {artifact.expiresAt === null ? null : (
+                <span>
+                  Expires{" "}
+                  <time dateTime={artifact.expiresAt.iso}>
+                    {artifact.expiresAt.label}
+                  </time>
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function collectionCount(
+  count: number,
+  singular: "artifact" | "job",
+  visibility: ResultCollectionVisibility,
+): string {
+  const noun = count === 1 ? singular : `${singular}s`;
+  return visibility === "restricted" ? `${count} visible ${noun}` : `${count} ${noun}`;
 }

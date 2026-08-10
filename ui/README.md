@@ -6,16 +6,58 @@ authorization, status codes, persistence, and mutations. For each request Rust
 constructs a typed `RenderRequest`, invokes the embedded renderer, and returns the
 complete HTML document.
 
-Both implemented page kinds are server rendered with meaningful content:
+All current page kinds are server rendered with meaningful content:
 
+- `setup` renders the JavaScript-independent, one-use administrator bootstrap
+  form; the host exposes it only while durable installation setup is armed.
+- `repository-directory` renders the bounded repositories available under the
+  viewer's current access, exact Code/Actions/Settings destinations, forward
+  pagination, and its repository-neutral empty state.
 - `run-list` renders filters, run data, pagination, and ordinary links.
-- `run-detail` renders run metadata, jobs, steps, artifacts, and ordinary POST
-  forms carrying a CSRF token.
+- `run-detail` renders run metadata, compact job destinations, and finalized
+  artifacts as a read-only view.
+- `job-log` renders job navigation, bounded log pages, search, and stable line
+  links.
+- `repository-settings` renders independent run-page, job-log, and artifact
+  access defaults for newly admitted runs. Existing runs keep their immutable
+  access snapshot, and an update form exists only when the host supplies an
+  authenticated, CSRF-protected update capability.
+- `repository-secrets` renders value-free encrypted-secret metadata and exposes
+  mutation forms only when the host supplies their exact capabilities.
+- `user-list`, `user-detail`, `role-list`, `role-detail`, and
+  `direct-binding-list` render tenant access management. Revision-bound native
+  forms appear only when the host authorizes the exact member, role, permission,
+  or direct-binding mutation; immutable and provider-observed records remain
+  read-only.
 
-The browser bundle hydrates the same document. JavaScript currently adds only a
-confirmation prompt to forms marked with `data-confirm`; links, GET filters, and
-POST operations retain their native behavior when JavaScript is absent or fails.
-There is no SPA router and no client-only page-data fetch.
+The browser bundle hydrates the same document. JavaScript enhances the theme
+toggle, in-page log filtering, and repository-settings draft and submission
+states. Links, GET filters, settings forms, and RBAC management forms retain
+their native behavior when JavaScript is absent or fails. There is no SPA router
+and no client-only page-data fetch.
+
+## Source architecture
+
+The source tree keeps transport, view composition, presentation, and the demo
+separate:
+
+```text
+src/
+├── components/   reusable landmarks and presentation components
+├── pages/        page composition and page-local derived view state
+├── presentation/ shared status, timing, and event copy derivation
+├── preview/      representative sample data, projections, and demo routing
+├── styles/       layered tokens, layout, components, pages, and conditions
+└── validation/   exact validation of the untrusted host boundary
+```
+
+Production pages receive validated models and render ordinary links and forms;
+they do not fetch data or know how the static demo is routed. The demo owns its
+sample data and its small query-preserving GET adapter, and production source
+never imports test fixtures. The adapter is reinstalled on hot module replacement
+so routing changes do not leave a stale submit handler. `styles.css` only
+declares the cascade order and imports the focused modules documented in
+`src/styles/README.md`.
 
 ## Commands
 
@@ -24,12 +66,57 @@ Node is a build and test dependency only. Dependencies and the lockfile are pinn
 ```sh
 npm ci
 npm run check
-npm audit
+npm audit --audit-level=low
 ```
 
+For the interactive static demo, run the Vite development server and open the
+printed local URL. Changes hot-reload in the browser:
+
+```sh
+npm run dev
+```
+
+The demo is explicitly marked as sample data and does not claim that its
+workflow runs were executed. Repository, branch, and commit links point to real
+allowlisted GitHub destinations; artifact downloads remain unavailable because
+the static site has no authenticated backend. The demo itself requires
+JavaScript, while the production application remains server-rendered. It is the
+same build intended for a future GitHub Pages preview; no hosted preview is
+currently deployed.
+
+The screenshot suite uses Chromium to exercise the populated and empty
+repository directory, the full run-list → run-summary → job-log path, both
+read-only repository settings views, and all five tenant access-management
+views. It captures every preview page in light and dark mode at desktop, tablet,
+and mobile sizes under `dist/preview/screenshots/`:
+
+```sh
+npx --no-install playwright install chromium
+npm run screenshots
+```
+
+Capture settings are deterministic: Chromium runs with fixed viewports, UTC,
+`en-US`, reduced motion, disabled screenshot animations, static preview data,
+and a wait for the locally bundled icon font. It owns its preview server instead
+of reusing an ambient process and serves the build from `/automata/`, matching
+the GitHub Pages project-site topology. The preview build verifier rejects
+root-relative executable/style URLs, missing assets, unexpected output, and
+other subpath-breaking output before the browser suite starts, then checks the
+exact non-empty PNG set before publication. The Pages workflow is intended as
+the future deployment path for this same build. Until Pages is enabled and
+deployed, screenshots remain local or review artifacts, and the root README
+does not link to hosted captures. The suite also checks native demo routing,
+keyboard focus, mobile disclosures, layout shift, document overflow, forced
+colors, reduced motion, theme persistence, and browser runtime errors.
+
+Production cleanup is scoped to `dist/client` and `dist/ssr`; it never removes
+an in-progress preview build or screenshot run. `npm run clean` remains the
+explicit whole-output cleanup command.
+
 Tests are kept outside production sources: pure contract and URL tests live in
-`tests/unit`, end-to-end SSR/hydration behavior lives in `tests/integration`, and
-shared typed requests live in `tests/fixtures`. `npm run check` runs the complete
+`tests/unit`, end-to-end SSR/hydration behavior lives in `tests/integration`,
+browser behavior and captures live in `tests/visual`, and adversarial host
+requests live in `tests/fixtures`. `npm run check` runs the unit and integration
 suite, then type-checks, builds, and verifies both outputs:
 
 ```text
@@ -51,19 +138,21 @@ render(serializedRequest: string): string
 ```
 
 The result always starts with `<!doctype html>` and contains the whole document.
-The build verifier imports the emitted bundle, checks that React and Node builtins
-were not left external, and performs a render smoke test.
+The build verifier imports the emitted bundle, enforces ECMAScript-module
+syntax, rejects static module edges, ambient CommonJS references, and known Node
+loader escape paths, and performs a render smoke test. It is a closure check for
+trusted bundler output, not a sandbox for hostile JavaScript or string-evaluation
+analysis.
 
 The checked-in Vite server bundle is compiled into a WASI Preview 2 component;
 Rust embeds that component and the hash-addressed client assets. At runtime the
 host supplies those same-origin paths through `RenderRequest.host.assets` and
 invokes the component with a fresh, resource-limited Wasmtime store. Host-owned
 locale, CSP nonce, and executable asset paths stay outside the page model and
-cannot be selected by route data.
-Display timestamps are already formatted in the page model so server and browser
-rendering never diverge because of timezone or locale differences. User-controlled
-values are escaped by React, and the hydration JSON additionally escapes HTML
-delimiter characters.
+cannot be selected by route data. Display timestamps are already formatted in
+the page model so server and browser rendering never diverge because of timezone
+or locale differences. User-controlled values are escaped by React, and the
+hydration JSON additionally escapes HTML delimiter characters.
 
 ## Runtime boundary
 
@@ -77,8 +166,10 @@ generated and checked by CI before static-musl packaging.
 
 The serialized interface is versioned (`schemaVersion: 1`) and validated deeply
 with exact shapes and explicit size limits before rendering or hydration. Every
-link and form action must be a safe same-origin route path, while script and CSS
-assets must also be rooted, fragment-free paths with the expected file type.
-Adding a route means adding a discriminated `PageModel` variant, its validator,
-and complete rendering in `App`; unknown variants fail rather than falling back
-to an empty client shell.
+internal link and form action must be a safe same-origin route path. Explicit
+source links must instead be exact canonical `https://github.com` targets bound
+to the page's repository, commit, or source ref; unsupported providers and
+target shapes fail closed. Script and CSS assets must be rooted, fragment-free
+paths with the expected file type. Adding a route means adding a discriminated
+`PageModel` variant, its validator, and complete rendering in `App`; unknown
+variants fail rather than falling back to an empty client shell.

@@ -1,0 +1,29 @@
+[package]
+name = "automata-ci-runner-auth"
+description = "Durable mTLS runner identity composition for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-core.workspace = true
+automata-ci-runner-control.workspace = true
+automata-ci-store.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

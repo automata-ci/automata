@@ -1,0 +1,778 @@
+name: Publish runner profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Build a review candidate or promote the exact reviewed lock
+        required: true
+        type: choice
+        options:
+          - build-candidate
+          - promote-locked
+      candidate_commit:
+        description: For candidate builds, the full 40-character source commit SHA
+        required: false
+        type: string
+      locked_digest:
+        description: For promotion, paste the reviewed sha256 digest from profile-lock.json
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-runner-profile-${{ inputs.operation }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
+  PROFILE_DIRECTORY: images/github-hosted-ubuntu-24.04-x64
+
+jobs:
+  validate:
+    name: Validate publication request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      candidate_commit: ${{ steps.profile.outputs.candidate_commit }}
+      locked_digest: ${{ steps.profile.outputs.locked_digest }}
+      locked_image: ${{ steps.profile.outputs.locked_image }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate publication request and reviewed lock
+        id: profile
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CONFIRMED_DIGEST: ${{ inputs.locked_digest }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - "$PROFILE_DIRECTORY" "$IMAGE" >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          def fail(message: str) -> None:
+              raise SystemExit(f"profile publication validation failed: {message}")
+
+          operation = os.environ["OPERATION"]
+          expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
+          if os.environ["DISPATCH_REF"] != expected_ref:
+              fail(f"trusted publisher workflow must be dispatched from {expected_ref}")
+
+          if operation == "build-candidate":
+              candidate_commit = os.environ["CANDIDATE_COMMIT"]
+              if re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is None:
+                  fail("candidate_commit must be a full lowercase 40-character commit SHA")
+              print(f"candidate_commit={candidate_commit}")
+              raise SystemExit(0)
+          if operation != "promote-locked":
+              fail(f"unsupported operation: {operation}")
+
+          directory = pathlib.Path(sys.argv[1])
+          image_repository = sys.argv[2]
+          manifest_bytes = (directory / "profile-manifest.json").read_bytes()
+          containerfile_bytes = (directory / "Containerfile").read_bytes()
+          manifest = json.loads(manifest_bytes)
+          lock = json.loads((directory / "profile-lock.json").read_bytes())
+
+          if manifest.get("schema_version") != 1 or lock.get("schema_version") != 1:
+              fail("only profile manifest and lock schema version 1 are supported")
+          profile_id = manifest.get("profile_id")
+          if not isinstance(profile_id, str) or profile_id != lock.get("profile_id"):
+              fail("manifest and lock profile identifiers differ")
+
+          image = manifest.get("image")
+          if image != lock.get("image"):
+              fail("manifest and lock image references differ")
+          image_pattern = re.escape(image_repository) + r"@(sha256:[0-9a-f]{64})"
+          image_match = re.fullmatch(image_pattern, image or "")
+          if image_match is None:
+              fail("image is not an exact digest under the canonical GHCR repository")
+          digest = image_match.group(1)
+
+          base_image = manifest.get("base_image")
+          if not isinstance(base_image, str) or re.search(
+              r"@sha256:[0-9a-f]{64}$", base_image
+          ) is None:
+              fail("base image is not digest-pinned")
+          if manifest.get("platform") != {
+              "os": "linux",
+              "architecture": "x86_64",
+              "compatibility_label": "ubuntu-24.04",
+          }:
+              fail("profile platform contract is not the reviewed Ubuntu x86_64 contract")
+          if lock.get("profile_manifest_sha256") != hashlib.sha256(
+              manifest_bytes
+          ).hexdigest():
+              fail("profile manifest checksum is stale")
+          if lock.get("containerfile_sha256") != hashlib.sha256(
+              containerfile_bytes
+          ).hexdigest():
+              fail("Containerfile checksum is stale")
+          if os.environ["CONFIRMED_DIGEST"] != digest:
+              fail("pasted digest does not exactly match the reviewed profile lock")
+
+          print(f"locked_digest={digest}")
+          print(f"locked_image={image}")
+          PY
+
+  candidate:
+    name: Build immutable review candidate
+    if: ${{ inputs.operation == 'build-candidate' }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
+      CANDIDATE_PROFILE_DIRECTORY: ${{ github.workspace }}/target/profile-candidate-source/images/github-hosted-ubuntu-24.04-x64
+      CANDIDATE_SOURCE_DIRECTORY: ${{ github.workspace }}/target/profile-candidate-source
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/profile-docker-config
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/profile-registry-auth.json
+    steps:
+      - name: Check out trusted publisher source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out candidate source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          path: target/profile-candidate-source
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.candidate_commit }}
+
+      - name: Validate candidate source and profile contract
+        id: candidate_contract
+        run: |
+          actual_commit="$(git -C "$CANDIDATE_SOURCE_DIRECTORY" rev-parse HEAD)"
+          [[ "$actual_commit" == "$CANDIDATE_COMMIT" ]] || {
+            printf 'error: candidate checkout resolved to %s, expected %s\n' \
+              "$actual_commit" "$CANDIDATE_COMMIT" >&2
+            exit 1
+          }
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --quiet
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --cached --quiet
+
+          python3 - "$CANDIDATE_PROFILE_DIRECTORY" "$IMAGE" \
+            >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+
+          directory = pathlib.Path(sys.argv[1])
+          image_repository = sys.argv[2]
+          manifest_path = directory / "profile-manifest.json"
+          containerfile_path = directory / "Containerfile"
+          if manifest_path.is_symlink() or containerfile_path.is_symlink():
+              raise SystemExit("candidate profile validation failed: profile inputs cannot be symlinks")
+          manifest_bytes = manifest_path.read_bytes()
+          containerfile_bytes = containerfile_path.read_bytes()
+          manifest = json.loads(manifest_bytes)
+
+          def fail(message: str) -> None:
+              raise SystemExit(f"candidate profile validation failed: {message}")
+
+          if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+              fail("only profile manifest schema version 1 is supported")
+          profile_id = manifest.get("profile_id")
+          if profile_id != "automata.dev/github-hosted-ubuntu-24-04-x64-v1":
+              fail("profile identifier is not the reviewed compatibility contract")
+          if manifest.get("platform") != {
+              "os": "linux",
+              "architecture": "x86_64",
+              "compatibility_label": "ubuntu-24.04",
+          }:
+              fail("platform is not the reviewed Ubuntu x86_64 contract")
+
+          base_image = manifest.get("base_image")
+          if not isinstance(base_image, str) or re.fullmatch(
+              r"[^\s@]+@sha256:[0-9a-f]{64}", base_image
+          ) is None:
+              fail("base image is not an exact digest reference")
+          from_instructions = [
+              line.strip()
+              for line in containerfile_bytes.decode("utf-8").splitlines()
+              if re.match(r"^\s*FROM\s+", line, re.IGNORECASE)
+          ]
+          if from_instructions != [f"FROM {base_image}"]:
+              fail("Containerfile must have exactly the manifest-pinned base image")
+
+          image = manifest.get("image")
+          if not isinstance(image, str) or re.fullmatch(
+              re.escape(image_repository) + r"@sha256:[0-9a-f]{64}", image
+          ) is None:
+              fail("manifest image is not an exact canonical GHCR reference")
+          if manifest.get("execution") != {
+              "workspace": "/__w",
+              "keepalive": ["/bin/sleep", "infinity"],
+              "root_filesystem": "writable-ephemeral",
+              "privilege": "administrator-inside-rootless-user-namespace",
+              "network": "private-egress",
+          }:
+              fail("execution contract differs from the reviewed profile")
+
+          toolchain = manifest.get("toolchain")
+          if not isinstance(toolchain, dict):
+              fail("toolchain contract is missing")
+          required_toolchain_strings = (
+              "rustup",
+              "rust",
+              "node_action_runtime",
+              "wasm_rquickjs_cli",
+              "cargo_cyclonedx",
+              "cargo_deny",
+              "clang",
+              "libclang",
+              "cargo_home",
+              "rustup_home",
+              "runner_tool_cache",
+          )
+          for field in required_toolchain_strings:
+              if not isinstance(toolchain.get(field), str) or not toolchain[field]:
+                  fail(f"toolchain field {field!r} is missing")
+          wasi_sdk = toolchain.get("wasi_sdk")
+          if not isinstance(wasi_sdk, dict):
+              fail("WASI SDK contract is missing")
+          for field in ("version", "platform", "archive", "installation_root", "environment"):
+              if not isinstance(wasi_sdk.get(field), str) or not wasi_sdk[field]:
+                  fail(f"WASI SDK field {field!r} is missing")
+          if re.fullmatch(r"[0-9a-f]{64}", wasi_sdk.get("archive_sha256", "")) is None:
+              fail("WASI SDK archive checksum is invalid")
+
+          container_engine = manifest.get("job_container_engine")
+          if not isinstance(container_engine, dict):
+              fail("job container engine contract is missing")
+          for field in ("capability", "client", "api", "build_backend", "socket"):
+              if not isinstance(container_engine.get(field), str) or not container_engine[field]:
+                  fail(f"job container engine field {field!r} is missing")
+
+          profile_contract = dict(manifest)
+          profile_contract.pop("image", None)
+          contract_bytes = json.dumps(
+              profile_contract, sort_keys=True, separators=(",", ":")
+          ).encode("utf-8")
+          print(f"profile_id={profile_id}")
+          print(f"profile_manifest_sha256={hashlib.sha256(manifest_bytes).hexdigest()}")
+          print(f"profile_contract_sha256={hashlib.sha256(contract_bytes).hexdigest()}")
+          print(f"containerfile_sha256={hashlib.sha256(containerfile_bytes).hexdigest()}")
+          PY
+
+      - name: Install image tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends podman skopeo
+
+      - name: Build candidate with trusted publisher logic
+        env:
+          PROFILE_ID: ${{ steps.candidate_contract.outputs.profile_id }}
+        run: |
+          install -d -m 0700 -- target/task-tmp/profile-image-build
+          export TMPDIR="$GITHUB_WORKSPACE/target/task-tmp/profile-image-build"
+          candidate_created="$(
+            git -C "$CANDIDATE_SOURCE_DIRECTORY" show -s --format=%cI "$CANDIDATE_COMMIT"
+          )"
+          podman build \
+            --file "$CANDIDATE_PROFILE_DIRECTORY/Containerfile" \
+            --format oci \
+            --label "org.opencontainers.image.created=${candidate_created}" \
+            --label "org.opencontainers.image.revision=${CANDIDATE_COMMIT}" \
+            --label "org.opencontainers.image.version=${PROFILE_ID}" \
+            --pull=always \
+            --timestamp 0 \
+            --tag "${IMAGE}:profile-build" \
+            "$CANDIDATE_PROFILE_DIRECTORY"
+
+      - name: Assert candidate image contract
+        run: |
+          "$PROFILE_DIRECTORY/verify-profile-image.sh" \
+            "${IMAGE}:profile-build" \
+            "$CANDIDATE_PROFILE_DIRECTORY/profile-manifest.json" \
+            "$CANDIDATE_COMMIT"
+
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          install -d -m 0700 -- "$DOCKER_CONFIG"
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" |
+            podman login --authfile "$REGISTRY_AUTH_FILE" \
+              --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+
+      - name: Push candidate and capture registry identity
+        id: candidate
+        run: |
+          install -d -m 0700 -- target/profile-publication
+          candidate_tag="${IMAGE}:candidate-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          digest_file=target/profile-publication/candidate.digest
+          manifest_file=target/profile-publication/candidate-manifest.json
+
+          podman tag "${IMAGE}:profile-build" "$candidate_tag"
+          podman push --digestfile "$digest_file" "$candidate_tag"
+          digest="$(tr -d '\r\n' < "$digest_file")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            printf 'error: registry returned an invalid candidate digest\n' >&2
+            exit 1
+          }
+
+          exact_image="${IMAGE}@${digest}"
+          skopeo inspect --raw "docker://${exact_image}" > "$manifest_file"
+          remote_digest="sha256:$(sha256sum "$manifest_file" | cut -d ' ' -f 1)"
+          [[ "$remote_digest" == "$digest" ]] || {
+            printf 'error: exact registry manifest hashes to %s, expected %s\n' \
+              "$remote_digest" "$digest" >&2
+            exit 1
+          }
+          podman pull "$exact_image"
+
+          {
+            printf 'digest=%s\n' "$digest"
+            printf 'exact_image=%s\n' "$exact_image"
+            printf 'transport_tag=%s\n' "$candidate_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assert pushed candidate image contract
+        env:
+          EXACT_IMAGE: ${{ steps.candidate.outputs.exact_image }}
+        run: |
+          "$PROFILE_DIRECTORY/verify-profile-image.sh" \
+            "$EXACT_IMAGE" \
+            "$CANDIDATE_PROFILE_DIRECTORY/profile-manifest.json" \
+            "$CANDIDATE_COMMIT"
+
+      - name: Record candidate source identity
+        env:
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+          CONTAINERFILE_SHA256: ${{ steps.candidate_contract.outputs.containerfile_sha256 }}
+          PROFILE_CONTRACT_SHA256: ${{ steps.candidate_contract.outputs.profile_contract_sha256 }}
+          PROFILE_ID: ${{ steps.candidate_contract.outputs.profile_id }}
+          PROFILE_MANIFEST_SHA256: ${{ steps.candidate_contract.outputs.profile_manifest_sha256 }}
+        run: |
+          python3 - target/profile-publication/candidate-identity.json <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          identity = {
+              "schema_version": 1,
+              "candidate_commit": os.environ["CANDIDATE_COMMIT"],
+              "candidate_digest": os.environ["CANDIDATE_DIGEST"],
+              "profile_id": os.environ["PROFILE_ID"],
+              "profile_manifest_sha256": os.environ["PROFILE_MANIFEST_SHA256"],
+              "profile_contract_sha256": os.environ["PROFILE_CONTRACT_SHA256"],
+              "containerfile_sha256": os.environ["CONTAINERFILE_SHA256"],
+          }
+          path = pathlib.Path(sys.argv[1])
+          path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Generate candidate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ steps.candidate.outputs.exact_image }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ github.token }}
+          output-file: target/profile-publication/profile.spdx.json
+          format: spdx-json
+          syft-version: v1.50.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest candidate provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
+          subject-digest: ${{ steps.candidate.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest candidate SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
+          subject-digest: ${{ steps.candidate.outputs.digest }}
+          sbom-path: target/profile-publication/profile.spdx.json
+          push-to-registry: true
+
+      - name: Attest candidate source identity
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
+          subject-digest: ${{ steps.candidate.outputs.digest }}
+          predicate-type: https://github.com/automata-ci/automata/attestations/profile-candidate/v1
+          predicate-path: target/profile-publication/candidate-identity.json
+          push-to-registry: true
+
+      - name: Record immutable review identity
+        env:
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+          EXACT_IMAGE: ${{ steps.candidate.outputs.exact_image }}
+          TRANSPORT_TAG: ${{ steps.candidate.outputs.transport_tag }}
+        run: |
+          # Markdown code spans are intentionally literal.
+          # shellcheck disable=SC2016
+          {
+            printf '## Profile candidate ready for review\n\n'
+            printf -- '- Exact image: `%s`\n' "$EXACT_IMAGE"
+            printf -- '- Digest confirmation: `%s`\n' "$CANDIDATE_DIGEST"
+            printf -- '- Candidate source commit: `%s`\n' "$CANDIDATE_COMMIT"
+            printf -- '- Trusted publisher commit: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Transport-only tag: `%s`\n\n' "$TRANSPORT_TAG"
+            printf '%s\n' \
+              'Review and test the exact `@sha256` image, not the mutable tag.' \
+              'Then update the manifest and lock in a reviewed commit; this workflow never edits them.' \
+              'Dispatch `promote-locked` from the default branch and paste the locked digest.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign out of GHCR
+        if: ${{ always() }}
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          podman logout --authfile "$REGISTRY_AUTH_FILE" ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$REGISTRY_AUTH_FILE" "$DOCKER_CONFIG/config.json"
+
+  promote:
+    name: Promote exact reviewed profile
+    if: ${{ inputs.operation == 'promote-locked' }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: profile-promotion
+    permissions:
+      attestations: read
+      contents: read
+      packages: write
+    env:
+      ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/profile-anonymous-auth.json
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/profile-docker-config
+      LOCKED_DIGEST: ${{ needs.validate.outputs.locked_digest }}
+      LOCKED_IMAGE: ${{ needs.validate.outputs.locked_image }}
+      SOURCE_REF: refs/heads/${{ github.event.repository.default_branch }}
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/profile-registry-auth.json
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install image tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends podman skopeo
+
+      - name: Require public exact locked image
+        run: |
+          install -d -m 0700 -- "$(dirname -- "$ANONYMOUS_AUTH_FILE")"
+          install -m 0600 /dev/null "$ANONYMOUS_AUTH_FILE"
+          printf '{"auths":{}}\n' > "$ANONYMOUS_AUTH_FILE"
+          manifest_file="$RUNNER_TEMP/profile-locked-anonymous.json"
+          if ! skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+            --raw "docker://${LOCKED_IMAGE}" > "$manifest_file"; then
+            printf 'error: %s must exist and be publicly readable before promotion\n' \
+              "$LOCKED_IMAGE" >&2
+            printf 'make the GHCR package public, then rerun this operation\n' >&2
+            exit 1
+          fi
+          actual="sha256:$(sha256sum "$manifest_file" | cut -d ' ' -f 1)"
+          [[ "$actual" == "$LOCKED_DIGEST" ]] || {
+            printf 'error: anonymous manifest hashes to %s, expected %s\n' \
+              "$actual" "$LOCKED_DIGEST" >&2
+            exit 1
+          }
+
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          install -d -m 0700 -- "$DOCKER_CONFIG"
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" |
+            podman login --authfile "$REGISTRY_AUTH_FILE" \
+              --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+
+      - name: Pull exact locked image
+        run: |
+          podman pull "$LOCKED_IMAGE"
+
+      - name: Verify candidate provenance and SBOM
+        id: candidate_identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/profile-image.yml
+        run: |
+          gh attestation verify "oci://${LOCKED_IMAGE}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-ref "$SOURCE_REF" \
+            --deny-self-hosted-runners >/dev/null
+          gh attestation verify "oci://${LOCKED_IMAGE}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-ref "$SOURCE_REF" \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --deny-self-hosted-runners >/dev/null
+          identity_attestations="$RUNNER_TEMP/profile-candidate-identity.json"
+          gh attestation verify "oci://${LOCKED_IMAGE}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-ref "$SOURCE_REF" \
+            --predicate-type \
+              https://github.com/automata-ci/automata/attestations/profile-candidate/v1 \
+            --deny-self-hosted-runners \
+            --format json > "$identity_attestations"
+
+          python3 - "$identity_attestations" "$PROFILE_DIRECTORY" "$LOCKED_DIGEST" \
+            >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+
+          attestations = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+          directory = pathlib.Path(sys.argv[2])
+          locked_digest = sys.argv[3]
+          manifest = json.loads((directory / "profile-manifest.json").read_bytes())
+          containerfile_bytes = (directory / "Containerfile").read_bytes()
+          profile_contract = dict(manifest)
+          profile_contract.pop("image", None)
+          contract_bytes = json.dumps(
+              profile_contract, sort_keys=True, separators=(",", ":")
+          ).encode("utf-8")
+          expected_contract = hashlib.sha256(contract_bytes).hexdigest()
+          expected_containerfile = hashlib.sha256(containerfile_bytes).hexdigest()
+
+          def fail(message: str) -> None:
+              raise SystemExit(f"candidate identity verification failed: {message}")
+
+          candidate_commits = set()
+          for result in attestations:
+              predicate = (
+                  result.get("verificationResult", {})
+                  .get("statement", {})
+                  .get("predicate")
+              )
+              if not isinstance(predicate, dict):
+                  continue
+              if predicate.get("schema_version") != 1:
+                  continue
+              if predicate.get("candidate_digest") != locked_digest:
+                  continue
+              if predicate.get("profile_id") != manifest.get("profile_id"):
+                  continue
+              if predicate.get("profile_contract_sha256") != expected_contract:
+                  continue
+              if predicate.get("containerfile_sha256") != expected_containerfile:
+                  continue
+              candidate_commit = predicate.get("candidate_commit")
+              if re.fullmatch(r"[0-9a-f]{40}", candidate_commit or "") is None:
+                  continue
+              candidate_commits.add(candidate_commit)
+
+          if not candidate_commits:
+              fail("no attestation matches the locked Containerfile and profile contract")
+          if len(candidate_commits) != 1:
+              fail("locked digest has conflicting candidate source identities")
+          print(f"candidate_commit={candidate_commits.pop()}")
+          PY
+
+      - name: Assert exact locked image contract
+        env:
+          CANDIDATE_COMMIT: ${{ steps.candidate_identity.outputs.candidate_commit }}
+        run: |
+          "$PROFILE_DIRECTORY/verify-profile-image.sh" \
+            "$LOCKED_IMAGE" \
+            "$PROFILE_DIRECTORY/profile-manifest.json" \
+            "$CANDIDATE_COMMIT"
+
+      - name: Scrub checkout credentials and require current default-branch head
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          credential_keys="$GITHUB_WORKSPACE/target/task-tmp/profile-git-credential-keys"
+          remote_head_file="$GITHUB_WORKSPACE/target/task-tmp/profile-default-branch-head"
+          install -d -m 0700 -- "$(dirname -- "$credential_keys")"
+
+          set +e
+          git config --local --name-only --get-regexp \
+            '^(http\..*\.extraheader|credential(\..*)?\.helper|core\.askpass)$' \
+            > "$credential_keys"
+          config_status=$?
+          set -e
+          case "$config_status" in
+            0)
+              LC_ALL=C sort -u "$credential_keys" |
+                while IFS= read -r credential_key; do
+                  git config --local --unset-all "$credential_key"
+                done
+              ;;
+            1)
+              ;;
+            *)
+              printf 'error: unable to inspect checkout credential configuration\n' >&2
+              exit 1
+              ;;
+          esac
+          rm -f -- "$credential_keys"
+
+          expected_ref="refs/heads/${DEFAULT_BRANCH}"
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          if ! env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git \
+              -c core.askPass= \
+              -c credential.helper= \
+              -c http.extraHeader= \
+              ls-remote --exit-code --refs "$remote_url" "$expected_ref" \
+              > "$remote_head_file"; then
+            printf 'error: unable to resolve direct remote %s before promotion\n' \
+              "$expected_ref" >&2
+            exit 1
+          fi
+
+          python3 - "$remote_head_file" "$expected_ref" "$GITHUB_SHA" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          remote_head_path = pathlib.Path(sys.argv[1])
+          expected_ref = sys.argv[2].encode("utf-8")
+          dispatch_sha = sys.argv[3]
+
+          def fail(message: str) -> None:
+              raise SystemExit(f"default-branch freshness check failed: {message}")
+
+          if re.fullmatch(r"[0-9a-f]{40}", dispatch_sha) is None:
+              fail("dispatch GITHUB_SHA is malformed")
+          remote_head = remote_head_path.read_bytes()
+          if not remote_head:
+              fail("direct remote returned no default-branch ref")
+          if len(remote_head.splitlines(keepends=True)) != 1:
+              fail("direct remote returned multiple default-branch refs")
+          match = re.fullmatch(rb"([0-9a-f]{40})\t([^\x00\r\n]+)\n", remote_head)
+          if match is None or match.group(2) != expected_ref:
+              fail("direct remote returned a malformed default-branch ref")
+          remote_sha = match.group(1).decode("ascii")
+          if remote_sha != dispatch_sha:
+              fail("default branch moved after dispatch; rerun promotion")
+          PY
+          rm -f -- "$remote_head_file"
+
+      - name: Promote exact digest without rebuilding
+        run: |
+          profile_tag="${IMAGE}:profile-v1"
+          latest_tag="${IMAGE}:latest"
+          inspect_output="$RUNNER_TEMP/profile-v1-inspect.txt"
+
+          set +e
+          skopeo inspect --raw "docker://${profile_tag}" \
+            > "$RUNNER_TEMP/profile-v1-current.json" 2> "$inspect_output"
+          inspect_status=$?
+          set -e
+          if (( inspect_status == 0 )); then
+            current="sha256:$(sha256sum "$RUNNER_TEMP/profile-v1-current.json" | cut -d ' ' -f 1)"
+            [[ "$current" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: refusing to move immutable profile-v1 from %s to %s\n' \
+                "$current" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+          elif ! grep -Eiq 'manifest unknown|name unknown|not found|404' "$inspect_output"; then
+            printf 'error: unable to inspect existing profile-v1 tag\n' >&2
+            cat "$inspect_output" >&2
+            exit 1
+          fi
+
+          for tagged in "$profile_tag" "$latest_tag"; do
+            skopeo copy --all --preserve-digests \
+              "docker://${LOCKED_IMAGE}" "docker://${tagged}"
+            skopeo inspect --raw "docker://${tagged}" \
+              > "$RUNNER_TEMP/promoted-manifest.json"
+            promoted="sha256:$(sha256sum "$RUNNER_TEMP/promoted-manifest.json" | cut -d ' ' -f 1)"
+            [[ "$promoted" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: promoted %s resolves to %s, expected %s\n' \
+                "$tagged" "$promoted" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+          done
+
+      - name: Remove registry credentials
+        run: |
+          docker logout ghcr.io >/dev/null
+          podman logout --authfile "$REGISTRY_AUTH_FILE" ghcr.io >/dev/null
+          rm -f -- "$REGISTRY_AUTH_FILE" "$DOCKER_CONFIG/config.json"
+
+      - name: Verify anonymous promoted identities
+        run: |
+          for reference in \
+            "$LOCKED_IMAGE" \
+            "${IMAGE}:profile-v1" \
+            "${IMAGE}:latest"; do
+            manifest_file="$RUNNER_TEMP/profile-public-manifest.json"
+            skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+              --raw "docker://${reference}" > "$manifest_file" || {
+              printf 'error: promoted profile is not anonymously readable: %s\n' \
+                "$reference" >&2
+              exit 1
+            }
+            public_digest="sha256:$(sha256sum "$manifest_file" | cut -d ' ' -f 1)"
+            [[ "$public_digest" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: public %s resolves to %s, expected %s\n' \
+                "$reference" "$public_digest" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+          done
+
+      - name: Record promoted identity
+        env:
+          CANDIDATE_COMMIT: ${{ steps.candidate_identity.outputs.candidate_commit }}
+        run: |
+          # Markdown code spans are intentionally literal.
+          # shellcheck disable=SC2016
+          {
+            printf '## Profile promotion complete\n\n'
+            printf -- '- Exact image: `%s`\n' "$LOCKED_IMAGE"
+            printf -- '- Stable tags: `%s`, `%s`\n' \
+              "${IMAGE}:profile-v1" "${IMAGE}:latest"
+            printf -- '- Candidate source commit: `%s`\n' "$CANDIDATE_COMMIT"
+            printf -- '- Source commit: `%s`\n' "$GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign out of GHCR
+        if: ${{ always() }}
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          podman logout --authfile "$REGISTRY_AUTH_FILE" ghcr.io >/dev/null 2>&1 || true
+          rm -f -- \
+            "$REGISTRY_AUTH_FILE" \
+            "$ANONYMOUS_AUTH_FILE" \
+            "$DOCKER_CONFIG/config.json"

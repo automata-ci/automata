@@ -1,0 +1,162 @@
+.log-page-heading {
+  margin-bottom: 16px;
+}
+
+.log-page-heading h1 {
+  margin-top: 5px;
+  font-size: 20px;
+}
+
+.log-viewer {
+  overflow: hidden;
+}
+
+.log-toolbar {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--canvas-subtle);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.log-toolbar > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.log-toolbar h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.log-toolbar > div:first-child > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-search {
+  flex: 0 1 280px;
+  min-width: 180px;
+}
+
+.log-search-form {
+  display: flex;
+  flex: 0 1 480px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.log-notice {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--fg-muted);
+  background: var(--canvas-subtle);
+  border-bottom: 1px solid var(--border-default);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.log-output {
+  display: grid;
+  grid-template-columns:
+    minmax(48px, max-content) 84px 68px
+    minmax(var(--log-message-min-width), 1fr);
+  max-width: 100%;
+  overflow-x: auto;
+  color: var(--log-fg);
+  background: var(--log-canvas);
+  border-top: 1px solid var(--log-border);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.log-output:focus-visible,
+.log-line > a:focus-visible {
+  outline-offset: -2px;
+}
+
+.log-line {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  min-height: 28px;
+  align-items: start;
+}
+
+.log-line:hover,
+.log-line:target {
+  background: var(--log-highlight);
+}
+
+.log-line > a {
+  align-self: stretch;
+  padding: 4px 10px 3px 4px;
+  overflow: hidden;
+  color: var(--log-muted);
+  border-right: 1px solid var(--log-border-muted);
+  text-align: right;
+  text-overflow: ellipsis;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.log-line > a:hover {
+  color: var(--log-accent);
+  text-decoration: none;
+}
+
+.log-line > time {
+  padding: 4px 10px 3px;
+  color: var(--log-muted);
+}
+
+.log-line__channel {
+  padding: 4px 8px 3px;
+  color: var(--log-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.log-line[data-channel="stderr"] .log-line__channel,
+.log-line[data-channel="stderr"] > code {
+  color: var(--log-danger);
+}
+
+.log-line[data-channel="system"] .log-line__channel {
+  color: var(--log-system);
+}
+
+.log-line > code {
+  padding: 4px 16px 3px 0;
+  color: inherit;
+  background: transparent;
+  direction: ltr;
+  font: inherit;
+  unicode-bidi: plaintext;
+  white-space: pre-wrap;
+}
+
+.log-output__empty {
+  grid-column: 1 / -1;
+  min-width: var(--log-output-min-width);
+  margin: 0;
+  padding: 18px 16px;
+  color: var(--log-muted);
+}
+
+.log-pagination {
+  background: var(--canvas-default);
+  border-color: var(--log-border);
+}

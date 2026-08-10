@@ -1,0 +1,84 @@
+.repository-directory__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repository-directory__item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px;
+}
+
+.repository-directory__item + .repository-directory__item {
+  border-top: 1px solid var(--border-muted);
+}
+
+.repository-directory__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.repository-directory__identity > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.repository-directory__icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--fg-muted);
+  background: var(--canvas-subtle);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-control);
+}
+
+.repository-directory__name {
+  display: flex;
+  min-width: 0;
+  color: var(--fg-default);
+  gap: 3px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.repository-directory__name:hover {
+  color: var(--accent-fg);
+  text-decoration: underline;
+}
+
+.repository-directory__name strong {
+  font-weight: 600;
+}
+
+.repository-directory__source {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.repository-directory__destinations {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.repository-directory__destinations .button {
+  gap: 6px;
+}
+
+.repository-directory__pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}

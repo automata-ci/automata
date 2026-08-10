@@ -1,0 +1,11 @@
+{
+  "schema": 2,
+  "generated_at_seconds": 1786220000,
+  "runners": [
+    {
+      "instance": "runner-example-01",
+      "cluster": "example-cluster",
+      "environment": "example"
+    }
+  ]
+}

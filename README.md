@@ -1,108 +1,146 @@
 # Automata
 
-Automata is a self-hostable, horizontally scalable execution platform for
-GitHub Actions workflows. Its compatibility mode is intended to run existing
-`.github/workflows` and actions without repository-specific rewrites.
+[![CI](https://github.com/automata-ci/automata/actions/workflows/ci.yml/badge.svg)](https://github.com/automata-ci/automata/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2f6f68.svg)](LICENSE)
 
-The project is at the bootstrap stage. Compatibility claims are accepted only
-when the same workflow revision has been compared against GitHub Actions; an
-unimplemented feature is reported as incompatible and is never silently
-ignored.
+Own the control plane behind your GitHub Actions workflows.
 
-## Distribution model
+Automata is a self-hostable execution platform being built to run existing
+`.github/workflows` files on infrastructure you control. It combines workflow
+planning, scheduling, results, a web interface, and an isolated runner in two
+Rust executables: `automata` and `automata-runner`. Future release archives will
+contain statically linked Linux builds; ordinary Cargo/source builds may be
+dynamically linked.
 
-Automata produces two product executables:
+> [!WARNING]
+> Automata 0.1 is bootstrap software. It is not production-ready, and the full
+> end-to-end compatibility gate has not passed.
+> No public release has been published yet, and the hosted UI preview is not
+> deployed. Use only a reviewed source checkout for evaluation and development.
 
-- `automata` — workflow ingestion, planning, scheduling, results, GitHub
-  integration, fleet control, API, server-rendered UI, and a `gh`-style
-  administration CLI.
-- `automata-runner` — capability discovery, leases, action execution,
-  sandbox and container providers, logs, and crash reconciliation.
+## Quick start
 
-Linux release artifacts are statically linked with musl. First-party adapters
-are compiled in and selected by configuration. Optional third-party providers
-communicate over versioned out-of-process protocols rather than Rust dynamic
-libraries. Each deterministic archive includes CycloneDX inventories for both
-executables, the embedded WASI renderer, and its production React runtime. It
-also carries SHA-256-indexed, verbatim third-party license and NOTICE/copyright
-texts generated offline from the exact Cargo and npm packages selected by the
-checked-in lockfiles and review policy. The generator fails when a shipped
-component lacks license material, when an allowlist drifts, or when an audited
-fallback changes. NOTICE coverage is necessarily limited to files actually
-published in those locked packages, so dependency-update review must also check
-for upstream-only notice obligations.
+### Run from source
 
-## Non-negotiable design rules
-
-- Existing GitHub workflows remain unchanged in compatibility mode.
-- Automata's own ordinary GitHub Actions CI is its first end-to-end workload.
-- All first-party Rust crates forbid `unsafe` code.
-- PostgreSQL owns durable coordination; S3-compatible storage owns immutable
-  blobs. Object storage is not used as a lock service.
-- Labels and runner groups are routing policy. Typed capabilities express OS,
-  architecture, resources, container support, and isolation.
-- Every attempt is leased and fenced. A stale runner may finish locally but
-  cannot commit a result.
-- A job never receives the host Podman socket or control-plane credentials.
-- Every UI route is rendered on the server with React and Vite. Browser code
-  may progressively enhance a page but cannot supply its essential content.
-
-See [the architecture](docs/architecture.md) and
-[compatibility contract](docs/compatibility.md). The ordered work, acceptance
-gates, and `world-engine` rollout are tracked in the
-[implementation plan](docs/implementation-plan.md).
-
-## Development
-
-The Rust workspace is pinned by `rust-toolchain.toml` and uses the lockfile:
+You need [Git](https://git-scm.com/) and [rustup](https://rustup.rs/). The
+repository selects its Rust toolchain automatically.
 
 ```console
-export TMPDIR="$PWD/target/task-tmp/local"
-install -d -m 0700 -- "$TMPDIR"
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
+git clone https://github.com/automata-ci/automata.git
+cd automata
+cargo run --locked --bin automata -- preview
 ```
 
-Project build, test, regeneration, and probe tooling must keep scratch data
-under the ignored repository `target/` tree. It does not use the host `/tmp`,
-which may be shared, inode-constrained, or mounted with unsuitable execution
-policy on CI and bare-metal runner hosts.
-
-Run the initial process-level smoke test with:
+Open <http://127.0.0.1:8080>, or verify it from another terminal:
 
 ```console
-cargo run --bin automata -- preview --listen 127.0.0.1:8080
-cargo run --bin automata-runner -- doctor --server http://127.0.0.1:8080 --json
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/readyz
 ```
 
-The preview command is intentionally dependency-free and does not exercise the
-control plane. See [`crates/automata/README.md`](crates/automata/README.md) for
-the strict PostgreSQL, S3, mTLS, and Results configuration required by
-`automata server`.
+Preview mode is dependency-free. It renders the embedded web interface and
+health endpoints, but does not start PostgreSQL, scheduling, runner control, or
+workflow execution. Continue with the [getting-started guide](docs/getting-started.md)
+for the complete source-build path and future release-channel policy, or the
+[control-plane setup](docs/deployment.md) for the durable local composition.
 
-Start the pinned PostgreSQL and RustFS integration stack through rootless
-Podman (the `podman compose` command requires an installed Compose provider):
+### Future release channels
 
-```console
-podman compose --file deploy/dev/compose.yaml up --detach --wait
-export AUTOMATA_TEST_DATABASE_URL='postgres://automata:automata-local-only@127.0.0.1:5432/automata'
-export AUTOMATA_TEST_S3_ENDPOINT='http://127.0.0.1:9000/'
-export AUTOMATA_TEST_S3_BUCKET='automata-dev'
-export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
-export AUTOMATA_TEST_S3_SECRET_KEY='automata-local-secret-change-me'
-cargo test -p automata-store --tests --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-runner-auth-postgres --test postgres_directory --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-blob-s3 --test rustfs_contract --all-features --locked
+After the first public version appears under
+[GitHub Releases](https://github.com/automata-ci/automata/releases), its exact
+tag will carry the checksum-verifying Linux installer and static archive. The
+planned matching distribution names are the crates.io packages `automata-ci`
+and `automata-ci-runner` and the GHCR repositories
+`ghcr.io/automata-ci/automata` and `ghcr.io/automata-ci/automata-runner`.
+Do not guess a version or use any of those channels until the same exact version
+is visibly published by its registry.
+
+## Why Automata?
+
+- **Keep your workflows.** Compatibility mode is designed for standard GitHub
+  workflow and action files, without Automata-specific YAML.
+- **Control where jobs run.** Route work by labels, runner groups, typed
+  capabilities, resources, and isolation requirements.
+- **Scale the control plane.** PostgreSQL owns durable coordination and
+  S3-compatible storage owns immutable workflow, log, result, and artifact data.
+- **Fail safely.** Leases, fencing tokens, crash journals, and idempotent cleanup
+  are part of the correctness model rather than optional deployment tuning.
+- **Keep jobs contained.** A job never receives the host Podman socket or
+  control-plane credentials.
+
+Automata is more than a replacement self-hosted runner. A normal self-hosted
+runner still relies on GitHub's Actions control plane; Automata is building both
+the control plane and the runner.
+
+## What works today?
+
+| Area | Bootstrap status |
+| --- | --- |
+| GitHub workflow parsing and planning | The repository CI bytes are mirrored and parser-tested. Its PostgreSQL service declaration reaches parsing, selection, logical lowering, projection, executor translation, and the rootless Podman runtime. The end-to-end gate remains open until a reviewed immutable service-proxy image is published and configured and the complete production composition passes. |
+| Durable control plane | PostgreSQL migrations, workflow admission, scheduling records, leases, fencing, maintenance, result projection, run finalization, and S3-compatible immutable blobs are implemented. A mandatory autonomous worker discovers admitted logical work and supervises exact preparation, activation, and materialization into runnable jobs. End-to-end execution still requires the configured runner and provider boundaries described below. |
+| Runner | mTLS transport, configured fail-closed network and process admission, exact provider lifecycle admission for every configured environment profile, lease handling, encrypted spool/journal foundations, and the rootless Podman path are implemented and under integration. |
+| Results and artifacts | The GitHub Actions Results-compatible boundary, durable block/manifest admission, verified reads, and signed downloads are implemented. Production retention and object garbage collection remain open. |
+| Web UI and CLI | The tenant-scoped SSR dashboard loads runs, summaries, verified logs, finalized artifacts, repository publication and secret settings, and authenticated user, role, permission, and direct-binding management from durable storage. GitHub browser login and session middleware are composed when authentication is configured. On Linux, `automata auth login`, `auth status`, and `auth logout` use the OS Secret Service for one server-scoped CLI session. |
+| Access control and publication | Explicit tenant/resource-scoped RBAC, the authenticated management JSON API, and its bounded browser management forms are composed. Dashboard metadata, logs, and artifacts have independent private, authenticated, or public repository settings; public access is read-only. A run snapshots those settings at admission, while readable-secret logs and artifacts are always narrowed to private and raw user output is suppressed. |
+| Secrets | The provider-neutral SPI requires an encrypted-at-rest boundary. Authenticated repository pages and HTTP routes expose value-free metadata plus capability-gated create, replace, delete, and built-in PostgreSQL provider activation. Fenced stale-intent recovery, cryptographic erasure, authenticated key-custody readiness, bounded cleanup metrics, and a Linux operator CLI for create/list/delete and provider status/activation are composed. Missing or wrong required key material fails startup, readiness, and every write boundary. CLI replacement, runner delivery, and external providers remain unsupported, so jobs do not receive managed secret values. |
+| GitHub integration | GitHub is the current human provider. Browser and device login, envelope-encrypted login/provider state, hashed audience-specific session credentials, fresh numeric membership authority, and RBAC browser/API management are composed. When the exact provider registry is configured, the product also composes signed webhook ingress, public/private source delivery, fenced Check Runs publication, scoped GitHub App service credentials, and exact lease-bound repository authority for materialized Standard jobs; CredentialFree jobs receive none. Admission-to-materialization is supervised, while end-to-end workflow compatibility remains gated by the configured runner, provider, and service-image path. |
+| Distribution | No public archive, package, or product image has been published. CI gates the future release workflow, which verifies crates.io packages, deterministic static Linux archives, checksums, SBOMs, license notices, GHCR images, and attestations before a GitHub Release becomes public. |
+
+Unsupported behavior is rejected explicitly. Automata does not silently ignore
+workflow options and call the result compatible. See the
+[compatibility contract](docs/compatibility.md) for the exact standard.
+
+## How it fits together
+
+```text
+Configured GitHub events                           Browser / CLI
+              |                                         |
+              +--------------- automata ----------------+
+                              |       |
+                        PostgreSQL   S3-compatible storage
+                              |
+                         fenced lease
+                              |
+                       automata-runner
+                              |
+                    isolated job environment
 ```
 
-The RustFS contract creates its configured test bucket if a clean development
-stack does not have it yet, then exercises conditional immutable publication
-and verified reads. These values are deliberately local-only; production
-credentials are supplied through provider configuration and never enter job
-environments. Provider prerequisites are runtime capabilities, not linked
-dependencies of either Automata executable.
+`automata` contains workflow ingestion, planning, scheduling, Results APIs,
+fleet control, the server-rendered interface, and administration commands.
+`automata-runner` validates configured host/network capability evidence, accepts
+fenced leases, executes jobs through a sandbox provider, streams logs, and
+reconciles interrupted work.
+
+The planned crates.io package names are `automata-ci` and `automata-ci-runner`;
+their installed command names will deliberately match the product roles above. Read the
+[architecture overview](docs/architecture.md) for the component and trust
+boundaries.
+
+## Documentation
+
+| I want to… | Start here |
+| --- | --- |
+| Build Automata from source and run the preview | [Getting started](docs/getting-started.md) |
+| Understand what is and is not supported | [Compatibility](docs/compatibility.md) |
+| Configure login, RBAC, and repository visibility | [Authentication and authorization](docs/authentication.md) |
+| Run the bootstrap control plane | [Control-plane setup](docs/deployment.md) |
+| Configure a local Linux runner | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
+| Understand the system design | [Architecture](docs/architecture.md) |
+| Work on the codebase | [Development guide](docs/development.md) |
+| Publish a release | [Release guide](docs/releasing.md) |
+| Review release history | [Changelog](CHANGELOG.md) |
+| Report a vulnerability privately | [Security policy](SECURITY.md) |
+| Find every document | [Documentation index](docs/README.md) |
+
+## Contributing
+
+Automata is currently shaped around its first end-to-end compatibility
+milestone. Bug reports, design feedback, compatibility fixtures, and focused
+code changes are welcome.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[implementation plan](docs/implementation-plan.md). Participation is governed
+by the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

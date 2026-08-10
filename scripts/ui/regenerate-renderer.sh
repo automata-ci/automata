@@ -36,9 +36,78 @@ readonly expected_wasi_ar_version="LLVM version 18.1.2-wasi-sdk"
 
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repository_root="$(cd -- "${script_directory}/../.." && pwd -P)"
+# Keep ambient rejection filesystem-free and first so a malformed invocation
+# cannot influence even interrupted-transaction recovery.
 # shellcheck source=scripts/ui/renderer-preflight-env.sh
 source "${script_directory}/renderer-preflight-env.sh"
 automata_renderer_reject_ambient_overrides
+
+ui_directory="${repository_root}/ui"
+renderer_directory="${ui_directory}/renderer"
+crate_directory="${repository_root}/crates/automata-ci-ui-renderer"
+asset_directory="${crate_directory}/assets"
+wit_file="${crate_directory}/wit/renderer.wit"
+generated_contract="${crate_directory}/src/generated_contract.rs"
+generated_rust="${crate_directory}/src/generated_assets.rs"
+wrapper_lock="${renderer_directory}/wrapper.Cargo.lock"
+wrapper_manifest="${renderer_directory}/wrapper.Cargo.toml"
+canonical_macro_directory="${renderer_directory}/vendor/rquickjs-macro-0.10.0"
+transaction_state_directory="${renderer_directory}/.regeneration-transaction"
+transaction_recovery_initialized=0
+
+initialize_renderer_transaction_recovery() {
+    # The stable checked-in directory inode prevents target cleanup from
+    # creating a second lock namespace while publication is active.
+    local recovery_command=''
+
+    for recovery_command in \
+        chmod cmp cp diff find flock install mv realpath rm sort stat; do
+        command -v "${recovery_command}" >/dev/null 2>&1 || {
+            echo "required recovery command is unavailable: ${recovery_command}" >&2
+            return 1
+        }
+    done
+    [[ -d "${renderer_directory}" && ! -L "${renderer_directory}" ]] || {
+        echo "renderer source directory must be a real directory" >&2
+        return 1
+    }
+    exec {regeneration_lock_fd}<"${renderer_directory}"
+    flock --exclusive --nonblock "${regeneration_lock_fd}" || {
+        echo "another renderer regeneration or verification owns the checked-in set" >&2
+        return 1
+    }
+    readonly regeneration_lock_fd
+    # shellcheck source=scripts/ci/lib/target-paths.sh
+    source "${repository_root}/scripts/ci/lib/target-paths.sh"
+    automata_init_target_root "${repository_root}"
+    scratch_directory="$(
+        automata_canonical_exact_target_child \
+            "${repository_root}/target/agent-scratch/ssr" \
+            "renderer scratch directory"
+    )"
+    # shellcheck source=scripts/ui/lib/renderer-generation-transaction.sh
+    source "${script_directory}/lib/renderer-generation-transaction.sh"
+    automata_renderer_transaction_configure_state \
+        "${transaction_state_directory}" \
+        "${scratch_directory}"
+    renderer_transaction_live_paths=(
+        "${asset_directory}"
+        "${generated_contract}"
+        "${generated_rust}"
+        "${renderer_directory}/SHA256SUMS"
+        "${renderer_directory}/PROVENANCE.toml"
+        "${renderer_directory}/renderer.cdx.json"
+    )
+    automata_renderer_transaction_recover "${renderer_transaction_live_paths[@]}"
+    transaction_recovery_initialized=1
+}
+
+# In a real checkout, recovery and the exact orphan-scratch sweep run before
+# toolchain, Cargo configuration, or new allocation. The source-directory test
+# lets isolated environment-preflight fixtures remain filesystem-free.
+if [[ -e "${renderer_directory}" || -L "${renderer_directory}" ]]; then
+    initialize_renderer_transaction_recovery
+fi
 
 [[ "${CARGO_HOME:-}" == "${expected_cargo_home}" && \
     "${RUSTUP_HOME:-}" == "${expected_rustup_home}" ]] || {
@@ -74,20 +143,8 @@ done
 # from --manifest-path. Pin that lookup root after the complete config scan.
 cd -- "${repository_root}"
 
-# shellcheck source=scripts/ci/lib/target-paths.sh
-source "${repository_root}/scripts/ci/lib/target-paths.sh"
-ui_directory="${repository_root}/ui"
-renderer_directory="${ui_directory}/renderer"
-asset_directory="${renderer_directory}/assets"
-crate_directory="${repository_root}/crates/automata-ui-renderer"
-wit_file="${crate_directory}/wit/renderer.wit"
-generated_rust="${crate_directory}/src/generated_assets.rs"
-wrapper_lock="${renderer_directory}/wrapper.Cargo.lock"
-wrapper_manifest="${renderer_directory}/wrapper.Cargo.toml"
-canonical_macro_directory="${renderer_directory}/vendor/rquickjs-macro-0.10.0"
-
 for command in \
-    cp diff find install mktemp node npm python3 readlink sha256sum; do
+    chmod cmp cp diff find flock install mktemp mv node npm python3 readlink rm sha256sum; do
     command -v "${command}" >/dev/null 2>&1 || {
         echo "required command is unavailable: ${command}" >&2
         exit 1
@@ -233,23 +290,28 @@ printf '#include <stdio.h>\nint main(void) { return 0; }\n' \
     exit 1
 }
 
-# No generated tree or scratch path is touched until the complete canonical
-# toolchain preflight above succeeds.
-automata_init_target_root "${repository_root}"
-scratch_directory="$(
-    automata_canonical_exact_target_child \
-        "${repository_root}/target/agent-scratch/ssr" \
-        "renderer scratch directory"
-)"
+# If there was no interrupted phase, acquire the same stable lock only after
+# the canonical preflight. Do not allocate new scratch or begin publication
+# before both recovery and that preflight are complete.
+if (( transaction_recovery_initialized == 0 )); then
+    initialize_renderer_transaction_recovery
+fi
+[[ ! -L "${transaction_state_directory}" ]] || {
+    echo "renderer regeneration transaction state must not be a symbolic link" >&2
+    exit 1
+}
+install -d -m 0700 -- "${transaction_state_directory}"
 mkdir -p -- "${scratch_directory}"
 export TMPDIR="${scratch_directory}"
 temporary_directory="$(mktemp -d "${scratch_directory}/regenerate.XXXXXXXX")"
-cleanup() {
-    if [[ -n "${temporary_directory:-}" && -d "${temporary_directory}" ]]; then
-        rm -rf -- "${temporary_directory}"
-    fi
-}
-trap cleanup EXIT
+automata_renderer_transaction_configure_cleanup \
+    "${temporary_directory}" \
+    "${transaction_state_directory}"
+trap automata_renderer_transaction_exit EXIT
+automata_renderer_transaction_begin \
+    "${renderer_transaction_live_paths[@]}"
+transaction_owner_marker="$(automata_renderer_transaction_owner_marker)"
+transaction_owner_id="$(automata_renderer_transaction_owner_id)"
 
 node "${script_directory}/sync-render-contract.mjs"
 npm --prefix "${ui_directory}" ci
@@ -399,31 +461,34 @@ component_hash="$(sha256sum "${stamped_component}" | awk '{print $1}')"
 component_name="renderer-${component_hash}.wasm"
 script_name="client-${script_hash}.js"
 style_name="styles-${style_hash}.css"
-staged_assets="${temporary_directory}/assets"
+candidate_directory="${temporary_directory}/candidate"
+candidate_renderer_directory="${candidate_directory}/renderer"
+staged_assets="${candidate_directory}/assets"
 mkdir -p -- "${staged_assets}"
+mkdir -p -- "${candidate_renderer_directory}"
 install -m 0644 -- "${stamped_component}" "${staged_assets}/${component_name}"
 install -m 0644 -- "${script_source}" "${staged_assets}/${script_name}"
 install -m 0644 -- "${style_source}" "${staged_assets}/${style_name}"
 
-staged_rust="${temporary_directory}/generated_assets.rs"
+staged_rust="${candidate_directory}/generated_assets.rs"
 printf '%s\n' \
     '// @generated by scripts/ui/regenerate-renderer.sh; do not edit by hand.' \
     '' \
     'pub(crate) const COMPONENT_BYTES: &[u8] = include_bytes!(' \
-    "    \"../../../ui/renderer/assets/${component_name}\"" \
+    "    \"../assets/${component_name}\"" \
     ');' \
     'pub(crate) const COMPONENT_SHA256: &str =' \
     "    \"${component_hash}\";" \
     '' \
     'pub(crate) const CLIENT_SCRIPT_BYTES: &[u8] = include_bytes!(' \
-    "    \"../../../ui/renderer/assets/${script_name}\"" \
+    "    \"../assets/${script_name}\"" \
     ');' \
     'pub(crate) const CLIENT_SCRIPT_SHA256: &str =' \
     "    \"${script_hash}\";" \
     "pub(crate) const CLIENT_SCRIPT_PATH: &str = \"/assets/${script_public_name}\";" \
     '' \
     'pub(crate) const CLIENT_STYLE_BYTES: &[u8] = include_bytes!(' \
-    "    \"../../../ui/renderer/assets/${style_name}\"" \
+    "    \"../assets/${style_name}\"" \
     ');' \
     'pub(crate) const CLIENT_STYLE_SHA256: &str =' \
     "    \"${style_hash}\";" \
@@ -431,14 +496,14 @@ printf '%s\n' \
     > "${staged_rust}"
 "${expected_rustfmt_binary}" --edition 2024 "${staged_rust}"
 
-staged_sums="${temporary_directory}/SHA256SUMS"
+staged_sums="${candidate_renderer_directory}/SHA256SUMS"
 printf '%s  %s\n' \
-    "${script_hash}" "assets/${script_name}" \
-    "${component_hash}" "assets/${component_name}" \
-    "${style_hash}" "assets/${style_name}" \
+    "${script_hash}" "crates/automata-ci-ui-renderer/assets/${script_name}" \
+    "${component_hash}" "crates/automata-ci-ui-renderer/assets/${component_name}" \
+    "${style_hash}" "crates/automata-ci-ui-renderer/assets/${style_name}" \
     > "${staged_sums}"
 
-staged_provenance="${temporary_directory}/PROVENANCE.toml"
+staged_provenance="${candidate_renderer_directory}/PROVENANCE.toml"
 printf '%s\n' \
     'schema = 1' \
     '' \
@@ -487,15 +552,53 @@ printf '%s\n' \
     "stylesheet_sha256 = \"${style_hash}\"" \
     > "${staged_provenance}"
 
-find "${asset_directory}" -maxdepth 1 -type f \
-    \( -name 'renderer-*.wasm' -o -name 'client-*.js' -o -name 'styles-*.css' \) \
-    -delete
-install -m 0644 -- "${staged_assets}"/* "${asset_directory}/"
-install -m 0644 -- "${staged_rust}" "${generated_rust}"
-install -m 0644 -- "${staged_sums}" "${renderer_directory}/SHA256SUMS"
-install -m 0644 -- "${staged_provenance}" "${renderer_directory}/PROVENANCE.toml"
-
+staged_sbom="${candidate_renderer_directory}/renderer.cdx.json"
 PATH="${expected_cargo_home}/bin:${PATH}" \
-    "${script_directory}/generate-renderer-sbom.sh"
-"${script_directory}/verify-renderer-assets.sh"
+    "${script_directory}/generate-renderer-sbom.sh" \
+        "${staged_sbom}" \
+        "${staged_assets}/${component_name}"
+"${script_directory}/verify-renderer-assets.sh" \
+    --transaction-owner-marker "${transaction_owner_marker}" \
+    --transaction-owner-id "${transaction_owner_id}" \
+    --transaction-owner-lock-fd "${regeneration_lock_fd}" \
+    --candidate "${candidate_directory}" \
+    "${ui_directory}/dist"
+
+# There is no cross-directory atomic rename for this checked-in set. The
+# exclusive stable-directory lock is therefore the coherence barrier for
+# participating multi-file verifiers. Within that window, publish every
+# immutable asset first, atomically switch generated Rust, and only then retire
+# predecessor assets; generated Rust consequently never names an absent asset,
+# even after SIGKILL.
+mapfile -d '' -t staged_asset_files < <(
+    find "${staged_assets}" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z
+)
+for staged_asset in "${staged_asset_files[@]}"; do
+    automata_renderer_transaction_publish_file \
+        "${staged_asset}" \
+        "${asset_directory}/${staged_asset##*/}"
+done
+automata_renderer_transaction_publish_file "${staged_rust}" "${generated_rust}"
+automata_renderer_transaction_publish_file \
+    "${staged_sums}" \
+    "${renderer_directory}/SHA256SUMS"
+automata_renderer_transaction_publish_file \
+    "${staged_provenance}" \
+    "${renderer_directory}/PROVENANCE.toml"
+automata_renderer_transaction_publish_file \
+    "${staged_sbom}" \
+    "${renderer_directory}/renderer.cdx.json"
+while IFS= read -r -d '' live_asset; do
+    if [[ ! -f "${staged_assets}/${live_asset##*/}" ]]; then
+        rm -f -- "${live_asset}"
+    fi
+done < <(
+    find "${asset_directory}" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z
+)
+
+"${script_directory}/verify-renderer-assets.sh" \
+    --transaction-owner-marker "${transaction_owner_marker}" \
+    --transaction-owner-id "${transaction_owner_id}" \
+    --transaction-owner-lock-fd "${regeneration_lock_fd}"
+automata_renderer_transaction_commit
 echo "renderer component and client assets regenerated"

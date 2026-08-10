@@ -1,0 +1,132 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}, "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "sum(rate(automata_ci_results_operations_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "refId": "A"}],
+      "title": "Results operation rate", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "yellow", "value": 0.01}, {"color": "red", "value": 0.05}]}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}, "id": 2,
+      "options": {"orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true},
+      "targets": [{"expr": "sum(rate(automata_ci_results_operations_total{cluster=~\"$cluster\",environment=~\"$environment\",outcome!~\"success|cancelled\"}[5m])) / clamp_min(sum(rate(automata_ci_results_operations_total{cluster=~\"$cluster\",environment=~\"$environment\",outcome!=\"cancelled\"}[5m])), 1e-9)", "refId": "A"}],
+      "title": "Results failure ratio", "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}, "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "sum(rate(automata_ci_results_bytes_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "refId": "A"}],
+      "title": "Results bytes", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}, "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"expr": "sum(rate(automata_ci_storage_bytes_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "refId": "A"}],
+      "title": "Storage bytes", "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (operation, outcome) (rate(automata_ci_results_operations_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "legendFormat": "{{operation}} {{outcome}}", "refId": "A"}],
+      "title": "Results outcomes", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(automata_ci_results_operation_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p95 {{operation}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.99, sum by (le, operation) (rate(automata_ci_results_operation_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p99 {{operation}}", "refId": "B"}
+      ],
+      "title": "Results operation latency", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 13}, "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (backend, operation, outcome) (rate(automata_ci_storage_operations_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "legendFormat": "{{backend}} {{operation}} {{outcome}}", "refId": "A"}],
+      "title": "Storage outcomes", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 13}, "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, backend, operation) (rate(automata_ci_storage_operation_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "{{backend}} {{operation}}", "refId": "A"}],
+      "title": "Storage p95 latency", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 13}, "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "automata_ci_postgres_pool_connections{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{instance}} {{state}}", "refId": "A"},
+        {"expr": "automata_ci_postgres_pool_max_connections{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{instance}} max", "refId": "B"}
+      ],
+      "title": "PostgreSQL pool", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21}, "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum by (route, outcome) (rate(automata_ci_results_http_requests_total{cluster=~\"$cluster\",environment=~\"$environment\"}[5m]))", "legendFormat": "{{route}} {{outcome}}", "refId": "A"}],
+      "title": "Results HTTP outcomes", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 5, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21}, "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, route) (rate(automata_ci_results_http_request_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p95 {{route}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.99, sum by (le, route) (rate(automata_ci_results_http_request_duration_seconds_bucket{cluster=~\"$cluster\",environment=~\"$environment\"}[5m])))", "legendFormat": "p99 {{route}}", "refId": "B"}
+      ],
+      "title": "Results HTTP latency", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29}, "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max without (instance) (automata_ci_control_plane_artifacts{cluster=~\"$cluster\",environment=~\"$environment\"})", "legendFormat": "artifact {{state}}", "refId": "A"},
+        {"expr": "cluster_kind:automata_ci_control_plane_artifact_reservations:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "reservation {{kind}}", "refId": "B"}
+      ],
+      "title": "Durable artifact state", "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29}, "id": 13,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "cluster_kind:automata_ci_control_plane_artifact_reservation_oldest_age_seconds:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{kind}}", "refId": "A"}],
+      "title": "Oldest artifact reservation", "type": "timeseries"
+    }
+  ],
+  "refresh": "30s", "schemaVersion": 39, "tags": ["automata", "results", "storage"],
+  "templating": {"list": [
+    {"current": {}, "label": "Prometheus", "name": "DS_PROMETHEUS", "options": [], "query": "prometheus", "refresh": 1, "type": "datasource"},
+    {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "includeAll": true, "label": "Cluster", "name": "cluster", "options": [], "query": {"query": "label_values(automata_ci_build_info, cluster)", "refId": "StandardVariableQuery"}, "refresh": 1, "type": "query"},
+    {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "includeAll": true, "label": "Environment", "name": "environment", "options": [], "query": {"query": "label_values(automata_ci_build_info, environment)", "refId": "StandardVariableQuery"}, "refresh": 1, "type": "query"}
+  ]},
+  "time": {"from": "now-6h", "to": "now"}, "timezone": "browser",
+  "title": "Automata / Results and storage", "uid": "automata-results-storage", "version": 2
+}

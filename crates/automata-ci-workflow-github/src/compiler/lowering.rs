@@ -1,0 +1,65 @@
+//! Shared semantic lowering helpers for the current logical workflow plan.
+
+use automata_ci_core::{Located, PermissionGrant, WorkflowJobKey, WorkflowPermissions};
+
+use crate::{Needs, PermissionLevel, Permissions, Spanned};
+
+use super::CompileContext;
+
+pub(super) fn compile_needs(
+    needs: Option<&Needs>,
+    context: &mut CompileContext<'_>,
+) -> Vec<Located<WorkflowJobKey>> {
+    let values: &[Spanned<String>] = match needs {
+        None => return Vec::new(),
+        Some(Needs::One(value)) => std::slice::from_ref(value),
+        Some(Needs::Many(values)) => values,
+    };
+    values
+        .iter()
+        .filter_map(|value| match WorkflowJobKey::new(value.value()) {
+            Ok(key) => context.located(key, value.span()),
+            Err(error) => {
+                context.semantic(
+                    "github.compile.invalid_dependency_key",
+                    error.to_string(),
+                    value.span().clone(),
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn compile_permissions(
+    permissions: &Permissions,
+    context: &mut CompileContext<'_>,
+) -> Option<WorkflowPermissions> {
+    match permissions {
+        Permissions::ReadAll(span) => context.span(span).map(WorkflowPermissions::ReadAll),
+        Permissions::WriteAll(span) => context.span(span).map(WorkflowPermissions::WriteAll),
+        Permissions::Mapping { entries, .. } => {
+            let grants = entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = located_text(entry.name(), context)?;
+                    let level = match entry.level().value() {
+                        PermissionLevel::Read => automata_ci_core::PermissionLevel::Read,
+                        PermissionLevel::Write => automata_ci_core::PermissionLevel::Write,
+                        PermissionLevel::None => automata_ci_core::PermissionLevel::None,
+                    };
+                    let level = context.located(level, entry.level().span())?;
+                    Some(PermissionGrant::new(name, level))
+                })
+                .collect();
+            Some(WorkflowPermissions::Mapping(grants))
+        }
+    }
+}
+
+pub(super) fn located_text(
+    value: &Spanned<String>,
+    context: &mut CompileContext<'_>,
+) -> Option<Located<String>> {
+    context.located(value.value().clone(), value.span())
+}

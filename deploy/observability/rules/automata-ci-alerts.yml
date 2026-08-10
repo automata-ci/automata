@@ -1,0 +1,709 @@
+groups:
+  - name: automata-ci-targets
+    rules:
+      - alert: AutomataControlPlaneTargetDown
+        expr: up{job="automata-control-plane"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata control-plane metrics target is unavailable
+          description: The target {{ $labels.instance }} has failed scrapes for two minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerTargetDown
+        expr: up{job="automata-runner"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner metrics target is unavailable
+          description: Runner target {{ $labels.instance }} has failed scrapes for five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerMissingFromInventory
+        expr: >-
+          automata_ci_runner_inventory_expected{job="automata-runner"} == 1
+          unless on (job, instance, cluster, environment)
+          up{job="automata-runner"}
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Expected Automata runner has disappeared from monitoring
+          description: Runner inventory identity {{ $labels.instance }} has no current node-local Agent scrape series.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerInventoryExporterDown
+        expr: >-
+          up{job="automata-runner-inventory"} == 0
+          or
+          absent(up{job="automata-runner-inventory"})
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner inventory monitoring is unavailable
+          description: The independent runner inventory exporter has failed or has no discovered target for five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerInventoryDocumentEmpty
+        expr: >-
+          absent(
+            automata_ci_runner_inventory_expected{job="automata-runner"}
+          )
+          and on ()
+          max(up{job="automata-runner-inventory"}) == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner inventory document is empty
+          description: The inventory exporter is up but publishes no expected runner identity, disabling whole-host loss detection.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerInventoryGenerationStale
+        expr: >-
+          (
+            (
+              automata_ci_runner_inventory_generation_timestamp_seconds{
+                job="automata-runner-inventory"
+              } == 0
+              or
+              (
+                automata_ci_runner_inventory_generation_timestamp_seconds{
+                  job="automata-runner-inventory"
+                } > 0
+                and
+                time()
+                - automata_ci_runner_inventory_generation_timestamp_seconds{
+                    job="automata-runner-inventory"
+                  } > 300
+              )
+              or
+              automata_ci_runner_inventory_generation_timestamp_seconds{
+                job="automata-runner-inventory"
+              } > time() + 60
+            )
+            and on (job, instance)
+            up{job="automata-runner-inventory"} == 1
+          )
+          or
+          (
+            up{job="automata-runner-inventory"} == 1
+            unless on (job, instance)
+            automata_ci_runner_inventory_generation_timestamp_seconds{
+              job="automata-runner-inventory"
+            }
+          )
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner inventory generation is stale
+          description: Inventory exporter {{ $labels.instance }} has no current generation timestamp, one older than five minutes, or one over sixty seconds in the future.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataRunnerInventoryTextfileError
+        expr: >-
+          node_textfile_scrape_error{job="automata-runner-inventory"} > 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner inventory textfile collection failed
+          description: Node exporter {{ $labels.instance }} cannot parse or read at least one configured textfile document.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/target-down.md
+
+      - alert: AutomataMetricsCardinalityBudgetNearLimit
+        expr: >-
+          scrape_samples_post_metric_relabeling{job="automata-runner"} > 980
+          or
+          scrape_samples_post_metric_relabeling{job="automata-control-plane"} > 4500
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata target is near its series budget
+          description: Target {{ $labels.instance }} exposes {{ $value }} post-relabel samples.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/metrics-budget.md
+
+      - alert: AutomataProcessMetricsSamplerUnhealthy
+        expr: automata_ci_metrics_process_snapshot_healthy == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata process resource sampling is unhealthy
+          description: Target {{ $labels.instance }} cannot refresh its cached process resource snapshot.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/process-resources.md
+
+      - alert: AutomataProcessFileDescriptorsNearLimit
+        expr: >-
+          process_open_fds / clamp_min(process_max_fds, 1) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata process file descriptors are near their limit
+          description: Target {{ $labels.instance }} has used more than 90% of its file-descriptor limit.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/process-resources.md
+
+  - name: automata-ci-control-plane
+    rules:
+      - alert: AutomataControlPlaneStateSamplerUnhealthy
+        expr: automata_ci_control_plane_state_sampler_healthy == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata durable-state sampling is unhealthy
+          description: Replica {{ $labels.instance }} failed its latest durable-state snapshot.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataControlPlaneUnready
+        expr: automata_ci_control_plane_ready == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata control-plane replica is unready
+          description: Replica {{ $labels.instance }} has remained unready for five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataControlPlaneDependencyUnready
+        expr: automata_ci_control_plane_dependency_ready == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata control-plane dependency is unavailable
+          description: Dependency {{ $labels.dependency }} is unready on {{ $labels.instance }}.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataPlatformErrorBudgetBurn
+        expr: >-
+          job:automata_ci_platform_error_ratio:rate5m > (14.4 * 0.001)
+          and on (job, cluster, environment, region)
+          job:automata_ci_platform_error_ratio:rate1h > (6 * 0.001)
+          and on (job, cluster, environment, region)
+          job:automata_ci_platform_requests:rate5m > 0.1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata platform request error budget is burning rapidly
+          description: The short and long error windows exceed the provisional 99.9% objective.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataControlPlaneStateSamplerStale
+        expr: >-
+          automata_ci_control_plane_state_sampler_last_success_timestamp_seconds == 0
+          or
+          (
+            automata_ci_control_plane_state_sampler_last_success_timestamp_seconds > 0
+            and
+            time() - automata_ci_control_plane_state_sampler_last_success_timestamp_seconds > 90
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata durable-state metrics are stale
+          description: The last successful cached state refresh on {{ $labels.instance }} is too old.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataMaintenanceStale
+        expr: >-
+          automata_ci_control_plane_maintenance_last_success_timestamp_seconds == 0
+          or
+          (
+            automata_ci_control_plane_maintenance_last_success_timestamp_seconds > 0
+            and
+            time() - automata_ci_control_plane_maintenance_last_success_timestamp_seconds > 120
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata maintenance progress is stale
+          description: No successful maintenance pass has been observed recently on {{ $labels.instance }}.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataPostgresPoolNearCapacity
+        expr: >-
+          automata_ci_postgres_pool_connections{state="in_use"}
+          / ignoring (state)
+          clamp_min(automata_ci_postgres_pool_max_connections, 1)
+          > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata PostgreSQL pool is near capacity
+          description: Replica {{ $labels.instance }} has used more than 90% of its configured PostgreSQL connections.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataQueueClaimObjectiveMiss
+        expr: >-
+          cluster:automata_ci_control_plane_lease_queue_wait_seconds:p99_5m > 60
+          and on (job, cluster, environment, region)
+          cluster:automata_ci_control_plane_lease_queue_wait_observations:rate5m > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata queue-to-claim latency exceeds the provisional objective
+          description: Fleet p99 queue-to-claim latency has exceeded 60 seconds for ten minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/queue.md
+
+      - alert: AutomataEligibleQueueCompatibleCapacityExhausted
+        expr: >-
+          max without (reason) (
+            cluster_reason:automata_ci_control_plane_eligible_queue_blocked_age_seconds:max
+          ) > 60
+          and on (job, cluster, environment, region)
+          sum without (reason) (
+            cluster_reason:automata_ci_control_plane_eligible_queue_blocked_jobs:max
+          ) > 0
+          and on (job, cluster, environment, region)
+          cluster_state:automata_ci_control_plane_queue_jobs:max{state="eligible"} > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Eligible Automata work lacks compatible capacity
+          description: Exact eligible work has remained blocked by capabilities or busy compatible runners beyond the 60-second objective.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/queue.md
+
+      - alert: AutomataLogicalActivationBacklogStale
+        expr: >-
+          cluster_state:automata_ci_control_plane_logical_activation_age_seconds:max{state="pending"} > 300
+          and on (job, cluster, environment, region, state)
+          cluster_state:automata_ci_control_plane_logical_activations:max{state="pending"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Logical workflow activation backlog is stale
+          description: At least one current WorkflowPlan-v2 logical job has awaited activation for more than five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
+
+      - alert: AutomataLogicalActivationBacklogCritical
+        expr: >-
+          cluster_state:automata_ci_control_plane_logical_activation_age_seconds:max{state="pending"} > 900
+          and on (job, cluster, environment, region, state)
+          cluster_state:automata_ci_control_plane_logical_activations:max{state="pending"} > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Logical workflow activation backlog is critically stale
+          description: Current WorkflowPlan-v2 logical work has made no activation progress for more than fifteen minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
+
+      - alert: AutomataLogicalActivationClaimExpired
+        expr: >-
+          cluster_state:automata_ci_control_plane_logical_activations:max{state="expired"} > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: A logical workflow activation claim expired
+          description: At least one fenced WorkflowPlan-v2 activation claim is past its durable expiry.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
+
+      - alert: AutomataLogicalActivationClaimStuck
+        expr: >-
+          cluster_state:automata_ci_control_plane_logical_activation_age_seconds:max{state="expired"} > 300
+          and on (job, cluster, environment, region, state)
+          cluster_state:automata_ci_control_plane_logical_activations:max{state="expired"} > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Expired logical activation claims are not recovering
+          description: A WorkflowPlan-v2 activation claim has remained expired for more than five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
+
+      - alert: AutomataRunnerCommandsPendingTooLong
+        expr: cluster:automata_ci_control_plane_commands_oldest_age_seconds:max > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner commands are not being acknowledged
+          description: The oldest pending runner command has exceeded five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataCancellationIntentPendingTooLong
+        expr: >-
+          cluster:automata_ci_control_plane_cancellation_intents_oldest_age_seconds:max > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata cancellation delivery is stale
+          description: The oldest unacknowledged runner cancellation intent has exceeded five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/control-plane.md
+
+      - alert: AutomataArtifactReservationStale
+        expr: >-
+          cluster_kind:automata_ci_control_plane_artifact_reservation_oldest_age_seconds:max > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata artifact reservation is stale
+          description: The oldest {{ $labels.kind }} artifact reservation has exceeded one hour.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/results-storage.md
+
+      - alert: AutomataResultsStorageIntegrityFailure
+        expr: >-
+          increase(
+            automata_ci_storage_operations_total{
+              outcome=~"integrity|corrupt_data"
+            }[10m]
+          ) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Automata Results storage reported an integrity failure
+          description: The {{ $labels.backend }} {{ $labels.operation }} operation reported {{ $labels.outcome }} on {{ $labels.instance }}.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/results-storage.md
+
+      - alert: AutomataLeaseExpirationObserved
+        expr: increase(automata_ci_runner_lease_expirations_total[10m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: An Automata runner lease expired locally
+          description: Runner {{ $labels.instance }} observed at least one lease expiry in ten minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataJobAttemptLost
+        expr: >-
+          increase(
+            automata_ci_control_plane_maintenance_work_items_total{
+              kind="lost_attempt"
+            }[10m]
+          ) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Automata declared a job attempt lost
+          description: Control-plane maintenance declared at least one job attempt lost in ten minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/queue.md
+
+  - name: automata-ci-runners
+    rules:
+      - alert: AutomataRunnerSessionInactive
+        expr: >-
+          automata_ci_runner_ready == 1
+          and on (instance, job)
+          automata_ci_runner_session_connected == 0
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Ready Automata runner has no control session
+          description: Runner {{ $labels.instance }} has been disconnected for ten minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataRunnerControlStale
+        expr: >-
+          (
+            automata_ci_runner_control_last_success_timestamp_seconds == 0
+            or
+            (
+              automata_ci_runner_control_last_success_timestamp_seconds > 0
+              and
+              time() - automata_ci_runner_control_last_success_timestamp_seconds > 120
+            )
+          )
+          and on (instance, job)
+          sum by (instance, job) (automata_ci_runner_slots{state!="idle"}) > 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Active Automata runner has stale control progress
+          description: Runner {{ $labels.instance }} has active work but no recent control success.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataRunnerSnapshotUnhealthy
+        expr: automata_ci_runner_snapshot_refresh_healthy == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner snapshot refresh is unhealthy
+          description: Runner {{ $labels.instance }} cannot refresh both bounded journal and spool snapshots.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSnapshotStale
+        expr: >-
+          automata_ci_runner_snapshot_last_success_timestamp_seconds == 0
+          or
+          (
+            automata_ci_runner_snapshot_last_success_timestamp_seconds > 0
+            and
+            time() - automata_ci_runner_snapshot_last_success_timestamp_seconds > 30
+          )
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner metrics snapshot is stale
+          description: Runner {{ $labels.instance }} has not published a successful bounded snapshot recently.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerPendingDeliveryStale
+        expr: >-
+          instance_kind:automata_ci_runner_pending_delivery_oldest_age_seconds:max > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner-to-control delivery is stale
+          description: Runner {{ $labels.instance }} has a {{ $labels.kind }} delivery pending for more than five minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerPendingDeliveryTimestampFuture
+        expr: >-
+          automata_ci_runner_pending_deliveries > 0
+          and
+          automata_ci_runner_pending_delivery_oldest_timestamp_seconds
+          > time() + 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner delivery timestamp is in the future
+          description: Runner {{ $labels.instance }} has a pending {{ $labels.kind }} timestamp more than sixty seconds ahead of Prometheus.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerCgroupSnapshotUnhealthy
+        expr: automata_ci_runner_cgroup_snapshot_healthy == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner cgroup sampling is unhealthy
+          description: Runner {{ $labels.instance }} failed its latest bounded aggregate cgroup-v2 snapshot.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-cgroup-resources.md
+
+      - alert: AutomataRunnerCgroupSnapshotStale
+        expr: >-
+          automata_ci_runner_cgroup_snapshot_last_success_timestamp_seconds == 0
+          or
+          (
+            automata_ci_runner_cgroup_snapshot_last_success_timestamp_seconds > 0
+            and
+            time() - automata_ci_runner_cgroup_snapshot_last_success_timestamp_seconds > 45
+          )
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner cgroup metrics are stale
+          description: Runner {{ $labels.instance }} has no recent successful aggregate cgroup-v2 snapshot.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-cgroup-resources.md
+
+      - alert: AutomataRunnerCgroupOomKill
+        expr: >-
+          sum without (event) (
+            increase(
+              automata_ci_runner_cgroup_memory_oom_events_total{
+                event=~"oom_kill|oom_group_kill"
+              }[10m]
+            )
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner sandbox workload was OOM-killed
+          description: Runner {{ $labels.instance }} observed a kill in its aggregate sandbox cgroup during the last ten minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-cgroup-resources.md
+
+      - alert: AutomataRunnerCgroupCpuThrottlingHigh
+        expr: >-
+          instance:automata_ci_runner_cgroup_cpu_throttled_period_ratio:rate5m > 0.25
+          and
+          rate(automata_ci_runner_cgroup_cpu_periods_total[5m]) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner sandbox CPU throttling is sustained
+          description: Runner {{ $labels.instance }} has throttled more than 25% of active cgroup CPU periods for fifteen minutes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-cgroup-resources.md
+
+      - alert: AutomataRunnerSlotAccountingMismatch
+        expr: automata_ci_runner_slot_snapshot_conserved == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner slot accounting does not conserve capacity
+          description: Runner {{ $labels.instance }} published a non-conserving atomic slot snapshot.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataRunnerSlotsOverCapacity
+        expr: automata_ci_runner_slots_over_capacity > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner has durable slots beyond current capacity
+          description: Runner {{ $labels.instance }} retains {{ $value }} durable slots beyond its configured capacity.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataRunnerJournalPoisoned
+        expr: automata_ci_runner_journal_poisoned == 1
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner journal is poisoned
+          description: Runner {{ $labels.instance }} cannot trust further journal mutation outcomes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerJournalUncertainMutation
+        expr: >-
+          increase(automata_ci_runner_journal_mutations_total{
+            outcome=~"uncertain|poisoned"
+          }[5m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner observed an uncertain journal mutation
+          description: Runner {{ $labels.instance }} cannot prove the durable outcome of a {{ $labels.domain }} mutation.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerJournalNearCapacity
+        expr: >-
+          automata_ci_runner_journal_size_bytes
+          /
+          clamp_min(automata_ci_runner_journal_max_bytes, 1)
+          > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner journal exceeds 80% of its byte limit
+          description: Runner {{ $labels.instance }} journal utilization is {{ $value | humanizePercentage }}.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerJournalCritical
+        expr: >-
+          automata_ci_runner_journal_size_bytes
+          /
+          clamp_min(automata_ci_runner_journal_max_bytes, 1)
+          > 0.95
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner journal exceeds 95% of its byte limit
+          description: Runner {{ $labels.instance }} journal is close to rejecting durable state transitions.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSpoolPoisoned
+        expr: automata_ci_runner_spool_poisoned == 1
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner spool is poisoned
+          description: Runner {{ $labels.instance }} cannot trust further spool mutation outcomes.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSpoolNearCapacity
+        expr: >-
+          (
+            automata_ci_runner_spool_protected_bytes
+            /
+            clamp_min(automata_ci_runner_spool_max_bytes, 1)
+            > 0.8
+          )
+          or
+          (
+            automata_ci_runner_spool_objects
+            /
+            clamp_min(automata_ci_runner_spool_max_objects, 1)
+            > 0.8
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner spool exceeds 80% of a capacity limit
+          description: Runner {{ $labels.instance }} spool byte or object utilization is {{ $value | humanizePercentage }}.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSpoolCritical
+        expr: >-
+          (
+            automata_ci_runner_spool_protected_bytes
+            /
+            clamp_min(automata_ci_runner_spool_max_bytes, 1)
+            > 0.95
+          )
+          or
+          (
+            automata_ci_runner_spool_objects
+            /
+            clamp_min(automata_ci_runner_spool_max_objects, 1)
+            > 0.95
+          )
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner spool exceeds 95% of a capacity limit
+          description: Runner {{ $labels.instance }} is close to rejecting durable output.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSpoolCapacityRejected
+        expr: increase(automata_ci_runner_spool_capacity_rejections_total[10m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner rejected a durable spool write for capacity
+          description: Runner {{ $labels.instance }} exhausted the {{ $labels.resource }} spool limit.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerSpoolProtectionFailure
+        expr: >-
+          increase(
+            automata_ci_runner_spool_failures_total{
+              kind=~"authentication|protection|protection_key_unavailable"
+            }[10m]
+          ) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Automata runner spool protection failed
+          description: Runner {{ $labels.instance }} reported a {{ $labels.kind }} spool failure.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner-durability.md
+
+      - alert: AutomataRunnerClockSkew
+        expr: >-
+          abs(automata_ci_runner_control_server_clock_offset_seconds) > 5
+          and on (instance, job)
+          automata_ci_runner_session_connected == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner clock differs from the control plane
+          description: Runner {{ $labels.instance }} reports more than five seconds of offset.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md
+
+      - alert: AutomataRunnerOutputTruncation
+        expr: increase(automata_ci_runner_sandbox_endpoint_output_truncations_total[30m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Automata runner truncated execution output
+          description: Runner {{ $labels.instance }} truncated captured execution output.
+          runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/runner.md

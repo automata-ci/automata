@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "runner_id": "00000000-0000-0000-0000-000000000001",
+  "platform": {
+    "operating_system": { "kind": "linux" },
+    "architecture": { "kind": "x86_64" }
+  },
+  "labels": [],
+  "groups": [],
+  "max_parallel_jobs": 1,
+  "resources_per_job": {
+    "cpu_millis": 0,
+    "memory_bytes": 0,
+    "ephemeral_disk_bytes": 0,
+    "gpu_count": 0
+  },
+  "sandbox": {
+    "maximum_isolation": "process",
+    "features": []
+  },
+  "containers": {
+    "features": []
+  },
+  "features": ["automata.core/shell-steps@v1"],
+  "environment_profiles": []
+}

@@ -1,0 +1,27 @@
+[package]
+name = "automata-ci-control"
+description = "Transport-neutral control-plane application services for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-control-plane.workspace = true
+automata-ci-core.workspace = true
+automata-ci-protocol.workspace = true
+automata-ci-store.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

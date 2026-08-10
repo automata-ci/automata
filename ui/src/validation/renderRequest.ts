@@ -1,6 +1,18 @@
 import type { RenderRequest } from "../models";
+import { validateJobLogPage } from "./jobLogModel";
+import { validateRepositoryDirectoryPage } from "./repositoryDirectoryModel";
+import { validateRepositorySettingsPage } from "./repositorySettingsModel";
+import { validateRepositorySecretsPage } from "./repositorySecretsModel";
+import {
+  validateDirectBindingListPage,
+  validateRoleDetailPage,
+  validateRoleListPage,
+  validateUserDetailPage,
+  validateUserListPage,
+} from "./rbacManagementModels";
 import { validateRunDetailPage } from "./runDetailModel";
 import { validateRunListPage } from "./runListModel";
+import { validateSetupPage } from "./setupPageModel";
 import {
   expectArray,
   expectAssetPath,
@@ -10,7 +22,6 @@ import {
   expectString,
   expectUnique,
   field,
-  hasOwn,
   invalid,
 } from "./primitives";
 import {
@@ -33,10 +44,10 @@ export function validateRenderRequest(value: unknown): RenderRequest {
 }
 
 function validateHost(value: unknown, path: string): void {
-  const host = expectObject(value, path, ["locale", "assets"], ["cspNonce"]);
-  const locale = expectString(field(host, "locale", path), `${path}.locale`, 35, 2);
-  if (!/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u.test(locale)) {
-    invalid(`${path}.locale`, "a structurally valid BCP 47 language tag");
+  const host = expectObject(value, path, ["locale", "assets", "cspNonce"]);
+  const locale = expectString(field(host, "locale", path), `${path}.locale`, 2, 2);
+  if (locale !== "en") {
+    invalid(`${path}.locale`, 'the current supported locale "en"');
   }
 
   const assetsPath = `${path}.assets`;
@@ -63,22 +74,43 @@ function validateHost(value: unknown, path: string): void {
     expectUnique(seenStylesheets, pathValue, itemPath);
   });
 
-  if (hasOwn(host, "cspNonce")) {
-    const nonce = expectString(host.cspNonce, `${path}.cspNonce`, 256, 1);
-    if (!/^[A-Za-z0-9+/_-]+={0,2}$/u.test(nonce)) {
-      invalid(`${path}.cspNonce`, "a base64 or base64url CSP nonce");
-    }
+  const nonce = expectString(field(host, "cspNonce", path), `${path}.cspNonce`, 256, 1);
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/u.test(nonce)) {
+    invalid(`${path}.cspNonce`, "a base64 or base64url CSP nonce");
   }
 }
 
 function validatePage(value: unknown, path: string): void {
   const page = expectRecord(value, path);
   const kind = field(page, "kind", path);
-  if (kind === "run-list") {
+  if (kind === "setup") {
+    validateSetupPage(page, path);
+  } else if (kind === "repository-directory") {
+    validateRepositoryDirectoryPage(page, path);
+  } else if (kind === "run-list") {
     validateRunListPage(page, path);
   } else if (kind === "run-detail") {
     validateRunDetailPage(page, path);
+  } else if (kind === "job-log") {
+    validateJobLogPage(page, path);
+  } else if (kind === "repository-settings") {
+    validateRepositorySettingsPage(page, path);
+  } else if (kind === "repository-secrets") {
+    validateRepositorySecretsPage(page, path);
+  } else if (kind === "user-list") {
+    validateUserListPage(page, path);
+  } else if (kind === "user-detail") {
+    validateUserDetailPage(page, path);
+  } else if (kind === "role-list") {
+    validateRoleListPage(page, path);
+  } else if (kind === "role-detail") {
+    validateRoleDetailPage(page, path);
+  } else if (kind === "direct-binding-list") {
+    validateDirectBindingListPage(page, path);
   } else {
-    invalid(`${path}.kind`, '"run-list" or "run-detail"');
+    invalid(
+      `${path}.kind`,
+      'a current supported page kind',
+    );
   }
 }

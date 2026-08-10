@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible Automata failure or incorrect result.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Automata. For a vulnerability, stop here and use private vulnerability reporting instead. Remove credentials, repository secrets, private workflow content, and personal data from all examples and logs.
+  - type: input
+    id: version
+    attributes:
+      label: Automata version
+      description: Paste `automata --version`, `automata-runner --version`, or the exact commit SHA.
+      placeholder: automata 0.1.0 (full-commit-sha)
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - Prebuilt release archive or installer
+        - crates.io
+        - GHCR container
+        - Source checkout
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OS, architecture, container runtime and version, and relevant deployment shape.
+      placeholder: Linux x86-64; Podman 5.x; rootless; local bootstrap composition
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Give the smallest complete sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized diagnostics
+      description: Include exact errors or logs only after removing secrets and private data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I searched existing issues and the compatibility document.
+          required: true
+        - label: I removed credentials, tokens, private workflow content, and personal data.
+          required: true
+        - label: This report does not require a private security embargo.
+          required: true

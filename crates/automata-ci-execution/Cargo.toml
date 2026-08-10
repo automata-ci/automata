@@ -1,0 +1,22 @@
+[package]
+name = "automata-ci-execution"
+description = "Provider-neutral sandbox and execution contracts for Automata runners"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions.workspace = true

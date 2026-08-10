@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded, read-only smart HTTP transport for local dogfood Git snapshots."""
+"""Bounded, read-only smart HTTP transport for local integration Git snapshots."""
 
 from __future__ import annotations
 
 import argparse
 import ipaddress
+import math
 import os
 from pathlib import Path
 import re
@@ -13,9 +14,10 @@ import socket
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import BinaryIO
+from typing import BinaryIO, cast
 from urllib.parse import urlsplit
 
 
@@ -27,8 +29,13 @@ MAX_CGI_HEADER_COUNT = 64
 MAX_CGI_HEADER_BYTES = 32 * 1024
 MAX_CGI_HEADER_LINE_BYTES = 8 * 1024
 MAX_CONCURRENT_REQUESTS = 8
-SOCKET_TIMEOUT_SECONDS = 30
-BACKEND_EXIT_TIMEOUT_SECONDS = 5
+MAX_BACKEND_RESPONSE_BYTES = 512 * 1024 * 1024
+DEFAULT_REQUEST_DEADLINE_SECONDS = 30.0
+MIN_TEST_REQUEST_DEADLINE_SECONDS = 0.25
+BACKEND_TERMINATION_GRACE_SECONDS = 1.0
+BACKEND_KILL_WAIT_SECONDS = 1.0
+BACKEND_CLEANUP_WAIT_SECONDS = 3.0
+BACKEND_POLL_INTERVAL_SECONDS = 0.01
 STREAM_CHUNK_BYTES = 64 * 1024
 RFC1918_NETWORKS = (
     ipaddress.IPv4Network("10.0.0.0/8"),
@@ -42,6 +49,20 @@ STATUS = re.compile(r"([1-5][0-9][0-9])(?:[ \t].*)?\Z")
 PASSTHROUGH_HEADERS = frozenset(
     {"cache-control", "content-type", "expires", "pragma"}
 )
+BACKEND_LAUNCHER = """\
+import os
+import signal
+import sys
+
+os.chdir(sys.argv[1])
+os.setsid()
+for signal_name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+    requested_signal = getattr(signal, signal_name, None)
+    if requested_signal is not None:
+        signal.signal(requested_signal, signal.SIG_DFL)
+os.execve(sys.argv[2], [sys.argv[2]], dict(os.environ))
+"""
+PROC_ROOT = Path("/proc")
 
 
 @dataclass(frozen=True)
@@ -50,6 +71,7 @@ class ServerConfig:
     scratch_directory: Path
     git_http_backend: Path
     listen_address: str
+    request_deadline_seconds: float
 
 
 @dataclass(frozen=True)
@@ -58,17 +80,45 @@ class Route:
     query: str
 
 
+@dataclass(eq=False)
+class ManagedBackend:
+    process: subprocess.Popen[bytes]
+    process_group: int
+    stopped: threading.Event = field(default_factory=threading.Event, repr=False)
+
+
+@dataclass
+class ActiveRequest:
+    deadline: float
+    deadline_cancelled: threading.Event = field(
+        default_factory=threading.Event, repr=False
+    )
+    deadline_worker: threading.Thread | None = field(default=None, repr=False)
+    backend: ManagedBackend | None = None
+    expired: bool = False
+
+
+class ServerShutdownRequested(Exception):
+    """Stop the serve loop after a signal-safe shutdown request."""
+
+
 class BoundedGitHttpServer(ThreadingHTTPServer):
     """Threaded HTTP server with a hard concurrent-request ceiling."""
 
     address_family = socket.AF_INET
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
     request_queue_size = MAX_CONCURRENT_REQUESTS
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], config: ServerConfig) -> None:
         self.config = config
         self._request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self._lifecycle_lock = threading.Lock()
+        self._accepting_requests = True
+        self._shutdown_requested = False
+        self._active_requests: dict[socket.socket, ActiveRequest] = {}
+        self._cleanup_failed = False
         super().__init__(address, GitHttpRequestHandler)
 
     def process_request(
@@ -88,8 +138,16 @@ class BoundedGitHttpServer(ThreadingHTTPServer):
             self.shutdown_request(request)
             return
         try:
+            state = self._register_request(request)
+            if state is None:
+                self._request_slots.release()
+                self.shutdown_request(request)
+                return
+            assert state.deadline_worker is not None
+            state.deadline_worker.start()
             super().process_request(request, client_address)
         except BaseException:
+            self._complete_request(request)
             self._request_slots.release()
             raise
 
@@ -99,7 +157,188 @@ class BoundedGitHttpServer(ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            self._complete_request(request)
             self._request_slots.release()
+
+    def _register_request(self, request: socket.socket) -> ActiveRequest | None:
+        state = ActiveRequest(
+            deadline=time.monotonic() + self.config.request_deadline_seconds
+        )
+        state.deadline_worker = threading.Thread(
+            target=self._wait_for_request_deadline,
+            args=(request, state),
+            name="git-http-request-deadline",
+            daemon=True,
+        )
+        with self._lifecycle_lock:
+            if self._shutdown_requested or not self._accepting_requests:
+                return None
+            self._active_requests[request] = state
+            if self._shutdown_requested:
+                del self._active_requests[request]
+                return None
+        return state
+
+    def _wait_for_request_deadline(
+        self, request: socket.socket, state: ActiveRequest
+    ) -> None:
+        remaining = max(0.0, state.deadline - time.monotonic())
+        if not state.deadline_cancelled.wait(remaining):
+            self._expire_request(request)
+
+    def _complete_request(self, request: socket.socket) -> None:
+        with self._lifecycle_lock:
+            state = self._active_requests.pop(request, None)
+        if state is not None:
+            state.deadline_cancelled.set()
+            worker = state.deadline_worker
+            if worker is not None and worker.ident is not None:
+                worker.join(BACKEND_CLEANUP_WAIT_SECONDS)
+                if worker.is_alive():
+                    self._record_cleanup_failure()
+
+    def request_deadline(self, request: socket.socket) -> float:
+        with self._lifecycle_lock:
+            state = self._active_requests.get(request)
+            if state is None:
+                return time.monotonic()
+            return state.deadline
+
+    def request_expired(self, request: socket.socket) -> bool:
+        with self._lifecycle_lock:
+            state = self._active_requests.get(request)
+            if state is None:
+                return True
+            if not state.expired and time.monotonic() >= state.deadline:
+                state.expired = True
+            return state.expired
+
+    def register_backend(
+        self, request: socket.socket, backend: ManagedBackend
+    ) -> bool:
+        with self._lifecycle_lock:
+            state = self._active_requests.get(request)
+            if (
+                self._shutdown_requested
+                or not self._accepting_requests
+                or state is None
+                or state.expired
+                or state.backend is not None
+            ):
+                return False
+            state.backend = backend
+            if (
+                self._shutdown_requested
+                or state.expired
+                or time.monotonic() >= state.deadline
+            ):
+                state.backend = None
+                state.expired = True
+                return False
+            return True
+
+    def release_backend(
+        self, request: socket.socket, backend: ManagedBackend
+    ) -> int | None:
+        owns_cleanup = False
+        with self._lifecycle_lock:
+            state = self._active_requests.get(request)
+            if state is not None and state.backend is backend:
+                state.backend = None
+                owns_cleanup = True
+        if owns_cleanup:
+            self._stop_backends([backend], graceful=False)
+        elif not backend.stopped.wait(BACKEND_CLEANUP_WAIT_SECONDS):
+            self._record_cleanup_failure()
+        return backend.process.returncode
+
+    def stop_unregistered_backend(self, backend: ManagedBackend) -> None:
+        self._stop_backends([backend], graceful=False)
+
+    def _expire_request(self, request: socket.socket) -> None:
+        backend: ManagedBackend | None = None
+        with self._lifecycle_lock:
+            state = self._active_requests.get(request)
+            if state is None or state.expired:
+                return
+            state.expired = True
+            backend = state.backend
+            state.backend = None
+        self._interrupt_request(request)
+        if backend is not None:
+            self._stop_backends([backend], graceful=False)
+
+    def begin_shutdown(self) -> bool:
+        with self._lifecycle_lock:
+            first_request = not self._shutdown_requested
+            self._shutdown_requested = True
+            self._accepting_requests = False
+            return first_request
+
+    def request_signal_shutdown(self) -> None:
+        self._shutdown_requested = True
+
+    def service_actions(self) -> None:
+        if self._shutdown_requested:
+            raise ServerShutdownRequested
+
+    def abort_active_requests(self) -> None:
+        backends: list[ManagedBackend] = []
+        requests: list[socket.socket] = []
+        with self._lifecycle_lock:
+            self._accepting_requests = False
+            for request, state in self._active_requests.items():
+                state.expired = True
+                state.deadline_cancelled.set()
+                requests.append(request)
+                if state.backend is not None:
+                    backends.append(state.backend)
+                    state.backend = None
+        for request in requests:
+            self._interrupt_request(request)
+        if backends:
+            self._stop_backends(backends, graceful=True)
+
+    def _stop_backends(
+        self, backends: list[ManagedBackend], *, graceful: bool
+    ) -> None:
+        cleanup_succeeded = False
+        try:
+            try:
+                cleanup_succeeded = terminate_backends(
+                    backends, graceful=graceful
+                )
+            except (AttributeError, OSError, subprocess.SubprocessError):
+                pass
+        finally:
+            try:
+                if not cleanup_succeeded:
+                    self._record_cleanup_failure()
+            finally:
+                for backend in backends:
+                    backend.stopped.set()
+
+    @staticmethod
+    def _interrupt_request(request: socket.socket) -> None:
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _record_cleanup_failure(self) -> None:
+        with self._lifecycle_lock:
+            first_failure = not self._cleanup_failed
+            self._cleanup_failed = True
+        if first_failure:
+            try:
+                print("git-http: backend cleanup failed", file=sys.stderr, flush=True)
+            except OSError:
+                pass
+
+    @property
+    def cleanup_failed(self) -> bool:
+        with self._lifecycle_lock:
+            return self._cleanup_failed
 
     def handle_error(
         self, request: socket.socket, client_address: tuple[str, int]
@@ -117,10 +356,12 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
 
     def setup(self) -> None:
         super().setup()
-        self.connection.settimeout(SOCKET_TIMEOUT_SECONDS)
+        self._deadline = self._bounded_server.request_deadline(self.request)
+        self._set_socket_deadline()
 
     def handle_one_request(self) -> None:
         try:
+            self._set_socket_deadline()
             self.raw_requestline = self.rfile.readline(MAX_REQUEST_LINE_BYTES + 1)
             if len(self.raw_requestline) > MAX_REQUEST_LINE_BYTES:
                 self.requestline = ""
@@ -136,12 +377,12 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
             if self.command not in {"GET", "HEAD", "POST"}:
                 self._method_not_allowed()
                 return
+            self._set_socket_deadline()
             method = getattr(self, f"do_{self.command}")
             method()
+            self._set_socket_deadline()
             self.wfile.flush()
-        except TimeoutError:
-            self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:
             self.close_connection = True
 
     def parse_request(self) -> bool:
@@ -266,24 +507,37 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
     def _run_backend(
         self, route: Route, content_length: int, head_only: bool, content_type: str
     ) -> None:
+        backend: ManagedBackend | None = None
         process: subprocess.Popen[bytes] | None = None
+        backend_return_code: int | None = None
         response_started = False
+        response_completed = False
         try:
-            self.connection.settimeout(SOCKET_TIMEOUT_SECONDS)
+            self._set_socket_deadline()
             process = subprocess.Popen(
-                [str(self._config.git_http_backend)],
+                [
+                    sys.executable,
+                    "-c",
+                    BACKEND_LAUNCHER,
+                    str(self._config.scratch_directory),
+                    str(self._config.git_http_backend),
+                ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                cwd=self._config.scratch_directory,
                 env=self._backend_environment(route, content_length, content_type),
                 close_fds=True,
-                start_new_session=True,
             )
+            backend = ManagedBackend(process=process, process_group=process.pid)
+            if not self._bounded_server.register_backend(self.request, backend):
+                self._bounded_server.stop_unregistered_backend(backend)
+                backend = None
+                raise TimeoutError("request ended before backend registration")
             assert process.stdin is not None
             assert process.stdout is not None
             remaining = content_length
             while remaining:
+                self._set_socket_deadline()
                 chunk = self.rfile.read(min(STREAM_CHUNK_BYTES, remaining))
                 if not chunk:
                     raise OSError("incomplete request body")
@@ -292,6 +546,7 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
             process.stdin.close()
 
             status, headers = read_cgi_headers(process.stdout)
+            self._set_socket_deadline()
             self.send_response(status)
             for name, value in headers:
                 self.send_header(name, value)
@@ -299,21 +554,51 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             response_started = True
 
+            response_bytes = 0
             while True:
                 chunk = process.stdout.read(STREAM_CHUNK_BYTES)
                 if not chunk:
                     break
+                response_bytes += len(chunk)
+                if response_bytes > MAX_BACKEND_RESPONSE_BYTES:
+                    raise ValueError("CGI response exceeds the byte limit")
                 if not head_only:
+                    self._set_socket_deadline()
                     self.wfile.write(chunk)
             process.stdout.close()
-            return_code = process.wait(timeout=BACKEND_EXIT_TIMEOUT_SECONDS)
-            if return_code != 0:
-                self._redacted_failure()
+            if wait_for_backend_leaders(
+                [backend], time.monotonic() + self._remaining_seconds()
+            ):
+                raise TimeoutError("backend did not exit before the request deadline")
+            response_completed = True
         except (OSError, ValueError, subprocess.SubprocessError):
+            if (
+                not response_started
+                and not self._bounded_server.request_expired(self.request)
+            ):
+                try:
+                    self.send_error(502)
+                except OSError:
+                    pass
+            if not self._bounded_server.request_expired(self.request):
+                self._redacted_failure()
+        finally:
+            if backend is not None:
+                backend_return_code = self._bounded_server.release_backend(
+                    self.request, backend
+                )
             if process is not None:
-                stop_backend(process)
-            if not response_started:
-                self.send_error(502)
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None and not stream.closed:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+        if (
+            response_completed
+            and backend_return_code != 0
+            and not self._bounded_server.request_expired(self.request)
+        ):
             self._redacted_failure()
 
     def _backend_environment(
@@ -351,7 +636,20 @@ class GitHttpRequestHandler(BaseHTTPRequestHandler):
 
     @property
     def _config(self) -> ServerConfig:
-        return self.server.config
+        return self._bounded_server.config
+
+    @property
+    def _bounded_server(self) -> BoundedGitHttpServer:
+        return cast(BoundedGitHttpServer, self.server)
+
+    def _remaining_seconds(self) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request deadline exceeded")
+        return remaining
+
+    def _set_socket_deadline(self) -> None:
+        self.connection.settimeout(self._remaining_seconds())
 
     def _method_not_allowed(self) -> None:
         self.send_response(405)
@@ -428,21 +726,128 @@ def read_cgi_headers(stream: BinaryIO) -> tuple[int, list[tuple[str, str]]]:
     return status, response_headers
 
 
-def stop_backend(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+def signal_process_group(backend: ManagedBackend, requested_signal: int) -> bool:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=BACKEND_EXIT_TIMEOUT_SECONDS)
-    except (OSError, subprocess.SubprocessError):
+        os.killpg(backend.process_group, requested_signal)
+        return True
+    except ProcessLookupError:
+        # The trusted launcher is registered before it calls setsid(). If
+        # cleanup wins that short race, signaling its still-reserved PID stops
+        # it before it can create the backend process group.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.kill(backend.process.pid, requested_signal)
+            return True
+        except ProcessLookupError:
+            return True
         except OSError:
-            pass
+            return False
+    except OSError:
+        return False
+
+
+def backend_leader_has_exited(backend: ManagedBackend) -> bool:
+    try:
+        result = os.waitid(
+            os.P_PID,
+            backend.process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except ChildProcessError:
+        return backend.process.returncode is not None
+    return result is not None
+
+
+def wait_for_backend_leaders(
+    backends: list[ManagedBackend], deadline: float
+) -> list[ManagedBackend]:
+    while True:
+        remaining = [
+            backend for backend in backends if not backend_leader_has_exited(backend)
+        ]
+        if not remaining:
+            return []
+        delay = min(BACKEND_POLL_INTERVAL_SECONDS, deadline - time.monotonic())
+        if delay <= 0:
+            return remaining
+        time.sleep(delay)
+
+
+def proc_process_group_and_state(pid: int) -> tuple[int, str] | None:
+    try:
+        encoded = (PROC_ROOT / str(pid) / "stat").read_text(encoding="ascii")
+        fields = encoded[encoded.rfind(")") + 2 :].split()
+        return int(fields[2], 10), fields[0]
+    except (IndexError, OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def backend_group_has_live_members(backend: ManagedBackend) -> bool:
+    if not backend_leader_has_exited(backend):
+        return True
+    try:
+        entries = PROC_ROOT.iterdir()
+        for entry in entries:
+            if not entry.name.isdigit() or int(entry.name, 10) == backend.process.pid:
+                continue
+            identity = proc_process_group_and_state(int(entry.name, 10))
+            if identity is not None:
+                process_group, state = identity
+                if process_group == backend.process_group and state != "Z":
+                    return True
+    except OSError:
+        return True
+    return False
+
+
+def wait_for_backend_groups(
+    backends: list[ManagedBackend], deadline: float
+) -> list[ManagedBackend]:
+    while True:
+        remaining = [
+            backend for backend in backends if backend_group_has_live_members(backend)
+        ]
+        if not remaining:
+            return []
+        for backend in remaining:
+            signal_process_group(backend, signal.SIGKILL)
+        delay = min(BACKEND_POLL_INTERVAL_SECONDS, deadline - time.monotonic())
+        if delay <= 0:
+            return remaining
+        time.sleep(delay)
+
+
+def terminate_backends(
+    backends: list[ManagedBackend], *, graceful: bool
+) -> bool:
+    pending = [backend for backend in backends if not backend.stopped.is_set()]
+    if not pending:
+        return True
+
+    cleanup_ok = True
+    if graceful:
+        for backend in pending:
+            cleanup_ok = signal_process_group(backend, signal.SIGTERM) and cleanup_ok
+        wait_for_backend_leaders(
+            pending, time.monotonic() + BACKEND_TERMINATION_GRACE_SECONDS
+        )
+
+    # The unreaped session leader reserves the numeric process-group identity.
+    # Signal every group before reaping its leader so a recycled PGID can never
+    # direct cleanup at an unrelated process group. SIGKILL also removes any
+    # descendants left behind by a backend that exited on its own.
+    for backend in pending:
+        cleanup_ok = signal_process_group(backend, signal.SIGKILL) and cleanup_ok
+    final_deadline = time.monotonic() + BACKEND_KILL_WAIT_SECONDS
+    survivors = wait_for_backend_groups(pending, final_deadline)
+    if survivors:
+        cleanup_ok = False
+
+    for backend in pending:
         try:
-            process.wait(timeout=BACKEND_EXIT_TIMEOUT_SECONDS)
-        except subprocess.SubprocessError:
-            pass
+            backend.process.wait(timeout=max(0.0, final_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            cleanup_ok = False
+    return cleanup_ok
 
 
 def canonical_directory(value: str) -> Path:
@@ -503,6 +908,35 @@ def port(value: str) -> int:
     return parsed
 
 
+def request_deadline_seconds(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "request deadline must be a finite number of seconds"
+        ) from error
+    if (
+        not math.isfinite(parsed)
+        or parsed < MIN_TEST_REQUEST_DEADLINE_SECONDS
+        or parsed > DEFAULT_REQUEST_DEADLINE_SECONDS
+    ):
+        raise argparse.ArgumentTypeError(
+            "request deadline is outside the supported test range"
+        )
+    return parsed
+
+
+def backend_lifecycle_supported() -> bool:
+    required_os_features = ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT", "waitid")
+    return (
+        all(hasattr(os, feature) for feature in required_os_features)
+        and Path(sys.executable).is_absolute()
+        and os.access(sys.executable, os.X_OK)
+        and signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+        and proc_process_group_and_state(os.getpid()) is not None
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="serve local bare Git repositories over bounded smart HTTP"
@@ -512,6 +946,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--git-http-backend", required=True, type=absolute_executable)
     parser.add_argument("--listen-address", required=True, type=listen_address)
     parser.add_argument("--port", required=True, type=port)
+    parser.add_argument(
+        "--request-deadline-seconds",
+        type=request_deadline_seconds,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--allow-loopback-test-listener",
         action="store_true",
@@ -525,11 +965,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--allow-loopback-test-listener requires a loopback address")
     if arguments.port == 0 and not arguments.allow_loopback_test_listener:
         parser.error("port zero requires --allow-loopback-test-listener")
+    if (
+        arguments.request_deadline_seconds is not None
+        and not arguments.allow_loopback_test_listener
+    ):
+        parser.error("request deadline overrides require a loopback test listener")
     return arguments
 
 
 def main() -> int:
     arguments = parse_args()
+    if not backend_lifecycle_supported():
+        print("git-http: required process lifecycle support is unavailable", file=sys.stderr)
+        return 2
     project_root: Path = arguments.project_root
     scratch_directory: Path = arguments.scratch_directory
     if (
@@ -544,6 +992,9 @@ def main() -> int:
         scratch_directory=scratch_directory,
         git_http_backend=arguments.git_http_backend,
         listen_address=arguments.listen_address,
+        request_deadline_seconds=(
+            arguments.request_deadline_seconds or DEFAULT_REQUEST_DEADLINE_SECONDS
+        ),
     )
     try:
         server = BoundedGitHttpServer(
@@ -554,20 +1005,24 @@ def main() -> int:
         return 1
 
     def request_shutdown(_signal: int, _frame: object) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        server.request_signal_shutdown()
 
-    signal.signal(signal.SIGTERM, request_shutdown)
-    print(
-        f"listening=http://{arguments.listen_address}:{server.server_port}/",
-        flush=True,
-    )
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, request_shutdown)
     try:
-        server.serve_forever(poll_interval=0.1)
-    except KeyboardInterrupt:
-        pass
+        print(
+            f"listening=http://{arguments.listen_address}:{server.server_port}/",
+            flush=True,
+        )
+        try:
+            server.serve_forever(poll_interval=0.1)
+        except (KeyboardInterrupt, ServerShutdownRequested):
+            pass
     finally:
+        server.begin_shutdown()
+        server.abort_active_requests()
         server.server_close()
-    return 0
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+    return 1 if server.cleanup_failed else 0
 
 
 if __name__ == "__main__":

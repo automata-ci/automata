@@ -83,7 +83,7 @@ distribution_dir="$(
     "$target_dir/distribution" \
     "distribution directory"
 )"
-archive_name="automata-$expected_version-$target.tar.gz"
+archive_name="automata-$target.tar.gz"
 archive_path="$distribution_dir/$archive_name"
 checksum_path="$archive_path.sha256"
 readonly distribution_dir archive_name archive_path checksum_path
@@ -102,6 +102,8 @@ trap cleanup EXIT
 install -m 0555 -- "$automata_binary" "$staging_dir/automata"
 install -m 0555 -- "$runner_binary" "$staging_dir/automata-runner"
 install -m 0444 -- "$repo_root/LICENSE" "$staging_dir/LICENSE"
+printf '%s\n' "$expected_version" > "$staging_dir/VERSION"
+chmod 0444 "$staging_dir/VERSION"
 for license_name in "${license_names[@]}"; do
   install -m 0444 -- "$license_dir/$license_name" "$staging_dir/$license_name"
 done
@@ -116,6 +118,7 @@ chmod 0555 -- "$staging_dir/sbom"
     LICENSE \
     THIRD_PARTY_LICENSES.txt \
     THIRD_PARTY_NOTICES.txt \
+    VERSION \
     automata \
     automata-runner \
     sbom/*.cdx.json \
@@ -137,6 +140,7 @@ tar \
   SHA256SUMS \
   THIRD_PARTY_LICENSES.txt \
   THIRD_PARTY_NOTICES.txt \
+  VERSION \
   automata \
   automata-runner \
   sbom

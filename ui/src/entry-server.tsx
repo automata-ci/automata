@@ -8,12 +8,12 @@ function renderValidatedPage(request: RenderRequest): string {
   return `<!doctype html>${renderToString(<HtmlDocument request={request} />)}`;
 }
 
-/** Source-level API used by tests and by future in-process renderer adapters. */
+/** Source-level API for trusted in-process rendering and focused tests. */
 export function renderPage(request: RenderRequest): string {
   return renderValidatedPage(validateRenderRequest(request));
 }
 
-/** Stable bundle boundary: serialized PageModel in, a complete HTML document out. */
+/** Stable bundle boundary: serialized RenderRequest in, a complete HTML document out. */
 export function render(serializedRequest: string): string {
   return renderValidatedPage(parseRenderRequest(serializedRequest));
 }

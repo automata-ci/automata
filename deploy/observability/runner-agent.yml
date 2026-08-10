@@ -1,0 +1,42 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: automata-runner
+    metrics_path: /metrics
+    scheme: http
+    scrape_protocols:
+      - PrometheusProto
+      - OpenMetricsText1.0.0
+    scrape_native_histograms: true
+    always_scrape_classic_histograms: true
+    native_histogram_bucket_limit: 160
+    native_histogram_min_bucket_factor: 1.09
+    body_size_limit: 2MB
+    sample_limit: 1000
+    label_limit: 24
+    label_name_length_limit: 128
+    label_value_length_limit: 256
+    static_configs:
+      - targets:
+          - 127.0.0.1:9464
+        labels:
+          # REQUIRED: template this to one stable, globally unique inventory
+          # identity before deployment. Every node scrapes the same loopback
+          # address, so the default Prometheus instance label would collide.
+          instance: replace-me-unique
+          environment: replace-me
+          cluster: replace-me
+
+remote_write:
+  - url: https://prometheus.example.invalid/api/v1/write
+    send_native_histograms: true
+    queue_config:
+      capacity: 10000
+      max_shards: 4
+      min_shards: 1
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      min_backoff: 100ms
+      max_backoff: 10s

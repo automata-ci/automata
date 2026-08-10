@@ -1,0 +1,26 @@
+[package]
+name = "automata-ci-blob"
+description = "Immutable content-addressed blob ports and provider-neutral adapters for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-core.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio.workspace = true

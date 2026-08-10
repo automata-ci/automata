@@ -45,7 +45,12 @@ export function parseRenderRequest(serialized: string): RenderRequest {
 
 export function readRenderRequest(root: Document): RenderRequest {
   const element = root.getElementById(PAGE_MODEL_ELEMENT_ID);
-  if (element === null || element.textContent === null) {
+  if (
+    element === null ||
+    element.tagName !== "SCRIPT" ||
+    element.getAttribute("type") !== "application/json" ||
+    element.textContent === null
+  ) {
     throw new Error("Automata page model is missing from the document");
   }
   return parseRenderRequest(element.textContent);

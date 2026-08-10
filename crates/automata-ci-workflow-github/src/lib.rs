@@ -1,0 +1,61 @@
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![doc = "A loss-aware, source-level frontend for GitHub Actions workflow YAML."]
+
+mod compiler;
+mod decode;
+mod diagnostic;
+mod expression;
+mod frontend;
+mod model;
+mod repository_archive;
+mod runner_profile;
+mod source;
+mod syntax;
+
+pub use compiler::{
+    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler,
+    WorkflowCompiler, WorkflowNotSelectedReason,
+};
+pub use diagnostic::{Diagnostic, DiagnosticKind, DiagnosticSeverity, RelatedDiagnostic};
+pub use expression::{
+    GITHUB_EXPRESSION_DIALECT, GITHUB_EXPRESSION_DIALECT_VERSION,
+    GITHUB_EXPRESSION_MAX_UTF16_UNITS, GithubConditionCompiler, GithubConditionPhase,
+    GithubExpressionError, GithubExpressionErrorKind, GithubExpressionLimitError,
+    GithubExpressionLimits,
+};
+pub use frontend::{
+    FrontendReport, GithubFrontendReport, GithubWorkflowFrontend, ParseWorkflowRequest,
+    WorkflowFrontend,
+};
+pub use model::{
+    ActionStep, BooleanValue, Concurrency, ConcurrencyQueue, ContainerCredentials,
+    ContainerEnvironment, ContainerSequence, Defaults, DetailedConcurrency, DetailedContainer,
+    DetailedJobEnvironment, EnvironmentVariables, EventName, EventTrigger, GithubChangedFilesV1,
+    GithubEventMetadataV1, GithubWorkflow, GithubWorkflowSourcePlan, Job, JobContainer,
+    JobEnvironment, JobId, JobOutputs, JobService, JobServices, JobStrategy, MatrixConfiguration,
+    MatrixConfigurations, MatrixDimension, MatrixDimensionValues, MatrixMapping, MatrixValue,
+    MatrixValueEntry, Needs, PermissionEntry, PermissionLevel, Permissions, PreservedField,
+    PushPullRequestFilter, ReusableWorkflowCall, ReusableWorkflowInputs, ReusableWorkflowSecretMap,
+    ReusableWorkflowSecrets, RunDefaults, RunStep, RunnerSelection, SOURCE_PLAN_SCHEMA_VERSION,
+    ScalarValue, SourcePlanVersion, Step, StepExecution, StepId, StrategyMatrix,
+    TriggerConfiguration, TriggerSet, ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
+};
+pub use repository_archive::{
+    MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,
+    RepositoryWorkflowDiscoveryFailure, RepositoryWorkflowDiscoveryLimits,
+    RepositoryWorkflowDiscoveryLimitsError, RepositoryWorkflowDiscoveryOutcome,
+    discover_repository_workflows,
+};
+pub use runner_profile::{
+    GithubRunnerProfileCatalog, GithubRunnerProfileError, GithubRunnerProfileMapping,
+};
+pub use source::{
+    SourceFile, SourceId, SourceLocation, SourceModelError, SourceOrigin, SourceProvenance,
+    SourceSpan, Spanned,
+};
+pub use syntax::ParseLimits as WorkflowParseLimits;
+pub use syntax::{
+    AnchorId, ScalarResolution, ScalarStyle, YamlAlias, YamlDocument, YamlMappingEntry, YamlNode,
+    YamlNodeKind, YamlScalar, YamlTag,
+};

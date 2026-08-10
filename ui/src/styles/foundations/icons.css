@@ -1,0 +1,135 @@
+@font-face {
+  font-family: "Automata Phosphor";
+  src: url("@phosphor-icons/web/regular/Phosphor.woff2?inline") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+}
+
+.ph {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 1em;
+  height: 1em;
+  overflow: hidden;
+  font-family: "Automata Phosphor" !important;
+  font-style: normal;
+  font-variant: normal;
+  font-weight: 400;
+  line-height: 1;
+  text-align: center;
+  text-transform: none;
+  vertical-align: -0.125em;
+}
+
+.ph::before {
+  display: block;
+}
+
+.ph.ph-play-circle::before {
+  content: "\e3d2";
+}
+
+.ph.ph-package::before {
+  content: "\e390";
+}
+
+.ph.ph-git-branch::before {
+  content: "\e278";
+}
+
+.ph.ph-git-commit::before {
+  content: "\e27a";
+}
+
+.ph.ph-git-pull-request::before {
+  content: "\e282";
+}
+
+.ph.ph-tag::before {
+  content: "\e478";
+}
+
+.ph.ph-book-open::before {
+  content: "\e0e6";
+}
+
+.ph.ph-book-bookmark::before {
+  content: "\e0e4";
+}
+
+.ph.ph-magnifying-glass::before {
+  content: "\e30c";
+}
+
+.ph.ph-path::before {
+  content: "\e39c";
+}
+
+.ph.ph-caret-right::before {
+  content: "\e13a";
+}
+
+.ph.ph-caret-down::before {
+  content: "\e136";
+}
+
+.ph.ph-check-circle::before {
+  content: "\e184";
+}
+
+.ph.ph-x-circle::before {
+  content: "\e4f8";
+}
+
+.ph.ph-clock::before {
+  content: "\e19a";
+}
+
+.ph.ph-warning-circle::before {
+  content: "\e4e2";
+}
+
+.ph.ph-gear-six::before {
+  content: "\e272";
+}
+
+.ph.ph-sign-out::before {
+  content: "\e42a";
+}
+
+.ph.ph-minus-circle::before {
+  content: "\e32c";
+}
+
+.ph.ph-moon::before {
+  content: "\e330";
+}
+
+.ph.ph-sun::before {
+  content: "\e472";
+}
+
+.icon--14 {
+  font-size: 14px;
+}
+
+.icon--15 {
+  font-size: 15px;
+}
+
+.icon--16 {
+  font-size: 16px;
+}
+
+.icon--18 {
+  font-size: 18px;
+}
+
+.icon--20 {
+  font-size: 20px;
+}
+
+.icon--24 {
+  font-size: 24px;
+}

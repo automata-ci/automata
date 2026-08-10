@@ -166,13 +166,13 @@ function main() {
     collectCargoComponents({
       ...cargoOptions,
       metadata: workspaceMetadata,
-      rootName: "automata",
+      rootName: "automata-ci",
       artifact: "automata",
     }),
     collectCargoComponents({
       ...cargoOptions,
       metadata: workspaceMetadata,
-      rootName: "automata-runner",
+      rootName: "automata-ci-runner",
       artifact: "automata-runner",
     }),
     collectCargoComponents({

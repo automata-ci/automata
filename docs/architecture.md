@@ -1,13 +1,26 @@
 # Architecture
 
+This document explains the system Automata is being built toward and the
+boundaries already enforced by the bootstrap implementation. It is not a claim
+that every provider or control-plane feature below is available today. See the
+[current status](../README.md#what-works-today) and
+[implementation gates](implementation-plan.md#milestones-and-gates) before
+planning a deployment.
+
+At a high level, `automata` turns workflow inputs into durable scheduled work,
+and `automata-runner` executes that work inside a provider-owned isolation
+boundary. PostgreSQL coordinates mutable state; S3-compatible storage holds
+immutable payloads.
+
 ## Components and boundaries
 
 The Cargo workspace contains libraries, but produces only two distributed
-executables. `automata` can run all control-plane roles together or a
-configured subset, so deployments may scale API, planner, scheduler, results,
-SSR, and fleet-controller replicas independently while using one artifact.
-`automata-runner` can run as a host supervisor or as the guest agent of a VM
-sandbox.
+executables. The target architecture lets `automata` run all control-plane
+roles together or a configured subset so each role can scale independently
+from the same artifact. The current v0.1 server has no role selector: every
+replica starts the complete composed control plane. Likewise, guest-agent
+execution is a target design; the current `automata-runner` supports rootless
+Linux host execution only.
 
 ```text
 GitHub / API / schedules                     Browser
@@ -27,9 +40,10 @@ GitHub / API / schedules                     Browser
 
 The primary internal ports are:
 
-1. `WorkflowFrontend`, which converts source workflows and events into an
-   immutable, versioned workflow plan and job IR. GitHub-specific behavior is
-   contained here.
+1. `WorkflowFrontend`, which parses and validates one provider dialect into its
+   source plan. A separate compiler lowers that plan into immutable logical
+   WorkflowPlan state, and fenced activation later projects concrete JobIR.
+   GitHub-specific syntax and lowering remain outside the scheduler.
 2. `SchedulerPolicy`, which matches typed requirements and user routing policy
    without knowing how capacity is provisioned.
 3. `FleetController`, which asynchronously reconciles desired runner capacity.
@@ -60,6 +74,11 @@ coordinate through transactions and fencing rather than process-local locks.
 S3/RustFS stores immutable workflow snapshots, action bundles, log segments,
 artifacts, caches, and final manifests.
 
+The current Results listener also composes the current-reference CacheService-v2
+upload/download path and its job-scoped runtime authority. Base/default-branch
+fallback, REST cache management, BuildKit compatibility, and physical object
+garbage collection remain later compatibility work.
+
 Attempt identity includes the job, attempt, lease, and monotonically increasing
 fencing token. All state changes and published outputs compare the expected
 token. Network delivery is at-least-once; externally visible commits are
@@ -88,6 +107,17 @@ capabilities. Unknown optional capabilities are ignored; an unknown required
 capability produces a typed decline reason. Every attempt records the exact
 negotiated capability snapshot.
 
+Static runner registration is the durable upper bound on that snapshot. An
+exact immutable service-proxy pin authorizes service containers in that ceiling,
+while the live runner strips the feature and restores it only after provider
+verification. Scheduling intersects the registered ceiling with the observed
+session, so an unverified feature remains ineligible. Workload OIDC is absent
+from both supported inventories. Its issuer, durable storage, fail-closed
+optional control issuer, and `/oidc/token` placement on the non-human Results
+listener are product-composed, but capability advertisement remains disabled
+pending external TLS, homogeneous multi-replica/key-fleet operational proof,
+and bounded authority/issuance retention.
+
 ## Provider roadmap
 
 The first local provider is one rootless Podman job pod with a private network,
@@ -109,10 +139,12 @@ It passes a typed `PageModel` to an embedded React renderer built by Vite. The
 SSR component, manifest, and hashed assets are embedded in `automata`; Node
 is never a production dependency. All routes return complete HTML and use
 normal links/forms. Hydration is limited to progressive enhancement such as
-live log updates.
+theme preference, in-page log filtering, and repository-settings draft and
+submission state. It does not fetch page data or provide live log transport.
 
-The same executable exposes a `gh`-style administration client for login,
-runs, secrets, runner groups, runners, artifacts, caches, and control-plane
-operations. CLI and browser authentication share provider-neutral server
-sessions; machine-to-machine runner identity remains a separate mTLS trust
-domain.
+The administration surface is a `gh`-style client for control-plane status,
+workflow admission, encrypted repository secrets, and Linux device-flow
+`auth login`, `auth status`, and `auth logout` when Secret Service is
+available. The CLI and browser authentication designs share provider-neutral
+server sessions;
+machine-to-machine runner identity remains a separate mTLS trust domain.
