@@ -706,7 +706,9 @@ async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> Test
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
         let cache = cache_authority("automata/results-test", "refs/heads/main");
-        let target = CacheEntryId::new(Uuid::new_v4())?;
+        // Keep the target after the injected `1000...` cohort when database-second
+        // timestamps tie, so the UUID tiebreak deterministically evicts row two.
+        let target = CacheEntryId::new(Uuid::parse_str("f0000000-0000-4000-8000-000000000000")?)?;
         repository
             .create(create_request(execution, cache.clone(), target, "target"))
             .await?;
