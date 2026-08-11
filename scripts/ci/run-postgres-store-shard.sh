@@ -45,7 +45,7 @@ for name, weight in sorted(weighted_targets, key=lambda item: (-item[1], item[0]
     shards[selected].append(name)
     loads[selected] += weight
 print(f"{len(weighted_targets)}\t{loads[shard_number]}")
-print("\n".join(sorted(shards[shard_number])))
+print("\n".join(shards[shard_number]))
 ' "$shard_number" "$shard_count" <<<"$metadata"
 )"
 mapfile -t assignment_lines <<<"$assignment"
