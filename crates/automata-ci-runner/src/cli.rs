@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
     name = "automata-runner",
     version,
     long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AUTOMATA_BUILD_GIT_SHA"), ")"),
-    about = "Automata runner for rootless Linux execution hosts"
+    about = "Automata runner for rootless Linux and trusted native Windows execution hosts"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

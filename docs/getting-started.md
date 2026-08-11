@@ -131,9 +131,14 @@ The following runner boundaries fail closed on Windows:
 Linux with rootless Podman remains the container-isolated execution-host path.
 The Windows path is a pre-1.0 trusted native runner and is not production-ready.
 A successful source build or passive doctor report alone is not execution
-evidence; the Windows CI contract also runs a real shell-step job through the
-native provider. On Linux, a normal dynamically linked Cargo build is still not
-a valid `scratch` probe payload for a production runner session.
+evidence. The Windows CI contract launches the shipped `automata-runner run`
+process through the production run composition with ephemeral mTLS/control and
+loopback S3 fixtures. It completes a real handshake and lease exchange,
+hydrates job content, executes a shell step through the native provider,
+reports its logs and successful result, cleans its workspace and scratch
+directory, and polls the released slot again. On Linux, a normal dynamically
+linked Cargo build is still not a valid `scratch` probe payload for a production
+runner session.
 
 ## Verify the installation
 

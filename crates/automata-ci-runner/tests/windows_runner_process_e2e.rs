@@ -1,0 +1,1168 @@
+#![cfg(windows)]
+#![deny(warnings)]
+
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs, io,
+    net::{Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use automata_ci_auth::{
+    machine::{
+        AuthenticatedMachine, ExternalRunnerIdentity, MachineAuthenticationError,
+        MachineAuthenticationEvidence, MachineAuthenticationFuture, MachineIdentityVerifier,
+    },
+    time::UnixTimestamp,
+};
+use automata_ci_core::{
+    AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId, FencingToken,
+    JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
+    JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobRuntimeContext, JobSource,
+    Lease, LeaseId, LogAck, OperatingSystem, OperationId, RunId, RunValueTemplates, RunnerId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, StrategyContext, UnixMillis, ValueTemplate, WorkflowId,
+};
+use automata_ci_protocol::{
+    CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
+    LeaseDisposition, LeaseOffer, LeaseRenewal, LeaseRequest, LogAckMessage, LogBatch,
+    MessageHeader, NegotiatedSession, NoWork, OperationAck, ProtocolLimits, RunnerSlotOrdinal,
+    RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
+    ServerToRunner, SessionDisposition,
+};
+use automata_ci_protocol_protobuf::encode_job_runtime_context;
+use automata_ci_runner_transport::{
+    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
+    RunnerControlHandler, RunnerControlServer, ServerTlsConfig, TransportLimits,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
+};
+use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use serde_json::json;
+use sha2::{Digest as _, Sha256};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt as _},
+    net::{TcpListener, TcpStream},
+    process::Command,
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
+    "application/vnd.automata.job-runtime-context.protobuf";
+const PROFILE_ID: &str = "automata.test/windows-process-e2e";
+const S3_BUCKET: &str = "automata-process-e2e";
+const S3_PREFIX: &str = "process-e2e";
+const SENTINEL: &str = "AUTOMATA_WINDOWS_RUNNER_PROCESS_E2E";
+const REQUIRE_STANDALONE_PWSH_ENV: &str = "AUTOMATA_RUNNER_WINDOWS_E2E_REQUIRE_STANDALONE_PWSH";
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
+    let root = TemporaryRoot::new();
+    let runner_id = RunnerId::new();
+    let session_id = RunnerSessionId::new();
+    let pki = TestPki::new();
+    let (job, event, runtime_context) = process_job();
+    let expected_s3_paths = [event.fixture_path(), runtime_context.fixture_path()];
+    let lease = Lease::new(
+        LeaseId::new(),
+        AttemptId::new(),
+        runner_id,
+        FencingToken::new(1).expect("fencing token"),
+        UnixMillis::new(unix_millis().saturating_sub(1_000)),
+        UnixMillis::new(unix_millis().saturating_add(10 * 60 * 1_000)),
+    )
+    .expect("process test lease");
+    let authorities =
+        JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("credential-free authorities");
+    let handler = Arc::new(ProcessFlowHandler::new(
+        runner_id,
+        session_id,
+        lease,
+        job,
+        authorities,
+    ));
+
+    let s3 = S3Fixture::spawn([event, runtime_context]).await;
+    let control = RunningControlServer::spawn(&pki, handler.clone()).await;
+    let config_path = write_runner_config(root.path(), runner_id, control.address, s3.address);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .env("AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM", pki.root_pem())
+        .env(
+            "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM",
+            pki.client.certificate_chain_pem(),
+        )
+        .env(
+            "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM",
+            pki.client.private_key_pem(),
+        )
+        .env("AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX", "11".repeat(32))
+        .env("AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY", "process-access")
+        .env("AUTOMATA_PROCESS_E2E_S3_SECRET_KEY", "process-secret")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("launch shipped automata-runner binary");
+    let stdout_task = tokio::spawn(drain_output(
+        child.stdout.take().expect("runner stdout pipe"),
+    ));
+    let stderr_task = tokio::spawn(drain_output(
+        child.stderr.take().expect("runner stderr pipe"),
+    ));
+
+    wait_for_terminal_result(&handler, &mut child, Duration::from_secs(90)).await;
+    tokio::time::timeout(Duration::from_secs(10), handler.wait_for_completed_poll())
+        .await
+        .expect("runner finalizes the completed job and polls its released slot");
+    let workspace = root.path().join(r"native\workspaces\automata\automata");
+    let scratch = root
+        .path()
+        .join("native")
+        .join("runner")
+        .join("attempts")
+        .join(handler.attempt_id().to_string());
+    assert!(
+        !workspace.exists(),
+        "native provider left the completed job workspace behind: {workspace:?}"
+    );
+    assert!(
+        !scratch.exists(),
+        "native provider left the per-attempt scratch directory behind: {scratch:?}"
+    );
+
+    stop_runner(&mut child).await;
+    let stdout = collect_output(stdout_task, "stdout").await;
+    let stderr = collect_output(stderr_task, "stderr").await;
+    let s3_requests = s3.requests();
+    control.stop().await;
+    s3.stop().await;
+
+    let observation = handler.observation();
+    assert_eq!(observation.hello_runner_id, Some(runner_id));
+    assert_eq!(
+        observation.hello_operating_system,
+        Some(OperatingSystem::Windows)
+    );
+    assert!(
+        observation.accepted,
+        "runner did not accept the offered lease"
+    );
+    assert_eq!(
+        observation.command_cursor,
+        Some(handler.offer_cursor()),
+        "runner did not durably acknowledge the offered command cursor"
+    );
+    assert_eq!(observation.conclusion, Some(JobConclusion::Success));
+    let logs = String::from_utf8_lossy(&observation.logs);
+    assert!(
+        logs.contains(SENTINEL),
+        "real cmd.exe output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+    );
+    assert!(
+        observation.completed_poll,
+        "runner reported the result but did not finalize the slot and poll again; stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+    );
+    assert_s3_requests(&s3_requests, &expected_s3_paths);
+}
+
+async fn drain_output<R>(mut reader: R) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn stop_runner(child: &mut tokio::process::Child) {
+    if child
+        .try_wait()
+        .expect("query runner before shutdown")
+        .is_none()
+    {
+        child.start_kill().expect("signal runner process shutdown");
+    }
+    tokio::time::timeout(TEARDOWN_TIMEOUT, child.wait())
+        .await
+        .expect("runner process exits within teardown timeout")
+        .expect("wait for runner process");
+}
+
+async fn collect_output(task: JoinHandle<io::Result<Vec<u8>>>, stream: &'static str) -> Vec<u8> {
+    tokio::time::timeout(TEARDOWN_TIMEOUT, task)
+        .await
+        .unwrap_or_else(|_| panic!("runner {stream} drain exceeded teardown timeout"))
+        .unwrap_or_else(|error| panic!("runner {stream} drain task failed: {error}"))
+        .unwrap_or_else(|error| panic!("runner {stream} drain failed: {error}"))
+}
+
+async fn wait_for_terminal_result(
+    handler: &ProcessFlowHandler,
+    child: &mut tokio::process::Child,
+    limit: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if handler.observation().conclusion.is_some() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("query runner process") {
+            panic!("automata-runner exited before reporting a job result: {status}");
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "automata-runner did not complete the claimed job within {limit:?}; observation={:?}",
+            handler.observation(),
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(200), handler.wait_for_result()).await;
+    }
+}
+
+fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
+    let event_bytes = b"{}".to_vec();
+    let event_reference =
+        content_reference("events/process-e2e.json", "application/json", &event_bytes);
+    let runtime_context = JobRuntimeContext::new(
+        ContextValue::empty_object(),
+        ContextValue::empty_object(),
+        ContextValue::empty_object(),
+        StrategyContext::new(true, 0, 1, 1).expect("strategy context"),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("empty runtime context");
+    let runtime_bytes = encode_job_runtime_context(&runtime_context, &ProtocolLimits::default())
+        .expect("encode runtime context");
+    let runtime_reference = content_reference(
+        "contexts/process-e2e.pb",
+        JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+        &runtime_bytes,
+    );
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new(PROFILE_ID).expect("profile ID"),
+        Sha256Digest::from_bytes([0x08; 32]),
+    );
+    let requirements = RunnerRequirements::default().with_environment_profile(profile);
+    let step = StepIr::new(
+        StepId::new("process-e2e").expect("step ID"),
+        ValueTemplate::literal("Run cmd.exe through the shipped runner").expect("step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal(format!(
+                "@echo {SENTINEL}\r\n@echo process-level-execution>runner-process-e2e.txt"
+            ))
+            .expect("cmd command"),
+            ShellTemplate::named(ValueTemplate::literal("cmd").expect("cmd shell")),
+        )),
+    );
+    let job = JobIr::new(
+        JobId::new(),
+        RunId::new(),
+        "process-e2e",
+        requirements,
+        JobInstanceIdentity::new("process-e2e", 0, 1, Sha256Digest::from_bytes([0x44; 32]))
+            .expect("job instance"),
+        false,
+        vec![step],
+    )
+    .with_authority_profile(JobAuthorityProfile::CredentialFree)
+    .with_permission_request(JobPermissionRequest::Mapping(Vec::new()));
+    let envelope = JobIrEnvelope::new(
+        WorkflowId::new(),
+        JobSource::new(
+            "github",
+            "automata-ci/automata",
+            "0123456789abcdef0123456789abcdef01234567",
+            ".github/workflows/windows-process-e2e.yml",
+            "workflow_dispatch",
+        ),
+        JobExecutionContext::new(
+            "CI",
+            "refs/heads/windows-process-e2e",
+            "/__w/automata/automata",
+            event_reference.clone(),
+            runtime_reference.clone(),
+        ),
+        job,
+    );
+    (
+        envelope,
+        S3Object::new(&event_reference, event_bytes),
+        S3Object::new(&runtime_reference, runtime_bytes),
+    )
+}
+
+fn content_reference(key: &str, media_type: &str, bytes: &[u8]) -> JobContentReference {
+    JobContentReference::new(
+        key,
+        Sha256Digest::from_bytes(Sha256::digest(bytes).into()),
+        u64::try_from(bytes.len()).expect("test content size"),
+        media_type,
+    )
+}
+
+#[derive(Clone, Debug)]
+struct S3Object {
+    key: String,
+    media_type: String,
+    digest: Sha256Digest,
+    bytes: Vec<u8>,
+}
+
+impl S3Object {
+    fn new(reference: &JobContentReference, bytes: Vec<u8>) -> Self {
+        Self {
+            key: reference.object_key().to_owned(),
+            media_type: reference.media_type().to_owned(),
+            digest: reference.digest(),
+            bytes,
+        }
+    }
+
+    fn fixture_path(&self) -> String {
+        format!("/{S3_BUCKET}/{S3_PREFIX}/{}", self.key)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct S3RequestObservation {
+    method: String,
+    path: String,
+    authorization_present: bool,
+}
+
+struct S3Fixture {
+    address: SocketAddr,
+    requests: Arc<Mutex<Vec<S3RequestObservation>>>,
+    shutdown: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl S3Fixture {
+    async fn spawn(objects: impl IntoIterator<Item = S3Object>) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind loopback S3 fixture");
+        let address = listener.local_addr().expect("S3 fixture address");
+        let objects = Arc::new(
+            objects
+                .into_iter()
+                .map(|object| (object.key.clone(), object))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = CancellationToken::new();
+        let serve_shutdown = shutdown.clone();
+        let serve_requests = Arc::clone(&requests);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = serve_shutdown.cancelled() => return,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { return };
+                        let objects = Arc::clone(&objects);
+                        let requests = Arc::clone(&serve_requests);
+                        tokio::spawn(async move {
+                            let _ = serve_s3_request(stream, &objects, &requests).await;
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            address,
+            requests,
+            shutdown,
+            task,
+        }
+    }
+
+    fn requests(&self) -> Vec<S3RequestObservation> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn stop(mut self) {
+        self.shutdown.cancel();
+        if let Ok(result) = tokio::time::timeout(TEARDOWN_TIMEOUT, &mut self.task).await {
+            result.expect("S3 fixture task");
+            return;
+        }
+
+        self.task.abort();
+        let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, &mut self.task).await;
+        panic!("S3 fixture exceeded teardown timeout");
+    }
+}
+
+async fn serve_s3_request(
+    stream: TcpStream,
+    objects: &BTreeMap<String, S3Object>,
+    requests: &Mutex<Vec<S3RequestObservation>>,
+) -> io::Result<()> {
+    let request = read_request_head(&stream).await?;
+    let mut request_line = request
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_ascii_whitespace();
+    let method = request_line.next().unwrap_or_default();
+    let path = request_line
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+    let authorization_present = request.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization") && !value.trim().is_empty()
+        })
+    });
+    requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(S3RequestObservation {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            authorization_present,
+        });
+    let object = objects
+        .values()
+        .find(|object| path.ends_with(&format!("/{}", object.key)));
+    let Some(object) = object else {
+        return write_all(
+            &stream,
+            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: {}\r\nx-amz-meta-automata-sha256: {}\r\nx-amz-meta-automata-size: {}\r\nx-amz-server-side-encryption: AES256\r\nconnection: close\r\n\r\n",
+        object.bytes.len(),
+        object.media_type,
+        object.digest,
+        object.bytes.len(),
+    );
+    write_all(&stream, head.as_bytes()).await?;
+    write_all(&stream, &object.bytes).await
+}
+
+fn assert_s3_requests(requests: &[S3RequestObservation], expected_paths: &[String; 2]) {
+    let expected = expected_paths
+        .iter()
+        .cloned()
+        .map(|path| S3RequestObservation {
+            method: "GET".to_owned(),
+            path,
+            authorization_present: true,
+        })
+        .collect::<Vec<_>>();
+    let mut observed = requests.to_vec();
+    observed.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut expected = expected;
+    expected.sort_by(|left, right| left.path.cmp(&right.path));
+    assert_eq!(
+        observed, expected,
+        "runner must issue exactly one signed GET for each referenced job-content object"
+    );
+}
+
+async fn read_request_head(stream: &TcpStream) -> io::Result<String> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4 * 1_024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        stream.readable().await?;
+        match stream.try_read(&mut buffer) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(received) => {
+                request.extend_from_slice(&buffer[..received]);
+                if request.len() > 32 * 1_024 {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    String::from_utf8(request).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+async fn write_all(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        stream.writable().await?;
+        match stream.try_write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProcessObservation {
+    hello_runner_id: Option<RunnerId>,
+    hello_operating_system: Option<OperatingSystem>,
+    accepted: bool,
+    command_cursor: Option<CommandCursor>,
+    logs: Vec<u8>,
+    conclusion: Option<JobConclusion>,
+    completed_poll: bool,
+}
+
+#[derive(Debug)]
+struct ProcessFlowHandler {
+    runner_id: RunnerId,
+    session_id: RunnerSessionId,
+    lease: Lease,
+    offer: LeaseOffer,
+    state: Mutex<ProcessFlowState>,
+    result_ready: tokio::sync::Notify,
+    completed_poll: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct ProcessFlowState {
+    offered: bool,
+    result_received: bool,
+    observation: ProcessObservation,
+}
+
+impl ProcessFlowHandler {
+    fn new(
+        runner_id: RunnerId,
+        session_id: RunnerSessionId,
+        lease: Lease,
+        job: JobIrEnvelope,
+        authorities: JobRuntimeAuthorities,
+    ) -> Self {
+        let offer = LeaseOffer::new(
+            ServerCommandHeader::new(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                session_id,
+                OperationId::new(),
+                CommandSequence::new(1).expect("command sequence"),
+            ),
+            RunnerSlotOrdinal::new(1).expect("slot"),
+            lease.clone(),
+            job,
+            authorities,
+        );
+        Self {
+            runner_id,
+            session_id,
+            lease,
+            offer,
+            state: Mutex::new(ProcessFlowState::default()),
+            result_ready: tokio::sync::Notify::new(),
+            completed_poll: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn observation(&self) -> ProcessObservation {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observation
+            .clone()
+    }
+
+    fn attempt_id(&self) -> AttemptId {
+        self.lease.attempt_id()
+    }
+
+    fn offer_cursor(&self) -> CommandCursor {
+        CommandCursor::through(self.offer.header().sequence())
+    }
+
+    async fn wait_for_result(&self) {
+        self.result_ready.notified().await;
+    }
+
+    async fn wait_for_completed_poll(&self) {
+        if !self.observation().completed_poll {
+            self.completed_poll.notified().await;
+        }
+    }
+
+    fn handle_handshake(
+        &self,
+        request: &AuthenticatedRunnerRequest,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        let RunnerToServer::Hello(hello) = request.message().message() else {
+            return Err(internal_application_error());
+        };
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.observation.hello_runner_id = Some(hello.runner().runner_id());
+        state.observation.hello_operating_system =
+            Some(hello.runner().platform().operating_system().clone());
+        if hello.runner().runner_id() != self.runner_id
+            || hello.runner().platform().operating_system() != &OperatingSystem::Windows
+        {
+            return Err(internal_application_error());
+        }
+        Ok(ServerToRunner::Hello(ServerHello::new(
+            OperationId::new(),
+            hello.operation_id(),
+            NegotiatedSession::new(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                automata_ci_core::JobIrVersion::current(),
+                self.session_id,
+                SessionDisposition::Opened,
+                CommandCursor::initial(),
+            ),
+            ServerTiming::new(UnixMillis::new(unix_millis()), 1_000, 10 * 60 * 1_000),
+        )))
+    }
+
+    fn handle_sync(
+        &self,
+        request: &AuthenticatedRunnerRequest,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        match request.message().message() {
+            RunnerToServer::Hello(_) => Err(internal_application_error()),
+            RunnerToServer::LeaseRequest(poll) => self.handle_lease_request(poll),
+            RunnerToServer::LeaseResponse(response) => {
+                if response.validate_for(&self.offer).is_err() {
+                    return Err(internal_application_error());
+                }
+                self.state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .observation
+                    .accepted = response.disposition() == &LeaseDisposition::Accepted;
+                Ok(ServerToRunner::OperationAck(OperationAck::new(
+                    reply_header(response.header()),
+                )))
+            }
+            RunnerToServer::Heartbeat(heartbeat) => {
+                if heartbeat.attempt_id() != self.lease.attempt_id()
+                    || heartbeat.guard() != self.lease.guard()
+                {
+                    return Err(internal_application_error());
+                }
+                Ok(ServerToRunner::LeaseRenewal(LeaseRenewal::new(
+                    reply_header(heartbeat.header()),
+                    self.lease.attempt_id(),
+                    self.lease.guard(),
+                    self.lease.expires_at(),
+                )))
+            }
+            RunnerToServer::JobState(state) => {
+                if state.attempt_id() != self.lease.attempt_id()
+                    || state.guard() != self.lease.guard()
+                {
+                    return Err(internal_application_error());
+                }
+                Ok(ServerToRunner::OperationAck(OperationAck::new(
+                    reply_header(state.header()),
+                )))
+            }
+            RunnerToServer::LogBatch(batch) => self.handle_log_batch(batch),
+            RunnerToServer::JobResult(result) => self.handle_job_result(result),
+            RunnerToServer::CommandAck(ack) => self.handle_command_ack(*ack),
+        }
+    }
+
+    fn handle_lease_request(
+        &self,
+        poll: &LeaseRequest,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.offered {
+            state.offered = true;
+            Ok(ServerToRunner::LeaseOffer(Box::new(self.offer.clone())))
+        } else if state.result_received {
+            state.observation.completed_poll = true;
+            self.completed_poll.notify_one();
+            Ok(ServerToRunner::NoWork(NoWork::new(
+                reply_header(poll.header()),
+                25,
+            )))
+        } else {
+            Err(internal_application_error())
+        }
+    }
+
+    fn handle_log_batch(&self, batch: &LogBatch) -> Result<ServerToRunner, ApplicationError> {
+        if batch.guard() != self.lease.guard()
+            || batch
+                .frames()
+                .iter()
+                .any(|frame| frame.attempt_id() != self.lease.attempt_id())
+        {
+            return Err(internal_application_error());
+        }
+        let last = batch
+            .frames()
+            .last()
+            .ok_or_else(internal_application_error)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for frame in batch.frames() {
+            state.observation.logs.extend_from_slice(frame.payload());
+        }
+        Ok(ServerToRunner::LogAck(LogAckMessage::new(
+            reply_header(batch.header()),
+            LogAck::new(last.stream_id(), Some(last.sequence())),
+        )))
+    }
+
+    fn handle_job_result(
+        &self,
+        result: &JobResultMessage,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        if result.result().attempt_id() != self.lease.attempt_id()
+            || result.guard() != self.lease.guard()
+        {
+            return Err(internal_application_error());
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.observation.conclusion = Some(result.result().conclusion());
+        state.result_received = true;
+        self.result_ready.notify_one();
+        Ok(ServerToRunner::OperationAck(OperationAck::new(
+            reply_header(result.header()),
+        )))
+    }
+
+    fn handle_command_ack(&self, ack: CommandAck) -> Result<ServerToRunner, ApplicationError> {
+        let expected = self.offer_cursor();
+        if ack.command_cursor() != expected {
+            return Err(internal_application_error());
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observation
+            .command_cursor = Some(ack.command_cursor());
+        Ok(ServerToRunner::OperationAck(OperationAck::new(
+            reply_header(ack.header()),
+        )))
+    }
+}
+
+impl RunnerControlHandler for ProcessFlowHandler {
+    fn handshake(&self, request: AuthenticatedRunnerRequest) -> HandlerFuture<'_> {
+        Box::pin(async move { self.handle_handshake(&request) })
+    }
+
+    fn sync(&self, request: AuthenticatedRunnerRequest) -> HandlerFuture<'_> {
+        Box::pin(async move { self.handle_sync(&request) })
+    }
+}
+
+fn reply_header(request: MessageHeader) -> MessageHeader {
+    MessageHeader::reply(
+        request.protocol_version(),
+        request.session_id(),
+        OperationId::new(),
+        request.operation_id(),
+    )
+}
+
+const fn internal_application_error() -> ApplicationError {
+    ApplicationError::new(ApplicationErrorKind::Internal)
+}
+
+#[derive(Debug)]
+struct AcceptingVerifier;
+
+impl MachineIdentityVerifier for AcceptingVerifier {
+    fn authenticate<'a>(
+        &'a self,
+        _evidence: &'a MachineAuthenticationEvidence,
+    ) -> MachineAuthenticationFuture<'a> {
+        Box::pin(async {
+            AuthenticatedMachine::new(
+                ExternalRunnerIdentity::new("runner.process-e2e").expect("external identity"),
+                [0x5a; 32],
+                UnixTimestamp::from_seconds(1_700_000_000),
+                UnixTimestamp::from_seconds(4_000_000_000),
+            )
+            .map_err(|_| MachineAuthenticationError::Unavailable)
+        })
+    }
+}
+
+struct RunningControlServer {
+    address: SocketAddr,
+    shutdown: CancellationToken,
+    task: JoinHandle<Result<(), automata_ci_runner_transport::ServeError>>,
+}
+
+impl RunningControlServer {
+    async fn spawn(pki: &TestPki, handler: Arc<dyn RunnerControlHandler>) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind runner control fixture");
+        let address = listener.local_addr().expect("control fixture address");
+        let server = RunnerControlServer::new(
+            listener,
+            &pki.server_tls(),
+            Arc::new(AcceptingVerifier),
+            handler,
+            ProtocolLimits::default(),
+            TransportLimits::default(),
+        )
+        .expect("runner control fixture");
+        let shutdown = CancellationToken::new();
+        let serve_shutdown = shutdown.clone();
+        let task = tokio::spawn(server.serve(serve_shutdown));
+        Self {
+            address,
+            shutdown,
+            task,
+        }
+    }
+
+    async fn stop(mut self) {
+        self.shutdown.cancel();
+        if let Ok(result) = tokio::time::timeout(TEARDOWN_TIMEOUT, &mut self.task).await {
+            result
+                .expect("control fixture task")
+                .expect("control fixture result");
+            return;
+        }
+
+        self.task.abort();
+        let _ = tokio::time::timeout(TEARDOWN_TIMEOUT, &mut self.task).await;
+        panic!("control fixture exceeded teardown timeout");
+    }
+}
+
+#[derive(Debug)]
+struct Identity {
+    certificate: Vec<u8>,
+    private_key: Vec<u8>,
+}
+
+impl Identity {
+    fn certificate_chain(&self) -> Vec<CertificateDer<'static>> {
+        vec![CertificateDer::from(self.certificate.clone())]
+    }
+
+    fn private_key(&self) -> PrivateKeyDer<'static> {
+        PrivatePkcs8KeyDer::from(self.private_key.clone()).into()
+    }
+
+    fn certificate_chain_pem(&self) -> String {
+        pem("CERTIFICATE", &self.certificate)
+    }
+
+    fn private_key_pem(&self) -> String {
+        pem("PRIVATE KEY", &self.private_key)
+    }
+}
+
+#[derive(Debug)]
+struct TestPki {
+    root: Vec<u8>,
+    server: Identity,
+    client: Identity,
+}
+
+impl TestPki {
+    fn new() -> Self {
+        let root = certificate_authority();
+        let server = leaf_identity(
+            "automata process e2e server",
+            vec!["127.0.0.1".to_owned()],
+            ExtendedKeyUsagePurpose::ServerAuth,
+            &root,
+        );
+        let client = leaf_identity(
+            "runner.process-e2e",
+            Vec::new(),
+            ExtendedKeyUsagePurpose::ClientAuth,
+            &root,
+        );
+        Self {
+            root: root.der().as_ref().to_vec(),
+            server,
+            client,
+        }
+    }
+
+    fn root_store(&self) -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(self.root.clone()))
+            .expect("generated root");
+        roots
+    }
+
+    fn root_pem(&self) -> String {
+        pem("CERTIFICATE", &self.root)
+    }
+
+    fn server_tls(&self) -> ServerTlsConfig {
+        ServerTlsConfig::new(
+            self.root_store(),
+            self.server.certificate_chain(),
+            self.server.private_key(),
+        )
+        .expect("server TLS")
+    }
+}
+
+fn certificate_authority() -> CertifiedIssuer<'static, KeyPair> {
+    let key = KeyPair::generate().expect("test CA key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "automata process e2e root");
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    CertifiedIssuer::self_signed(params, key).expect("self-signed test CA")
+}
+
+fn leaf_identity(
+    name: &str,
+    subject_alt_names: Vec<String>,
+    purpose: ExtendedKeyUsagePurpose,
+    issuer: &CertifiedIssuer<'_, KeyPair>,
+) -> Identity {
+    let key = KeyPair::generate().expect("test leaf key");
+    let mut params = CertificateParams::new(subject_alt_names).expect("leaf parameters");
+    params.distinguished_name.push(DnType::CommonName, name);
+    params.extended_key_usages = vec![purpose];
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    let certificate = params.signed_by(&key, issuer).expect("signed test leaf");
+    Identity {
+        certificate: certificate.der().as_ref().to_vec(),
+        private_key: key.serialize_der(),
+    }
+}
+
+fn pem(label: &str, der: &[u8]) -> String {
+    let encoded = STANDARD.encode(der);
+    let mut value = format!("-----BEGIN {label}-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        value.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        value.push('\n');
+    }
+    writeln!(value, "-----END {label}-----").expect("write PEM footer");
+    value
+}
+
+#[allow(clippy::too_many_lines)]
+fn write_runner_config(
+    root: &Path,
+    runner_id: RunnerId,
+    control_address: SocketAddr,
+    s3_address: SocketAddr,
+) -> PathBuf {
+    let journal = root.join("journal");
+    let spool = root.join("spool");
+    let native = root.join("native");
+    let workspaces = native.join("workspaces");
+    let runner = native.join("runner");
+    let temp = root.join("temp");
+    let home = root.join("home");
+    let tool_cache = root.join("tool-cache");
+    for path in [&temp, &home, &tool_cache] {
+        fs::create_dir_all(path).expect("create runner support directory");
+    }
+    let system_root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+    let cmd = std::env::var_os("ComSpec")
+        .map_or_else(|| system_root.join(r"System32\cmd.exe"), PathBuf::from);
+    let powershell = system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let standalone_pwsh = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+    if require_standalone_pwsh() {
+        assert!(
+            standalone_pwsh.is_file(),
+            "{REQUIRE_STANDALONE_PWSH_ENV}=1 requires standalone PowerShell at {}",
+            standalone_pwsh.display()
+        );
+    }
+    let pwsh = if standalone_pwsh.is_file() {
+        standalone_pwsh
+    } else {
+        powershell.clone()
+    };
+    let process_path = [
+        pwsh.parent().expect("pwsh parent"),
+        cmd.parent().expect("cmd parent"),
+        system_root.as_path(),
+    ]
+    .into_iter()
+    .map(|path| path.to_string_lossy())
+    .collect::<Vec<_>>()
+    .join(";");
+    let config = json!({
+        "schema_version": 1,
+        "runner_id": runner_id.to_string(),
+        "control_endpoint": format!("https://{control_address}/"),
+        "state": {
+            "journal": journal,
+            "spool": spool,
+            "windows_native": native,
+        },
+        "tls": {
+            "server_roots": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM"},
+            "certificate_chain": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM"},
+            "private_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM"},
+        },
+        "spool": {
+            "protection_id": "windows-process-e2e-key-v1",
+            "key_hex": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX"},
+            "decrypt_only": [],
+        },
+        "inventory": {
+            "labels": ["self-hosted", "windows", "x64"],
+            "groups": ["default"],
+            "max_parallel_jobs": 1,
+            "resources_per_job": {
+                "cpu_millis": 1000,
+                "memory_bytes": 1_073_741_824_u64,
+                "ephemeral_disk_bytes": 0,
+                "pids": 128,
+            },
+            "environment_profiles": [{
+                "id": PROFILE_ID,
+                "manifest_sha256": "08".repeat(32),
+                "workspace": workspaces,
+                "default_environment": {
+                    "SystemRoot": system_root,
+                    "WINDIR": system_root,
+                    "ComSpec": cmd,
+                    "TEMP": temp,
+                    "TMP": temp,
+                    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+                },
+            }],
+        },
+        "windows_native": {},
+        "executor": {
+            "resources": {
+                "cpu_millis": 1000,
+                "memory_bytes": 1_073_741_824_u64,
+                "ephemeral_disk_bytes": 0,
+                "pids": 128,
+            },
+            "network": "host",
+            "root_filesystem": "host",
+            "privilege": "host",
+            "default_step_timeout_seconds": 60,
+            "maximum_output_bytes": 1_048_576,
+            "runner_root": runner,
+            "home": home,
+            "path": process_path,
+            "temp": temp,
+            "tool_cache": tool_cache,
+            "toolchain": {
+                "bash": null,
+                "sh": null,
+                "python": null,
+                "pwsh": pwsh,
+                "powershell": powershell,
+                "cmd": cmd,
+                "install": null,
+                "tar": null,
+                "node12": null,
+                "node16": null,
+                "node20": null,
+                "node24": null,
+            },
+        },
+        "object_store": {
+            "endpoint": format!("http://{s3_address}/"),
+            "region": "us-east-1",
+            "bucket": S3_BUCKET,
+            "prefix": S3_PREFIX,
+            "loopback_development": true,
+            "operation_timeout_seconds": 5,
+            "access_key_id": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY"},
+            "secret_access_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_SECRET_KEY"},
+        },
+        "github": {
+            "user_agent": "automata-runner-process-e2e/0.1.0",
+            "server_url": "https://github.com/",
+            "api_url": "https://api.github.com/",
+            "graphql_url": "https://api.github.com/graphql",
+        },
+    });
+    let config_path = root.join("runner.windows.process-e2e.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("encode runner config"),
+    )
+    .expect("write runner config");
+    config_path
+}
+
+fn require_standalone_pwsh() -> bool {
+    match std::env::var_os(REQUIRE_STANDALONE_PWSH_ENV) {
+        None => false,
+        Some(value) if value == "1" => true,
+        Some(value) if value == "0" => false,
+        Some(value) => panic!(
+            "{REQUIRE_STANDALONE_PWSH_ENV} must be 0 or 1, received {}",
+            value.to_string_lossy()
+        ),
+    }
+}
+
+struct TemporaryRoot {
+    parent: PathBuf,
+    path: PathBuf,
+}
+
+impl TemporaryRoot {
+    fn new() -> Self {
+        let parent = std::env::temp_dir();
+        let path = parent.join(format!(
+            "automata-runner-process-e2e-{}",
+            RunnerSessionId::new()
+        ));
+        fs::create_dir(&path).expect("create process E2E root");
+        Self { parent, path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryRoot {
+    fn drop(&mut self) {
+        let safe_name = self
+            .path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.starts_with("automata-runner-process-e2e-"));
+        if safe_name && self.path.parent() == Some(self.parent.as_path()) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn unix_millis() -> i64 {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch");
+    i64::try_from(duration.as_millis()).expect("current Unix milliseconds fit i64")
+}
