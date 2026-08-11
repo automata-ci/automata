@@ -1013,7 +1013,7 @@ fn include_matching_is_charged_once_against_aggregate_work_limit() {
         None,
         None,
         matrix,
-        AXIS_VALUES as u16,
+        u16::try_from(AXIS_VALUES).expect("axis value count fits u16"),
         span(),
     ))
     .expect("valid include matching must consume one aggregate-work charge");

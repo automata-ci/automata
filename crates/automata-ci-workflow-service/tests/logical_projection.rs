@@ -300,7 +300,7 @@ jobs:
         requirements
             .labels()
             .iter()
-            .map(|label| label.as_str())
+            .map(automata_ci_core::RunnerLabel::as_str)
             .collect::<Vec<_>>(),
         ["linux", "self-hosted", "x64"]
     );
@@ -308,7 +308,7 @@ jobs:
         requirements
             .eligible_groups()
             .iter()
-            .map(|group| group.as_str())
+            .map(automata_ci_core::RunnerGroup::as_str)
             .collect::<Vec<_>>(),
         ["trusted-builders"]
     );

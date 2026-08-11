@@ -345,7 +345,7 @@ fn service(repository: Arc<ControllableRepository>) -> WorkflowAdmissionService 
 
 fn concurrency_request(tenant: &str, group: &str) -> WorkflowAdmissionRequest {
     let source = format!(
-        r#"name: Queue contract
+        r"name: Queue contract
 on: workflow_dispatch
 concurrency:
   group: {group}
@@ -356,7 +356,7 @@ jobs:
     runs-on: linux
     steps:
       - run: echo synthetic
-"#
+"
     );
     let provenance = SourceProvenance::new(
         SourceId::new(".github/workflows/queue.yml"),
