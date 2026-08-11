@@ -11,19 +11,21 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_core::UnixMillis;
-use automata_ci_scm::{RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort};
+use automata_ci_scm::{
+    RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort, ScmProvider,
+};
 use automata_ci_store::{
-    ClaimProviderDelivery, GithubServerServiceAction, GithubServerServiceAuthoritySelector,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceRepository, MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
-    MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
-    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryIdentity,
-    ProviderDeliveryRenewalTiming, ProviderDeliveryRepository, ProviderDeliveryStoreError,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
-    TenantScope,
+    ClaimProviderDelivery, GithubRepositoryDispatchEvidenceRepository, GithubServerServiceAction,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_ATTEMPTS,
+    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
+    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository,
+    ProviderDeliveryIdentity, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
+    ProviderDeliveryStoreError, ProviderInstallationId, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RenewProviderDeliveryClaim,
+    RenewedProviderDeliveryClaim, TenantScope,
 };
 use thiserror::Error;
 use tokio::{sync::OwnedMutexGuard, time::Instant};
@@ -688,6 +690,45 @@ impl GithubDeliveryService {
             workflow_processor,
             deliveries,
             GithubDeliverySourcePolicy::PublicOnly,
+            None,
+            clock,
+            worker_id,
+            worker_config,
+            config,
+        )
+    }
+
+    /// Constructs a public-only service with custom-dispatch branch resolution.
+    ///
+    /// # Errors
+    ///
+    /// Rejects either source adapter when it does not identify as GitHub.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_public_only_with_repository_dispatch<R>(
+        objects: Arc<dyn ImmutableBlobStore>,
+        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_dispatch_resolver: Arc<dyn ScmProvider>,
+        workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
+        deliveries: Arc<R>,
+        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+        clock: Arc<dyn GithubDeliveryClock>,
+        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_config: GithubDeliveryWorkerConfig,
+        config: GithubDeliveryServiceConfig,
+    ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
+    where
+        R: ProviderDeliveryRepository
+            + ProviderDeliveryClaimRenewalRepository
+            + GithubSubjectEvidenceRepository
+            + 'static,
+    {
+        Self::new_with_source_policy(
+            objects,
+            repository_source,
+            workflow_processor,
+            deliveries,
+            GithubDeliverySourcePolicy::PublicOnly,
+            Some((repository_dispatches, repository_dispatch_resolver)),
             clock,
             worker_id,
             worker_config,
@@ -728,6 +769,49 @@ impl GithubDeliveryService {
             workflow_processor,
             deliveries,
             GithubDeliverySourcePolicy::PrivateEnabled(credentials),
+            None,
+            clock,
+            worker_id,
+            worker_config,
+            config,
+        )
+    }
+
+    /// Constructs a private-capable service with custom-dispatch resolution.
+    ///
+    /// Public branches resolve anonymously. Private branches reuse only the
+    /// existing exact-repository `contents: read` credential handoff.
+    ///
+    /// # Errors
+    ///
+    /// Rejects either source adapter when it does not identify as GitHub.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_private_source_credentials_and_repository_dispatch<R>(
+        objects: Arc<dyn ImmutableBlobStore>,
+        repository_source: Arc<dyn RepositorySourcePort>,
+        repository_dispatch_resolver: Arc<dyn ScmProvider>,
+        workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
+        deliveries: Arc<R>,
+        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+        credentials: Arc<dyn GithubDeliverySourceCredentialProvider>,
+        clock: Arc<dyn GithubDeliveryClock>,
+        worker_id: ProviderDeliveryClaimOwnerId,
+        worker_config: GithubDeliveryWorkerConfig,
+        config: GithubDeliveryServiceConfig,
+    ) -> Result<Self, GithubDeliveryWorkerConfigurationError>
+    where
+        R: ProviderDeliveryRepository
+            + ProviderDeliveryClaimRenewalRepository
+            + GithubSubjectEvidenceRepository
+            + 'static,
+    {
+        Self::new_with_source_policy(
+            objects,
+            repository_source,
+            workflow_processor,
+            deliveries,
+            GithubDeliverySourcePolicy::PrivateEnabled(credentials),
+            Some((repository_dispatches, repository_dispatch_resolver)),
             clock,
             worker_id,
             worker_config,
@@ -742,6 +826,10 @@ impl GithubDeliveryService {
         workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor>,
         deliveries: Arc<R>,
         source_policy: GithubDeliverySourcePolicy,
+        repository_dispatch: Option<(
+            Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+            Arc<dyn ScmProvider>,
+        )>,
         clock: Arc<dyn GithubDeliveryClock>,
         worker_id: ProviderDeliveryClaimOwnerId,
         worker_config: GithubDeliveryWorkerConfig,
@@ -757,15 +845,30 @@ impl GithubDeliveryService {
         let subject_evidence_repository: Arc<dyn GithubSubjectEvidenceRepository> =
             deliveries.clone();
         let renewal_repository: Arc<dyn ProviderDeliveryClaimRenewalRepository> = deliveries;
-        let worker = Arc::new(GithubDeliveryWorker::new(
-            objects,
-            repository_source,
-            workflow_processor,
-            delivery_repository.clone(),
-            subject_evidence_repository,
-            clock.clone(),
-            worker_config,
-        )?);
+        let worker = Arc::new(match repository_dispatch {
+            Some((repository_dispatches, resolver)) => {
+                GithubDeliveryWorker::new_with_repository_dispatch(
+                    objects,
+                    repository_source,
+                    resolver,
+                    workflow_processor,
+                    delivery_repository.clone(),
+                    subject_evidence_repository,
+                    repository_dispatches,
+                    clock.clone(),
+                    worker_config,
+                )?
+            }
+            None => GithubDeliveryWorker::new(
+                objects,
+                repository_source,
+                workflow_processor,
+                delivery_repository.clone(),
+                subject_evidence_repository,
+                clock.clone(),
+                worker_config,
+            )?,
+        });
         Ok(Self {
             worker,
             deliveries: delivery_repository,
@@ -981,7 +1084,7 @@ impl GithubDeliveryService {
             }
             GithubDeliverySourcePolicy::PrivateEnabled(credentials) => Arc::clone(credentials),
         };
-        let Some(authority_selector) = prepared.evidence().private_source_authority() else {
+        let Some(authority_selector) = prepared.private_source_authority() else {
             return self
                 .worker
                 .finish_private_source_unsupported(lease)

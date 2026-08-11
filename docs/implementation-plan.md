@@ -91,10 +91,11 @@ workflow does not satisfy the gate.
 
 ### G2: broader Actions runtime
 
-Complete the remaining JavaScript and composite post-time template
-re-evaluation, job and service containers, container actions, matrices, status
-functions, fail-fast, max-parallel, reusable workflows, artifacts, cache
-management, cancellation, summaries, and annotations.
+Exercise JavaScript and composite post-time template re-evaluation in the
+differential fixture, and complete job and service containers, container
+actions, matrices, status functions, fail-fast, max-parallel, reusable
+workflows, artifacts, cache management, cancellation, summaries, and
+annotations.
 
 Gate: Automata's CI consumes its own artifacts and caches and matches GitHub at
 the same commit.

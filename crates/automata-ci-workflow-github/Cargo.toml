@@ -13,12 +13,15 @@ publish.workspace = true
 
 [dependencies]
 automata-ci-core.workspace = true
+automata-ci-schedule.workspace = true
 flate2.workspace = true
+jiff.workspace = true
 saphyr-parser.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 

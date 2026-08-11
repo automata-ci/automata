@@ -9,6 +9,7 @@ use automata_ci_github_runtime::{
 };
 use automata_ci_output_policy::SecretExposureClass;
 use automata_ci_runner_runtime::{ExecutionEvents, LogEvent};
+use zeroize::Zeroize as _;
 
 use crate::{ExecutorAdapterError, error::ExecutorAdapterErrorKind};
 
@@ -23,6 +24,15 @@ pub(crate) struct SecretMasker {
     exposure: SecretExposureClass,
     #[cfg(test)]
     matcher_builds: usize,
+}
+
+impl Drop for SecretMasker {
+    fn drop(&mut self) {
+        self.matcher = None;
+        for mut mask in std::mem::take(&mut self.masks) {
+            mask.zeroize();
+        }
+    }
 }
 
 impl SecretMasker {

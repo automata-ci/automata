@@ -24,11 +24,13 @@ use crate::{
 
 mod admission;
 mod bootstrap;
+mod conformance;
 mod g1;
 mod github_checks;
 mod github_job_runtime_authority;
 mod github_oidc;
 mod github_provider_manifest;
+mod github_schedule;
 mod github_service_authority;
 mod github_subject_evidence;
 mod logical_activation;
@@ -42,13 +44,17 @@ mod logical_work_selection;
 mod maintenance;
 mod managed_secret_authority;
 mod observability;
+mod protected_environment;
 mod provider_delivery;
 mod publication;
+mod reusable_workflow_admission;
+mod reusable_workflow_runtime;
 mod runtime_authority;
 mod secret_custody;
 mod secret_management;
 mod server_cancellation_terminal;
 mod web;
+mod workflow_rerun;
 mod workflow_runtime_policy;
 
 pub use github_oidc::{

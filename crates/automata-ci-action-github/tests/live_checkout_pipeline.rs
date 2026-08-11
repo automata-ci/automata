@@ -7,7 +7,9 @@ use automata_ci_action::{
 use automata_ci_action_github::{
     ActionExecution, ActionMetadataDecoder, GithubActionMetadataDecoder, JavascriptRuntime,
 };
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
+use automata_ci_blob_s3::{
+    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
+};
 use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use url::Url;
@@ -30,7 +32,13 @@ async fn resolves_and_decodes_the_exact_checkout_action() {
         Some("contract/action-metadata-v1".to_owned()),
         Duration::from_secs(30),
     )
-    .expect("test S3 configuration");
+    .expect("test S3 configuration")
+    .with_at_rest_encryption(
+        S3AtRestEncryption::aws_kms(
+            env::var("AUTOMATA_TEST_S3_KMS_KEY_ID").expect("AUTOMATA_TEST_S3_KMS_KEY_ID"),
+        )
+        .expect("test S3 KMS key identity"),
+    );
     let credentials = StaticS3Credentials::new(
         env::var("AUTOMATA_TEST_S3_ACCESS_KEY").expect("AUTOMATA_TEST_S3_ACCESS_KEY"),
         env::var("AUTOMATA_TEST_S3_SECRET_KEY").expect("AUTOMATA_TEST_S3_SECRET_KEY"),

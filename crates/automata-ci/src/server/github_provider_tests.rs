@@ -36,7 +36,19 @@ fn runner_policy() -> Value {
             },
             "selector": "Ubuntu-24.04"
         }],
+        "resources": resource_policy(),
         "schema": 1
+    })
+}
+
+fn resource_policy() -> Value {
+    json!({
+        "defaults": {
+            "requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+            "limits": {"cpu_millis": 1000, "memory_bytes": 1073741824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+        },
+        "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+        "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8589934592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
     })
 }
 
@@ -48,6 +60,7 @@ fn repository(
     repository_id: u64,
     owner_id: u64,
     name: &str,
+    default_branch: &str,
     visibility: &str,
     checks_authority: u128,
     private_authority: Option<u128>,
@@ -59,13 +72,14 @@ fn repository(
         "repository_id": repository_id,
         "repository_owner_id": owner_id,
         "repository": name,
-        "default_branch": "main",
+        "default_branch": default_branch,
         "visibility": visibility,
         "manifest_revision": 1,
         "policy_revision": 7,
         "runtime_policy_revision": 1,
         "authority_profile": "standard",
         "runner_policy": runner_policy(),
+        "workflow_path": ".github/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority, 7),
@@ -76,6 +90,23 @@ fn repository(
 }
 
 fn mixed_document() -> Value {
+    let mut public = repository(
+        "tenant-public",
+        0x201,
+        202,
+        302,
+        402,
+        "octo/public-repository",
+        "refs/release",
+        "public",
+        0x501,
+        None,
+    );
+    public
+        .as_object_mut()
+        .expect("repository fixture is an object")
+        .remove("workflow_path");
+    public["workflow_selection"] = json!({"mode": "all_direct"});
     json!({
         "schema": 2,
         "app": {
@@ -90,17 +121,7 @@ fn mixed_document() -> Value {
             "verifier_revision": 11
         },
         "repositories": [
-            repository(
-                "tenant-public",
-                0x201,
-                202,
-                302,
-                402,
-                "octo/public-repository",
-                "public",
-                0x501,
-                None,
-            ),
+            public,
             repository(
                 "tenant-private",
                 0x202,
@@ -108,6 +129,7 @@ fn mixed_document() -> Value {
                 301,
                 401,
                 "octo/private-repository",
+                "release/stable",
                 "private",
                 0x502,
                 Some(0x602),
@@ -276,6 +298,14 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_eq!(plan.authorities().len(), 3);
     assert_eq!(plan.connections().len(), 2);
     assert_eq!(
+        plan.manifests()[0].exact_workflow_path(),
+        Some(".github/workflows/main.yml")
+    );
+    assert_eq!(plan.manifests()[1].exact_workflow_path(), None);
+    assert_eq!(plan.manifests()[1].workflow_path(), ".github/workflows");
+    assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
+    assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
+    assert_eq!(
         plan.manifests()[0].repository_visibility(),
         ProviderRepositoryVisibility::Private
     );
@@ -289,6 +319,10 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         "private-repository"
     );
     assert_eq!(plan.connections()[1].repository_name(), "public-repository");
+    assert_eq!(
+        plan.connections()[1].default_branch_ref(),
+        Some("refs/heads/refs/release")
+    );
 
     let ordered_authorities = plan
         .authorities()
@@ -502,7 +536,7 @@ async fn runtime_policy_drift_fails_before_manifest_or_authority_writes() {
         "architecture":"x86_64","operating_system":"linux",
         "environment_profile":{"manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
-      }],"schema":1
+      }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
     }"#;
 
     let config = load_config("runtime-policy-drift.json", &mixed_document()).expect("mixed config");

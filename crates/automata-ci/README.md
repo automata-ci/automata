@@ -38,6 +38,12 @@ The runner listener must validate client certificates directly. Do not pass a
 runner identity through reverse-proxy headers. A proxy-terminated runner
 transport would require a separate adapter and trust contract.
 
+When managed-secret encryption is configured, `--runner-public-url` is also
+required. It is the exact HTTPS origin configured as each runner's
+`control_endpoint`; the private value route rejects any different HTTP/2
+authority. Secret delivery uses the same direct mTLS listener, never the human
+listener or a proxy-forwarded identity.
+
 All three mandatory listeners require fixed, nonzero ports. The human/webhook
 listener is raw HTTP: keep it on literal loopback, or place a trusted isolating
 TLS reverse proxy in front of a non-loopback bind and explicitly assert that
@@ -261,8 +267,8 @@ the client stores and verifies the credential before activating it. Status can
 retry an indeterminate activation. The operator is responsible for selecting a
 Secret Service with encrypted backing storage because Automata cannot attest
 the external keyring implementation. Complete GitHub provider configuration
-adds the exact signed webhook, public/private source-delivery, fenced Check
-Runs, scoped App-credential runtime, and exact lease-bound repository authority
+adds the exact signed webhook, public/private source-delivery, bounded periodic
+schedule discovery, fenced Check Runs, scoped App-credential runtime, and exact lease-bound repository authority
 for an already-materialized Standard GitHub job. CredentialFree jobs receive
 no runtime authority, and there is no fallback/default installation route.
 The mandatory autonomous worker supervises asynchronous logical preparation,
@@ -382,8 +388,13 @@ the current browser session. The current CLI permission combinations are
 `secrets:metadata:read` plus `secrets:delete` for delete;
 `secret-providers:read` for provider status; and `secret-providers:read` plus
 `secret-providers:manage` for activation. The CLI has no replacement command
-and refuses create when the name already exists. Runner delivery and external
-providers remain unsupported, so jobs do not receive managed secret values.
+and refuses create when the name already exists. Exact-version built-in values
+are delivered only after a live lease and current policy/grant/approval check,
+over the direct mTLS runner listener. The runner keeps them in bounded,
+zeroizing execution-local custody, registers every value with output masking,
+and only then acknowledges delivery. The bearer and plaintext never enter
+`JobIR`, the command outbox, the runner journal/spool, or PostgreSQL plaintext
+columns. External and dynamically leased providers remain unsupported.
 
 The built-in path now fails closed at restart, periodic readiness, and every
 write boundary. Immutable authenticated canaries prove the loaded bytes for the

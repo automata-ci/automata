@@ -462,7 +462,6 @@ fn is_canonical_branch_name(branch: &str) -> bool {
     !branch.is_empty()
         && branch != "@"
         && !branch.starts_with(['-', '/', '.'])
-        && !branch.starts_with("refs/")
         && !branch.ends_with(['/', '.'])
         && !branch.contains("//")
         && !branch.contains("..")

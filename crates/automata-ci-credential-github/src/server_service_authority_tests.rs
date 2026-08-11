@@ -1351,6 +1351,7 @@ fn action_handoff_id(action: GithubServerServiceAction) -> GithubServerServiceHa
         GithubServerServiceAction::PublishCheckRun => 0x704,
         GithubServerServiceAction::FetchPrivateRepositoryRevision => 0x705,
         GithubServerServiceAction::FetchPrivateRepositoryChangedFiles => 0x706,
+        GithubServerServiceAction::DiscoverPrivateRepositorySchedules => 0x707,
     };
     handoff_id(value)
 }

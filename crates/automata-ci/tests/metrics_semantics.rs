@@ -81,7 +81,7 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         .filter_map(|line| line.split_once(' ').map(|(sample, _value)| sample))
         .filter(|sample| is_semantic_metric(sample.split('{').next().expect("sample name")))
         .count();
-    assert_eq!(semantic_series, 1_002);
+    assert_eq!(semantic_series, 1_118);
     let all_series = exposition
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -107,6 +107,10 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         "automata_ci_control_plane_runner_transport_requests_total{route=\"handshake\",stage=\"response\",outcome=\"success\"} 1",
         "automata_ci_control_plane_runner_transport_requests_in_flight{route=\"handshake\"} 0",
         "automata_ci_control_plane_runner_transport_bytes_total{route=\"handshake\",direction=\"request\"} 17",
+        "automata_ci_control_plane_runner_transport_requests_total{route=\"ephemeral_secrets\",stage=\"response\",outcome=\"success\"} 1",
+        "automata_ci_control_plane_runner_transport_requests_in_flight{route=\"ephemeral_secrets\"} 0",
+        "automata_ci_control_plane_runner_transport_bytes_total{route=\"ephemeral_secrets\",direction=\"request\"} 23",
+        "automata_ci_control_plane_runner_transport_requests_total{route=\"ephemeral_secrets\",stage=\"head\",outcome=\"method\"} 1",
     ] {
         assert!(exposition.contains(expected), "missing sample: {expected}");
     }
@@ -185,6 +189,29 @@ fn record_semantic_observations(metrics: &ControlPlaneMetrics) {
         Duration::from_millis(6),
     );
     RunnerTransportObserver::request_finished(metrics, RunnerTransportRoute::Handshake);
+    RunnerTransportObserver::request_started(metrics, RunnerTransportRoute::EphemeralSecrets);
+    RunnerTransportObserver::observe_bytes(
+        metrics,
+        RunnerTransportRoute::EphemeralSecrets,
+        RunnerTransportByteDirection::Request,
+        23,
+    );
+    RunnerTransportObserver::observe_request(
+        metrics,
+        RunnerTransportRequestObservation::Succeeded {
+            route: RunnerTransportRoute::EphemeralSecrets,
+        },
+        Duration::from_millis(3),
+    );
+    RunnerTransportObserver::request_finished(metrics, RunnerTransportRoute::EphemeralSecrets);
+    RunnerTransportObserver::observe_request(
+        metrics,
+        RunnerTransportRequestObservation::HeadRejected {
+            route: RunnerTransportRoute::EphemeralSecrets,
+            reason: automata_ci_runner_transport::RunnerTransportHeadRejection::Method,
+        },
+        Duration::from_millis(1),
+    );
 }
 
 fn series_keys(exposition: &str) -> BTreeSet<String> {

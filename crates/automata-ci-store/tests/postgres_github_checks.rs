@@ -95,6 +95,15 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
             .apply(MIGRATOR.table_name.as_ref(), migration)
             .await?;
     }
+    sqlx::query(
+        r"
+        ALTER TABLE github_check_subjects
+            ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'provider_delivery',
+            ADD COLUMN schedule_fire_id UUID
+        ",
+    )
+    .execute(database.pool())
+    .await?;
     apply_credential_rejection_migration(&mut connection).await?;
     // These focused 0029 lifecycle tests intentionally stop before the 0035
     // current-only cutover. Model only the later immutable selector projection
@@ -107,6 +116,23 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
             provider_delivery_id UUID NOT NULL,
             tenant_id TEXT NOT NULL,
             repository_id UUID NOT NULL,
+            checks_authority_id UUID NOT NULL,
+            checks_authority_identity_digest BYTEA NOT NULL,
+            checks_authority_app_configuration_revision BIGINT NOT NULL,
+            checks_authority_policy_revision BIGINT NOT NULL
+        )
+        ",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        CREATE TABLE github_schedule_check_evidence (
+            github_check_subject_id UUID PRIMARY KEY,
+            schedule_fire_id UUID NOT NULL,
+            tenant_id TEXT NOT NULL,
+            repository_id UUID NOT NULL,
+            provider_connection_id UUID NOT NULL,
             checks_authority_id UUID NOT NULL,
             checks_authority_identity_digest BYTEA NOT NULL,
             checks_authority_app_configuration_revision BIGINT NOT NULL,

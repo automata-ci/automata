@@ -1,10 +1,13 @@
 //! Automata execution-host runner.
 //!
 //! The crate diagnoses host capabilities and validates runner configuration.
-//! Linux execution uses the configured rootless-Podman isolation probe;
-//! trusted Windows execution uses native processes contained by a Job Object
-//! with explicit host-network and host-filesystem semantics. It then
-//! supervises fenced job execution through the selected provider.
+//! Before the production command opens a control-plane session, Linux execution
+//! either requires the configured rootless-Podman network probe and cleanup to
+//! succeed or constructs the authenticated Kubernetes adapter. Trusted Windows
+//! execution uses native processes contained by a Job Object with explicit
+//! host-network and host-filesystem semantics. Every path exercises configured
+//! environments through exact lifecycle admission before supervising fenced
+//! job execution.
 //! [`run`] is the `automata-runner` process entry point; diagnostic and product
 //! modules expose the same typed boundaries for embedding and tests.
 

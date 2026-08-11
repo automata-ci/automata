@@ -6,6 +6,7 @@ use serde::{
     Deserialize,
     de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::webhook::{
     AuthenticatedGithubWebhook, GithubPushRef, GithubPushRefKind, GithubPushRepository,
@@ -14,6 +15,9 @@ use crate::webhook::{
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
+const MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS: usize = 100;
+const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES: usize = 10;
+const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS: usize = 65_535;
 
 /// Repository identity retained by normalized non-push webhook evidence.
 ///
@@ -139,6 +143,8 @@ pub enum VerifiedGithubWebhook {
     PullRequest(VerifiedGithubPullRequest),
     /// A normalized merge-queue group event.
     MergeGroup(VerifiedGithubMergeGroup),
+    /// A normalized custom repository-dispatch event.
+    RepositoryDispatch(VerifiedGithubRepositoryDispatch),
 }
 
 impl VerifiedGithubWebhook {
@@ -149,6 +155,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.delivery_id(),
             Self::PullRequest(event) => event.delivery_id(),
             Self::MergeGroup(event) => event.delivery_id(),
+            Self::RepositoryDispatch(event) => event.delivery_id(),
         }
     }
 
@@ -159,6 +166,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.event_name(),
             Self::PullRequest(event) => event.event_name(),
             Self::MergeGroup(event) => event.event_name(),
+            Self::RepositoryDispatch(event) => event.event_name(),
         }
     }
 
@@ -169,6 +177,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.raw_body(),
             Self::PullRequest(event) => event.raw_body(),
             Self::MergeGroup(event) => event.raw_body(),
+            Self::RepositoryDispatch(event) => event.raw_body(),
         }
     }
 
@@ -179,6 +188,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.body_sha256(),
             Self::PullRequest(event) => event.body_sha256(),
             Self::MergeGroup(event) => event.body_sha256(),
+            Self::RepositoryDispatch(event) => event.body_sha256(),
         }
     }
 
@@ -189,6 +199,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.installation_id(),
             Self::PullRequest(event) => event.installation_id(),
             Self::MergeGroup(event) => event.installation_id(),
+            Self::RepositoryDispatch(event) => event.installation_id(),
         }
     }
 
@@ -199,6 +210,7 @@ impl VerifiedGithubWebhook {
             Self::Push(event) => event.repository(),
             Self::PullRequest(event) => event.repository(),
             Self::MergeGroup(event) => event.repository(),
+            Self::RepositoryDispatch(event) => event.repository(),
         }
     }
 }
@@ -209,7 +221,107 @@ impl fmt::Debug for VerifiedGithubWebhook {
             Self::Push(event) => formatter.debug_tuple("Push").field(event).finish(),
             Self::PullRequest(event) => formatter.debug_tuple("PullRequest").field(event).finish(),
             Self::MergeGroup(event) => formatter.debug_tuple("MergeGroup").field(event).finish(),
+            Self::RepositoryDispatch(event) => formatter
+                .debug_tuple("RepositoryDispatch")
+                .field(event)
+                .finish(),
         }
+    }
+}
+
+/// Authenticated and strictly normalized custom repository-dispatch evidence.
+///
+/// The exact client payload remains available through the authenticated raw
+/// body and this typed view, but is always redacted from `Debug` output.
+#[derive(Clone, Eq, PartialEq)]
+pub struct VerifiedGithubRepositoryDispatch {
+    authenticated: AuthenticatedGithubWebhook,
+    installation_id: NonZeroU64,
+    repository: GithubWebhookRepository,
+    event_type: Box<str>,
+    branch: Box<str>,
+    git_ref: Box<str>,
+    client_payload: Option<JsonMap<String, JsonValue>>,
+}
+
+impl VerifiedGithubRepositoryDispatch {
+    /// Returns the exact singleton delivery header outside the body MAC.
+    #[must_use]
+    pub fn delivery_id(&self) -> &str {
+        self.authenticated.delivery_id()
+    }
+
+    /// Returns the exact `repository_dispatch` event-name header.
+    #[must_use]
+    pub fn event_name(&self) -> &str {
+        self.authenticated.event_name()
+    }
+
+    /// Returns the exact HMAC-authenticated body without reserialization.
+    #[must_use]
+    pub const fn raw_body(&self) -> &Bytes {
+        self.authenticated.raw_body()
+    }
+
+    /// Returns SHA-256 of the exact authenticated body.
+    #[must_use]
+    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
+        self.authenticated.body_sha256()
+    }
+
+    /// Returns the nonzero GitHub App installation identifier.
+    #[must_use]
+    pub const fn installation_id(&self) -> NonZeroU64 {
+        self.installation_id
+    }
+
+    /// Returns the repository that received the custom dispatch.
+    #[must_use]
+    pub const fn repository(&self) -> &GithubWebhookRepository {
+        &self.repository
+    }
+
+    /// Returns the bounded custom event type used by `on.repository_dispatch.types`.
+    #[must_use]
+    pub fn event_type(&self) -> &str {
+        &self.event_type
+    }
+
+    /// Returns the validated unqualified default-branch name.
+    #[must_use]
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// Returns the full default-branch reference used by the workflow run.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+
+    /// Returns the bounded custom client payload, or `None` for JSON `null`.
+    #[must_use]
+    pub const fn client_payload(&self) -> Option<&JsonMap<String, JsonValue>> {
+        self.client_payload.as_ref()
+    }
+}
+
+impl fmt::Debug for VerifiedGithubRepositoryDispatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedGithubRepositoryDispatch")
+            .field("delivery_id", &"[redacted]")
+            .field("event_name", &self.authenticated.event_name())
+            .field("raw_body", &"[redacted]")
+            .field("body_len", &self.authenticated.raw_body().len())
+            .field("body_sha256", &self.authenticated.body_sha256())
+            .field("installation_id", &self.installation_id)
+            .field("repository", &self.repository)
+            .field("event_type", &"[redacted]")
+            .field("branch", &"[redacted]")
+            .field("git_ref", &"[redacted]")
+            .field("client_payload", &"[redacted]")
+            .finish()
     }
 }
 
@@ -502,6 +614,17 @@ struct MergeGroupObjectPayload {
 }
 
 #[derive(Deserialize)]
+struct RepositoryDispatchPayload {
+    action: String,
+    branch: String,
+    client_payload: JsonValue,
+    repository: RepositoryPayload,
+    installation: InstallationPayload,
+    #[serde(rename = "sender")]
+    _sender: IgnoredAny,
+}
+
+#[derive(Deserialize)]
 struct RepositoryPayload {
     id: u64,
     private: bool,
@@ -509,6 +632,8 @@ struct RepositoryPayload {
     name: String,
     full_name: String,
     owner: RepositoryOwnerPayload,
+    #[serde(default)]
+    default_branch: Option<String>,
 }
 
 impl RepositoryPayload {
@@ -522,6 +647,18 @@ impl RepositoryPayload {
             self.name,
             self.full_name,
         )
+    }
+
+    fn normalize_with_default_branch(
+        self,
+    ) -> Result<(GithubWebhookRepository, Box<str>), GithubWebhookError> {
+        let default_branch = self
+            .default_branch
+            .clone()
+            .ok_or(GithubWebhookError::InvalidPayload)
+            .and_then(normalize_branch_name)?;
+        self.normalize()
+            .map(|repository| (repository, default_branch))
     }
 }
 
@@ -612,6 +749,64 @@ pub(crate) fn normalize_merge_group(
         head_ref,
         base_ref,
     })
+}
+
+pub(crate) fn normalize_repository_dispatch(
+    authenticated: AuthenticatedGithubWebhook,
+) -> Result<VerifiedGithubRepositoryDispatch, GithubWebhookError> {
+    let payload: RepositoryDispatchPayload = serde_json::from_slice(authenticated.raw_body())
+        .map_err(|_| GithubWebhookError::MalformedPayload)?;
+    let event_type = normalize_repository_dispatch_event_type(payload.action)?;
+    let branch = normalize_branch_name(payload.branch)?;
+    let installation_id = durable_provider_id(payload.installation.id)?;
+    let (repository, default_branch) = payload.repository.normalize_with_default_branch()?;
+    if branch != default_branch {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    let client_payload = normalize_repository_dispatch_client_payload(payload.client_payload)?;
+    let git_ref = format!("refs/heads/{branch}").into_boxed_str();
+
+    Ok(VerifiedGithubRepositoryDispatch {
+        authenticated,
+        installation_id,
+        repository,
+        event_type,
+        branch,
+        git_ref,
+        client_payload,
+    })
+}
+
+fn normalize_repository_dispatch_event_type(
+    event_type: String,
+) -> Result<Box<str>, GithubWebhookError> {
+    let character_count = event_type.chars().count();
+    if character_count == 0
+        || character_count > MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS
+        || event_type.chars().any(char::is_control)
+    {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    Ok(event_type.into_boxed_str())
+}
+
+fn normalize_repository_dispatch_client_payload(
+    value: JsonValue,
+) -> Result<Option<JsonMap<String, JsonValue>>, GithubWebhookError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let JsonValue::Object(object) = value else {
+        return Err(GithubWebhookError::InvalidPayload);
+    };
+    if object.len() > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    let encoded = serde_json::to_string(&object).map_err(|_| GithubWebhookError::InvalidPayload)?;
+    if encoded.chars().count() > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    Ok(Some(object))
 }
 
 fn normalize_pull_request_action(

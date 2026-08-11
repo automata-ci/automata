@@ -106,6 +106,9 @@ struct FakeState {
     port_output: Option<CommandOutput>,
     fail_once: Option<Vec<String>>,
     cancel_once: Option<Vec<String>>,
+    buildkit_image_missing: bool,
+    buildkit_digest_override: Option<String>,
+    buildkit_probe_output: Option<CommandOutput>,
     exec_output: Option<CommandOutput>,
     copied_to: Option<Vec<u8>>,
     copy_from: Vec<u8>,
@@ -164,6 +167,21 @@ impl FakePodman {
                 .map(|component| (*component).to_owned())
                 .collect(),
         );
+    }
+
+    pub(crate) fn make_buildkit_image_missing(&self) {
+        self.state.lock().expect("fake lock").buildkit_image_missing = true;
+    }
+
+    pub(crate) fn override_buildkit_digest(&self, digest: &str) {
+        self.state
+            .lock()
+            .expect("fake lock")
+            .buildkit_digest_override = Some(digest.to_owned());
+    }
+
+    pub(crate) fn set_buildkit_probe_output(&self, output: CommandOutput) {
+        self.state.lock().expect("fake lock").buildkit_probe_output = Some(output);
     }
 
     pub(crate) fn replace_owner(&self, owner: &str) {
@@ -570,6 +588,17 @@ fn execute_fake(state: &mut FakeState, command: &[String], stdin: Option<&[u8]>)
             .clone()
             .unwrap_or_else(|| CommandOutput::success(b"executed\n".to_vec())),
         [action, ..] if action == "wait" => CommandOutput::success(b"137\n".to_vec()),
+        [action, arguments @ ..]
+            if action == "run"
+                && arguments
+                    .iter()
+                    .any(|value| value == "--entrypoint=buildkitd")
+                && arguments.last().is_some_and(|value| value == "--version") =>
+        {
+            state.buildkit_probe_output.clone().unwrap_or_else(|| {
+                CommandOutput::success(b"buildkitd github.com/moby/buildkit v0.0.0-test\n".to_vec())
+            })
+        }
         [action, source, destination] if action == "cp" => {
             execute_fake_copy(state, source, destination, stdin)
         }
@@ -586,7 +615,11 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
         [image, exists, reference]
             if image == "image" && exists == "exists" && reference.contains("@sha256:") =>
         {
-            Some(CommandOutput::success(Vec::new()))
+            Some(if state.buildkit_image_missing {
+                CommandOutput::failure(1, Vec::new())
+            } else {
+                CommandOutput::success(Vec::new())
+            })
         }
         [image, inspect, format, template, reference]
             if image == "image"
@@ -599,6 +632,23 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
             Some(CommandOutput::success(
                 format!("{digest}\n1\n").into_bytes(),
             ))
+        }
+        [image, inspect, format, template, reference]
+            if image == "image"
+                && inspect == "inspect"
+                && format == "--format"
+                && template == "{{.Digest}}"
+                && reference.contains("@sha256:") =>
+        {
+            let digest = reference
+                .rsplit_once('@')
+                .map(|(_, value)| value)
+                .unwrap_or_default();
+            let digest = state
+                .buildkit_digest_override
+                .as_deref()
+                .unwrap_or(digest);
+            Some(CommandOutput::success(format!("{digest}\n").into_bytes()))
         }
         [container, inspect, format, template, name]
             if container == "container"
@@ -1331,6 +1381,14 @@ pub(crate) fn options(root: &Path) -> PodmanOptions {
 
 pub(crate) fn options_with_service_proxy(root: &Path) -> PodmanOptions {
     options(root).with_service_proxy_image(synthetic_service_proxy_image())
+}
+
+pub(crate) fn synthetic_buildkit_image() -> ImmutableImage {
+    ImmutableImage::new(format!(
+        "registry.example.invalid/buildkit/runtime@sha256:{}",
+        "66".repeat(32)
+    ))
+    .expect("synthetic immutable BuildKit image")
 }
 
 fn synthetic_service_proxy_image() -> ImmutableImage {

@@ -124,6 +124,7 @@ pub struct SeedData {
     pub run_id: RunId,
     pub job_id: JobId,
     pub session_fence: RunnerSessionFence,
+    pub observed_at: UnixMillis,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -252,6 +253,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
             .fetch_one(pool)
             .await?;
+    let observed_at = UnixMillis::new(database_now);
     let session = PostgresStore::from_postgres_pool(pool.clone())
         .open_session(OpenRunnerSession::new(
             RunnerSessionId::new(),
@@ -260,7 +262,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
             RunnerProtocolVersion::new(4)?,
             JobIrVersion::current(),
             routing,
-            UnixMillis::new(database_now),
+            observed_at,
         ))
         .await?;
 
@@ -268,6 +270,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
         run_id: RunId::from_uuid(run_id),
         job_id,
         session_fence: session.fence(),
+        observed_at,
     })
 }
 

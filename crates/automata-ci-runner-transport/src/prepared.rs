@@ -6,8 +6,9 @@ use automata_ci_protocol::{
 };
 use bytes::Bytes;
 use thiserror::Error;
+use zeroize::{Zeroize as _, Zeroizing};
 
-use crate::{ControlRoute, SessionBinding};
+use crate::{ControlRoute, MAX_EPHEMERAL_REQUEST_BYTES, SessionBinding};
 
 /// Failure while preparing a deterministic outbound runner request.
 #[derive(Debug, Error)]
@@ -21,6 +22,60 @@ pub enum PrepareError {
     /// The request header does not match the explicitly negotiated session.
     #[error("runner request does not match the negotiated session")]
     SessionMismatch,
+}
+
+/// Invalid bounded payload for the private ephemeral-value route.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("ephemeral runner request is empty or exceeds its byte bound")]
+pub struct PrepareEphemeralError;
+
+/// Retry-stable application payload for the private mTLS value route.
+///
+/// The encoded operation identity and bearer remain in an application-owned
+/// zeroizing aggregate. This type is intentionally non-cloneable so retries
+/// cannot silently diverge from the caller's one prepared operation.
+pub struct PreparedEphemeralRequest {
+    body: Zeroizing<Vec<u8>>,
+}
+
+impl PreparedEphemeralRequest {
+    /// Takes ownership of one non-empty request within the route ceiling.
+    ///
+    /// The transport treats these bytes as opaque and may classify an ambiguous
+    /// loss as safe to retry with the exact same prepared value. Callers must
+    /// therefore validate their application envelope before construction: it
+    /// must carry a stable operation identity, and the server-side handler must
+    /// deduplicate identical replays by that identity before committing side
+    /// effects. Reusing identical bytes alone does not make an arbitrary
+    /// operation safe. A new operation must be represented by a newly prepared
+    /// value.
+    ///
+    /// # Errors
+    ///
+    /// Rejects and zeroizes empty or oversized input.
+    pub fn new(mut body: Vec<u8>) -> Result<Self, PrepareEphemeralError> {
+        if body.is_empty() || body.len() > MAX_EPHEMERAL_REQUEST_BYTES {
+            body.zeroize();
+            return Err(PrepareEphemeralError);
+        }
+        Ok(Self {
+            body: Zeroizing::new(body),
+        })
+    }
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl fmt::Debug for PreparedEphemeralRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedEphemeralRequest")
+            .field("body", &"[REDACTED]")
+            .field("byte_count", &self.body.len())
+            .finish()
+    }
 }
 
 /// Immutable request whose operation identity and canonical bytes survive retries.

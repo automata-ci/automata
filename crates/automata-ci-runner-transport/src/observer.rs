@@ -37,6 +37,8 @@ pub enum RunnerTransportRoute {
     Handshake,
     /// Post-negotiation runner synchronization.
     Sync,
+    /// Private ephemeral-value exchange on the same authenticated listener.
+    EphemeralSecrets,
 }
 
 /// Bounded connection-lifecycle events emitted by the server.

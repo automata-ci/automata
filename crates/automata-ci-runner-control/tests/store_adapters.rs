@@ -707,11 +707,11 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(request.command().operation_id(), server_operation_id);
         assert_eq!(
             request.command().kind().as_str(),
-            "automata.runner.lease-offer.v2"
+            "automata.runner.lease-offer.v3"
         );
         let body: serde_json::Value =
             serde_json::from_slice(request.command().payload().bytes()).expect("offer JSON");
-        assert_eq!(body["schema"], 2);
+        assert_eq!(body["schema"], 3);
         assert_eq!(body["protocol_version"], 1);
         assert_eq!(body["slot"], 2);
         assert_eq!(
@@ -719,6 +719,13 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
             serde_json::to_value(&lease).expect("lease JSON")
         );
         assert_eq!(body["job"], serde_json::to_value(&job).expect("job JSON"));
+        assert_eq!(
+            body["managed_secret_bindings"],
+            serde_json::to_value(automata_ci_protocol::ManagedSecretBindingOverlay::empty(
+                &lease
+            ))
+            .expect("managed-secret overlay JSON")
+        );
         assert_eq!(
             body["runtime_authorities"],
             serde_json::to_value(&runtime_authorities).expect("runtime authorities JSON")

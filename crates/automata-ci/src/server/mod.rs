@@ -12,6 +12,8 @@ mod github_webhook;
 pub(crate) mod human_auth;
 pub(crate) mod installation_setup;
 mod maintenance;
+#[allow(dead_code)] // Wired only when encrypted secret custody is operational.
+mod managed_secret_delivery;
 pub(crate) mod metrics;
 mod readiness;
 mod secret_cleanup;
@@ -32,7 +34,7 @@ use automata_ci_store::{
 };
 use automata_ci_workflow_service::{
     AutonomousWorkflowService, LogicalResultProjectionError, LogicalResultProjectionOutcome,
-    LogicalResultProjectionService, LogicalRunFinalizationService,
+    LogicalResultProjectionService, LogicalRunFinalizationService, ReusableWorkflowRuntimeService,
 };
 use axum::{
     extract::Request,
@@ -64,7 +66,7 @@ pub use github_provider_config::{
     GithubProviderAppConfig, GithubProviderAuthorityConfig, GithubProviderAuthorityId,
     GithubProviderConfig, GithubProviderConfigError, GithubProviderConnectionId,
     GithubProviderInternalRepositoryId, GithubProviderRepositoryConfig,
-    GithubProviderWebhookConfig, MAX_GITHUB_PROVIDER_CONFIG_BYTES,
+    GithubProviderScheduleConfig, GithubProviderWebhookConfig, MAX_GITHUB_PROVIDER_CONFIG_BYTES,
     MAX_GITHUB_PROVIDER_REPOSITORIES,
 };
 pub use github_provider_credentials::{
@@ -497,6 +499,7 @@ where
     );
     let autonomous_workflow = run_autonomous_workflow(
         components.autonomous_workflow,
+        components.reusable_workflow_runtime,
         autonomous_workflow_readiness,
         metrics.clone(),
         autonomous_workflow_cancellation,
@@ -525,11 +528,26 @@ where
 
 async fn run_autonomous_workflow(
     service: AutonomousWorkflowService,
+    reusable_workflow: ReusableWorkflowRuntimeService,
     readiness: Readiness,
     metrics: ControlPlaneMetrics,
     cancellation: CancellationToken,
 ) -> Result<(), ManagedServiceError> {
-    run_autonomous_workflow_with_readiness(service.run(cancellation), readiness, metrics).await
+    let reusable_cancellation = cancellation.child_token();
+    let workflow_cancellation = cancellation.child_token();
+    let combined = async move {
+        tokio::try_join!(
+            async move { service.run(workflow_cancellation).await.map_err(|_| ()) },
+            async move {
+                reusable_workflow
+                    .run(reusable_cancellation)
+                    .await
+                    .map_err(|_| ())
+            },
+        )
+        .map(|_| ())
+    };
+    run_autonomous_workflow_with_readiness(combined, readiness, metrics).await
 }
 
 async fn run_autonomous_workflow_with_readiness<F, E>(

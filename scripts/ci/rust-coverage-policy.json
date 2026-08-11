@@ -107,6 +107,13 @@
         "crates/automata-ci-results-github/tests/http_compatibility.rs"
       ]
     },
+    "exact_test_bundles": {
+      "podman": {
+        "crates/automata-ci-runner/src/podman_probe/mod.rs": [
+          "podman_probe::tests::configured_rootless_lifecycle_matches_both_production_network_policies"
+        ]
+      }
+    },
     "intentionally_unexecuted_sources": [
       "crates/automata-ci-runner/src/product/metrics.rs",
       "crates/automata-ci/tests/metrics_schema.rs"

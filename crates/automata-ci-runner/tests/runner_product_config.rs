@@ -42,6 +42,11 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
         IMAGE
     );
     assert_eq!(
+        config.inventory().max_parallel_jobs(),
+        3,
+        "the one dogfood runner identity must advertise exactly three host slots"
+    );
+    assert_eq!(
         environment_value(environment, "CARGO_HOME"),
         Some("/opt/cargo")
     );
@@ -672,7 +677,7 @@ fn podman_state_is_the_exact_dedicated_runtime_state_child() {
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     let parsed = parse_value(&value).expect("exact one-mount Podman layout");
     assert_eq!(
-        parsed.state().provider(),
+        parsed.state().podman().expect("Podman state"),
         std::path::Path::new("/run/automata-runner/automata-ci-podman/state")
     );
 
@@ -972,6 +977,92 @@ fn temporary_hierarchies_and_noncanonical_environment_names_are_rejected() {
 fn parse_value(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProductConfigError> {
     let bytes = serde_json::to_vec(value).expect("serialize modified config");
     RunnerProductConfig::from_json(&bytes)
+}
+
+#[test]
+fn kubernetes_provider_configuration_is_exact_and_mutually_exclusive() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    let podman = value["podman"].clone();
+    value
+        .as_object_mut()
+        .expect("configuration object")
+        .remove("podman");
+    value["state"]
+        .as_object_mut()
+        .expect("state object")
+        .remove("podman");
+    value["executor"]["network"] = serde_json::json!("disabled");
+    value["executor"]["privilege"] = serde_json::json!("unprivileged");
+    value["executor"]["resources"]["ephemeral_disk_bytes"] = serde_json::json!(2_147_483_648_u64);
+    value["executor"]["resources"]["gpu_count"] = serde_json::json!(1);
+    value["inventory"]["resources_per_job"]["ephemeral_disk_bytes"] =
+        serde_json::json!(2_147_483_648_u64);
+    value["inventory"]["resources_per_job"]["gpu_count"] = serde_json::json!(1);
+    value["kubernetes"] = serde_json::json!({
+        "namespace": "automata-runners",
+        "guest_image": format!(
+            "registry.example/automata/guest@sha256:{}",
+            "ab".repeat(32)
+        ),
+        "network_isolation_verified": true,
+        "ephemeral_storage_enforcement_verified": true,
+        "process_limit_enforcement": 4096,
+        "gpu_resource_name": "nvidia.com/gpu",
+        "node_selector": {"automata.dev/pool": "jobs"},
+        "runtime_class_name": "kata"
+    });
+
+    let configured = parse_value(&value).expect("Kubernetes configuration");
+    assert!(configured.podman().is_none());
+    assert!(configured.state().podman().is_none());
+    let kubernetes = configured.kubernetes().expect("Kubernetes config");
+    assert_eq!(kubernetes.adapter().namespace(), "automata-runners");
+    assert_eq!(kubernetes.adapter().process_limit(), Some(4096));
+    assert!(kubernetes.adapter().ephemeral_storage_enforced());
+    assert_eq!(
+        kubernetes.adapter().gpu_resource_name(),
+        Some("nvidia.com/gpu")
+    );
+    assert_eq!(kubernetes.adapter().runtime_class_name(), Some("kata"));
+    assert_eq!(
+        configured
+            .inventory()
+            .resources_per_job()
+            .ephemeral_disk_bytes(),
+        2_147_483_648
+    );
+    assert_eq!(configured.inventory().resources_per_job().gpu_count(), 1);
+
+    let mut unverified_storage = value.clone();
+    unverified_storage["kubernetes"]["ephemeral_storage_enforcement_verified"] =
+        serde_json::json!(false);
+    assert_eq!(
+        parse_value(&unverified_storage).expect_err("storage evidence is required"),
+        RunnerProductConfigError::InvalidKubernetes
+    );
+
+    let mut ambiguous = value;
+    ambiguous["podman"] = podman;
+    assert_eq!(
+        parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
+        RunnerProductConfigError::InvalidSandboxProvider
+    );
+}
+
+#[test]
+fn only_the_current_product_schema_is_accepted() {
+    let current: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    assert!(parse_value(&current).is_ok());
+    for unsupported in [0, 1, u16::MAX] {
+        let mut document = current.clone();
+        document["schema_version"] = serde_json::json!(unsupported);
+        assert_eq!(
+            parse_value(&document).expect_err("noncurrent schema must fail closed"),
+            RunnerProductConfigError::UnsupportedSchema
+        );
+    }
 }
 
 fn environment_value<'a>(

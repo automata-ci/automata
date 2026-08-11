@@ -11,6 +11,7 @@ use crate::{
     github_dispatch::{
         AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, GithubWorkflowDispatchEvidenceV1,
     },
+    github_schedule::{AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, GithubScheduleEvidenceV1},
 };
 
 /// GitHub adapter that re-parses and recompiles exact admitted source.
@@ -60,9 +61,23 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
                 admission.plan().event().clone(),
                 evidence.metadata(),
             )
+        } else if admission.plan().event().name() == "schedule" {
+            if admission.event_media_type() != AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE {
+                return Err(WorkflowPlanVerificationError::ScheduleEvidenceMismatch);
+            }
+            let evidence = GithubScheduleEvidenceV1::decode(admission.event())
+                .map_err(|_| WorkflowPlanVerificationError::ScheduleEvidenceMismatch)?;
+            CompileWorkflowRequest::for_preselected_event_with_metadata_v1(
+                parsed_plan,
+                admission.plan().event().clone(),
+                automata_ci_workflow_github::GithubEventMetadataV1::schedule(evidence.cron()),
+            )
         } else {
             if admission.event_media_type() == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE {
                 return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
+            }
+            if admission.event_media_type() == AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE {
+                return Err(WorkflowPlanVerificationError::ScheduleEvidenceMismatch);
             }
             CompileWorkflowRequest::for_preselected_event(
                 parsed_plan,

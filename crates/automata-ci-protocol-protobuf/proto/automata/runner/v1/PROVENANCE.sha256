@@ -1,9 +1,9 @@
 # Update only after reviewing the schema and regenerated DTO diff.
 package=automata.runner.v1
 schema=proto/automata/runner/v1/runner.proto
-schema_sha256=9d70c2bea9eedfd83ac0039676b42d917ce54f45c6ea7d5548bd49d1afba9c51
+schema_sha256=f1bfef950727c972ca6a9777ece915c2a029d9ed8f907c9cd5e62455e8477780
 generated=src/generated/automata.runner.v1.rs
-generated_sha256=f691485de510e1ab6ef165d8472b17fe5d83d6b2d517718c2d1eedb633017318
+generated_sha256=961a5efcec2c1668846852584e3df5ce987f46ee9e17669e75405f26e66f8b3f
 generator_manifest=tools/codegen.Cargo.toml
 generator_manifest_sha256=5a35efa09a803cbfbd782d2e9df28736b907976e60bcce1d0032598fb7dd1167
 generator_source=tools/codegen.rs

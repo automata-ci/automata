@@ -26,15 +26,18 @@ use automata_ci_github_delivery::{
     GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
+    GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
+    GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
     GithubServerServiceCredentialRelease,
 };
 use automata_ci_store::{
-    AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubServerServiceAction,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
-    GithubServerServiceAuthorityState, GithubServerServiceConsumerClaim,
-    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey, GithubServerServiceScope,
-    GithubServerServiceStoreError, ProviderDeliveryIdentity, ProviderRepositoryOwnerId,
+    AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubProviderManifest,
+    GithubServerServiceAction, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceConsumerClaim, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    GithubServerServiceScope, GithubServerServiceStoreError, ProviderDeliveryIdentity,
+    ProviderRepositoryOwnerId,
 };
 use thiserror::Error;
 use tokio::{
@@ -979,6 +982,62 @@ impl GithubProviderCredentialAdapters {
             Err(_) => Err(GithubDeliverySourceCredentialProviderError::InvariantViolation),
         }
     }
+
+    async fn acquire_private_schedule_source(
+        &self,
+        request: GithubScheduleSourceCredentialRequest<'_>,
+    ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
+        let authority = self
+            .authority(
+                request.authority_selector(),
+                GithubServerServiceScope::PrivateRepositorySourceRead,
+            )
+            .await
+            .map_err(schedule_source_handoff_error)?;
+        if !private_schedule_identity_matches(&authority, request.manifest()) {
+            return Err(GithubScheduleSourceCredentialProviderError::Rejected);
+        }
+        let consumer = request
+            .consumer_claim()
+            .map_err(|_| GithubScheduleSourceCredentialProviderError::InvariantViolation)?;
+        let handoff_request = acquire_request(
+            request.authority_selector().clone(),
+            consumer,
+            request.observed_at(),
+            request.required_through(),
+        )
+        .map_err(schedule_source_handoff_error)?;
+        let handoff = self
+            .handoffs
+            .acquire(handoff_request)
+            .await
+            .map_err(schedule_source_handoff_error)?;
+        if !private_schedule_handoff_matches(&handoff, &request, consumer) {
+            release_invalid_handoff(handoff).await;
+            return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
+        }
+        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
+            release_invalid_handoff(handoff).await;
+            return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
+        };
+        let repository = canonical_request.repository().repository().clone();
+        let drop_release_arm = handoff.drop_release_arm.clone();
+        let credential = GithubScheduleSourceCredential::new(
+            &request,
+            repository,
+            handoff.selector,
+            handoff.consumer,
+            handoff.token,
+            handoff.release,
+        );
+        match credential {
+            Ok(credential) => {
+                arm_drop_release(drop_release_arm);
+                Ok(credential)
+            }
+            Err(_) => Err(GithubScheduleSourceCredentialProviderError::InvariantViolation),
+        }
+    }
 }
 
 fn map_authority_resolution_store_error(
@@ -1068,6 +1127,16 @@ impl GithubDeliverySourceCredentialProvider for GithubProviderCredentialAdapters
     }
 }
 
+#[async_trait]
+impl GithubScheduleSourceCredentialProvider for GithubProviderCredentialAdapters {
+    async fn acquire(
+        &self,
+        request: GithubScheduleSourceCredentialRequest<'_>,
+    ) -> Result<GithubScheduleSourceCredential, GithubScheduleSourceCredentialProviderError> {
+        self.acquire_private_schedule_source(request).await
+    }
+}
+
 struct ChecksCredentialContext {
     identity: GithubCheckSubjectIdentity,
     selector: GithubServerServiceAuthoritySelector,
@@ -1131,6 +1200,25 @@ fn private_identity_matches(
         && authority.github_repository_name().as_str() == identity.repository_identity()
 }
 
+fn private_schedule_identity_matches(
+    authority: &GithubServerServiceAuthorityIdentity,
+    manifest: &GithubProviderManifest,
+) -> bool {
+    manifest.repository_visibility() == automata_ci_store::ProviderRepositoryVisibility::Private
+        && authority.tenant() == manifest.tenant()
+        && authority.repository_id() == manifest.repository_id()
+        && authority.connection_id() == manifest.connection_id()
+        && authority.installation_id() == manifest.installation_id()
+        && authority.github_app_id() == manifest.github_app_id()
+        && authority.github_repository_id() == manifest.github_repository_id()
+        && authority.github_repository_name() == manifest.github_repository_name()
+        && authority.app_client_id() == manifest.app_client_id()
+        && authority.jwt_issuer() == manifest.jwt_issuer()
+        && authority.app_key_spki_sha256() == manifest.app_key_spki_sha256()
+        && authority.app_configuration_revision() == manifest.app_configuration_revision()
+        && authority.policy_revision() == manifest.policy_revision()
+}
+
 fn handoff_matches(
     handoff: &GithubProviderCredentialHandoff,
     context: &ChecksCredentialContext,
@@ -1153,6 +1241,19 @@ fn private_handoff_matches(
         && handoff.required_through == context.required_through
         && handoff.acquired_at == context.observed_at
         && handoff.usable_until >= context.required_through
+}
+
+fn private_schedule_handoff_matches(
+    handoff: &GithubProviderCredentialHandoff,
+    request: &GithubScheduleSourceCredentialRequest<'_>,
+    consumer: GithubServerServiceConsumerClaim,
+) -> bool {
+    handoff.selector == *request.authority_selector()
+        && handoff.consumer == consumer
+        && handoff.key.authority_id() == request.authority_selector().authority_id()
+        && handoff.required_through == request.required_through()
+        && handoff.acquired_at == request.observed_at()
+        && handoff.usable_until >= request.required_through()
 }
 
 async fn release_invalid_handoff(handoff: GithubProviderCredentialHandoff) {
@@ -1207,6 +1308,22 @@ const fn source_handoff_error(
         }
         GithubProviderCredentialHandoffError::Inconsistent => {
             GithubDeliverySourceCredentialProviderError::InvariantViolation
+        }
+    }
+}
+
+const fn schedule_source_handoff_error(
+    error: GithubProviderCredentialHandoffError,
+) -> GithubScheduleSourceCredentialProviderError {
+    match error {
+        GithubProviderCredentialHandoffError::Unavailable => {
+            GithubScheduleSourceCredentialProviderError::Unavailable
+        }
+        GithubProviderCredentialHandoffError::Rejected => {
+            GithubScheduleSourceCredentialProviderError::Rejected
+        }
+        GithubProviderCredentialHandoffError::Inconsistent => {
+            GithubScheduleSourceCredentialProviderError::InvariantViolation
         }
     }
 }

@@ -2,7 +2,9 @@ mod support;
 
 use std::{env, sync::Arc, time::Duration};
 
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
+use automata_ci_blob_s3::{
+    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
+};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, UnixMillis};
 use automata_ci_results_github::{
     CacheAccessScope, CacheAuthority, CacheLimits, CachePermission, CacheRepository, CacheService,
@@ -18,11 +20,11 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug)]
-struct FixedClock;
+struct FixedClock(u64);
 
 impl ResultsClock for FixedClock {
     fn now_seconds(&self) -> u64 {
-        1_000
+        self.0
     }
 }
 
@@ -40,7 +42,7 @@ impl ResultsIdGenerator for FixedIds {
 async fn finalized_cache_blocks_are_verified_and_ranged_from_rustfs() -> TestResult {
     let endpoint = env::var("AUTOMATA_TEST_S3_ENDPOINT")?;
     run_with_database(|database| async move {
-        let execution = active_attempt(&database).await?;
+        let (execution, now_seconds) = active_attempt(&database).await?;
         let cache = CacheAuthority::new(
             "automata/results-test",
             vec![CacheAccessScope::new(
@@ -58,7 +60,10 @@ async fn finalized_cache_blocks_are_verified_and_ranged_from_rustfs() -> TestRes
             bucket,
             Some(format!("cache-contract/{}", Uuid::new_v4().simple())),
             Duration::from_secs(20),
-        )?;
+        )?
+        .with_at_rest_encryption(S3AtRestEncryption::aws_kms(env::var(
+            "AUTOMATA_TEST_S3_KMS_KEY_ID",
+        )?)?);
         let objects = Arc::new(S3BlobStore::new(
             config.client(StaticS3Credentials::new(access_key, secret_key, None)?),
             &config,
@@ -69,7 +74,7 @@ async fn finalized_cache_blocks_are_verified_and_ranged_from_rustfs() -> TestRes
         let service = CacheService::new(
             repository,
             objects,
-            Arc::new(FixedClock),
+            Arc::new(FixedClock(now_seconds)),
             Arc::new(FixedIds(upload_id)),
             CacheLimits::default(),
         );
@@ -120,7 +125,7 @@ async fn finalized_cache_blocks_are_verified_and_ranged_from_rustfs() -> TestRes
     .await
 }
 
-async fn active_attempt(database: &TestDatabase) -> TestResult<ExecutionAuthority> {
+async fn active_attempt(database: &TestDatabase) -> TestResult<(ExecutionAuthority, u64)> {
     let seed = seed_control_plane(database.pool()).await?;
     let attempt_id = AttemptId::new();
     database
@@ -129,7 +134,7 @@ async fn active_attempt(database: &TestDatabase) -> TestResult<ExecutionAuthorit
             attempt_id,
             seed.job_id,
             AttemptNumber::new(1)?,
-            UnixMillis::new(3),
+            seed.observed_at,
         ))
         .await?;
     let lease = database
@@ -140,16 +145,15 @@ async fn active_attempt(database: &TestDatabase) -> TestResult<ExecutionAuthorit
                 LeaseId::new(),
                 seed.session_fence,
                 StableRunnerSlot::new(1)?,
-                UnixMillis::new(4),
-                UnixMillis::new(100),
+                seed.observed_at,
+                UnixMillis::new(seed.observed_at.get() + 60_000),
             )
             .expect("valid lease request"),
         )
         .await?;
-    Ok(ExecutionAuthority::new(
-        seed.run_id,
-        seed.job_id,
-        attempt_id,
-        lease.fencing_token(),
+    let now_seconds = u64::try_from(seed.observed_at.get())? / 1_000;
+    Ok((
+        ExecutionAuthority::new(seed.run_id, seed.job_id, attempt_id, lease.fencing_token()),
+        now_seconds,
     ))
 }

@@ -23,17 +23,18 @@ use automata_ci_key_management::{
     LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
 use automata_ci_store::{
-    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
-    AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation,
-    BuiltinRepositorySecretVersion, ClaimNextLogicalInstanceMaterialization,
-    ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization,
-    ClaimedLogicalJobActivation, CommitLogicalInstanceMaterialization,
-    ConfirmRepositorySecretVersionMutation, ConfirmRepositorySecretVersionMutationOutcome,
-    ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
-    ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
-    GithubCheckHeadSha, GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AcknowledgeManagedSecretDelivery,
+    ActivatedLogicalInstanceDescriptor, AdmissionObject, AdmissionRepository,
+    AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim,
+    BindLogicalActivationPreparation, BuiltinRepositorySecretVersion,
+    ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
+    ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization, ClaimedLogicalJobActivation,
+    CommitLogicalInstanceMaterialization, ConfirmRepositorySecretVersionMutation,
+    ConfirmRepositorySecretVersionMutationOutcome, ConsumeSelectedLogicalInstanceMaterialization,
+    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
+    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -46,7 +47,8 @@ use automata_ci_store::{
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
     ManagedSecretAuthorityRepository as _, ManagedSecretAuthorityStoreError, ManagedSecretBinding,
-    ManagedSecretBindingSet, ObjectKey, OpenRunnerSession, PostgresSecretCustodyRepository,
+    ManagedSecretBindingSet, ManagedSecretDeliveryMachine, ManagedSecretDeliveryOperationId,
+    ManagedSecretDeliveryProposal, ObjectKey, OpenRunnerSession, PostgresSecretCustodyRepository,
     PostgresSecretManagementRepository, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
@@ -117,6 +119,7 @@ struct ExecutionFixture {
     job_id: JobId,
     lease: Lease,
     session: RunnerSessionFence,
+    machine: ManagedSecretDeliveryMachine,
     runtime_context: JobRuntimeContext,
     runtime_context_digest: Sha256Digest,
     bindings: Vec<BindingIdentity>,
@@ -151,6 +154,34 @@ impl ExecutionFixture {
     fn exact_bindings(&self) -> ManagedSecretBindingSet {
         ManagedSecretBindingSet::from_runtime_context(&self.runtime_context)
             .expect("fixture runtime context has exact bindings")
+    }
+
+    fn delivery_request(
+        &self,
+        observed_at: i64,
+        operation_id: Uuid,
+        verifier: Sha256Digest,
+    ) -> Result<ResolveManagedSecretAuthority, automata_ci_store::ManagedSecretAuthorityValueError>
+    {
+        Ok(self
+            .request(self.exact_bindings(), observed_at)?
+            .with_delivery(ManagedSecretDeliveryProposal::new(
+                ManagedSecretDeliveryOperationId::from_uuid(operation_id)?,
+                "delivery-test-key",
+                verifier,
+            )?))
+    }
+
+    fn authenticated_delivery_request(
+        &self,
+        observed_at: i64,
+        operation_id: Uuid,
+        verifier: Sha256Digest,
+    ) -> Result<ResolveManagedSecretAuthority, automata_ci_store::ManagedSecretAuthorityValueError>
+    {
+        Ok(self
+            .delivery_request(observed_at, operation_id, verifier)?
+            .with_authenticated_machine(self.machine.clone()))
     }
 }
 
@@ -526,9 +557,13 @@ async fn select_materialization(
 }
 
 async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
+    pool_now_ms(database.pool()).await
+}
+
+async fn pool_now_ms(pool: &PgPool) -> TestResult<i64> {
     Ok(
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
-            .fetch_one(database.pool())
+            .fetch_one(pool)
             .await?,
     )
 }
@@ -740,13 +775,16 @@ async fn seed_current_execution(
         runner_id,
         RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
     );
+    let external_identity = format!("secret-runner-identity-{}", runner_id.as_uuid().simple());
+    let certificate_sha256 =
+        Sha256Digest::from_bytes(Sha256::digest(runner_id.as_uuid().as_bytes()).into());
     sqlx::query(
         r"
         INSERT INTO runners (
             id, tenant_id, name, normalized_name, capabilities, slots, status,
-            desired_state, created_at_ms, updated_at_ms
+            desired_state, external_identity, created_at_ms, updated_at_ms
         ) VALUES (
-            $1, $2, $3, $3, $4::jsonb, 1, 'online', 'active', 1, 1
+            $1, $2, $3, $3, $4::jsonb, 1, 'online', 'active', $5, 1, 1
         )
         ",
     )
@@ -754,6 +792,7 @@ async fn seed_current_execution(
     .bind(&fixture.tenant)
     .bind(format!("secret-runner-{}", runner_id.as_uuid().simple()))
     .bind(serde_json::to_value(&capabilities)?)
+    .bind(&external_identity)
     .execute(database.pool())
     .await?;
     let session = database
@@ -772,6 +811,18 @@ async fn seed_current_execution(
     let fence = FencingToken::new(7)?;
     let lease_issued_at = database_now_ms(database).await?;
     let lease_expires_at = lease_issued_at + 335_000;
+    sqlx::query(
+        r"
+        INSERT INTO runner_machine_certificates (
+            leaf_sha256, runner_id, expires_at_seconds, revoked_at_seconds
+        ) VALUES ($1, $2, $3, NULL)
+        ",
+    )
+    .bind(certificate_sha256.as_bytes().as_slice())
+    .bind(runner_id.as_uuid())
+    .bind(lease_expires_at / 1_000 + 600)
+    .execute(database.pool())
+    .await?;
     let changed = sqlx::query(
         r"
         UPDATE job_attempts
@@ -813,6 +864,7 @@ async fn seed_current_execution(
             UnixMillis::new(lease_expires_at),
         )?,
         session: session.fence(),
+        machine: ManagedSecretDeliveryMachine::new(external_identity, certificate_sha256)?,
         runtime_context: prepared.runtime_context,
         runtime_context_digest,
         bindings: fixture.bindings,
@@ -869,7 +921,12 @@ async fn seed_secret_actor(
     .bind(principal_id)
     .execute(pool)
     .await?;
-    for permission in ["secrets:create", "secrets:update"] {
+    for permission in [
+        "secrets:create",
+        "secrets:update",
+        "environments:approve",
+        "environments:manage",
+    ] {
         sqlx::query(
             r"
             INSERT INTO rbac_role_permissions (
@@ -1120,6 +1177,7 @@ async fn stage_encrypted_builtin_version(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn seed_environment(
     pool: &PgPool,
     execution: &ExecutionFixture,
@@ -1155,6 +1213,31 @@ async fn seed_environment(
     if !protected {
         return Ok((environment_id, None));
     }
+    let approval_now = pool_now_ms(pool).await?;
+    let current_authorization_revision: i64 = sqlx::query_scalar(
+        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id = $1 AND principal_id = $2",
+    )
+    .bind(&execution.tenant)
+    .bind(actor.principal_id)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO repository_environment_reviewers (
+            tenant_id, repository_id, environment_id, environment_revision,
+            principal_id, principal_authorization_revision,
+            granted_by_principal_id, grantor_authorization_revision, granted_at_ms
+        ) VALUES ($1, $2, $3, 1, $4, $5, $4, $5, $6)
+        ",
+    )
+    .bind(&execution.tenant)
+    .bind(execution.repository_id.as_uuid())
+    .bind(environment_id)
+    .bind(actor.principal_id)
+    .bind(current_authorization_revision)
+    .bind(approval_now)
+    .execute(pool)
+    .await?;
     let approval_id = Uuid::new_v4();
     sqlx::query(
         r"
@@ -1165,7 +1248,7 @@ async fn seed_environment(
             resolved_at_ms, resolution_reason, revision
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, 1, FALSE, $8,
-            'approved', $9, $10, $11, 'administrative_approval', 1
+            'pending', $9, $10, NULL, NULL, 1
         )
         ",
     )
@@ -1177,9 +1260,34 @@ async fn seed_environment(
     .bind(execution.lease.attempt_id().as_uuid())
     .bind(approval_id)
     .bind(actor.principal_id)
-    .bind(execution.time(120_100))
+    .bind(approval_now - 1)
     .bind(execution.time(300_000))
-    .bind(execution.time(120_200))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO protected_environment_approval_decisions (
+            tenant_id, request_id, principal_id, decision, reason, decided_at_ms
+        ) VALUES ($1, $2, $3, 'approve', 'policy_reviewed', $4)
+        ",
+    )
+    .bind(&execution.tenant)
+    .bind(approval_id)
+    .bind(actor.principal_id)
+    .bind(approval_now)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE protected_environment_approval_requests
+        SET status = 'approved', resolved_at_ms = $3,
+            resolution_reason = 'approval_threshold_met', revision = 2
+        WHERE tenant_id = $1 AND id = $2
+        ",
+    )
+    .bind(&execution.tenant)
+    .bind(approval_id)
+    .bind(approval_now)
     .execute(pool)
     .await?;
     Ok((environment_id, Some(approval_id)))
@@ -1215,6 +1323,14 @@ async fn insert_workload_grant_in_transaction(
     approval_id: Option<Uuid>,
     digest_byte: u8,
 ) -> TestResult {
+    let issued_at: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
+            .fetch_one(&mut **transaction)
+            .await?;
+    let mut authority_digest = Sha256::new();
+    authority_digest.update(binding.grant_id.as_bytes());
+    authority_digest.update([digest_byte]);
+    let authority_digest = authority_digest.finalize();
     sqlx::query(
         r"
         INSERT INTO secret_workload_grants (
@@ -1241,9 +1357,9 @@ async fn insert_workload_grant_in_transaction(
     .bind(binding.version_id)
     .bind(environment_id)
     .bind(approval_id)
-    .bind(vec![digest_byte; 32])
+    .bind(authority_digest.as_slice())
     .bind(format!("authority-test-key-{digest_byte}"))
-    .bind(execution.time(120_500))
+    .bind(issued_at)
     .bind(execution.time(300_500))
     .execute(&mut **transaction)
     .await?;
@@ -1360,20 +1476,13 @@ async fn current_repository_binding_remains_closed_and_rejects_tamper() -> TestR
         .bind(&execution.tenant)
         .bind(binding.grant_id)
         .execute(database.pool())
-        .await?;
-        assert_eq!(reactivated.rows_affected(), 1, "migration 0012 permits terminal ABA");
-        assert_eq!(
-            database
-                .store()
-                .resolve_managed_secret_authority(
-                    execution.request(execution.exact_bindings(), 121_100)?,
-                )
-                .await,
-            Err(ManagedSecretAuthorityStoreError::Unauthorized),
-            "an apparently active row remains non-issuable because terminal history is not provable",
+        .await;
+        assert_constraint(
+            reactivated.expect_err("terminal grants must not reactivate"),
+            "secret_workload_grants_terminal_monotonic",
         );
 
-        sqlx::query(
+        let newer_attempt = sqlx::query(
             r"
             INSERT INTO job_attempts (
                 id, job_id, attempt_number, lifecycle, fencing_token,
@@ -1393,16 +1502,341 @@ async fn current_repository_binding_remains_closed_and_rejects_tamper() -> TestR
         .bind(execution.lease.attempt_id().as_uuid())
         .bind(execution.time(121_200))
         .execute(database.pool())
+        .await;
+        assert_constraint(
+            newer_attempt.expect_err("a job may have only one current attempt"),
+            "job_attempts_one_current_per_job",
+        );
+        Ok(())
+    })
+    .await
+}
+
+fn assert_constraint(error: sqlx::Error, expected: &str) {
+    let sqlx::Error::Database(error) = error else {
+        panic!("expected database constraint failure");
+    };
+    assert_eq!(error.constraint(), Some(expected));
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn exact_delivery_operation_is_reserved_and_replayed_without_values() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let execution = seed_current_execution(&database, vec![binding]).await?;
+        seed_authority_state(&database, &execution, false, true).await?;
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xd1);
+        let first = database
+            .store()
+            .resolve_managed_secret_authority(execution.delivery_request(
+                121_000,
+                operation_id,
+                verifier,
+            )?)
+            .await?;
+        assert_eq!(first.operation_id().as_uuid(), operation_id);
+        assert_eq!(first.bindings().len(), 1);
+        assert_eq!(
+            first.bindings()[0].version_id().as_uuid(),
+            binding.version_id
+        );
+
+        let replay_request = execution.authenticated_delivery_request(
+            121_100,
+            operation_id,
+            verifier,
+        )?;
+        let replay = database
+            .store()
+            .resolve_managed_secret_authority(replay_request.clone())
+            .await?;
+        assert_eq!(replay.operation_id(), first.operation_id());
+        assert_eq!(replay.evidence_digest(), first.evidence_digest());
+
+        assert_eq!(
+            database
+                .store()
+                .resolve_managed_secret_authority(execution.delivery_request(
+                    121_100,
+                    operation_id,
+                    digest(0xd2),
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "an existing operation cannot be replayed with another bearer verifier",
+        );
+        assert_eq!(
+            database
+                .store()
+                .resolve_managed_secret_authority(execution.delivery_request(
+                    121_100,
+                    Uuid::new_v4(),
+                    digest(0xd3),
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "one exact workload cannot reserve a second delivery operation",
+        );
+
+        let acknowledgement = database
+            .store()
+            .acknowledge_managed_secret_delivery(AcknowledgeManagedSecretDelivery::new(
+                replay_request,
+            )?)
+            .await?;
+        assert_eq!(acknowledgement.operation_id().as_uuid(), operation_id);
+        let retry_acknowledgement = database
+            .store()
+            .acknowledge_managed_secret_delivery(AcknowledgeManagedSecretDelivery::new(
+                execution.authenticated_delivery_request(121_200, operation_id, verifier)?,
+            )?)
+            .await?;
+        assert_eq!(retry_acknowledgement, acknowledgement);
+        assert_eq!(
+            database
+                .store()
+                .resolve_managed_secret_authority(execution.authenticated_delivery_request(
+                    121_300,
+                    operation_id,
+                    verifier,
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "acknowledged values cannot be resolved again",
+        );
+
+        let expiring_binding = BindingIdentity::fresh();
+        let expiring = seed_current_execution(&database, vec![expiring_binding]).await?;
+        seed_authority_state(&database, &expiring, false, true).await?;
+        let expiring_operation = Uuid::new_v4();
+        let expiring_verifier = digest(0xd4);
+        database
+            .store()
+            .resolve_managed_secret_authority(expiring.delivery_request(
+                121_000,
+                expiring_operation,
+                expiring_verifier,
+            )?)
+            .await?;
+        assert_eq!(
+            database
+                .store()
+                .acknowledge_managed_secret_delivery(AcknowledgeManagedSecretDelivery::new(
+                    expiring.authenticated_delivery_request(
+                        301_000,
+                        expiring_operation,
+                        expiring_verifier,
+                    )?,
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "a response cannot be acknowledged after its exact authority deadline",
+        );
+        let expired_state: String = sqlx::query_scalar(
+            "SELECT state FROM managed_secret_delivery_operations WHERE tenant_id = $1 AND operation_id = $2",
+        )
+        .bind(&expiring.tenant)
+        .bind(expiring_operation)
+        .fetch_one(database.pool())
         .await?;
+        assert_eq!(expired_state, "expired");
+
+        let stored_plaintext_columns: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'managed_secret_delivery_operations'
+              AND column_name IN ('value', 'plaintext', 'credential', 'bearer')
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(stored_plaintext_columns, 0);
+        let restricted_parent_links: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)
+            FROM information_schema.referential_constraints
+            WHERE constraint_schema = current_schema()
+              AND constraint_name IN (
+                  'managed_secret_delivery_operations_repository',
+                  'managed_secret_delivery_operations_repository_run',
+                  'managed_secret_delivery_operations_run_job',
+                  'managed_secret_delivery_operations_job_attempt',
+                  'managed_secret_delivery_operations_runner',
+                  'managed_secret_delivery_operations_session'
+              )
+              AND delete_rule IN ('RESTRICT', 'NO ACTION')
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(restricted_parent_links, 6);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn authenticated_delivery_requires_the_current_runner_machine() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let execution = seed_current_execution(&database, vec![binding]).await?;
+        seed_authority_state(&database, &execution, false, true).await?;
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xd6);
+
+        let wrong_identity = ManagedSecretDeliveryMachine::new(
+            format!("other-{}", execution.lease.runner_id().as_uuid().simple()),
+            execution.machine.certificate_sha256(),
+        )?;
         assert_eq!(
             database
                 .store()
                 .resolve_managed_secret_authority(
-                    execution.request(execution.exact_bindings(), 121_300)?,
+                    execution
+                        .delivery_request(121_000, operation_id, verifier)?
+                        .with_authenticated_machine(wrong_identity),
                 )
                 .await,
             Err(ManagedSecretAuthorityStoreError::Unauthorized),
-            "a selected lease is not current when a newer live attempt exists",
+            "fetch authority must be bound to the currently authenticated runner identity",
+        );
+
+        let wrong_certificate = ManagedSecretDeliveryMachine::new(
+            execution.machine.external_identity().to_owned(),
+            digest(0xd7),
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .resolve_managed_secret_authority(
+                    execution
+                        .delivery_request(121_000, operation_id, verifier)?
+                        .with_authenticated_machine(wrong_certificate),
+                )
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "fetch authority must be bound to the current unrevoked leaf certificate",
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn delivery_operations_expire_when_the_current_attempt_leaves_live_states() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let execution = seed_current_execution(&database, vec![binding]).await?;
+        seed_authority_state(&database, &execution, false, true).await?;
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xd8);
+        database
+            .store()
+            .resolve_managed_secret_authority(execution.delivery_request(
+                121_000,
+                operation_id,
+                verifier,
+            )?)
+            .await?;
+
+        sqlx::query(
+            r"
+            UPDATE job_attempts
+            SET lifecycle = 'succeeded',
+                lease_id = NULL,
+                runner_id = NULL,
+                lease_issued_at_ms = NULL,
+                lease_expires_at_ms = NULL,
+                runner_session_id = NULL,
+                runner_session_epoch = NULL,
+                runner_generation = NULL,
+                runner_slot = NULL,
+                changed_at_ms = $2
+            WHERE id = $1
+            ",
+        )
+        .bind(execution.lease.attempt_id().as_uuid())
+        .bind(execution.time(121_100))
+        .execute(database.pool())
+        .await?;
+
+        let expired_state: String = sqlx::query_scalar(
+            "SELECT state FROM managed_secret_delivery_operations WHERE tenant_id = $1 AND operation_id = $2",
+        )
+        .bind(&execution.tenant)
+        .bind(operation_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(expired_state, "expired");
+        assert_eq!(
+            database
+                .store()
+                .acknowledge_managed_secret_delivery(AcknowledgeManagedSecretDelivery::new(
+                    execution.authenticated_delivery_request(121_200, operation_id, verifier)?,
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "terminal attempt transitions must close the pending delivery row",
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn delivery_operations_expire_when_the_runner_session_disconnects() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let execution = seed_current_execution(&database, vec![binding]).await?;
+        seed_authority_state(&database, &execution, false, true).await?;
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xd9);
+        database
+            .store()
+            .resolve_managed_secret_authority(execution.delivery_request(
+                121_000,
+                operation_id,
+                verifier,
+            )?)
+            .await?;
+
+        sqlx::query(
+            r"
+            UPDATE runner_sessions
+            SET disconnected_at_ms = $2
+            WHERE id = $1
+            ",
+        )
+        .bind(execution.session.session_id().as_uuid())
+        .bind(execution.time(121_100))
+        .execute(database.pool())
+        .await?;
+
+        let expired_state: String = sqlx::query_scalar(
+            "SELECT state FROM managed_secret_delivery_operations WHERE tenant_id = $1 AND operation_id = $2",
+        )
+        .bind(&execution.tenant)
+        .bind(operation_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(expired_state, "expired");
+        assert_eq!(
+            database
+                .store()
+                .acknowledge_managed_secret_delivery(AcknowledgeManagedSecretDelivery::new(
+                    execution.authenticated_delivery_request(121_200, operation_id, verifier)?,
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::Unauthorized),
+            "session disconnects must close the pending delivery row",
         );
         Ok(())
     })
@@ -1418,15 +1852,16 @@ async fn protected_environment_approval_aba_remains_closed_and_non_enumerating()
         let (_, environment_id, _) =
             seed_authority_state(&database, &execution, true, true).await?;
         let environment_id = environment_id.ok_or("fixture environment missing")?;
-        assert_eq!(
-            database
-                .store()
-                .resolve_managed_secret_authority(
-                    execution.request(execution.exact_bindings(), 121_000)?,
-                )
-                .await,
-            Err(ManagedSecretAuthorityStoreError::Unauthorized),
-        );
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xe1);
+        database
+            .store()
+            .resolve_managed_secret_authority(execution.delivery_request(
+                121_000,
+                operation_id,
+                verifier,
+            )?)
+            .await?;
 
         sqlx::query(
             r"
@@ -1444,9 +1879,11 @@ async fn protected_environment_approval_aba_remains_closed_and_non_enumerating()
         assert_eq!(
             database
                 .store()
-                .resolve_managed_secret_authority(
-                    execution.request(execution.exact_bindings(), 121_200)?,
-                )
+                .resolve_managed_secret_authority(execution.delivery_request(
+                    121_200,
+                    operation_id,
+                    verifier,
+                )?)
                 .await,
             Err(ManagedSecretAuthorityStoreError::Unauthorized),
         );
@@ -1466,9 +1903,11 @@ async fn protected_environment_approval_aba_remains_closed_and_non_enumerating()
         assert_eq!(
             database
                 .store()
-                .resolve_managed_secret_authority(
-                    execution.request(execution.exact_bindings(), 121_400)?,
-                )
+                .resolve_managed_secret_authority(execution.delivery_request(
+                    121_400,
+                    operation_id,
+                    verifier,
+                )?)
                 .await,
             Err(ManagedSecretAuthorityStoreError::Unauthorized),
             "matching mutable settings cannot prove approval freshness after ABA",
@@ -1484,8 +1923,10 @@ async fn in_flight_grant_insert_is_linearized_before_exact_cardinality() -> Test
     run_with_database(|database| async move {
         let binding = BindingIdentity::fresh();
         let execution = seed_current_execution(&database, vec![binding]).await?;
-        let (_, environment_id, _) =
-            seed_authority_state(&database, &execution, false, false).await?;
+        let (actor, environment_id, _) =
+            seed_authority_state(&database, &execution, false, true).await?;
+        let concurrent_binding = BindingIdentity::fresh();
+        seed_repository_secret(database.pool(), &execution, &actor, concurrent_binding, 1).await?;
         let mut transaction = database.pool().begin().await?;
         let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *transaction)
@@ -1493,14 +1934,17 @@ async fn in_flight_grant_insert_is_linearized_before_exact_cardinality() -> Test
         insert_workload_grant_in_transaction(
             &mut transaction,
             &execution,
-            binding,
+            concurrent_binding,
             environment_id,
             None,
             91,
         )
         .await?;
 
-        let request = execution.request(execution.exact_bindings(), 121_000)?;
+        // Exercise the actual value-bearing reservation path. A request without
+        // an operation/bearer is rejected before it reaches the exact execution
+        // locks and therefore cannot prove the insert/authority linearization.
+        let request = execution.delivery_request(121_000, Uuid::new_v4(), digest(0xd5))?;
         let resolver_database = Arc::clone(&database);
         let resolver = tokio::spawn(async move {
             resolver_database
@@ -1508,12 +1952,7 @@ async fn in_flight_grant_insert_is_linearized_before_exact_cardinality() -> Test
                 .resolve_managed_secret_authority(request)
                 .await
         });
-        wait_for_backend_blocked_by(
-            database.pool(),
-            blocking_backend_pid,
-            "FROM job_attempts AS attempt",
-        )
-        .await?;
+        wait_for_backend_blocked_by(database.pool(), blocking_backend_pid).await?;
         transaction.commit().await?;
         let result = tokio::time::timeout(Duration::from_secs(5), resolver).await??;
         assert_eq!(result, Err(ManagedSecretAuthorityStoreError::Unauthorized));
@@ -1522,11 +1961,7 @@ async fn in_flight_grant_insert_is_linearized_before_exact_cardinality() -> Test
     .await
 }
 
-async fn wait_for_backend_blocked_by(
-    pool: &PgPool,
-    blocking_backend_pid: i32,
-    query_fragment: &str,
-) -> TestResult<i32> {
+async fn wait_for_backend_blocked_by(pool: &PgPool, blocking_backend_pid: i32) -> TestResult<i32> {
     for _ in 0..500 {
         let waiting_backend_pid: Option<i32> = sqlx::query_scalar(
             r"
@@ -1534,13 +1969,11 @@ async fn wait_for_backend_blocked_by(
             FROM pg_stat_activity
             WHERE pid <> $1
               AND $1 = ANY(pg_blocking_pids(pid))
-              AND query LIKE '%' || $2 || '%'
             ORDER BY pid
             LIMIT 1
             ",
         )
         .bind(blocking_backend_pid)
-        .bind(query_fragment)
         .fetch_optional(pool)
         .await?;
         if let Some(waiting_backend_pid) = waiting_backend_pid {
@@ -1548,5 +1981,5 @@ async fn wait_for_backend_blocked_by(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Err(format!("backend did not block on expected {query_fragment} lock").into())
+    Err("authority resolver did not block behind the in-flight grant insert".into())
 }
