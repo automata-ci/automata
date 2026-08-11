@@ -790,6 +790,47 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
 }
 
 #[tokio::test]
+async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
+    let fixture = claimed_fixture("refs/heads/main", false, 1);
+    let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
+        BTreeMap::from([("README.md", b"no workflow here\n".to_vec())]),
+    ))));
+    let processor = Arc::new(RecordingProcessor::returning(skipped()));
+    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
+    let (worker, _) = worker(
+        &fixture,
+        source,
+        processor.clone(),
+        deliveries.clone(),
+        GithubDeliveryWorkerConfig::default(),
+    );
+
+    let outcome = worker
+        .process_claimed(
+            fixture.claimed,
+            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
+            },
+        )
+        .await
+        .expect("missing configured workflow is a durable terminal outcome");
+
+    assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Completed(_)));
+    assert!(processor.observations().is_empty());
+    let completions = deliveries.completions.lock().expect("completions lock");
+    assert_eq!(completions.len(), 1);
+    let outcomes = completions[0].outcomes();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].workflow_path(), ".github/workflows/ci.yml");
+    let ProviderDeliveryWorkflowConclusion::Failed { failure_kind } = outcomes[0].conclusion()
+    else {
+        panic!("missing configured workflow must fail its Check subject");
+    };
+    assert_eq!(failure_kind.as_str(), "github.workflow.missing");
+}
+
+#[tokio::test]
 async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let historical =

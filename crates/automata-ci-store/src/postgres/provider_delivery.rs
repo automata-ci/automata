@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
-    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    CompleteProviderDelivery, GithubCheckTerminalCause, MAX_PROVIDER_DELIVERY_ATTEMPTS,
+    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey,
+    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
     ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
@@ -297,6 +297,15 @@ impl ProviderDeliveryRepository for PostgresStore {
         } else {
             verify_exact_completion(&mut transaction, &request).await?
         };
+        if let Some(cause) = completion_check_terminal_cause(request.outcomes()) {
+            terminalize_pre_admission_check(
+                &mut transaction,
+                request.claim().delivery_id(),
+                cause,
+                request.completed_at(),
+            )
+            .await?;
+        }
         transaction.commit().await.map_err(operation_error)?;
         Ok(receipt)
     }
@@ -351,6 +360,7 @@ impl ProviderDeliveryRepository for PostgresStore {
         &self,
         request: RejectProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         let row = sqlx::query(
             r"
             UPDATE provider_delivery_inbox
@@ -380,13 +390,149 @@ impl ProviderDeliveryRepository for PostgresStore {
         .bind(request.claim().fence_i64())
         .bind(request.failure_kind().as_str())
         .bind(request.rejected_at().get())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(operation_error)?;
-        row.as_ref()
+        let receipt = row
+            .as_ref()
             .map(decode_receipt)
             .transpose()?
-            .ok_or(ProviderDeliveryStoreError::ClaimRejected)
+            .ok_or(ProviderDeliveryStoreError::ClaimRejected)?;
+        terminalize_pre_admission_check(
+            &mut transaction,
+            request.claim().delivery_id(),
+            GithubCheckTerminalCause::SystemUnknown,
+            request.rejected_at(),
+        )
+        .await?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(receipt)
+    }
+}
+
+fn completion_check_terminal_cause(
+    outcomes: &[ProviderDeliveryWorkflowOutcome],
+) -> Option<GithubCheckTerminalCause> {
+    if outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.conclusion(),
+            ProviderDeliveryWorkflowConclusion::Admitted { .. }
+        )
+    }) {
+        None
+    } else if outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.conclusion(),
+            ProviderDeliveryWorkflowConclusion::Failed { .. }
+        )
+    }) {
+        Some(GithubCheckTerminalCause::WorkflowFailure)
+    } else {
+        Some(GithubCheckTerminalCause::WorkflowSkipped)
+    }
+}
+
+async fn terminalize_pre_admission_check(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+    cause: GithubCheckTerminalCause,
+    terminal_at: UnixMillis,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let rows = sqlx::query(
+        r"
+        SELECT id, workflow_run_id, desired_state, desired_conclusion,
+               terminal_cause, desired_revision, desired_updated_at_ms
+        FROM github_check_subjects
+        WHERE provider_delivery_id = $1
+        ORDER BY id
+        FOR UPDATE
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let [row] = rows.as_slice() else {
+        if !rows.is_empty() {
+            return Err(ProviderDeliveryStoreError::CorruptData);
+        }
+        let evidence_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM github_provider_delivery_evidence \
+             WHERE provider_delivery_id = $1)",
+        )
+        .bind(delivery_id.as_uuid())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+        return if evidence_exists {
+            Err(ProviderDeliveryStoreError::CorruptData)
+        } else {
+            Ok(())
+        };
+    };
+    let subject_id: Uuid = row.try_get("id").map_err(operation_error)?;
+    let workflow_run_id: Option<Uuid> = row.try_get("workflow_run_id").map_err(operation_error)?;
+    let desired_state: String = row.try_get("desired_state").map_err(operation_error)?;
+    let desired_conclusion: Option<String> =
+        row.try_get("desired_conclusion").map_err(operation_error)?;
+    let terminal_cause: Option<String> = row.try_get("terminal_cause").map_err(operation_error)?;
+    let desired_revision: i64 = row.try_get("desired_revision").map_err(operation_error)?;
+    let desired_updated_at: i64 = row
+        .try_get("desired_updated_at_ms")
+        .map_err(operation_error)?;
+    if workflow_run_id.is_some() || desired_updated_at < 0 {
+        return Err(ProviderDeliveryStoreError::CorruptData);
+    }
+    let expected_conclusion = cause.conclusion().as_str();
+    let expected_cause = cause.as_str();
+    if desired_state == "completed" {
+        return if desired_conclusion.as_deref() == Some(expected_conclusion)
+            && terminal_cause.as_deref() == Some(expected_cause)
+            && desired_revision == 2
+            && desired_updated_at == terminal_at.get()
+        {
+            Ok(())
+        } else {
+            Err(ProviderDeliveryStoreError::CorruptData)
+        };
+    }
+    if desired_state != "queued"
+        || desired_conclusion.is_some()
+        || terminal_cause.is_some()
+        || desired_revision != 1
+        || desired_updated_at > terminal_at.get()
+    {
+        return Err(ProviderDeliveryStoreError::CorruptData);
+    }
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        r"
+        UPDATE github_check_subjects
+        SET desired_state = 'completed',
+            desired_conclusion = $2,
+            terminal_cause = $3,
+            desired_revision = desired_revision + 1,
+            desired_updated_at_ms = $4
+        WHERE id = $1
+          AND workflow_run_id IS NULL
+          AND desired_state = 'queued'
+          AND desired_conclusion IS NULL
+          AND terminal_cause IS NULL
+          AND desired_revision = 1
+          AND desired_updated_at_ms <= $4
+        RETURNING id
+        ",
+    )
+    .bind(subject_id)
+    .bind(expected_conclusion)
+    .bind(expected_cause)
+    .bind(terminal_at.get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if updated == Some(subject_id) {
+        Ok(())
+    } else {
+        Err(ProviderDeliveryStoreError::CorruptData)
     }
 }
 

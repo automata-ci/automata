@@ -6,9 +6,11 @@ use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobK
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, EnsureGithubServerServiceAuthority,
-    GithubCheckHeadSha, GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, CompleteProviderDelivery,
+    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -16,10 +18,13 @@ use automata_ci_store::{
     GithubSubjectEvidenceStoreError, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, StoreError,
-    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RejectProviderDelivery, StartGithubCheckProjection, StoreError, TenantScope,
+    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -50,6 +55,8 @@ struct CheckProjectionState {
     workflow_run_id: Option<Uuid>,
     linked_at_ms: Option<i64>,
     desired_state: String,
+    desired_conclusion: Option<String>,
+    terminal_cause: Option<String>,
     desired_revision: i64,
     desired_updated_at_ms: i64,
     outbox_state: String,
@@ -268,6 +275,300 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn skipped_pre_admission_completion_terminalizes_check_once() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-skipped-check",
+            0x210,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-skipped-check",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                11,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x211, 60_000).await?;
+        let completion = CompleteProviderDelivery::new(
+            claim.claim(),
+            vec![ProviderDeliveryWorkflowOutcome::new(
+                ".github/workflows/ci.yml",
+                ProviderDeliveryWorkflowConclusion::Skipped {
+                    reason: ProviderDeliveryFailureKind::new(
+                        "github.workflow.branch_not_selected",
+                    )?,
+                },
+            )?],
+            claim.claimed_at(),
+        )?;
+
+        let receipt = database
+            .store()
+            .complete_provider_delivery(completion.clone())
+            .await?;
+        assert_eq!(receipt.state(), ProviderDeliveryState::Completed);
+        let terminal = assert_pre_admission_terminal_check(
+            &database,
+            accepted.check_subject_id().as_uuid(),
+            claim.claimed_at(),
+            "skipped",
+            "workflow_skipped",
+        )
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .complete_provider_delivery(completion)
+                .await?,
+            receipt
+        );
+        assert_eq!(
+            assert_pre_admission_terminal_check(
+                &database,
+                accepted.check_subject_id().as_uuid(),
+                claim.claimed_at(),
+                "skipped",
+                "workflow_skipped",
+            )
+            .await?,
+            terminal,
+            "an exact completion replay must not advance the Check revision twice"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn failed_pre_admission_completion_terminalizes_check_as_failure() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-failed-check",
+            0x220,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-failed-check",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                12,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x221, 60_000).await?;
+        let receipt = database
+            .store()
+            .complete_provider_delivery(CompleteProviderDelivery::new(
+                claim.claim(),
+                vec![ProviderDeliveryWorkflowOutcome::new(
+                    ".github/workflows/ci.yml",
+                    ProviderDeliveryWorkflowConclusion::Failed {
+                        failure_kind: ProviderDeliveryFailureKind::new(
+                            "github.workflow.frontend_rejected",
+                        )?,
+                    },
+                )?],
+                claim.claimed_at(),
+            )?)
+            .await?;
+        assert_eq!(receipt.state(), ProviderDeliveryState::Completed);
+        assert_pre_admission_terminal_check(
+            &database,
+            accepted.check_subject_id().as_uuid(),
+            claim.claimed_at(),
+            "failure",
+            "workflow_failure",
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn rejected_pre_admission_delivery_terminalizes_check_as_failure() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-rejected-check",
+            0x230,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-rejected-check",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                13,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x231, 60_000).await?;
+        let receipt = database
+            .store()
+            .reject_provider_delivery(RejectProviderDelivery::new(
+                claim.claim(),
+                ProviderDeliveryFailureKind::new("github.subject_evidence.mismatch")?,
+                claim.claimed_at(),
+            )?)
+            .await?;
+        assert_eq!(receipt.state(), ProviderDeliveryState::Rejected);
+        assert_pre_admission_terminal_check(
+            &database,
+            accepted.check_subject_id().as_uuid(),
+            claim.claimed_at(),
+            "failure",
+            "system_unknown",
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn noncanonical_check_state_rolls_back_delivery_completion() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-terminal-rollback",
+            0x238,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-terminal-rollback",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                13,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x239, 60_000).await?;
+        database
+            .store()
+            .start_github_check_projection(StartGithubCheckProjection::new(
+                GithubCheckSubjectTarget::new(fixture.tenant.clone(), accepted.check_subject_id()),
+                claim.claimed_at(),
+            )?)
+            .await?;
+        let check_before =
+            load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?;
+        let completion =
+            CompleteProviderDelivery::new(claim.claim(), Vec::new(), claim.claimed_at())?;
+
+        assert!(matches!(
+            database
+                .store()
+                .complete_provider_delivery(completion)
+                .await,
+            Err(ProviderDeliveryStoreError::CorruptData)
+        ));
+        let inbox_state: String =
+            sqlx::query_scalar("SELECT state FROM provider_delivery_inbox WHERE id = $1")
+                .bind(accepted.delivery_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        let outcome_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM provider_delivery_workflow_outcomes WHERE inbox_id = $1",
+        )
+        .bind(accepted.delivery_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(inbox_state, "claimed");
+        assert_eq!(outcome_count, 0);
+        assert_eq!(
+            load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?,
+            check_before
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn admitted_delivery_completion_preserves_linked_check() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-admitted-check",
+            0x240,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-admitted-check",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                14,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x241, 60_000).await?;
+        let command = logical_command(
+            &fixture,
+            "logical-admitted-check",
+            0x62,
+            15,
+            0x2_000,
+            claim.claimed_at(),
+        );
+        let run_id = command.run_id();
+        database
+            .store()
+            .admit_authenticated_github_delivery(command, claim, claim.claimed_at())
+            .await?;
+        let linked =
+            load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?;
+
+        complete_admitted_delivery(&database, claim, run_id).await?;
+        assert_eq!(
+            load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?,
+            linked,
+            "admitted delivery completion must leave run finalization authoritative"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn public_api_decodes_historical_manifest_profile_and_runner_policy() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(
@@ -476,6 +777,8 @@ async fn logical_admission_records_once_and_replay_uses_durable_run_time() -> Te
                 workflow_run_id: Some(run_id.as_uuid()),
                 linked_at_ms: Some(admitted_at.get()),
                 desired_state: "in_progress".to_owned(),
+                desired_conclusion: None,
+                terminal_cause: None,
                 desired_revision: 2,
                 desired_updated_at_ms: admitted_at.get(),
                 outbox_state: "pending".to_owned(),
@@ -1213,7 +1516,8 @@ async fn load_check_projection(
     Ok(sqlx::query_as(
         r"
         SELECT subject.workflow_run_id, subject.linked_at_ms,
-               subject.desired_state, subject.desired_revision,
+               subject.desired_state, subject.desired_conclusion,
+               subject.terminal_cause, subject.desired_revision,
                subject.desired_updated_at_ms, outbox.state AS outbox_state,
                outbox.attempted_revision, outbox.attempt_count,
                outbox.claim_fence, outbox.projected_revision,
@@ -1227,6 +1531,59 @@ async fn load_check_projection(
     .bind(subject_id)
     .fetch_one(database.pool())
     .await?)
+}
+
+async fn assert_pre_admission_terminal_check(
+    database: &TestDatabase,
+    subject_id: Uuid,
+    terminal_at: UnixMillis,
+    conclusion: &str,
+    cause: &str,
+) -> TestResult<CheckProjectionState> {
+    let state = load_check_projection(database, subject_id).await?;
+    assert_eq!(state.workflow_run_id, None);
+    assert_eq!(state.linked_at_ms, None);
+    assert_eq!(state.desired_state, "completed");
+    assert_eq!(state.desired_conclusion.as_deref(), Some(conclusion));
+    assert_eq!(state.terminal_cause.as_deref(), Some(cause));
+    assert_eq!(state.desired_revision, 2);
+    assert_eq!(state.desired_updated_at_ms, terminal_at.get());
+    assert_eq!(state.outbox_state, "pending");
+    assert_eq!(state.attempted_revision, None);
+    assert_eq!(state.attempt_count, 0);
+    assert_eq!(state.claim_fence, 0);
+    assert_eq!(state.projected_revision, 0);
+    assert_eq!(state.state_updated_at_ms, terminal_at.get());
+    Ok(state)
+}
+
+async fn complete_admitted_delivery(
+    database: &TestDatabase,
+    claim: AuthenticatedGithubDeliveryClaim,
+    run_id: RunId,
+) -> TestResult {
+    let completed_at = database_now(database.pool()).await?;
+    let completion = CompleteProviderDelivery::new(
+        claim.claim(),
+        vec![ProviderDeliveryWorkflowOutcome::new(
+            ".github/workflows/ci.yml",
+            ProviderDeliveryWorkflowConclusion::Admitted { run_id },
+        )?],
+        completed_at,
+    )?;
+    let receipt = database
+        .store()
+        .complete_provider_delivery(completion.clone())
+        .await?;
+    assert_eq!(receipt.state(), ProviderDeliveryState::Completed);
+    assert_eq!(
+        database
+            .store()
+            .complete_provider_delivery(completion)
+            .await?,
+        receipt
+    );
+    Ok(())
 }
 
 async fn assert_run_evidence(

@@ -1149,6 +1149,7 @@ impl GithubDeliveryWorker {
             })?;
             outcomes.push(outcome);
         }
+        ensure_manifest_workflow_outcome(&mut outcomes, evidence.manifest())?;
         let operation = match terminal_operation {
             Some(operation) => operation,
             None => lease.lock_operation().await,
@@ -1732,6 +1733,22 @@ fn failed(failure_kind: &'static str) -> ProviderDeliveryWorkflowConclusion {
     ProviderDeliveryWorkflowConclusion::Failed {
         failure_kind: failure_kind_value(failure_kind),
     }
+}
+
+fn ensure_manifest_workflow_outcome(
+    outcomes: &mut Vec<ProviderDeliveryWorkflowOutcome>,
+    manifest: &GithubProviderManifest,
+) -> Result<(), ProcessingFailure> {
+    if outcomes.is_empty() {
+        outcomes.push(
+            ProviderDeliveryWorkflowOutcome::new(
+                manifest.workflow_path(),
+                failed("github.workflow.missing"),
+            )
+            .map_err(|_| ProcessingFailure::reject("github.delivery.invalid_workflow_outcome"))?,
+        );
+    }
+    Ok(())
 }
 
 fn failure_kind_value(value: &'static str) -> ProviderDeliveryFailureKind {
