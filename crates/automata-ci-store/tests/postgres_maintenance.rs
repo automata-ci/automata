@@ -791,16 +791,6 @@ async fn insert_pending_concurrency_run(
     let pending = RunId::new();
     sqlx::query(
         r"
-        INSERT INTO concurrency_groups (
-            repository_id, normalized_key, display_key, updated_at_ms
-        ) VALUES ($1, 'dogfood', 'dogfood', 70)
-        ",
-    )
-    .bind(seed.repository_id)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, head_sha, status, created_at_ms, updated_at_ms,

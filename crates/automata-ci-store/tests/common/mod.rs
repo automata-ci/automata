@@ -263,6 +263,19 @@ async fn seed_control_plane_with_optional_concurrency(
     .bind(repository_id.to_string())
     .execute(pool)
     .await?;
+    if let Some((group, _)) = concurrency {
+        sqlx::query(
+            r"
+            INSERT INTO concurrency_groups (
+                repository_id, normalized_key, display_key, updated_at_ms
+            ) VALUES ($1, $2, $2, 1)
+            ",
+        )
+        .bind(repository_id)
+        .bind(group)
+        .execute(pool)
+        .await?;
+    }
     sqlx::query(
         r"
         INSERT INTO workflow_definitions (
