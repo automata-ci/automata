@@ -388,6 +388,8 @@ test("service-proxy publication is GitHub-hosted, two-phase, and least-privilege
 test("service-proxy candidates bind exact default-branch source and public digest", () => {
   const { candidate, candidateBuild } = serviceProxyJobs();
   const policy = source("scripts/ci/service-proxy-publication.py");
+  const bareArtifactDigestGate =
+    '[[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]';
 
   assert.match(candidateBuild, /ref: \$\{\{ needs\.validate\.outputs\.candidate_commit \}\}/);
   assert.match(candidateBuild, /fetch-depth: 0/);
@@ -404,6 +406,7 @@ test("service-proxy candidates bind exact default-branch source and public diges
   assert.match(candidateBuild, /cmp --[\s\S]+service-proxy-publication-reproduction/);
   assert.match(candidateBuild, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(candidateBuild, /archive: false/);
+  assert.equal(candidateBuild.split(bareArtifactDigestGate).length - 1, 1);
   assert.match(candidateBuild, /artifact service digest differs from candidate bytes/);
   assert.doesNotMatch(candidateBuild, /actions\/attest@|skopeo copy|GHCR_TOKEN/);
   assert.match(candidate, /Download same-run raw candidate by artifact ID/);
@@ -413,6 +416,11 @@ test("service-proxy candidates bind exact default-branch source and public diges
   assert.match(candidate, /find "\$CANDIDATE_DOWNLOAD" -mindepth 1 -maxdepth 1 -print0/);
   assert.match(candidate, /artifact-service and producer digests differ/);
   assert.match(candidate, /downloaded candidate bytes differ from both digests/);
+  assert.equal(candidate.split(bareArtifactDigestGate).length - 1, 2);
+  assert.doesNotMatch(
+    `${candidateBuild}\n${candidate}`,
+    /ARTIFACT_DIGEST#sha256:|sha256:\$\{lock_sha256\}/,
+  );
   assert.match(candidate, /--source-directory "\$CANDIDATE_SOURCE_DIRECTORY"/);
   assert.match(
     policy,
