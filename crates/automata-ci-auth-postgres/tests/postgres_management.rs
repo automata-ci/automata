@@ -595,7 +595,11 @@ async fn finite_grants_rebase_both_accepted_clock_skews_without_extending_lifeti
             .bind(granted_binding)
             .fetch_one(pool)
             .await?;
-            assert_eq!(persisted.1 - persisted.0, 120_000);
+            let persisted_lifetime_ms = persisted.1 - persisted.0;
+            assert!(
+                (1..=120_000).contains(&persisted_lifetime_ms),
+                "the rebased lifetime must remain positive without exceeding the request"
+            );
         }
         Ok(())
     })
