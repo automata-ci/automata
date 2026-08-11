@@ -660,7 +660,7 @@ test("service-proxy candidates bind exact default-branch source and public diges
   assert.match(candidate, /Require anonymously readable exact review candidate/);
   assert.match(candidate, /make the GHCR package public/);
   assert.equal(
-    (candidate.match(/uses: actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d/g) ?? [])
+    (candidate.match(/uses: actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6/g) ?? [])
       .length,
     3,
   );
