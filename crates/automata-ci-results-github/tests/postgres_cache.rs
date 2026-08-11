@@ -667,7 +667,10 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
                     restore_keys: Vec::new(),
                     version: CacheVersion::new("version-1").expect("fixed cache version"),
                     observed_at_seconds: lookup_observed_at,
-                    inactivity_seconds: 1,
+                    // Give the hosted runner enough time to reach the
+                    // deliberate row lock before testing expiry during the
+                    // wait itself.
+                    inactivity_seconds: 10,
                 })
                 .await
         });
@@ -678,7 +681,7 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
                 .is_err(),
             "lookup must wait for the exact cache-entry lock"
         );
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        tokio::time::sleep(Duration::from_millis(10_200)).await;
         gate.commit().await?;
         assert!(lookup.await??.is_none());
         let last_accessed_after: i64 = sqlx::query_scalar(
