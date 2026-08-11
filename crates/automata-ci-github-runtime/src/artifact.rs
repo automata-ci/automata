@@ -58,9 +58,7 @@ fn parse_declaration(value: &str) -> Option<ArtifactDeclaration> {
 }
 
 fn parse_oci(value: &str) -> Option<ArtifactDeclaration> {
-    let Some((name, digest)) = value.rsplit_once('@') else {
-        return None;
-    };
+    let (name, digest) = value.rsplit_once('@')?;
     if name.is_empty() {
         return None;
     }
@@ -69,10 +67,9 @@ fn parse_oci(value: &str) -> Option<ArtifactDeclaration> {
             ("sha256", hexadecimal, 64)
         } else if let Some(hexadecimal) = digest.strip_prefix("sha384:") {
             ("sha384", hexadecimal, 96)
-        } else if let Some(hexadecimal) = digest.strip_prefix("sha512:") {
-            ("sha512", hexadecimal, 128)
         } else {
-            return None;
+            let hexadecimal = digest.strip_prefix("sha512:")?;
+            ("sha512", hexadecimal, 128)
         };
     if hexadecimal.is_empty()
         || !hexadecimal.bytes().all(|byte| byte.is_ascii_hexdigit())
