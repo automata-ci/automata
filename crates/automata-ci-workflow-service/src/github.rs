@@ -9,8 +9,7 @@ use automata_ci_workflow_github::{
 use crate::{
     WorkflowAdmissionRequest, WorkflowPlanVerificationError, WorkflowPlanVerifier,
     github_dispatch::{
-        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE,
-        GithubWorkflowDispatchEvidenceV1,
+        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, GithubWorkflowDispatchEvidenceV1,
     },
 };
 
@@ -44,19 +43,15 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
                 diagnostic_codes(parsed.diagnostics()),
             ));
         }
-        let parsed_plan = parsed.plan().ok_or_else(|| {
-            WorkflowPlanVerificationError::FrontendRejected("no plan".into())
-        })?;
+        let parsed_plan = parsed
+            .plan()
+            .ok_or_else(|| WorkflowPlanVerificationError::FrontendRejected("no plan".into()))?;
         let compile_request = if admission.plan().event().name() == "workflow_dispatch" {
-            if admission.event_media_type()
-                != AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
-            {
+            if admission.event_media_type() != AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE {
                 return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
             }
             let evidence = GithubWorkflowDispatchEvidenceV1::decode(admission.event())
-                .map_err(|_| {
-                    WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch
-                })?;
+                .map_err(|_| WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch)?;
             if !evidence.matches_admission(admission) {
                 return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
             }
@@ -66,9 +61,7 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
                 evidence.metadata(),
             )
         } else {
-            if admission.event_media_type()
-                == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
-            {
+            if admission.event_media_type() == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE {
                 return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
             }
             CompileWorkflowRequest::for_preselected_event(

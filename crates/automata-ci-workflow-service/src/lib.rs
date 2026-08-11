@@ -35,6 +35,9 @@ pub use activation::{
     MAX_ACTIVATION_OUTPUT_BYTES, MAX_MATRIX_CANDIDATE_COMBINATIONS, MAX_MATRIX_EXPANSION_WORK,
     ValidatedLogicalJob, ValidatedLogicalPlan,
 };
+pub use automata_ci_workflow_github::{
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
+};
 pub use autonomous_workflow::{
     AUTONOMOUS_WORKFLOW_AUTHORITY_SAFETY_MILLIS, AutonomousActivationLease,
     AutonomousMaterializationLease, AutonomousPreparationLease, AutonomousWorkflowDeadline,
@@ -51,13 +54,10 @@ pub use github_activation::{
 pub use github_autonomous::GithubAutonomousWorkflowPhaseExecutor;
 pub use github_dispatch::{
     AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, DurableGithubWorkflowDispatchRequest,
-    GithubWorkflowDispatchError,
-    GithubWorkflowDispatchEvidenceError, GithubWorkflowDispatchEvidenceV1,
-    GithubWorkflowDispatchRequest, GithubWorkflowDispatchRequestError,
-    GithubWorkflowDispatchService, WorkflowDispatchAuthorization,
-};
-pub use automata_ci_workflow_github::{
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
+    GithubWorkflowDispatchError, GithubWorkflowDispatchEvidenceError,
+    GithubWorkflowDispatchEvidenceV1, GithubWorkflowDispatchRequest,
+    GithubWorkflowDispatchRequestError, GithubWorkflowDispatchService,
+    WorkflowDispatchAuthorization,
 };
 pub use id::{Sha256AdmissionIdGenerator, SystemAdmissionClock};
 pub use logical_projection::{

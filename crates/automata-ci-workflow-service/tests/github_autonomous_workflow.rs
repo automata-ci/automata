@@ -110,6 +110,64 @@ jobs:
       - run: echo autonomous
 ";
 
+const OUTPUT_DRIVEN_MATRIX_SOURCE: &str = r"name: Autonomous CI
+on: workflow_dispatch
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.emit.outputs.matrix }}
+    steps:
+      - id: emit
+        run: echo matrix
+  build:
+    needs: plan
+    strategy:
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo matrix job
+";
+
+const OUTPUT_DRIVEN_MATRIX_VALUE: &str = r#"{
+  "profile": [
+    {
+      "name": "stable",
+      "options": ["fast", true],
+      "metadata": {"tier": "primary"}
+    },
+    {
+      "name": "preview",
+      "options": ["safe", false],
+      "metadata": {"tier": "secondary"}
+    }
+  ],
+  "shard": [1, 2],
+  "exclude": [
+    {"profile": {"metadata": {"tier": "primary"}}, "shard": 2}
+  ],
+  "include": [
+    {
+      "profile": {
+        "name": "stable",
+        "options": ["fast", true],
+        "metadata": {"tier": "primary"}
+      },
+      "shard": 1,
+      "settings": {"retry": 3, "enabled": true}
+    },
+    {
+      "profile": {
+        "name": "edge",
+        "options": [],
+        "metadata": {"tier": "experimental"}
+      },
+      "shard": 3,
+      "settings": {"retry": 0, "enabled": false}
+    }
+  ]
+}"#;
+
 const MATRIX_CREDENTIAL_FREE_SOURCE: &str = r"name: Autonomous CI
 on: workflow_dispatch
 permissions: {}
@@ -1645,6 +1703,33 @@ fn prerequisite_evidence() -> LogicalActivationPrerequisiteEvidence {
         UnixMillis::new(9),
     )
     .expect("prerequisite evidence")
+}
+
+fn matrix_prerequisite_evidence(
+    sensitivity: OutputSensitivity,
+    value: Option<&str>,
+) -> LogicalActivationPrerequisiteEvidence {
+    let output = LogicalActivationPrerequisiteOutput::new(
+        WorkflowOutputKey::new("matrix").expect("matrix output key"),
+        sensitivity,
+        value.map(str::to_owned),
+    )
+    .expect("matrix prerequisite output");
+    LogicalActivationPrerequisiteEvidence::new(
+        LogicalWorkflowJobId::from_uuid(Uuid::from_u128(41)).expect("prerequisite job"),
+        WorkflowJobKey::new("plan").expect("prerequisite logical key"),
+        0,
+        Sha256Digest::from_bytes([0x41; 32]),
+        Sha256Digest::from_bytes([0x42; 32]),
+        Sha256Digest::from_bytes([0x43; 32]),
+        JobConclusion::Success,
+        false,
+        false,
+        false,
+        vec![output],
+        UnixMillis::new(9),
+    )
+    .expect("matrix prerequisite evidence")
 }
 
 fn admitted_base_context(authority_profile: JobAuthorityProfile) -> JobRuntimeContext {

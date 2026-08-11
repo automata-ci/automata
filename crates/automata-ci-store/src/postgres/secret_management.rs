@@ -2370,13 +2370,12 @@ pub(super) async fn authorize_human_repository_action(
     // from the database clock at the transactional boundary so a session that
     // expired while immutable evidence was being published cannot authorize a
     // dispatch with its earlier ingress timestamp.
-    let now_seconds = sqlx::query_scalar::<_, i64>(
-        "SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT",
-    )
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sql_error)
-    .map_err(map_human_action_error)?;
+    let now_seconds =
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT")
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sql_error)
+            .map_err(map_human_action_error)?;
     let now_seconds = u64::try_from(now_seconds)
         .map_err(|_| StoreError::corrupt_data("database clock is outside the auth time domain"))?;
     let current_actor = ManagementActor::new(

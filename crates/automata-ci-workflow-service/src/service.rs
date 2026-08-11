@@ -19,11 +19,11 @@ use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
     AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    AuthenticatedWorkflowDispatchSource,
-    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    ProviderDeliveryId, ResolveAuthenticatedWorkflowDispatchSource,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionValueError, WorkflowConcurrency,
+    AuthenticatedWorkflowDispatchSource, LogicalWorkflowAdmissionRepository,
+    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ObjectKey, ProviderDeliveryId,
+    ResolveAuthenticatedWorkflowDispatchSource, WorkflowAdmissionIdempotency,
+    WorkflowAdmissionValueError, WorkflowConcurrency,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};

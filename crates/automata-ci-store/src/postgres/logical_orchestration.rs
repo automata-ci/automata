@@ -16,14 +16,12 @@ use super::{
 use crate::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
     AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    GithubSubjectEvidenceStoreError,
-    LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    GithubSubjectEvidenceStoreError, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     LogicalWorkflowInvocationId, ObjectKey, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
-    ValidateGithubWorkflowRunSubjectEvidenceReplay,
-    WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency,
-    WorkflowAdmissionStoreError, WorkflowSnapshotId,
+    ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+    WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
 };
 
 enum SubjectEvidenceAdmission {
@@ -89,6 +87,9 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
     }
 }
 
+// One transaction reauthorizes the caller and decodes the complete immutable
+// workflow source descriptor without exposing a partially validated record.
+#[allow(clippy::too_many_lines)]
 async fn resolve_authenticated_dispatch_source(
     store: &PostgresStore,
     request: ResolveAuthenticatedWorkflowDispatchSource,
@@ -106,8 +107,7 @@ async fn resolve_authenticated_dispatch_source(
     };
     if actor.tenant_id != request.actor().tenant_id().as_str()
         || actor.authorization_revision
-            != i64::try_from(request.actor().authorization_revision().value())
-                .unwrap_or(i64::MAX)
+            != i64::try_from(request.actor().authorization_revision().value()).unwrap_or(i64::MAX)
         || actor.principal_id.hyphenated().to_string() != request.actor().principal_id().as_str()
         || actor.session_id.hyphenated().to_string() != request.actor().session_id().as_str()
     {
@@ -188,16 +188,14 @@ async fn resolve_authenticated_dispatch_source(
     let digest = row
         .try_get::<Vec<u8>, _>("source_digest")
         .map_err(operation_error)?;
-    let digest: [u8; 32] = digest.try_into().map_err(|_| {
-        StoreError::corrupt_data("signed GitHub workflow source digest is invalid")
-    })?;
+    let digest: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| StoreError::corrupt_data("signed GitHub workflow source digest is invalid"))?;
     let size = row
         .try_get::<Option<i64>, _>("source_size_bytes")
         .map_err(operation_error)?
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| {
-            StoreError::corrupt_data("signed GitHub workflow source size is invalid")
-        })?;
+        .ok_or_else(|| StoreError::corrupt_data("signed GitHub workflow source size is invalid"))?;
     let media_type = row
         .try_get::<Option<String>, _>("source_media_type")
         .map_err(operation_error)?
@@ -220,17 +218,14 @@ async fn resolve_authenticated_dispatch_source(
         provider,
         row.try_get::<String, _>("provider_repository_id")
             .map_err(operation_error)?,
-        row.try_get::<String, _>("owner")
-            .map_err(operation_error)?,
-        row.try_get::<String, _>("name")
-            .map_err(operation_error)?,
+        row.try_get::<String, _>("owner").map_err(operation_error)?,
+        row.try_get::<String, _>("name").map_err(operation_error)?,
     )
     .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
     let source = AuthenticatedWorkflowDispatchSource::new(
         repository,
         request.workflow_id(),
-        row.try_get::<String, _>("path")
-            .map_err(operation_error)?,
+        row.try_get::<String, _>("path").map_err(operation_error)?,
         request.git_ref(),
         request.commit_sha(),
         source,
