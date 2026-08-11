@@ -274,7 +274,12 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".github/workflows/ci.yml");
   const verify = section(ci, "\n  verify:", "\n  rust_tests:");
-  const rustTests = section(ci, "\n  rust_tests:", "\n  renderer_tests:");
+  const rustTests = section(ci, "\n  rust_tests:", "\n  rust_coverage:");
+  const rustCoverage = section(
+    ci,
+    "\n  rust_coverage:",
+    "\n  renderer_tests:",
+  );
   const rendererTests = section(
     ci,
     "\n  renderer_tests:",
@@ -297,7 +302,16 @@ test("CI executes documentation and committed script contract suites", () => {
   );
   assert.match(
     rustTests,
-    /CARGO_TARGET_DIR=target\/llvm-cov-target \\\n            cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
+    /cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked/,
+  );
+  assert.match(
+    rustTests,
+    /cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
+  );
+  assert.doesNotMatch(rustTests, /cargo-llvm-cov|run-rust-coverage\.sh/);
+  assert.match(
+    rustCoverage,
+    /run-rust-coverage\.sh target\/coverage\/rust ordinary/,
   );
   assert.match(
     rendererTests,
@@ -335,29 +349,36 @@ test("CI executes documentation and committed script contract suites", () => {
 
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
   const ci = source(".github/workflows/ci.yml");
-  const rustTests = section(ci, "\n  rust_tests:", "\n  renderer_tests:");
+  const rustCoverage = section(
+    ci,
+    "\n  rust_coverage:",
+    "\n  renderer_tests:",
+  );
   const runner = source("scripts/ci/run-rust-coverage.sh");
   const policy = JSON.parse(source("scripts/ci/rust-coverage-policy.json"));
 
-  assert.match(rustTests, /cargo install cargo-llvm-cov --version 0\.8\.7 --locked/);
   assert.match(
-    rustTests,
+    rustCoverage,
+    /cargo install cargo-llvm-cov --version 0\.8\.7 --locked/,
+  );
+  assert.match(
+    rustCoverage,
     /^[ \t]*\.\/scripts\/ci\/run-rust-coverage\.sh target\/coverage\/rust ordinary[ \t]*$/m,
   );
   assert.deepEqual(
-    rustTests
+    rustCoverage
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.includes("run-rust-coverage.sh")),
     ["./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary"],
   );
-  assert.match(rustTests, /name: rust-coverage-ordinary/);
+  assert.match(rustCoverage, /name: rust-coverage-ordinary/);
   assert.match(
-    rustTests,
+    rustCoverage,
     /- name: Upload service-aware Rust coverage report\n        if: \$\{\{ always\(\) && hashFiles\('target\/coverage\/rust\/manifest\.json'\) != '' \}\}/,
   );
-  assert.match(rustTests, /target\/coverage\/rust\/manifest\.json/);
-  assert.doesNotMatch(rustTests, /fail-under-(?:lines|regions|functions)/);
+  assert.match(rustCoverage, /target\/coverage\/rust\/manifest\.json/);
+  assert.doesNotMatch(rustCoverage, /fail-under-(?:lines|regions|functions)/);
   const expectedLanes = [
     "ordinary",
     "postgres",
@@ -444,11 +465,12 @@ test("distribution build overlaps validation while the final gate retains every 
   );
   assert.match(
     dist,
-    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - rust_coverage\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
   );
   assert.match(dist, /needs\.dist_build\.result == 'success'/);
   assert.match(dist, /needs\.verify\.result == 'success'/);
   assert.match(dist, /needs\.rust_tests\.result == 'success'/);
+  assert.match(dist, /needs\.rust_coverage\.result == 'success'/);
   assert.match(dist, /needs\.renderer_tests\.result == 'success'/);
   assert.match(dist, /needs\.postgres_store\.result == 'success'/);
   assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);

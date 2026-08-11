@@ -117,7 +117,32 @@ jobs:
           crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
 
   rust_tests:
-    name: Rust workspace tests and ordinary coverage
+    name: Rust workspace tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Test Rust workspace
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked
+          cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
+
+  rust_coverage:
+    name: Rust ordinary coverage
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -144,8 +169,6 @@ jobs:
           trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
           df -h -- "$GITHUB_WORKSPACE"
           ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary
-          CARGO_TARGET_DIR=target/llvm-cov-target \
-            cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
 
       - name: Upload service-aware Rust coverage report
         if: ${{ always() && hashFiles('target/coverage/rust/manifest.json') != '' }}
@@ -483,6 +506,7 @@ jobs:
           && needs.dist_build.result == 'success'
           && needs.verify.result == 'success'
           && needs.rust_tests.result == 'success'
+          && needs.rust_coverage.result == 'success'
           && needs.renderer_tests.result == 'success'
           && needs.postgres_store.result == 'success'
           && needs.postgres_integrations.result == 'success'
@@ -494,6 +518,7 @@ jobs:
       - dist_build
       - verify
       - rust_tests
+      - rust_coverage
       - renderer_tests
       - postgres_store
       - postgres_integrations
