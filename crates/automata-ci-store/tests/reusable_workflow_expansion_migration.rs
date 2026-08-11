@@ -116,6 +116,7 @@ fn typed_boundaries_and_permission_reduction_have_durable_shapes() {
         "workflow_plan_v2_reusable_permission_grants",
         "default_level IN ('none', 'read', 'write')",
         "workflow_plan_v2_reusable_expansion_permissions_exact",
+        "workflow_plan_v2_reusable_expansion_permission_reduction",
     ] {
         assert!(
             MIGRATION.contains(required),

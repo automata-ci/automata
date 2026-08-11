@@ -695,6 +695,63 @@ BEGIN
 
     IF EXISTS (
         SELECT 1
+        FROM workflow_plan_v2_reusable_invocation_expansions AS child
+        JOIN workflow_plan_v2_reusable_invocation_expansions AS parent
+          ON parent.run_id = child.run_id
+         AND parent.invocation_id = child.parent_invocation_id
+        JOIN workflow_plan_v2_reusable_permission_snapshots AS child_permissions
+          ON child_permissions.run_id = child.run_id
+         AND child_permissions.invocation_id = child.invocation_id
+        JOIN workflow_plan_v2_reusable_permission_snapshots AS parent_permissions
+          ON parent_permissions.run_id = parent.run_id
+         AND parent_permissions.invocation_id = parent.invocation_id
+        WHERE child.run_id = NEW.run_id
+          AND child.depth > 0
+          AND (
+              CASE child_permissions.default_level
+                  WHEN 'none' THEN 0 WHEN 'read' THEN 1 ELSE 2
+              END > CASE parent_permissions.default_level
+                  WHEN 'none' THEN 0 WHEN 'read' THEN 1 ELSE 2
+              END
+              OR EXISTS (
+                  SELECT 1
+                  FROM (
+                      SELECT permission_name
+                      FROM workflow_plan_v2_reusable_permission_grants
+                      WHERE run_id = child.run_id
+                        AND invocation_id = child.invocation_id
+                      UNION
+                      SELECT permission_name
+                      FROM workflow_plan_v2_reusable_permission_grants
+                      WHERE run_id = parent.run_id
+                        AND invocation_id = parent.invocation_id
+                  ) AS scope
+                  LEFT JOIN workflow_plan_v2_reusable_permission_grants AS child_grant
+                    ON child_grant.run_id = child.run_id
+                   AND child_grant.invocation_id = child.invocation_id
+                   AND child_grant.permission_name = scope.permission_name
+                  LEFT JOIN workflow_plan_v2_reusable_permission_grants AS parent_grant
+                    ON parent_grant.run_id = parent.run_id
+                   AND parent_grant.invocation_id = parent.invocation_id
+                   AND parent_grant.permission_name = scope.permission_name
+                  WHERE CASE COALESCE(
+                      child_grant.permission_level,
+                      child_permissions.default_level
+                  ) WHEN 'none' THEN 0 WHEN 'read' THEN 1 ELSE 2 END
+                  > CASE COALESCE(
+                      parent_grant.permission_level,
+                      parent_permissions.default_level
+                  ) WHEN 'none' THEN 0 WHEN 'read' THEN 1 ELSE 2 END
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'reusable workflow permissions exceed their caller ceiling'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_plan_v2_reusable_expansion_permission_reduction';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
         FROM workflow_plan_v2_reusable_invocation_expansions AS invocation
         WHERE invocation.run_id = NEW.run_id
           AND (
@@ -774,7 +831,7 @@ CREATE CONSTRAINT TRIGGER workflow_plan_v2_reusable_outputs_validate_expansion
 AFTER INSERT ON workflow_plan_v2_reusable_outputs
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION automata_validate_reusable_workflow_expansion();
-CREATE CONSTRAINT TRIGGER workflow_plan_v2_reusable_permission_snapshots_validate_expansion
+CREATE CONSTRAINT TRIGGER workflow_plan_v2_reusable_perm_snapshots_validate
 AFTER INSERT ON workflow_plan_v2_reusable_permission_snapshots
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION automata_validate_reusable_workflow_expansion();
