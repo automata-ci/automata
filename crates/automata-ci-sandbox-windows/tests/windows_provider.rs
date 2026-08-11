@@ -665,7 +665,7 @@ fn preexisting_workspace_and_scratch_are_never_rolled_back() {
 }
 
 #[test]
-fn copy_rejects_reparse_escape_and_windows_ads_paths() {
+fn copy_rejects_reparse_escape_and_core_rejects_windows_ads_paths() {
     let fixture = Fixture::new(16);
     let record = fixture.create();
     let endpoint = fixture
@@ -690,17 +690,14 @@ fn copy_rejects_reparse_escape_and_windows_ads_paths() {
     assert_eq!(error.kind(), ExecutionErrorKind::OwnershipMismatch);
     assert!(!foreign.join("escaped.txt").exists());
 
-    let ads = TargetPath::windows(format!(
-        "{}:alternate",
-        fixture.workspace.join("payload.txt").display()
-    ))
-    .expect("core target path admits provider-specific validation");
-    let request =
-        CopyToRequest::new(OperationId::new(), ads, b"ads".to_vec()).expect("ADS copy request");
-    let error = endpoint
-        .copy_to(&request, &NeverCancelled)
-        .expect_err("alternate data stream must fail closed");
-    assert_eq!(error.kind(), ExecutionErrorKind::OwnershipMismatch);
+    assert!(
+        TargetPath::windows(format!(
+            "{}:alternate",
+            fixture.workspace.join("payload.txt").display()
+        ))
+        .is_err(),
+        "alternate data streams must fail closed at the core path boundary"
+    );
 
     drop(endpoint);
     fixture.destroy(&record);

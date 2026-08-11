@@ -326,6 +326,7 @@ jobs:
           -p automata-ci-sandbox-windows
           -p automata-ci-job-executor-github
           --all-targets
+          --no-deps
           --
           -D warnings
 

@@ -22,6 +22,7 @@ use automata_ci_runner_runtime::{
     CleanupRequest, ExecutionCancellation, ExecutionEvents, JobExecutor,
 };
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use support::{
@@ -152,6 +153,7 @@ async fn native_provider_runs_powershell_then_cmd_with_command_file_propagation(
         "PowerShell producer",
         r"Write-Output 'native-powershell-log'
 Set-Content -LiteralPath (Join-Path (Get-Location) 'powershell-artifact.txt') -Value 'powershell-artifact' -Encoding ascii
+'file://powershell-artifact.txt' | Out-File -LiteralPath $env:GITHUB_ARTIFACTS -Encoding ascii -Append
 New-Item -ItemType Directory -Force -Path (Join-Path (Get-Location) 'tools') | Out-Null
 'FROM_POWERSHELL=ready' | Out-File -LiteralPath $env:GITHUB_ENV -Encoding ascii -Append
 'digest=native-output' | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding ascii -Append
@@ -168,6 +170,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path (Get-Location) 'tools') | O
 @if /I not "%FROM_POWERSHELL%"=="ready" exit /b 31
 @if /I not "%FROM_OUTPUT%"=="native-output" exit /b 32
 @if not exist "powershell-artifact.txt" exit /b 33
+@copy /Y "%GITHUB_ARTIFACTS_LIST%" "artifact-list.json" >nul
 @echo cmd-artifact>cmd-artifact.txt"#,
         "cmd",
     )
@@ -237,6 +240,24 @@ New-Item -ItemType Directory -Force -Path (Join-Path (Get-Location) 'tools') | O
             .expect("cmd artifact")
             .trim(),
         "cmd-artifact"
+    );
+    let artifact_bytes = fs::read(workspace.join("powershell-artifact.txt"))
+        .expect("read declared PowerShell artifact");
+    let artifact_digest = format!("{:x}", Sha256::digest(&artifact_bytes));
+    let artifact_list: serde_json::Value = serde_json::from_slice(
+        &fs::read(workspace.join("artifact-list.json")).expect("copied artifact subject list"),
+    )
+    .expect("valid artifact subject list");
+    assert_eq!(
+        artifact_list,
+        serde_json::json!({
+            "version": 1,
+            "subjects": [{
+                "name": "powershell-artifact.txt",
+                "digest": format!("sha256:{artifact_digest}"),
+                "kind": "file"
+            }]
+        })
     );
     let logs = fixture
         .events
