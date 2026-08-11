@@ -33,7 +33,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 9);
+    assert_eq!(plan.workflow().jobs().len(), 10);
     assert_eq!(
         plan.workflow()
             .jobs()
@@ -43,6 +43,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         [
             "verify",
             "rust_tests",
+            "rust_coverage",
             "renderer_tests",
             "postgres_store",
             "postgres_integrations",
@@ -96,6 +97,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
     && needs.dist_build.result == 'success'
     && needs.verify.result == 'success'
     && needs.rust_tests.result == 'success'
+    && needs.rust_coverage.result == 'success'
     && needs.renderer_tests.result == 'success'
     && needs.postgres_store.result == 'success'
     && needs.postgres_integrations.result == 'success'
