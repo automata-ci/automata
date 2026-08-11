@@ -84,6 +84,8 @@ struct PreparedInstance {
 #[allow(clippy::too_many_lines)]
 async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResult {
     run_with_database(|database| async move {
+        const INSTANCE_RESULT_CLAIM_MILLIS: i64 = 60_000;
+
         let idle_observed_at = database_now_ms(&database).await?;
         let idle_request = ClaimNextLogicalJobResult::new(
             LogicalJobResultSelectionId::from_uuid(Uuid::from_u128(90_590))?,
@@ -248,7 +250,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
                             90_500 + u128::try_from(index)?,
                         ))?,
                         UnixMillis::new(claimed_at),
-                        UnixMillis::new(claimed_at + 3_000),
+                        UnixMillis::new(claimed_at + INSTANCE_RESULT_CLAIM_MILLIS),
                     )?)
                     .await?,
             );

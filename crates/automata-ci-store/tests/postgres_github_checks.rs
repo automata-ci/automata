@@ -888,6 +888,8 @@ async fn missing_create_retries_only_reconciliation_until_exact_bind() -> TestRe
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn proven_unissued_release_reopens_prepare_under_the_exact_fence_only() -> TestResult {
     run_with_unmigrated_database(|database| async move {
+        const RETRY_HORIZON_MILLIS: i64 = 1_000;
+
         apply_checks_migrations(&database).await?;
         let fixture = seed_fixture(&database).await?;
         let (receipt, fence, _) = seed_indeterminate_create(
@@ -900,7 +902,7 @@ async fn proven_unissued_release_reopens_prepare_under_the_exact_fence_only() ->
         )
         .await?;
         let released_at = UnixMillis::new(database_now_ms(&database).await?);
-        let retry_at = UnixMillis::new(released_at.get() + 10);
+        let retry_at = UnixMillis::new(released_at.get() + RETRY_HORIZON_MILLIS);
         let release = ReleaseUnissuedGithubCheckRunCreate::new(fence, released_at, retry_at)?;
         assert_eq!(
             database
