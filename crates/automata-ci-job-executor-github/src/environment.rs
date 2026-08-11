@@ -1,11 +1,14 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use automata_ci_auth::secret::SharedSensitiveString;
 use automata_ci_core::{ExpressionProgram, ValueSource, ValueTemplate, ValueTemplateSegment};
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
 };
-use automata_ci_expression_github::{GithubEvaluationContext, GithubExpressionEvaluator};
+use automata_ci_expression_github::{
+    GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
+    GithubObject, GithubStatus, GithubValue,
+};
 use automata_ci_github_runtime::JobCommandState;
 
 use crate::{
@@ -109,6 +112,11 @@ pub(crate) struct EnvironmentBuilder<'a> {
     defaults: &'a ExecutionEnvironment,
 }
 
+struct ResolvedPhaseValues {
+    process: BTreeMap<String, ResolvedEnvironmentValue>,
+    expression: BTreeMap<String, ResolvedEnvironmentValue>,
+}
+
 impl<'a> EnvironmentBuilder<'a> {
     pub(crate) const fn new(
         evaluator: &'a GithubExpressionEvaluator,
@@ -131,6 +139,33 @@ impl<'a> EnvironmentBuilder<'a> {
         extra: impl IntoIterator<Item = (String, ResolvedEnvironmentValue)>,
         masker: &mut SecretMasker,
     ) -> Result<ExecutionEnvironment, ExecutorAdapterError> {
+        let values = self.phase_values(context, commands, job, step, extra, masker)?;
+        into_execution_environment(values.process)
+    }
+
+    pub(crate) fn phase_expression_values(
+        &self,
+        context: &GithubContextSnapshot,
+        commands: &JobCommandState,
+        job: &BTreeMap<String, ValueSource>,
+        step: &BTreeMap<String, ValueSource>,
+        masker: &mut SecretMasker,
+    ) -> Result<Vec<(String, ResolvedEnvironmentValue)>, ExecutorAdapterError> {
+        self.phase_values(context, commands, job, step, std::iter::empty(), masker)
+            .map(|values| values.expression)
+            .map(BTreeMap::into_iter)
+            .map(Iterator::collect)
+    }
+
+    fn phase_values(
+        &self,
+        context: &GithubContextSnapshot,
+        commands: &JobCommandState,
+        job: &BTreeMap<String, ValueSource>,
+        step: &BTreeMap<String, ValueSource>,
+        extra: impl IntoIterator<Item = (String, ResolvedEnvironmentValue)>,
+        masker: &mut SecretMasker,
+    ) -> Result<ResolvedPhaseValues, ExecutorAdapterError> {
         let mut values = BTreeMap::new();
         for variable in self.defaults.values() {
             if variable.is_secret() {
@@ -150,19 +185,33 @@ impl<'a> EnvironmentBuilder<'a> {
             }
             values.insert(variable.name().to_owned(), resolved_context_value(variable));
         }
-        self.overlay_sources(&mut values, job, context.expression(), masker)?;
-        for variable in commands.environment() {
-            values.insert(
-                variable.name().to_owned(),
-                ResolvedEnvironmentValue::plain(variable.value()),
-            );
+        let mut expression = expression_environment(context.expression())?;
+        for (name, source) in job {
+            let value = self.resolve_source_value(source, context.expression(), masker)?;
+            values.insert(name.clone(), value.clone());
+            insert_expression_environment(&mut expression, name.clone(), value);
         }
-        self.overlay_sources(&mut values, step, context.expression(), masker)?;
+        for variable in commands.environment() {
+            let name = variable.name().to_owned();
+            let value = ResolvedEnvironmentValue::plain(variable.value());
+            values.insert(name.clone(), value.clone());
+            insert_expression_environment(&mut expression, name, value);
+        }
+        let step_context = EnvironmentEvaluationContext::new(context.expression(), &expression)?;
+        for (name, source) in step {
+            let value = self.resolve_source_value(source, &step_context, masker)?;
+            values.insert(name.clone(), value.clone());
+            insert_expression_environment(&mut expression, name.clone(), value);
+        }
         for (name, value) in extra {
             values.insert(name, value);
         }
         prepend_paths(&mut values, commands);
-        into_execution_environment(values)
+        prepend_paths(&mut expression, commands);
+        Ok(ResolvedPhaseValues {
+            process: values,
+            expression,
+        })
     }
 
     pub(crate) fn resolve_action_inputs(
@@ -357,6 +406,92 @@ impl<'a> EnvironmentBuilder<'a> {
             .map(|value| value.coerce_to_string())
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
+}
+
+struct EnvironmentEvaluationContext<'a> {
+    base: &'a dyn GithubEvaluationContext,
+    environment: GithubValue,
+}
+
+impl<'a> EnvironmentEvaluationContext<'a> {
+    fn new(
+        base: &'a dyn GithubEvaluationContext,
+        values: &BTreeMap<String, ResolvedEnvironmentValue>,
+    ) -> Result<Self, ExecutorAdapterError> {
+        let environment = GithubObject::new(
+            values
+                .iter()
+                .map(|(name, value)| (name.clone(), GithubValue::string(value.expose())))
+                .collect(),
+        )
+        .map(GithubValue::object)
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::ResourceExhausted))?;
+        Ok(Self { base, environment })
+    }
+}
+
+impl fmt::Debug for EnvironmentEvaluationContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentEvaluationContext")
+            .field("environment", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl GithubEvaluationContext for EnvironmentEvaluationContext<'_> {
+    fn named_value(&self, name: &str) -> Option<GithubValue> {
+        if name.eq_ignore_ascii_case("env") {
+            Some(self.environment.clone())
+        } else {
+            self.base.named_value(name)
+        }
+    }
+
+    fn status(&self) -> GithubStatus {
+        self.base.status()
+    }
+
+    fn functions(&self) -> &dyn GithubExpressionFunctionProvider {
+        self.base.functions()
+    }
+}
+
+fn expression_environment(
+    context: &dyn GithubEvaluationContext,
+) -> Result<BTreeMap<String, ResolvedEnvironmentValue>, ExecutorAdapterError> {
+    let Some(value) = context.named_value("env") else {
+        return Ok(BTreeMap::new());
+    };
+    let GithubValue::Object(value) = value else {
+        return Err(ExecutorAdapterError::new(
+            ExecutorAdapterErrorKind::InvalidJob,
+        ));
+    };
+    let mut environment = BTreeMap::new();
+    for (name, value) in value.entries() {
+        insert_expression_environment(
+            &mut environment,
+            name.clone(),
+            ResolvedEnvironmentValue::plain(value.coerce_to_string()),
+        );
+    }
+    Ok(environment)
+}
+
+fn insert_expression_environment(
+    values: &mut BTreeMap<String, ResolvedEnvironmentValue>,
+    name: String,
+    value: ResolvedEnvironmentValue,
+) {
+    if let Some(existing) = values
+        .keys()
+        .find(|existing| existing.eq_ignore_ascii_case(&name))
+        .cloned()
+    {
+        values.remove(&existing);
+    }
+    values.insert(name, value);
 }
 
 fn resolved_default_value(variable: &EnvironmentVariable) -> ResolvedEnvironmentValue {

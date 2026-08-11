@@ -6,17 +6,19 @@ use automata_ci_core::{
     ActionReference, Architecture, CompiledBooleanTemplate, CompiledExpressionTemplate,
     CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerSpec, ExpressionProgram,
     ExpressionSegment, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIr,
-    JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest, JobSource,
-    JobValidationError, LogicalJobKind, LogicalJobOutputSource, LogicalOutputMergePolicy,
-    LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate,
-    LogicalTimeoutUnit, MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem,
-    PermissionLevel, PermissionSnapshotRequest, PlanSourceOrigin, RunId, RunValueTemplates,
-    RunnerFeature, RunnerRequirements, RuntimeBoolean, RuntimePositiveInteger,
-    RuntimeTimeoutTemplate, RuntimeTimeoutUnit, SemanticStep, Sha256Digest, ShellTemplate, StepId,
-    StepIr, TemplateValueMap, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment,
-    WorkflowId, WorkflowPermissions,
+    JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest,
+    JobResourceAllocation, JobResourcePolicy, JobSource, JobValidationError, LogicalJobKind,
+    LogicalJobOutputSource, LogicalOutputMergePolicy, LogicalServiceContainerTemplate,
+    LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate, LogicalTimeoutUnit,
+    MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem, PermissionLevel,
+    PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError, ResourceCapacity,
+    ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature, RunnerRequirements,
+    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, RuntimeTimeoutUnit,
+    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap, ValueSource,
+    ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId, WorkflowPermissions,
 };
 use automata_ci_protocol::ProtocolLimits;
+use automata_ci_store::ReusableWorkflowPermissionSnapshot;
 use automata_ci_workflow_github::{
     GithubConditionCompiler, GithubConditionPhase, GithubRunnerProfileCatalog,
     GithubRunnerProfileMapping,
@@ -25,7 +27,9 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::{ActivatedJobInstance, ActivatedRunnerSelection, ValidatedLogicalJob};
+use crate::{
+    ActivatedJobInstance, ActivatedJobResources, ActivatedRunnerSelection, ValidatedLogicalJob,
+};
 
 /// Canonical content type for a protobuf-encoded current job runtime context.
 pub const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
@@ -44,6 +48,8 @@ pub struct ProjectGithubLogicalJobRequest<'a> {
     execution: JobExecutionContext,
     profiles: &'a GithubRunnerProfileCatalog,
     authority_profile: JobAuthorityProfile,
+    resource_policy: JobResourcePolicy,
+    permission_ceiling: Option<&'a ReusableWorkflowPermissionSnapshot>,
 }
 
 impl fmt::Debug for ProjectGithubLogicalJobRequest<'_> {
@@ -72,6 +78,7 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
         execution: JobExecutionContext,
         profiles: &'a GithubRunnerProfileCatalog,
         authority_profile: JobAuthorityProfile,
+        resource_policy: JobResourcePolicy,
     ) -> Self {
         Self {
             job,
@@ -82,7 +89,19 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
             execution,
             profiles,
             authority_profile,
+            resource_policy,
+            permission_ceiling: None,
         }
+    }
+
+    /// Binds the immutable least-authority ceiling for a sealed reusable child.
+    #[must_use]
+    pub const fn with_permission_ceiling(
+        mut self,
+        ceiling: &'a ReusableWorkflowPermissionSnapshot,
+    ) -> Self {
+        self.permission_ceiling = Some(ceiling);
+        self
     }
 }
 
@@ -183,11 +202,15 @@ fn project_github_logical_job(
             .job
             .permissions()
             .or_else(|| plan.logical().permissions()),
+        request.permission_ceiling,
+    )?;
+    let requirements = runner_requirements(runner, request.profiles)?.with_resource_allocation(
+        resource_allocation(
+            request.instance.resources().copied(),
+            request.resource_policy,
+        )?,
     );
-    let requirements = permission_requirements(
-        runner_requirements(runner, request.profiles)?,
-        &permission_request,
-    );
+    let requirements = permission_requirements(requirements, &permission_request);
     validate_workspace_platform(&requirements, request.execution.workspace())?;
 
     let runtime_context = request.instance.runtime_context().clone();
@@ -256,12 +279,7 @@ fn project_github_logical_job(
 fn reject_unsupported_semantics(
     job: ValidatedLogicalJob<'_>,
 ) -> Result<(), LogicalJobProjectionError> {
-    let plan = job.plan();
     for (present, unsupported) in [
-        (
-            plan.logical().invocation().is_some(),
-            UnsupportedLogicalJobSemantics::ReusableWorkflowInvocation,
-        ),
         (
             job.concurrency().is_some(),
             UnsupportedLogicalJobSemantics::JobConcurrency,
@@ -284,18 +302,96 @@ fn reject_unsupported_semantics(
 
 fn resolved_permission_request(
     request: Option<&PermissionSnapshotRequest>,
-) -> JobPermissionRequest {
-    let Some(request) = request else {
-        return JobPermissionRequest::ProviderDefault;
+    ceiling: Option<&ReusableWorkflowPermissionSnapshot>,
+) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
+    let request = source_permission_request(request);
+    let Some(ceiling) = ceiling else {
+        return Ok(request);
     };
-    match request.permissions() {
-        WorkflowPermissions::ReadAll(_) => JobPermissionRequest::ReadAll,
-        WorkflowPermissions::WriteAll(_) => JobPermissionRequest::WriteAll,
-        WorkflowPermissions::Mapping(grants) => {
-            JobPermissionRequest::mapping(grants.iter().map(|grant| {
-                JobPermissionGrant::new(grant.name().value().clone(), *grant.level().value())
-            }))
+    reduce_permission_request(request, ceiling.default_level(), ceiling.grants())
+}
+
+fn reduce_permission_request(
+    request: JobPermissionRequest,
+    default_level: PermissionLevel,
+    ceiling_grants: &BTreeMap<String, PermissionLevel>,
+) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
+    match request {
+        JobPermissionRequest::ProviderDefault => {
+            if default_level == PermissionLevel::Write && ceiling_grants.is_empty() {
+                Ok(JobPermissionRequest::ProviderDefault)
+            } else {
+                Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
+            }
         }
+        JobPermissionRequest::Mapping(requested_grants) => Ok(JobPermissionRequest::mapping(
+            requested_grants.into_iter().filter_map(|grant| {
+                let ceiling = ceiling_grants
+                    .get(grant.name())
+                    .copied()
+                    .unwrap_or(default_level);
+                let level = minimum_permission(grant.level(), ceiling);
+                (level != PermissionLevel::None)
+                    .then(|| JobPermissionGrant::new(grant.name().to_owned(), level))
+            }),
+        )),
+        JobPermissionRequest::ReadAll => {
+            reduce_all_permissions(PermissionLevel::Read, default_level, ceiling_grants)
+        }
+        JobPermissionRequest::WriteAll => {
+            reduce_all_permissions(PermissionLevel::Write, default_level, ceiling_grants)
+        }
+    }
+}
+
+fn source_permission_request(request: Option<&PermissionSnapshotRequest>) -> JobPermissionRequest {
+    request.map_or(
+        JobPermissionRequest::ProviderDefault,
+        |request| match request.permissions() {
+            WorkflowPermissions::ReadAll(_) => JobPermissionRequest::ReadAll,
+            WorkflowPermissions::WriteAll(_) => JobPermissionRequest::WriteAll,
+            WorkflowPermissions::Mapping(grants) => {
+                JobPermissionRequest::mapping(grants.iter().map(|grant| {
+                    JobPermissionGrant::new(grant.name().value().clone(), *grant.level().value())
+                }))
+            }
+        },
+    )
+}
+
+fn reduce_all_permissions(
+    requested: PermissionLevel,
+    default_level: PermissionLevel,
+    grants: &BTreeMap<String, PermissionLevel>,
+) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
+    let default = minimum_permission(requested, default_level);
+    let overrides = grants
+        .iter()
+        .filter_map(|(name, level)| {
+            let level = minimum_permission(requested, *level);
+            (level != default).then_some((name, level))
+        })
+        .collect::<Vec<_>>();
+    match (default, overrides.is_empty()) {
+        (PermissionLevel::Write, true) => Ok(JobPermissionRequest::WriteAll),
+        (PermissionLevel::Read, true) => Ok(JobPermissionRequest::ReadAll),
+        (PermissionLevel::None, _) => Ok(JobPermissionRequest::mapping(
+            overrides
+                .into_iter()
+                .filter(|(_, level)| *level != PermissionLevel::None)
+                .map(|(name, level)| JobPermissionGrant::new(name.to_owned(), level)),
+        )),
+        (PermissionLevel::Read | PermissionLevel::Write, false) => {
+            Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
+        }
+    }
+}
+
+const fn minimum_permission(left: PermissionLevel, right: PermissionLevel) -> PermissionLevel {
+    match (left, right) {
+        (PermissionLevel::None, _) | (_, PermissionLevel::None) => PermissionLevel::None,
+        (PermissionLevel::Read, _) | (_, PermissionLevel::Read) => PermissionLevel::Read,
+        (PermissionLevel::Write, PermissionLevel::Write) => PermissionLevel::Write,
     }
 }
 
@@ -418,6 +514,45 @@ fn runner_requirements(
         requirements = requirements.with_architecture(value);
     }
     Ok(requirements)
+}
+
+fn resource_allocation(
+    resources: Option<ActivatedJobResources>,
+    policy: JobResourcePolicy,
+) -> Result<JobResourceAllocation, LogicalJobProjectionError> {
+    let resources = resources.unwrap_or(ActivatedJobResources::empty());
+    let requests = resources.requests().unwrap_or_default();
+    let limits = resources.limits().unwrap_or_default();
+    let defaults = policy.defaults();
+    let default_requests = defaults.requests();
+    let default_limits = defaults.limits();
+    let cpu_request = requests
+        .cpu_millis()
+        .unwrap_or(default_requests.cpu_millis());
+    let cpu_limit = limits.cpu_millis().unwrap_or(default_limits.cpu_millis());
+    let memory_request = requests
+        .memory_bytes()
+        .unwrap_or(default_requests.memory_bytes());
+    let memory_limit = limits
+        .memory_bytes()
+        .unwrap_or(default_limits.memory_bytes());
+    let ephemeral_request = requests
+        .ephemeral_storage_bytes()
+        .unwrap_or(default_requests.ephemeral_disk_bytes());
+    let ephemeral_limit = limits
+        .ephemeral_storage_bytes()
+        .unwrap_or(default_limits.ephemeral_disk_bytes());
+    let gpu_request = requests.gpu_count().unwrap_or(default_requests.gpu_count());
+    let gpu_limit = limits.gpu_count().unwrap_or(default_limits.gpu_count());
+    let allocation = JobResourceAllocation::new(
+        ResourceCapacity::new(cpu_request, memory_request, ephemeral_request, gpu_request),
+        ResourceCapacity::new(cpu_limit, memory_limit, ephemeral_limit, gpu_limit),
+    )
+    .map_err(LogicalJobProjectionError::InvalidResourceAllocation)?;
+    policy
+        .validate_allocation(allocation)
+        .map_err(LogicalJobProjectionError::ResourcePolicyViolation)?;
+    Ok(allocation)
 }
 
 enum MergedSelector<T> {
@@ -884,8 +1019,6 @@ fn validate_runtime_context_reference(
 /// Logical semantics deliberately rejected instead of being erased from `JobIR`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedLogicalJobSemantics {
-    /// The workflow delegates its invocation to another workflow.
-    ReusableWorkflowInvocation,
     /// The logical job invokes a reusable workflow instead of executing steps.
     ReusableWorkflowJob,
     /// A job output is sourced from a reusable-workflow result.
@@ -903,7 +1036,6 @@ pub enum UnsupportedLogicalJobSemantics {
 impl fmt::Display for UnsupportedLogicalJobSemantics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::ReusableWorkflowInvocation => "reusable workflow invocation contract",
             Self::ReusableWorkflowJob => "reusable workflow job",
             Self::ReusableWorkflowOutput => "reusable workflow output",
             Self::JobConcurrency => "job concurrency",
@@ -941,6 +1073,12 @@ pub enum LogicalJobProjectionError {
     /// Generic labels select mutually incompatible platforms.
     #[error("runner selectors require conflicting platforms")]
     ConflictingRunnerSelectors,
+    /// Resolved requests and limits violate the provider-neutral allocation contract.
+    #[error("job resource allocation is invalid")]
+    InvalidResourceAllocation(#[source] ResourceAllocationError),
+    /// A resolved allocation falls outside the pinned repository bounds.
+    #[error("job resource allocation violates pinned repository policy")]
+    ResourcePolicyViolation(#[source] ResourcePolicyError),
     /// The server-selected workspace is invalid for the selected platform.
     #[error("workspace path grammar does not match the selected runner platform")]
     WorkspacePlatformMismatch,
@@ -977,10 +1115,133 @@ pub enum LogicalJobProjectionError {
     /// Credential-free projection retained a managed-secret binding.
     #[error("credential-free projection cannot retain runtime secret bindings")]
     CredentialFreeRuntimeSecrets,
+    /// A reusable permission ceiling cannot be encoded without broadening authority.
+    #[error("reusable workflow permission ceiling is not representable")]
+    UnrepresentablePermissionCeiling,
     /// Canonical runtime-context protobuf encoding failed.
     #[error("canonical runtime-context encoding failed")]
     RuntimeContextEncoding(#[source] automata_ci_protocol_protobuf::EncodeError),
     /// The projected current `JobIR` violates a domain invariant.
     #[error("projected current JobIR is invalid")]
     InvalidJobIr(#[source] JobValidationError),
+}
+
+#[cfg(test)]
+mod resource_policy_tests {
+    use automata_ci_core::{
+        JobResourceAllocation, JobResourcePolicy, ResourceAllocationError, ResourceCapacity,
+    };
+
+    use super::*;
+    use crate::ActivatedResourceVector;
+
+    #[test]
+    fn pinned_policy_supplies_omitted_allocation() {
+        let policy = resource_policy();
+        assert_eq!(
+            resource_allocation(None, policy).expect("allocation"),
+            policy.defaults()
+        );
+    }
+
+    #[test]
+    fn distinct_gpu_request_and_limit_fail_closed() {
+        let resources = ActivatedJobResources::new(
+            Some(ActivatedResourceVector::new(
+                Some(500),
+                Some(512 * 1_024 * 1_024),
+                None,
+                Some(1),
+            )),
+            Some(ActivatedResourceVector::new(
+                Some(1_000),
+                Some(1_024 * 1_024 * 1_024),
+                None,
+                Some(2),
+            )),
+        );
+        assert!(matches!(
+            resource_allocation(Some(resources), resource_policy()),
+            Err(LogicalJobProjectionError::InvalidResourceAllocation(
+                ResourceAllocationError::GpuRequestLimitMismatch
+            ))
+        ));
+    }
+
+    fn resource_policy() -> JobResourcePolicy {
+        let defaults = JobResourceAllocation::new(
+            ResourceCapacity::new(500, 512 * 1_024 * 1_024, 0, 0),
+            ResourceCapacity::new(2_000, 2 * 1_024 * 1_024 * 1_024, 0, 0),
+        )
+        .expect("defaults");
+        JobResourcePolicy::new(
+            defaults,
+            ResourceCapacity::new(100, 128 * 1_024 * 1_024, 0, 0),
+            ResourceCapacity::new(8_000, 16 * 1_024 * 1_024 * 1_024, 0, 2),
+        )
+        .expect("policy")
+    }
+}
+
+#[cfg(test)]
+mod permission_ceiling_tests {
+    use super::*;
+
+    #[test]
+    fn provider_default_is_preserved_only_by_an_unrestricted_ceiling() {
+        assert_eq!(
+            reduce_permission_request(
+                JobPermissionRequest::ProviderDefault,
+                PermissionLevel::Write,
+                &BTreeMap::new(),
+            )
+            .expect("unrestricted ceiling"),
+            JobPermissionRequest::ProviderDefault,
+        );
+        assert!(matches!(
+            reduce_permission_request(
+                JobPermissionRequest::ProviderDefault,
+                PermissionLevel::Read,
+                &BTreeMap::new(),
+            ),
+            Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
+        ));
+    }
+
+    #[test]
+    fn all_permissions_reduce_to_the_exact_explicit_ceiling() {
+        let ceiling = BTreeMap::from([
+            ("contents".to_owned(), PermissionLevel::Read),
+            ("id-token".to_owned(), PermissionLevel::None),
+        ]);
+        assert_eq!(
+            reduce_permission_request(
+                JobPermissionRequest::WriteAll,
+                PermissionLevel::None,
+                &ceiling,
+            )
+            .expect("exact mapping"),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "contents",
+                PermissionLevel::Read,
+            )]),
+        );
+    }
+
+    #[test]
+    fn explicit_permissions_are_intersected_without_adding_scopes() {
+        let ceiling = BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]);
+        let requested = JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::Write),
+            JobPermissionGrant::new("packages", PermissionLevel::Read),
+        ]);
+        assert_eq!(
+            reduce_permission_request(requested, PermissionLevel::None, &ceiling)
+                .expect("mapping intersection"),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "contents",
+                PermissionLevel::Read,
+            )]),
+        );
+    }
 }

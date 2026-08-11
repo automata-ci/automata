@@ -38,9 +38,10 @@ pub use port::{
     ControlPortError, DesiredRunnerState, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
     JobIrObjectReader, LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand,
     LeaseOfferCommandError, LeaseOfferCommandPublisher, LeaseOfferPublishOutcome,
-    LeaseOfferReplayResolution, LeasePollAdapter, LeasePoller, OptionalRuntimeAuthorityIssuer,
-    PublishedCommand, RandomControlIdGenerator, RunnerRegistrationAuthorizer,
-    RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest, RuntimeAuthorityIssueRequestError,
-    RuntimeAuthorityIssuer, StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
+    LeaseOfferReplayResolution, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
+    OptionalRuntimeAuthorityIssuer, PublishedCommand, RandomControlIdGenerator,
+    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
+    RuntimeAuthorityIssueRequestError, RuntimeAuthorityIssuer, StoreLeaseOfferCommandPublisher,
+    StoreRunnerSessionFenceResolver,
 };
 pub use verify::{JobIrBlobError, verify_job_ir_blob};

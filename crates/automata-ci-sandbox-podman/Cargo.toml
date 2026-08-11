@@ -19,6 +19,7 @@ automata-ci-execution.workspace = true
 rustix = { workspace = true, features = ["event"] }
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

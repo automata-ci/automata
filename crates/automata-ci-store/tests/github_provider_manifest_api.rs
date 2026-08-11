@@ -11,13 +11,14 @@ use automata_ci_store::{
     GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
     GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
     GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WORKFLOW_MAX_BYTES,
-    GITHUB_PROVIDER_WORKFLOW_PATH, GithubCheckName, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRepository, GithubProviderManifestRevision,
-    GithubProviderManifestValueError, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
-    ProviderConnectionId, ProviderDeliveryIdentity, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope,
+    GITHUB_PROVIDER_WORKFLOW_PATH, GithubCheckName, GithubCheckSubjectKey, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository,
+    GithubProviderManifestRevision, GithubProviderManifestValueError, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
+    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
     github_provider_repository_id,
 };
 use uuid::Uuid;
@@ -175,6 +176,113 @@ fn resource_policy_accepts_only_the_exact_supported_values() {
 }
 
 #[test]
+fn manifest_can_pin_a_nondefault_direct_workflow_path() {
+    let manifest = manifest_with_profile_at_path(
+        1,
+        1,
+        1,
+        1,
+        [7; 32],
+        [9; 32],
+        "Automata CI",
+        ProviderRepositoryVisibility::Public,
+        automata_ci_core::JobAuthorityProfile::Standard,
+        ".github/workflows/main.yaml",
+    );
+
+    assert_eq!(manifest.workflow_path(), ".github/workflows/main.yaml");
+    assert_eq!(
+        manifest.check_subject_key().as_str(),
+        ".github/workflows/main.yaml"
+    );
+}
+
+#[test]
+fn all_direct_selection_is_canonical_and_digest_bound() {
+    let exact = manifest(1, 1, 1, [7; 32], "Automata CI");
+    let all_direct = manifest_with_profile_selection(
+        1,
+        1,
+        1,
+        1,
+        [7; 32],
+        [9; 32],
+        "Automata CI",
+        ProviderRepositoryVisibility::Public,
+        automata_ci_core::JobAuthorityProfile::Standard,
+        GithubProviderWorkflowSelection::all_direct(),
+    );
+
+    assert_eq!(all_direct.exact_workflow_path(), None);
+    assert_eq!(all_direct.workflow_path(), ".github/workflows");
+    assert!(all_direct.selects_workflow_path(".github/workflows/build.yml"));
+    assert!(all_direct.selects_workflow_path(".github/workflows/release.yaml"));
+    for rejected in [
+        ".github/workflows/nested/build.yml",
+        ".github/workflows/build.yaml/extra",
+        ".github/workflows/build.YML",
+        ".github/workflows",
+        "workflows/build.yml",
+    ] {
+        assert!(!all_direct.selects_workflow_path(rejected), "{rejected}");
+    }
+    assert_ne!(all_direct.digest(), exact.digest());
+}
+
+#[test]
+fn configured_default_branch_ref_is_canonical_and_digest_bound() {
+    let main = manifest_with_profile_selection_at_ref(
+        1,
+        1,
+        1,
+        1,
+        [7; 32],
+        [9; 32],
+        "Automata CI",
+        ProviderRepositoryVisibility::Public,
+        automata_ci_core::JobAuthorityProfile::Standard,
+        GithubProviderWorkflowSelection::all_direct(),
+        GithubProviderGitRef::main(),
+    );
+    let release = manifest_with_profile_selection_at_ref(
+        1,
+        1,
+        1,
+        1,
+        [7; 32],
+        [9; 32],
+        "Automata CI",
+        ProviderRepositoryVisibility::Public,
+        automata_ci_core::JobAuthorityProfile::Standard,
+        GithubProviderWorkflowSelection::all_direct(),
+        GithubProviderGitRef::new("refs/heads/release/stable").expect("branch ref"),
+    );
+    assert_eq!(release.git_ref(), "refs/heads/release/stable");
+    assert_ne!(release.digest(), main.digest());
+    assert_eq!(
+        GithubProviderGitRef::new("refs/heads/refs/release")
+            .expect("nested refs branch")
+            .as_str(),
+        "refs/heads/refs/release"
+    );
+
+    for invalid in [
+        "main",
+        "refs/tags/release",
+        "refs/heads/.hidden",
+        "refs/heads/release..stable",
+        "refs/heads/release.lock",
+        "refs/heads/release stable",
+    ] {
+        assert_eq!(
+            GithubProviderGitRef::new(invalid),
+            Err(GithubProviderManifestValueError::InvalidGitRef),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     let original = manifest(1, 1, 1, [7; 32], "Automata CI");
     let exact_reconstruction = manifest(1, 1, 1, [7; 32], "Automata CI");
@@ -230,6 +338,29 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     assert_ne!(
         original.repository_id(),
         github_provider_repository_id(&other_tenant, original.github_repository_id())
+    );
+}
+
+#[test]
+fn owner_binding_uses_a_new_domain_without_changing_legacy_goldens() {
+    let legacy = manifest(1, 1, 1, [7; 32], "Automata CI");
+    let owner = legacy
+        .clone()
+        .with_repository_owner_id(ProviderRepositoryOwnerId::new(404).expect("owner ID"));
+    let other_owner = legacy
+        .clone()
+        .with_repository_owner_id(ProviderRepositoryOwnerId::new(405).expect("owner ID"));
+
+    assert_eq!(legacy.github_repository_owner_id(), None);
+    assert_eq!(
+        owner.github_repository_owner_id(),
+        Some(ProviderRepositoryOwnerId::new(404).expect("owner ID"))
+    );
+    assert_ne!(legacy.digest(), owner.digest());
+    assert_ne!(owner.digest(), other_owner.digest());
+    assert_eq!(
+        legacy.digest().to_string(),
+        "ae2823f2dcda8cf0325e587c50652f8dc17e7e2549e389c7b3ec1eafb9faef00"
     );
 }
 
@@ -314,8 +445,93 @@ fn manifest_with_profile(
     visibility: ProviderRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
 ) -> GithubProviderManifest {
+    manifest_with_profile_at_path(
+        manifest_revision,
+        app_revision,
+        webhook_verifier_revision,
+        policy_revision,
+        spki,
+        webhook_verifier_fingerprint,
+        check_name,
+        visibility,
+        authority_profile,
+        GITHUB_PROVIDER_WORKFLOW_PATH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_with_profile_at_path(
+    manifest_revision: u64,
+    app_revision: u64,
+    webhook_verifier_revision: u64,
+    policy_revision: u64,
+    spki: [u8; 32],
+    webhook_verifier_fingerprint: [u8; 32],
+    check_name: &str,
+    visibility: ProviderRepositoryVisibility,
+    authority_profile: automata_ci_core::JobAuthorityProfile,
+    workflow_path: &str,
+) -> GithubProviderManifest {
+    manifest_with_profile_selection(
+        manifest_revision,
+        app_revision,
+        webhook_verifier_revision,
+        policy_revision,
+        spki,
+        webhook_verifier_fingerprint,
+        check_name,
+        visibility,
+        authority_profile,
+        GithubProviderWorkflowSelection::exact(
+            GithubCheckSubjectKey::new(workflow_path).expect("workflow path"),
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_with_profile_selection(
+    manifest_revision: u64,
+    app_revision: u64,
+    webhook_verifier_revision: u64,
+    policy_revision: u64,
+    spki: [u8; 32],
+    webhook_verifier_fingerprint: [u8; 32],
+    check_name: &str,
+    visibility: ProviderRepositoryVisibility,
+    authority_profile: automata_ci_core::JobAuthorityProfile,
+    workflow_selection: GithubProviderWorkflowSelection,
+) -> GithubProviderManifest {
+    manifest_with_profile_selection_at_ref(
+        manifest_revision,
+        app_revision,
+        webhook_verifier_revision,
+        policy_revision,
+        spki,
+        webhook_verifier_fingerprint,
+        check_name,
+        visibility,
+        authority_profile,
+        workflow_selection,
+        GithubProviderGitRef::main(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_with_profile_selection_at_ref(
+    manifest_revision: u64,
+    app_revision: u64,
+    webhook_verifier_revision: u64,
+    policy_revision: u64,
+    spki: [u8; 32],
+    webhook_verifier_fingerprint: [u8; 32],
+    check_name: &str,
+    visibility: ProviderRepositoryVisibility,
+    authority_profile: automata_ci_core::JobAuthorityProfile,
+    workflow_selection: GithubProviderWorkflowSelection,
+    git_ref: GithubProviderGitRef,
+) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(policy_revision);
-    GithubProviderManifest::new(
+    GithubProviderManifest::new_with_workflow_selection_and_git_ref(
         TenantScope::from_authenticated_tenant_id("automata-ci").expect("tenant"),
         ProviderConnectionId::from_uuid(Uuid::from_u128(0x100)).expect("connection"),
         ProviderInstallationId::new(101).expect("installation"),
@@ -337,6 +553,8 @@ fn manifest_with_profile(
         runtime_policy.runner_policy,
         runtime_policy.revision,
         runtime_policy.semantic_digest,
+        workflow_selection,
+        git_ref,
         GithubCheckName::new(check_name).expect("Check name"),
         GithubProviderOrigins::github_dot_com(),
         GithubProviderManifestLimits::github_dot_com_ci(),

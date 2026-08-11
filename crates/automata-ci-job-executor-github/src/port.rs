@@ -11,9 +11,11 @@ use automata_ci_execution::{SandboxEnvironment, ServiceContainerBindings, Target
 use automata_ci_expression_github::{GithubEvaluationContext, GithubStatus, GithubValue};
 use automata_ci_github_runtime::JobCommandState;
 use automata_ci_protocol::JobRuntimeAuthorities;
+use automata_ci_runner_runtime::ExecutorError;
 use automata_ci_scm::RepositoryId;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{ActionPreparationError, PortError, PreparedAction};
@@ -101,6 +103,23 @@ pub trait SecretPort: fmt::Debug + Send + Sync {
     ///
     /// Returns a secret-free lookup failure.
     fn resolve(&self, reference: &str) -> Result<SharedSensitiveString, PortError>;
+}
+
+/// Commits a non-durable secret-delivery acknowledgement after masking.
+///
+/// The executor invokes this only after every value in the verified runtime
+/// context has been installed in exact [`SecretPort`] custody and registered
+/// with the per-execution output masker. Implementations must not retain
+/// values, create durable command material, or acknowledge a partial install.
+#[async_trait]
+pub trait SecretCustodyAcknowledger: fmt::Debug + Send + Sync {
+    /// Acknowledges the exact installed custody operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized failure before sandbox, expression, environment,
+    /// or command work begins.
+    async fn acknowledge(&self, cancellation: CancellationToken) -> Result<(), ExecutorError>;
 }
 
 /// Secret port that fails closed for every reference.

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use automata_ci_core::UnixMillis;
+use automata_ci_core::{RunId, UnixMillis};
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
@@ -12,10 +12,12 @@ use crate::{
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
     ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryVisibility, RejectProviderDelivery,
-    RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim, RetryProviderDelivery, Sha256Digest,
-    TenantScope,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
+    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery, RenewProviderDeliveryClaim,
+    RenewedProviderDeliveryClaim, RetryProviderDelivery, Sha256Digest, TenantScope,
 };
 
 use super::PostgresStore;
@@ -297,7 +299,19 @@ impl ProviderDeliveryRepository for PostgresStore {
         } else {
             verify_exact_completion(&mut transaction, &request).await?
         };
-        if let Some(cause) = completion_check_terminal_cause(request.outcomes()) {
+        let all_direct = delivery_uses_all_direct_workflow_selection(
+            &mut transaction,
+            request.claim().delivery_id(),
+        )
+        .await?;
+        let terminal_cause = if all_direct {
+            Some(all_direct_completion_check_terminal_cause(
+                request.outcomes(),
+            ))
+        } else {
+            completion_check_terminal_cause(request.outcomes())
+        };
+        if let Some(cause) = terminal_cause {
             terminalize_pre_admission_check(
                 &mut transaction,
                 request.claim().delivery_id(),
@@ -308,6 +322,97 @@ impl ProviderDeliveryRepository for PostgresStore {
         }
         transaction.commit().await.map_err(operation_error)?;
         Ok(receipt)
+    }
+
+    async fn register_provider_delivery_workflow_inventory(
+        &self,
+        request: RegisterProviderDeliveryWorkflowInventory,
+    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        let inventory = request.inventory();
+        let inserted = sqlx::query(
+            r"
+            INSERT INTO provider_delivery_workflow_inventories (
+                inbox_id, tenant_id, manifest_digest, source_revision,
+                repository_source_digest, inventory_digest, workflow_count,
+                registered_at_ms
+            )
+            SELECT inbox.id, inbox.tenant_id, $4, $5, $6, $7, $8, $9
+            FROM provider_delivery_inbox AS inbox
+            JOIN github_provider_delivery_evidence AS evidence
+              ON evidence.provider_delivery_id = inbox.id
+             AND evidence.tenant_id = inbox.tenant_id
+             AND evidence.provider_manifest_digest = $4
+            WHERE inbox.id = $1
+              AND inbox.state = 'claimed'
+              AND inbox.claim_owner_id = $2
+              AND inbox.claim_fence = $3
+              AND inbox.claimed_at_ms <= $9
+              AND inbox.claim_expires_at_ms > $9
+            ON CONFLICT (inbox_id) DO NOTHING
+            ",
+        )
+        .bind(request.claim().delivery_id().as_uuid())
+        .bind(request.claim().owner().as_uuid())
+        .bind(request.claim().fence_i64())
+        .bind(inventory.manifest_digest().as_bytes().as_slice())
+        .bind(inventory.source_revision())
+        .bind(inventory.repository_source_digest().as_bytes().as_slice())
+        .bind(inventory.digest().as_bytes().as_slice())
+        .bind(
+            i16::try_from(inventory.entries().len())
+                .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        )
+        .bind(request.observed_at().get())
+        .execute(&mut *transaction)
+        .await
+        .map_err(operation_error)?;
+
+        if inserted.rows_affected() == 1 {
+            insert_workflow_inventory_entries(
+                &mut transaction,
+                request.claim().delivery_id(),
+                inventory,
+            )
+            .await?;
+        }
+        require_live_inventory_claim(&mut transaction, &request).await?;
+        let receipt =
+            load_workflow_inventory_receipt(&mut transaction, request.claim().delivery_id())
+                .await?
+                .ok_or(ProviderDeliveryStoreError::WorkflowProgressRejected)?;
+        if receipt.inventory() != inventory {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(receipt)
+    }
+
+    async fn record_provider_delivery_workflow_progress(
+        &self,
+        request: RecordProviderDeliveryWorkflowProgress,
+    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        require_live_progress_claim(&mut transaction, &request).await?;
+        insert_workflow_progress(&mut transaction, &request).await?;
+        if matches!(
+            request.outcome().conclusion(),
+            ProviderDeliveryWorkflowConclusion::Failed { .. }
+        ) {
+            terminalize_failed_workflow_check(&mut transaction, &request).await?;
+        }
+        let outcome = load_workflow_progress(
+            &mut transaction,
+            request.claim().delivery_id(),
+            request.outcome().workflow_path(),
+        )
+        .await?
+        .ok_or(ProviderDeliveryStoreError::WorkflowProgressRejected)?;
+        if &outcome != request.outcome() {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(outcome)
     }
 
     async fn retry_provider_delivery(
@@ -432,39 +537,78 @@ fn completion_check_terminal_cause(
     }
 }
 
+fn all_direct_completion_check_terminal_cause(
+    outcomes: &[ProviderDeliveryWorkflowOutcome],
+) -> GithubCheckTerminalCause {
+    if outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.conclusion(),
+            ProviderDeliveryWorkflowConclusion::Failed { .. }
+        )
+    }) {
+        GithubCheckTerminalCause::WorkflowFailure
+    } else if outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.conclusion(),
+            ProviderDeliveryWorkflowConclusion::Admitted { .. }
+        )
+    }) {
+        GithubCheckTerminalCause::WorkflowSuccess
+    } else {
+        GithubCheckTerminalCause::WorkflowSkipped
+    }
+}
+
+async fn delivery_uses_all_direct_workflow_selection(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+) -> Result<bool, ProviderDeliveryStoreError> {
+    sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT manifest.workflow_selection_kind = 'all_direct'
+        FROM github_provider_delivery_evidence AS evidence
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = evidence.tenant_id
+         AND manifest.repository_id = evidence.repository_id
+         AND manifest.provider_connection_id = evidence.provider_connection_id
+         AND manifest.manifest_revision = evidence.provider_manifest_revision
+         AND manifest.manifest_digest = evidence.provider_manifest_digest
+        WHERE evidence.provider_delivery_id = $1
+        FOR SHARE OF evidence, manifest
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)
+    .map(Option::unwrap_or_default)
+}
+
 async fn terminalize_pre_admission_check(
     transaction: &mut Transaction<'_, Postgres>,
     delivery_id: ProviderDeliveryId,
     cause: GithubCheckTerminalCause,
     terminal_at: UnixMillis,
 ) -> Result<(), ProviderDeliveryStoreError> {
-    let rows = sqlx::query(
+    let row = sqlx::query(
         r"
         SELECT id, workflow_run_id, desired_state, desired_conclusion,
                terminal_cause, desired_revision, desired_updated_at_ms
-        FROM github_check_subjects
-        WHERE provider_delivery_id = $1
-        ORDER BY id
-        FOR UPDATE
+        FROM github_check_subjects AS subject
+        JOIN github_provider_delivery_evidence AS evidence
+          ON evidence.github_check_subject_id = subject.id
+         AND evidence.provider_delivery_id = subject.provider_delivery_id
+         AND evidence.tenant_id = subject.tenant_id
+        WHERE evidence.provider_delivery_id = $1
+        FOR UPDATE OF subject
         ",
     )
     .bind(delivery_id.as_uuid())
-    .fetch_all(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let [row] = rows.as_slice() else {
-        if !rows.is_empty() {
-            return Err(ProviderDeliveryStoreError::CorruptData);
-        }
-        let evidence_exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM github_provider_delivery_evidence \
-             WHERE provider_delivery_id = $1)",
-        )
-        .bind(delivery_id.as_uuid())
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(operation_error)?;
-        return if evidence_exists {
+    let Some(row) = row else {
+        return if provider_delivery_evidence_exists(transaction, delivery_id).await? {
             Err(ProviderDeliveryStoreError::CorruptData)
         } else {
             Ok(())
@@ -480,8 +624,11 @@ async fn terminalize_pre_admission_check(
     let desired_updated_at: i64 = row
         .try_get("desired_updated_at_ms")
         .map_err(operation_error)?;
-    if workflow_run_id.is_some() || desired_updated_at < 0 {
+    if desired_updated_at < 0 {
         return Err(ProviderDeliveryStoreError::CorruptData);
+    }
+    if workflow_run_id.is_some() {
+        return Ok(());
     }
     let expected_conclusion = cause.conclusion().as_str();
     let expected_cause = cause.as_str();
@@ -534,6 +681,20 @@ async fn terminalize_pre_admission_check(
     } else {
         Err(ProviderDeliveryStoreError::CorruptData)
     }
+}
+
+async fn provider_delivery_evidence_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+) -> Result<bool, ProviderDeliveryStoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM github_provider_delivery_evidence \
+         WHERE provider_delivery_id = $1)",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)
 }
 
 async fn database_time(
@@ -981,6 +1142,549 @@ fn decode_state(value: &str) -> Result<ProviderDeliveryState, ProviderDeliverySt
         "rejected" => Ok(ProviderDeliveryState::Rejected),
         _ => Err(ProviderDeliveryStoreError::CorruptData),
     }
+}
+
+async fn insert_workflow_inventory_entries(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+    inventory: &ProviderDeliveryWorkflowInventory,
+) -> Result<(), ProviderDeliveryStoreError> {
+    for (ordinal, entry) in inventory.entries().iter().enumerate() {
+        let (source_state, source_digest) = match entry.source_state() {
+            ProviderDeliveryWorkflowSourceState::Ready(digest) => {
+                ("ready", Some(digest.as_bytes().as_slice()))
+            }
+            ProviderDeliveryWorkflowSourceState::Empty => ("empty", None),
+            ProviderDeliveryWorkflowSourceState::Oversized => ("oversized", None),
+            ProviderDeliveryWorkflowSourceState::Missing => ("missing", None),
+        };
+        let inserted = sqlx::query(
+            r"
+            INSERT INTO provider_delivery_workflow_inventory_entries (
+                inbox_id, tenant_id, ordinal, workflow_path,
+                source_state, source_digest
+            )
+            SELECT inventory.inbox_id, inventory.tenant_id, $2, $3, $4, $5
+            FROM provider_delivery_workflow_inventories AS inventory
+            WHERE inventory.inbox_id = $1
+              AND inventory.inventory_digest = $6
+            ",
+        )
+        .bind(delivery_id.as_uuid())
+        .bind(i16::try_from(ordinal).map_err(|_| ProviderDeliveryStoreError::CorruptData)?)
+        .bind(entry.workflow_path())
+        .bind(source_state)
+        .bind(source_digest)
+        .bind(inventory.digest().as_bytes().as_slice())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+        if inserted.rows_affected() != 1 {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+    }
+    Ok(())
+}
+
+async fn require_live_inventory_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RegisterProviderDeliveryWorkflowInventory,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let valid: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM provider_delivery_inbox AS inbox
+            JOIN provider_delivery_workflow_inventories AS inventory
+              ON inventory.inbox_id = inbox.id
+             AND inventory.tenant_id = inbox.tenant_id
+            WHERE inbox.id = $1
+              AND inbox.state = 'claimed'
+              AND inbox.claim_owner_id = $2
+              AND inbox.claim_fence = $3
+              AND inbox.claimed_at_ms <= $4
+              AND inbox.claim_expires_at_ms > $4
+              AND inventory.inventory_digest = $5
+        )
+        ",
+    )
+    .bind(request.claim().delivery_id().as_uuid())
+    .bind(request.claim().owner().as_uuid())
+    .bind(request.claim().fence_i64())
+    .bind(request.observed_at().get())
+    .bind(request.inventory().digest().as_bytes().as_slice())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if !valid {
+        return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+    }
+    Ok(())
+}
+
+async fn require_live_progress_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let valid: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM provider_delivery_inbox AS inbox
+            JOIN provider_delivery_workflow_inventories AS inventory
+              ON inventory.inbox_id = inbox.id
+             AND inventory.tenant_id = inbox.tenant_id
+            JOIN provider_delivery_workflow_inventory_entries AS entry
+              ON entry.inbox_id = inventory.inbox_id
+             AND entry.tenant_id = inventory.tenant_id
+             AND entry.workflow_path = $6
+            WHERE inbox.id = $1
+              AND inbox.state = 'claimed'
+              AND inbox.claim_owner_id = $2
+              AND inbox.claim_fence = $3
+              AND inbox.claimed_at_ms <= $4
+              AND inbox.claim_expires_at_ms > $4
+              AND inventory.inventory_digest = $5
+        )
+        ",
+    )
+    .bind(request.claim().delivery_id().as_uuid())
+    .bind(request.claim().owner().as_uuid())
+    .bind(request.claim().fence_i64())
+    .bind(request.observed_at().get())
+    .bind(request.inventory_digest().as_bytes().as_slice())
+    .bind(request.outcome().workflow_path())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if !valid {
+        return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+    }
+    Ok(())
+}
+
+async fn insert_workflow_progress(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let outcome = request.outcome();
+    match outcome.conclusion() {
+        ProviderDeliveryWorkflowConclusion::Admitted { run_id } => {
+            sqlx::query(
+                r"
+                INSERT INTO provider_delivery_workflow_progress (
+                    inbox_id, tenant_id, workflow_path, inventory_digest,
+                    outcome_kind, run_id, failure_kind, recorded_at_ms
+                )
+                SELECT inventory.inbox_id, inventory.tenant_id, entry.workflow_path,
+                       inventory.inventory_digest, 'admitted', run.id, NULL, $5
+                FROM provider_delivery_workflow_inventories AS inventory
+                JOIN provider_delivery_workflow_inventory_entries AS entry
+                  ON entry.inbox_id = inventory.inbox_id
+                 AND entry.tenant_id = inventory.tenant_id
+                 AND entry.workflow_path = $2
+                JOIN github_provider_delivery_evidence AS evidence
+                  ON evidence.provider_delivery_id = inventory.inbox_id
+                 AND evidence.tenant_id = inventory.tenant_id
+                JOIN workflow_runs AS run
+                  ON run.repository_id = evidence.repository_id
+                 AND run.id = $4
+                JOIN workflow_definitions AS workflow
+                  ON workflow.repository_id = run.repository_id
+                 AND workflow.id = run.workflow_id
+                 AND workflow.path = entry.workflow_path
+                WHERE inventory.inbox_id = $1
+                  AND inventory.inventory_digest = $3
+                ON CONFLICT (inbox_id, workflow_path) DO NOTHING
+                ",
+            )
+            .bind(request.claim().delivery_id().as_uuid())
+            .bind(outcome.workflow_path())
+            .bind(request.inventory_digest().as_bytes().as_slice())
+            .bind(run_id.as_uuid())
+            .bind(request.observed_at().get())
+            .execute(&mut **transaction)
+            .await
+            .map_err(operation_error)?;
+        }
+        ProviderDeliveryWorkflowConclusion::Skipped { reason } => {
+            insert_non_admitted_workflow_progress(transaction, request, "skipped", reason.as_str())
+                .await?;
+        }
+        ProviderDeliveryWorkflowConclusion::Failed { failure_kind } => {
+            insert_non_admitted_workflow_progress(
+                transaction,
+                request,
+                "failed",
+                failure_kind.as_str(),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn terminalize_failed_workflow_check(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+) -> Result<(), ProviderDeliveryStoreError> {
+    insert_failed_workflow_check(transaction, request).await?;
+    transition_failed_workflow_check(transaction, request).await
+}
+
+async fn insert_failed_workflow_check(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let candidate_id = Uuid::new_v4();
+    let external_id = format!("automata-check:{candidate_id}");
+    sqlx::query(
+        r"
+        INSERT INTO github_check_subjects (
+            id, tenant_id, repository_id, provider_delivery_id, subject_key,
+            provider_connection_id, provider_installation_id,
+            github_repository_id, github_app_id, head_sha, check_name,
+            external_id, created_at_ms, desired_updated_at_ms
+        )
+        SELECT $1, evidence.tenant_id, evidence.repository_id,
+               evidence.provider_delivery_id, progress.workflow_path,
+               evidence.provider_connection_id, evidence.provider_installation_id,
+               evidence.github_repository_id, manifest.github_app_id,
+               evidence.github_check_head_sha, manifest.check_name, $2,
+               inbox.accepted_at_ms, inbox.accepted_at_ms
+        FROM provider_delivery_workflow_progress AS progress
+        JOIN provider_delivery_workflow_inventories AS inventory
+          ON inventory.inbox_id = progress.inbox_id
+         AND inventory.tenant_id = progress.tenant_id
+         AND inventory.inventory_digest = progress.inventory_digest
+        JOIN github_provider_delivery_evidence AS evidence
+          ON evidence.provider_delivery_id = inventory.inbox_id
+         AND evidence.tenant_id = inventory.tenant_id
+        JOIN provider_delivery_inbox AS inbox
+          ON inbox.id = evidence.provider_delivery_id
+         AND inbox.tenant_id = evidence.tenant_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = evidence.tenant_id
+         AND manifest.repository_id = evidence.repository_id
+         AND manifest.provider_connection_id = evidence.provider_connection_id
+         AND manifest.manifest_revision = evidence.provider_manifest_revision
+         AND manifest.manifest_digest = evidence.provider_manifest_digest
+        WHERE progress.inbox_id = $3
+          AND progress.workflow_path = $4
+          AND progress.inventory_digest = $5
+          AND progress.outcome_kind = 'failed'
+          AND manifest.workflow_selection_kind = 'all_direct'
+          AND inbox.state = 'claimed'
+          AND inbox.claim_owner_id = $6
+          AND inbox.claim_fence = $7
+          AND inbox.claimed_at_ms <= $8
+          AND inbox.claim_expires_at_ms > $8
+        ON CONFLICT (provider_delivery_id, subject_key) DO NOTHING
+        ",
+    )
+    .bind(candidate_id)
+    .bind(external_id)
+    .bind(request.claim().delivery_id().as_uuid())
+    .bind(request.outcome().workflow_path())
+    .bind(request.inventory_digest().as_bytes().as_slice())
+    .bind(request.claim().owner().as_uuid())
+    .bind(request.claim().fence_i64())
+    .bind(request.observed_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
+async fn transition_failed_workflow_check(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+) -> Result<(), ProviderDeliveryStoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT subject.id, subject.workflow_run_id, subject.desired_state,
+               subject.desired_conclusion, subject.terminal_cause,
+               subject.desired_revision, subject.desired_updated_at_ms
+        FROM github_check_subjects AS subject
+        JOIN github_provider_delivery_evidence AS evidence
+          ON evidence.provider_delivery_id = subject.provider_delivery_id
+         AND evidence.tenant_id = subject.tenant_id
+         AND evidence.repository_id = subject.repository_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = evidence.tenant_id
+         AND manifest.repository_id = evidence.repository_id
+         AND manifest.provider_connection_id = evidence.provider_connection_id
+         AND manifest.manifest_revision = evidence.provider_manifest_revision
+         AND manifest.manifest_digest = evidence.provider_manifest_digest
+        JOIN provider_delivery_workflow_progress AS progress
+          ON progress.inbox_id = evidence.provider_delivery_id
+         AND progress.tenant_id = evidence.tenant_id
+         AND progress.workflow_path = subject.subject_key
+        WHERE evidence.provider_delivery_id = $1
+          AND subject.subject_key = $2
+          AND progress.inventory_digest = $3
+          AND progress.outcome_kind = 'failed'
+          AND manifest.workflow_selection_kind = 'all_direct'
+        FOR UPDATE OF subject
+        ",
+    )
+    .bind(request.claim().delivery_id().as_uuid())
+    .bind(request.outcome().workflow_path())
+    .bind(request.inventory_digest().as_bytes().as_slice())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProviderDeliveryStoreError::WorkflowProgressRejected)?;
+    let subject_id: Uuid = row.try_get("id").map_err(operation_error)?;
+    let run_id: Option<Uuid> = row.try_get("workflow_run_id").map_err(operation_error)?;
+    let state: String = row.try_get("desired_state").map_err(operation_error)?;
+    let conclusion: Option<String> = row.try_get("desired_conclusion").map_err(operation_error)?;
+    let cause: Option<String> = row.try_get("terminal_cause").map_err(operation_error)?;
+    let revision: i64 = row.try_get("desired_revision").map_err(operation_error)?;
+    let updated_at: i64 = row
+        .try_get("desired_updated_at_ms")
+        .map_err(operation_error)?;
+    if run_id.is_some() {
+        return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+    }
+    if state == "completed" {
+        return if conclusion.as_deref() == Some("failure")
+            && cause.as_deref() == Some("workflow_failure")
+            && revision == 2
+            && updated_at >= 0
+        {
+            Ok(())
+        } else {
+            Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
+        };
+    }
+    if state != "queued"
+        || conclusion.is_some()
+        || cause.is_some()
+        || revision != 1
+        || updated_at > request.observed_at().get()
+    {
+        return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+    }
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        r"
+        UPDATE github_check_subjects
+        SET desired_state = 'completed', desired_conclusion = 'failure',
+            terminal_cause = 'workflow_failure',
+            desired_revision = desired_revision + 1,
+            desired_updated_at_ms = $2
+        WHERE id = $1
+          AND workflow_run_id IS NULL
+          AND desired_state = 'queued'
+          AND desired_conclusion IS NULL
+          AND terminal_cause IS NULL
+          AND desired_revision = 1
+          AND desired_updated_at_ms <= $2
+        RETURNING id
+        ",
+    )
+    .bind(subject_id)
+    .bind(request.observed_at().get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if updated == Some(subject_id) {
+        Ok(())
+    } else {
+        Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
+    }
+}
+
+async fn insert_non_admitted_workflow_progress(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordProviderDeliveryWorkflowProgress,
+    outcome_kind: &'static str,
+    failure_kind: &str,
+) -> Result<(), ProviderDeliveryStoreError> {
+    sqlx::query(
+        r"
+        INSERT INTO provider_delivery_workflow_progress (
+            inbox_id, tenant_id, workflow_path, inventory_digest,
+            outcome_kind, run_id, failure_kind, recorded_at_ms
+        )
+        SELECT inventory.inbox_id, inventory.tenant_id, entry.workflow_path,
+               inventory.inventory_digest, $4, NULL, $5, $6
+        FROM provider_delivery_workflow_inventories AS inventory
+        JOIN provider_delivery_workflow_inventory_entries AS entry
+          ON entry.inbox_id = inventory.inbox_id
+         AND entry.tenant_id = inventory.tenant_id
+         AND entry.workflow_path = $2
+        WHERE inventory.inbox_id = $1
+          AND inventory.inventory_digest = $3
+        ON CONFLICT (inbox_id, workflow_path) DO NOTHING
+        ",
+    )
+    .bind(request.claim().delivery_id().as_uuid())
+    .bind(request.outcome().workflow_path())
+    .bind(request.inventory_digest().as_bytes().as_slice())
+    .bind(outcome_kind)
+    .bind(failure_kind)
+    .bind(request.observed_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
+async fn load_workflow_inventory_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+) -> Result<Option<ProviderDeliveryWorkflowInventoryReceipt>, ProviderDeliveryStoreError> {
+    let header = sqlx::query(
+        r"
+        SELECT manifest_digest, source_revision, repository_source_digest,
+               inventory_digest, workflow_count
+        FROM provider_delivery_workflow_inventories
+        WHERE inbox_id = $1
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    let rows = sqlx::query(
+        r"
+        SELECT workflow_path, source_state, source_digest
+        FROM provider_delivery_workflow_inventory_entries
+        WHERE inbox_id = $1
+        ORDER BY ordinal
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let source_state = match row
+            .try_get::<String, _>("source_state")
+            .map_err(operation_error)?
+            .as_str()
+        {
+            "ready" => {
+                ProviderDeliveryWorkflowSourceState::Ready(decode_digest(&row, "source_digest")?)
+            }
+            "empty" => ProviderDeliveryWorkflowSourceState::Empty,
+            "oversized" => ProviderDeliveryWorkflowSourceState::Oversized,
+            "missing" => ProviderDeliveryWorkflowSourceState::Missing,
+            _ => return Err(ProviderDeliveryStoreError::CorruptData),
+        };
+        entries.push(
+            ProviderDeliveryWorkflowInventoryEntry::new(
+                row.try_get::<String, _>("workflow_path")
+                    .map_err(operation_error)?,
+                source_state,
+            )
+            .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        );
+    }
+    let expected_count: i16 = header.try_get("workflow_count").map_err(operation_error)?;
+    if usize::try_from(expected_count).ok() != Some(entries.len()) {
+        return Err(ProviderDeliveryStoreError::CorruptData);
+    }
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        decode_digest(&header, "manifest_digest")?,
+        header
+            .try_get::<String, _>("source_revision")
+            .map_err(operation_error)?,
+        decode_digest(&header, "repository_source_digest")?,
+        entries,
+    )
+    .map_err(|_| ProviderDeliveryStoreError::CorruptData)?;
+    if inventory.digest() != decode_digest(&header, "inventory_digest")? {
+        return Err(ProviderDeliveryStoreError::CorruptData);
+    }
+    let progress = load_all_workflow_progress(transaction, delivery_id).await?;
+    ProviderDeliveryWorkflowInventoryReceipt::new(inventory, progress)
+        .map(Some)
+        .map_err(|_| ProviderDeliveryStoreError::CorruptData)
+}
+
+async fn load_all_workflow_progress(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+) -> Result<Vec<ProviderDeliveryWorkflowOutcome>, ProviderDeliveryStoreError> {
+    let rows = sqlx::query(
+        r"
+        SELECT workflow_path, outcome_kind, run_id, failure_kind
+        FROM provider_delivery_workflow_progress
+        WHERE inbox_id = $1
+        ORDER BY workflow_path
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    rows.iter().map(decode_workflow_progress).collect()
+}
+
+async fn load_workflow_progress(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: ProviderDeliveryId,
+    workflow_path: &str,
+) -> Result<Option<ProviderDeliveryWorkflowOutcome>, ProviderDeliveryStoreError> {
+    sqlx::query(
+        r"
+        SELECT workflow_path, outcome_kind, run_id, failure_kind
+        FROM provider_delivery_workflow_progress
+        WHERE inbox_id = $1 AND workflow_path = $2
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .bind(workflow_path)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .as_ref()
+    .map(decode_workflow_progress)
+    .transpose()
+}
+
+fn decode_workflow_progress(
+    row: &PgRow,
+) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
+    let conclusion = match row
+        .try_get::<String, _>("outcome_kind")
+        .map_err(operation_error)?
+        .as_str()
+    {
+        "admitted" => {
+            let run_id: Uuid = row.try_get("run_id").map_err(operation_error)?;
+            ProviderDeliveryWorkflowConclusion::Admitted {
+                run_id: RunId::from_uuid(run_id),
+            }
+        }
+        "skipped" => ProviderDeliveryWorkflowConclusion::Skipped {
+            reason: crate::ProviderDeliveryFailureKind::new(
+                row.try_get::<String, _>("failure_kind")
+                    .map_err(operation_error)?,
+            )
+            .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        },
+        "failed" => ProviderDeliveryWorkflowConclusion::Failed {
+            failure_kind: crate::ProviderDeliveryFailureKind::new(
+                row.try_get::<String, _>("failure_kind")
+                    .map_err(operation_error)?,
+            )
+            .map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        },
+        _ => return Err(ProviderDeliveryStoreError::CorruptData),
+    };
+    ProviderDeliveryWorkflowOutcome::new(
+        row.try_get::<String, _>("workflow_path")
+            .map_err(operation_error)?,
+        conclusion,
+    )
+    .map_err(|_| ProviderDeliveryStoreError::CorruptData)
 }
 
 fn decode_digest(

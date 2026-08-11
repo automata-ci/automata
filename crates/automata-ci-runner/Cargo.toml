@@ -20,10 +20,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 automata-ci-action.workspace = true
 automata-ci-action-github.workspace = true
 automata-ci-blob.workspace = true
 automata-ci-blob-s3.workspace = true
+automata-ci-auth.workspace = true
 automata-ci-core.workspace = true
 automata-ci-execution.workspace = true
 automata-ci-expression-github.workspace = true
@@ -37,12 +39,14 @@ automata-ci-runner-journal.workspace = true
 automata-ci-runner-runtime.workspace = true
 automata-ci-runner-spool.workspace = true
 automata-ci-runner-transport.workspace = true
+automata-ci-sandbox-kubernetes.workspace = true
 automata-ci-sandbox-podman.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-workflow-github.workspace = true
 axum.workspace = true
 clap.workspace = true
 http.workspace = true
+kube.workspace = true
 reqwest.workspace = true
 prometheus-client.workspace = true
 rustls.workspace = true

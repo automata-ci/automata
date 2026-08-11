@@ -29,7 +29,7 @@ pub use command::{
     PodmanProcessEnvironment, SystemCommandExecutor,
 };
 pub use config::{
-    JobContainerEngine, PodmanBinary, PodmanHostGatewayAlias, PodmanLaunchTrust,
+    BuildKitRuntime, JobContainerEngine, PodmanBinary, PodmanHostGatewayAlias, PodmanLaunchTrust,
     PodmanLaunchTrustHandle, PodmanLimits, PodmanOptions,
 };
 pub(crate) use error::provider_error;

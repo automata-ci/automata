@@ -84,7 +84,7 @@ const RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a","id":"github/ubuntu-24-04"},
     "selector":"ubuntu-latest"
-  }],"schema":1
+  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 const WORKFLOW_SOURCE: &str = r"name: Autonomous CI
@@ -406,9 +406,9 @@ enum FinalMutationFault {
 
 #[derive(Clone, Debug)]
 enum ReadyPhase {
-    Preparation(LogicalActivationPreparationDescriptor),
+    Preparation(Box<LogicalActivationPreparationDescriptor>),
     Activation(Box<LogicalActivationPreparationReceipt>),
-    Materialization(LogicalInstanceMaterializationDescriptor),
+    Materialization(Box<LogicalInstanceMaterializationDescriptor>),
     Done,
 }
 
@@ -455,7 +455,7 @@ impl HarnessRepository {
     fn new(descriptor: LogicalActivationPreparationDescriptor, trace: HarnessTrace) -> Self {
         Self {
             state: Mutex::new(RepositoryState {
-                ready: ReadyPhase::Preparation(descriptor),
+                ready: ReadyPhase::Preparation(Box::new(descriptor)),
                 orchestration: None,
                 materialization: None,
                 wrong_receipt: WrongReceipt::None,
@@ -678,7 +678,7 @@ impl HarnessRepository {
         let ReadyPhase::Materialization(descriptor) = &state.ready else {
             panic!("materialization-ready descriptor")
         };
-        descriptor.clone()
+        descriptor.as_ref().clone()
     }
 
     fn replace_ready_runtime_context(&self, runtime_context: LogicalActivationObject) {
@@ -701,7 +701,7 @@ impl HarnessRepository {
             current.runtime_policy().clone(),
         )
         .expect("replacement materialization descriptor");
-        state.ready = ReadyPhase::Materialization(replacement);
+        state.ready = ReadyPhase::Materialization(Box::new(replacement));
         state.materialization = None;
     }
 }
@@ -944,7 +944,7 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         if state.orchestration.is_none() {
             let consumed = match state.ready.clone() {
                 ReadyPhase::Preparation(descriptor) => {
-                    Some(selected_preparation(descriptor, &request))
+                    Some(selected_preparation(*descriptor, &request))
                 }
                 ReadyPhase::Activation(preparation) => {
                     Some(selected_activation(*preparation, &request))
@@ -974,7 +974,7 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         if state.materialization.is_none()
             && let ReadyPhase::Materialization(descriptor) = state.ready.clone()
         {
-            state.materialization = Some(selected_materialization(descriptor, &request));
+            state.materialization = Some(selected_materialization(*descriptor, &request));
         }
         Ok(state.materialization.as_ref().map_or(
             LogicalInstanceMaterializationSelectionOutcome::Idle,
@@ -1047,7 +1047,8 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         assert_eq!(
             Some(request.consumed()),
             state.orchestration.as_ref(),
-            "quarantine must retain the latest exact orchestration authority"
+            "quarantine must retain the latest exact orchestration authority for {:?}",
+            request.kind(),
         );
         state.orchestration_quarantines.push(request.kind());
         Ok(LogicalWorkQuarantineOutcome::Quarantined)
@@ -1368,7 +1369,10 @@ impl LogicalActivationRepository for HarnessRepository {
             state.ready = if request.instances().is_empty() {
                 ReadyPhase::Done
             } else {
-                ReadyPhase::Materialization(materialization_descriptor(&preparation, &request))
+                ReadyPhase::Materialization(Box::new(materialization_descriptor(
+                    &preparation,
+                    &request,
+                )))
             };
             state.orchestration = None;
             fault

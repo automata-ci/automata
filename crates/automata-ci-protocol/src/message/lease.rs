@@ -87,6 +87,8 @@ pub struct LeaseOffer {
     lease: Lease,
     job: JobIrEnvelope,
     runtime_authorities: Option<super::JobRuntimeAuthorities>,
+    #[serde(default)]
+    managed_secret_bindings: Option<super::ManagedSecretBindingOverlay>,
 }
 
 impl LeaseOffer {
@@ -105,7 +107,22 @@ impl LeaseOffer {
             lease,
             job,
             runtime_authorities: Some(runtime_authorities),
+            managed_secret_bindings: None,
         }
+    }
+
+    /// Attaches the value-free secret-binding overlay for this exact lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an overlay bound to another attempt, lease, or fencing token.
+    pub fn with_managed_secret_bindings(
+        mut self,
+        overlay: super::ManagedSecretBindingOverlay,
+    ) -> Result<Self, super::ManagedSecretBindingOverlayError> {
+        overlay.validate_for(&self.lease)?;
+        self.managed_secret_bindings = Some(overlay);
+        Ok(self)
     }
 
     #[must_use]
@@ -136,6 +153,13 @@ impl LeaseOffer {
     #[must_use]
     pub const fn runtime_authorities(&self) -> Option<&super::JobRuntimeAuthorities> {
         self.runtime_authorities.as_ref()
+    }
+
+    /// Returns the lease-scoped, value-free secret-binding overlay, if this
+    /// command schema carries one.
+    #[must_use]
+    pub const fn managed_secret_bindings(&self) -> Option<&super::ManagedSecretBindingOverlay> {
+        self.managed_secret_bindings.as_ref()
     }
 }
 

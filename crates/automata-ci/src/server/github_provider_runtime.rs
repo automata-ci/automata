@@ -45,7 +45,10 @@ use automata_ci_github_delivery::{
     GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
     GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
-    GithubRestPushChangedFilesProvider,
+    GithubRestPushChangedFilesProvider, GithubScheduleClock,
+    GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
+    GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
+    GithubScheduleSourceCredentialProvider,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
@@ -54,11 +57,13 @@ use automata_ci_runner_control::{
 };
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckStoreError, GithubJobRuntimeAuthorityRepository, GithubRuntimeAuthorityRepository,
-    GithubRuntimeAuthorityWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceScope, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceRepository, LogicalWorkflowAdmissionRepository, PostgresStore,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderRepositoryVisibility, TenantScope,
+    GithubCheckStoreError, GithubJobRuntimeAuthorityRepository,
+    GithubRepositoryDispatchEvidenceRepository, GithubRuntimeAuthorityRepository,
+    GithubRuntimeAuthorityWorkerId, GithubScheduleWorkerId, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceScope,
+    GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
+    LogicalWorkflowAdmissionRepository, PostgresStore, ProviderConnectionId,
+    ProviderDeliveryClaimOwnerId, ProviderRepositoryVisibility, TenantScope,
 };
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionObserver, WorkflowAdmissionService,
@@ -357,6 +362,7 @@ impl GithubProviderRuntimeBuilder {
         let clock = Arc::new(NonRegressingGithubProviderClock::default());
         let delivery_clock: Arc<dyn GithubDeliveryClock> = clock.clone();
         let credential_clock: Arc<dyn GithubServerServiceCoordinatorClock> = clock.clone();
+        let schedule_clock: Arc<dyn GithubScheduleClock> = clock.clone();
         let runtime_authority_clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock> = clock;
         let applied_at = credential_clock.now();
 
@@ -589,6 +595,22 @@ impl GithubProviderRuntimeBuilder {
             releases.clone(),
             plan.authorities(),
         )?);
+        let schedule_private_authorities = GithubSchedulePrivateSourceAuthorities::new(
+            plan.authorities()
+                .iter()
+                .filter(|authority| {
+                    authority.scope() == GithubServerServiceScope::PrivateRepositorySourceRead
+                })
+                .map(|authority| {
+                    (
+                        authority.connection_id(),
+                        automata_ci_store::GithubServerServiceAuthoritySelector::from_identity(
+                            authority,
+                        ),
+                    )
+                }),
+        )
+        .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
 
         let endpoint = GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)?;
@@ -601,6 +623,36 @@ impl GithubProviderRuntimeBuilder {
         if let Some(observer) = admission_observer {
             admission = admission.with_observer(observer);
         }
+        let schedule_admission = admission.clone();
+        let schedule_worker = GithubScheduleWorkerId::from_uuid(Uuid::new_v4())
+            .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
+        let schedule_source = Arc::new(endpoint.clone());
+        let schedule = match shape.source_mode() {
+            GithubProviderSourceMode::PublicOnly => GithubScheduleService::new_public_only(
+                blobs.clone(),
+                schedule_source,
+                store.clone(),
+                schedule_admission,
+                schedule_clock,
+                schedule_worker,
+                config.schedule().service_config(),
+            ),
+            GithubProviderSourceMode::PublicAndPrivate => {
+                let credentials: Arc<dyn GithubScheduleSourceCredentialProvider> = adapters.clone();
+                GithubScheduleService::new_with_private_source_credentials(
+                    blobs.clone(),
+                    schedule_source,
+                    store.clone(),
+                    schedule_admission,
+                    schedule_private_authorities,
+                    Some(credentials),
+                    schedule_clock,
+                    schedule_worker,
+                    config.schedule().service_config(),
+                )
+            }
+        }
+        .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
         let changed_files: Arc<dyn GithubPushChangedFilesProvider> =
             Arc::new(GithubRestPushChangedFilesProvider::new(endpoint.clone()));
         let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> = Arc::new(
@@ -608,27 +660,36 @@ impl GithubProviderRuntimeBuilder {
                 .with_changed_files_provider(changed_files),
         );
         let repository_source = Arc::new(endpoint.clone());
+        let repository_dispatch_resolver = Arc::new(endpoint.clone());
+        let repository_dispatch_evidence: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
+            store.clone();
         let delivery_worker = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let delivery = match shape.source_mode() {
-            GithubProviderSourceMode::PublicOnly => GithubDeliveryService::new_public_only(
-                blobs.clone(),
-                repository_source,
-                workflow_processor,
-                store.clone(),
-                delivery_clock.clone(),
-                delivery_worker,
-                GithubDeliveryWorkerConfig::default(),
-                GithubDeliveryServiceConfig::default(),
-            ),
+            GithubProviderSourceMode::PublicOnly => {
+                GithubDeliveryService::new_public_only_with_repository_dispatch(
+                    blobs.clone(),
+                    repository_source,
+                    repository_dispatch_resolver,
+                    workflow_processor,
+                    store.clone(),
+                    repository_dispatch_evidence,
+                    delivery_clock.clone(),
+                    delivery_worker,
+                    GithubDeliveryWorkerConfig::default(),
+                    GithubDeliveryServiceConfig::default(),
+                )
+            }
             GithubProviderSourceMode::PublicAndPrivate => {
                 let source_credentials: Arc<dyn GithubDeliverySourceCredentialProvider> =
                     adapters.clone();
-                GithubDeliveryService::new_with_private_source_credentials(
+                GithubDeliveryService::new_with_private_source_credentials_and_repository_dispatch(
                     blobs.clone(),
                     repository_source,
+                    repository_dispatch_resolver,
                     workflow_processor,
                     store.clone(),
+                    repository_dispatch_evidence,
                     source_credentials,
                     delivery_clock.clone(),
                     delivery_worker,
@@ -650,14 +711,16 @@ impl GithubProviderRuntimeBuilder {
         ));
         let checks_worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
-        let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = store;
+        let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = store.clone();
+        let repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository> = store;
         let ingress = Arc::new(
-            GithubDeliveryIngress::new(
+            GithubDeliveryIngress::new_with_repository_dispatch(
                 verifier,
                 config.webhook().verifier_revision(),
                 plan.into_connections(),
                 blobs,
                 subject_evidence,
+                repository_dispatches,
                 delivery_clock,
             )
             .map_err(GithubProviderRuntimeBuildError::Ingress)?,
@@ -672,6 +735,7 @@ impl GithubProviderRuntimeBuilder {
         Ok(GithubProviderRuntime {
             ingress,
             delivery: Arc::new(delivery),
+            schedule: Arc::new(schedule),
             checks,
             maintenance,
             credential_commit_supervisor,
@@ -709,6 +773,7 @@ impl fmt::Debug for GithubProviderRuntimeBuilder {
 pub struct GithubProviderRuntime {
     ingress: Arc<GithubDeliveryIngress>,
     delivery: Arc<GithubDeliveryService>,
+    schedule: Arc<GithubScheduleService>,
     checks: Arc<GithubChecksPublisher>,
     maintenance: Arc<dyn CredentialMaintenancePort>,
     credential_commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
@@ -781,6 +846,7 @@ impl GithubProviderRuntime {
         let Self {
             ingress: _,
             delivery,
+            schedule,
             checks,
             maintenance,
             credential_commit_supervisor,
@@ -800,6 +866,10 @@ impl GithubProviderRuntime {
         let delivery_stop = stop.clone();
         loops.push(runtime_loop(async move {
             RuntimeLoopExit::Delivery(delivery.run(delivery_stop).await)
+        }));
+        let schedule_stop = stop.clone();
+        loops.push(runtime_loop(async move {
+            RuntimeLoopExit::Schedules(schedule.run(schedule_stop).await)
         }));
         let checks_connections = connection_ids;
         let checks_delay = idle_delay;
@@ -913,6 +983,9 @@ pub enum GithubProviderRuntimeBuildError {
     /// Delivery worker configuration was incompatible with runtime policy.
     #[error(transparent)]
     DeliveryWorker(GithubDeliveryWorkerConfigurationError),
+    /// Schedule worker configuration was incompatible with runtime policy.
+    #[error(transparent)]
+    ScheduleWorker(GithubScheduleServiceConfigurationError),
     /// The post-bootstrap ingress registry was inconsistent.
     #[error(transparent)]
     Ingress(GithubDeliveryConfigurationError),
@@ -924,6 +997,9 @@ pub enum GithubProviderRuntimeError {
     /// Durable delivery supervision failed.
     #[error(transparent)]
     Delivery(#[from] GithubDeliveryServiceError),
+    /// Durable schedule discovery or due-fire supervision failed.
+    #[error(transparent)]
+    Schedules(#[from] GithubScheduleServiceError),
     /// Fenced GitHub Checks publication failed.
     #[error(transparent)]
     Checks(#[from] GithubChecksPublisherError),
@@ -978,6 +1054,12 @@ impl GithubServerServiceCoordinatorClock for NonRegressingGithubProviderClock {
 impl GithubRuntimeAuthorityCoordinatorClock for NonRegressingGithubProviderClock {
     fn now(&self) -> UnixMillis {
         self.system_now()
+    }
+}
+
+impl GithubScheduleClock for NonRegressingGithubProviderClock {
+    fn now(&self) -> Result<UnixMillis, GithubScheduleServiceError> {
+        Ok(self.system_now())
     }
 }
 
@@ -1618,6 +1700,7 @@ impl ReleaseDrainPort for GithubProviderCredentialReleaseSupervisor {
 
 enum RuntimeLoopExit {
     Delivery(Result<(), GithubDeliveryServiceError>),
+    Schedules(Result<(), GithubScheduleServiceError>),
     Checks(Result<(), GithubChecksPublisherError>),
     Credentials(Result<(), GithubServerServiceCoordinatorError>),
     JobAuthority(Result<(), GithubRuntimeAuthorityLifecycleError>),
@@ -1675,10 +1758,12 @@ async fn supervise_runtime_loops(
         };
         let error = match exit {
             RuntimeLoopExit::Delivery(Ok(()))
+            | RuntimeLoopExit::Schedules(Ok(()))
             | RuntimeLoopExit::Checks(Ok(()))
             | RuntimeLoopExit::Credentials(Ok(()))
             | RuntimeLoopExit::JobAuthority(Ok(())) => None,
             RuntimeLoopExit::Delivery(Err(error)) => Some(error.into()),
+            RuntimeLoopExit::Schedules(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Checks(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Credentials(Err(error)) => Some(error.into()),
             RuntimeLoopExit::JobAuthority(Err(error)) => Some(error.into()),

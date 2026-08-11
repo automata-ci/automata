@@ -14,7 +14,8 @@ use automata_ci_core::{
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
-    LeaseRenewal, LogAckMessage, MessageHeader, NegotiatedSession, NoWork, OperationAck,
+    LeaseRenewal, LogAckMessage, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession,
+    NoWork, OperationAck,
     OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerToServer,
     SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
     SessionDisposition, SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer,
@@ -50,8 +51,9 @@ use crate::port::{
     AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, DesiredRunnerState,
     JobIrObjectReader, LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand,
     LeaseOfferCommandPublisher, LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
-    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
-    RuntimeAuthorityIssuer, decode_durable_server_command, is_durable_lease_offer_command,
+    ManagedSecretBindingIssuer, RunnerRegistrationAuthorizer, RunnerSessionFenceResolver,
+    RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer, decode_durable_server_command,
+    is_durable_lease_offer_command,
 };
 use crate::verify::verify_job_ir_blob;
 use crate::{
@@ -315,6 +317,7 @@ pub struct RunnerControlPorts {
     lease: RunnerLeasePorts,
     durability: RunnerDurabilityPorts,
     runtime_authorities: Option<Arc<dyn RuntimeAuthorityIssuer>>,
+    managed_secret_bindings: Option<Arc<dyn ManagedSecretBindingIssuer>>,
     clock: Arc<dyn LeaseClock>,
     ids: Arc<dyn ControlIdGenerator>,
 }
@@ -340,6 +343,7 @@ impl RunnerControlPorts {
             lease,
             durability,
             runtime_authorities: None,
+            managed_secret_bindings: None,
             clock,
             ids,
         }
@@ -355,6 +359,16 @@ impl RunnerControlPorts {
         issuer: Arc<dyn RuntimeAuthorityIssuer>,
     ) -> Self {
         self.runtime_authorities = Some(issuer);
+        self
+    }
+
+    /// Installs post-lease, value-free managed-secret grant issuance.
+    #[must_use]
+    pub fn with_managed_secret_binding_issuer(
+        mut self,
+        issuer: Arc<dyn ManagedSecretBindingIssuer>,
+    ) -> Self {
+        self.managed_secret_bindings = Some(issuer);
         self
     }
 }
@@ -1177,6 +1191,17 @@ impl DurableRunnerControlHandler {
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Self::not_cancelled(cancellation)?;
+        let authority_slot = StableRunnerSlot::new(claim.slot().get())
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let authority_request = RuntimeAuthorityIssueRequest::new(
+            &job,
+            claim.job_ir_metadata(),
+            claim.lease(),
+            claim.lease().issued_at(),
+            claim.session(),
+            authority_slot,
+        )
+        .map_err(|_| app(ApplicationErrorKind::Internal))?;
         let runtime_authorities = match job.job().authority_profile() {
             JobAuthorityProfile::CredentialFree => {
                 JobRuntimeAuthorities::new(Vec::new(), &job, claimed.lease())
@@ -1188,17 +1213,6 @@ impl DurableRunnerControlHandler {
                     .runtime_authorities
                     .as_ref()
                     .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?;
-                let authority_slot = StableRunnerSlot::new(claim.slot().get())
-                    .map_err(|_| app(ApplicationErrorKind::Internal))?;
-                let authority_request = RuntimeAuthorityIssueRequest::new(
-                    &job,
-                    claim.job_ir_metadata(),
-                    claim.lease(),
-                    claim.lease().issued_at(),
-                    claim.session(),
-                    authority_slot,
-                )
-                .map_err(|_| app(ApplicationErrorKind::Internal))?;
                 authority_issuer
                     .issue(authority_request)
                     .await
@@ -1208,6 +1222,23 @@ impl DurableRunnerControlHandler {
         runtime_authorities
             .validate_for(&job, claimed.lease())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let managed_secret_bindings = match (
+            job.job().authority_profile(),
+            self.ports.managed_secret_bindings.as_ref(),
+        ) {
+            (JobAuthorityProfile::Standard, Some(issuer)) => issuer
+                .issue(authority_request)
+                .await
+                .map_err(port_application_error)?,
+            (JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard, None)
+            | (JobAuthorityProfile::CredentialFree, Some(_)) => {
+                ManagedSecretBindingOverlay::empty(claim.lease())
+            }
+        };
+        managed_secret_bindings
+            .validate_for(claim.lease())
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        Self::not_cancelled(cancellation)?;
         let publish_at = runtime_authorities
             .as_slice()
             .iter()
@@ -1223,6 +1254,9 @@ impl DurableRunnerControlHandler {
         }
         let command =
             LeaseOfferCommand::try_new(claim, job.clone(), runtime_authorities.clone(), publish_at)
+                .and_then(|command| {
+                    command.with_managed_secret_bindings(managed_secret_bindings.clone())
+                })
                 .map_err(|_| app(ApplicationErrorKind::Internal))?;
         let publication = self
             .ports
@@ -1242,7 +1276,7 @@ impl DurableRunnerControlHandler {
             } else {
                 LeaseOfferObservation::Published
             });
-        Ok(ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
+        let offer = LeaseOffer::new(
             ServerCommandHeader::new(
                 request.header().protocol_version(),
                 fence.session_id(),
@@ -1253,7 +1287,10 @@ impl DurableRunnerControlHandler {
             claimed.lease().clone(),
             job,
             runtime_authorities,
-        ))))
+        )
+        .with_managed_secret_bindings(managed_secret_bindings)
+        .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        Ok(ServerToRunner::LeaseOffer(Box::new(offer)))
     }
 
     async fn handle_heartbeat(

@@ -1,6 +1,6 @@
 use crate::{
-    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, Spanned,
-    TriggerConfiguration, TriggerSet, YamlNode,
+    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, RepositoryDispatchFilter,
+    Spanned, TriggerConfiguration, TriggerSet, YamlNode,
 };
 
 use super::{DecodeContext, field_name, sequence_text};
@@ -28,7 +28,6 @@ const OTHER_GITHUB_EVENTS: &[&str] = &[
     "pull_request_target",
     "registry_package",
     "release",
-    "repository_dispatch",
     "status",
     "watch",
     "workflow_run",
@@ -136,6 +135,12 @@ fn event_with_configuration(
             EventName::MergeGroup => {
                 TriggerConfiguration::MergeGroup(merge_group_configuration(configuration, context))
             }
+            EventName::RepositoryDispatch if empty => {
+                TriggerConfiguration::RepositoryDispatch(RepositoryDispatchFilter::empty())
+            }
+            EventName::RepositoryDispatch => TriggerConfiguration::RepositoryDispatch(
+                repository_dispatch_configuration(configuration, context),
+            ),
             EventName::WorkflowDispatch if empty => TriggerConfiguration::WorkflowDispatch(None),
             EventName::WorkflowDispatch => {
                 TriggerConfiguration::WorkflowDispatch(Some(configuration.clone()))
@@ -176,6 +181,7 @@ fn parse_event_name(name: &Spanned<String>, context: &mut DecodeContext<'_>) -> 
         "push" => EventName::Push,
         "pull_request" => EventName::PullRequest,
         "merge_group" => EventName::MergeGroup,
+        "repository_dispatch" => EventName::RepositoryDispatch,
         "workflow_dispatch" => EventName::WorkflowDispatch,
         "schedule" => EventName::Schedule,
         "workflow_call" => EventName::WorkflowCall,
@@ -201,6 +207,47 @@ fn merge_group_configuration(node: &YamlNode, context: &mut DecodeContext<'_>) -
         return MergeGroupFilter::empty();
     };
     let mut filter = MergeGroupFilter::empty();
+    for entry in entries {
+        if context.is_exhausted() {
+            break;
+        }
+        let name = field_name(entry);
+        let entry_path = match name {
+            Some(name) => context.child_path(PATH, name, &entry.key.span),
+            None => None,
+        };
+        if name.is_some() && entry_path.is_none() {
+            break;
+        }
+        match name {
+            Some("types") if filter.types.is_none() => {
+                filter.types = Some(filter_values(
+                    &entry.value,
+                    entry_path.as_deref(),
+                    PATH,
+                    context,
+                ));
+            }
+            Some("types") => {}
+            _ => {
+                if let Some(extension) = context.preserve_unknown(PATH, entry) {
+                    filter.extensions.push(extension);
+                }
+            }
+        }
+    }
+    filter
+}
+
+fn repository_dispatch_configuration(
+    node: &YamlNode,
+    context: &mut DecodeContext<'_>,
+) -> RepositoryDispatchFilter {
+    const PATH: &str = "on.repository_dispatch";
+    let Some(entries) = context.expect_mapping(node, PATH) else {
+        return RepositoryDispatchFilter::empty();
+    };
+    let mut filter = RepositoryDispatchFilter::empty();
     for entry in entries {
         if context.is_exhausted() {
             break;

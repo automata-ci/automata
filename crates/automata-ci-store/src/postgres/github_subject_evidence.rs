@@ -4,22 +4,25 @@ use sqlx::{AssertSqlSafe, Postgres, Row as _, Transaction, ValueRef as _, postgr
 use uuid::Uuid;
 
 use crate::{
-    AcceptManifestPinnedGithubDelivery, AdmissionObject, AuthenticatedGithubDeliveryClaim,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
+    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEventKind,
+    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
+    GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
+    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
+    PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
-    TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay, WorkflowRuntimePolicyRevision,
-    WorkflowSnapshotId,
+    ResolveGithubRepositoryDispatch, TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay,
+    WorkflowRuntimePolicyRevision, WorkflowSnapshotId,
 };
 
 use super::PostgresStore;
@@ -34,6 +37,24 @@ struct CurrentManifestPin {
 #[derive(Debug)]
 struct DurableAcceptance {
     receipt: ManifestPinnedGithubDeliveryReceipt,
+    tenant_id: String,
+    provider: String,
+    connection_id: Uuid,
+    installation_id: i64,
+    github_repository_id: i64,
+    github_repository_name: String,
+    repository_visibility: String,
+    delivery_key: String,
+    request_digest: Sha256Digest,
+    raw_event_digest: Sha256Digest,
+    raw_event_object_key: String,
+    raw_event_size_bytes: i64,
+    raw_event_media_type: String,
+}
+
+#[derive(Debug)]
+struct DurablePendingAcceptance {
+    receipt: PendingGithubRepositoryDispatchReceipt,
     tenant_id: String,
     provider: String,
     connection_id: Uuid,
@@ -124,6 +145,102 @@ impl GithubSubjectEvidenceRepository for PostgresStore {
     }
 }
 
+#[async_trait]
+impl GithubRepositoryDispatchEvidenceRepository for PostgresStore {
+    async fn accept_manifest_pinned_github_repository_dispatch(
+        &self,
+        request: AcceptManifestPinnedGithubRepositoryDispatch,
+    ) -> Result<PendingGithubRepositoryDispatchReceipt, GithubSubjectEvidenceStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        let pin = load_matching_current_manifest_for_dispatch(&mut transaction, &request).await?;
+        let proposed_delivery_id = Uuid::new_v4();
+        let inserted = if let Some(pin) = pin.as_ref() {
+            insert_generic_inbox(&mut transaction, proposed_delivery_id, request.delivery())
+                .await?
+                .then_some(pin)
+        } else {
+            None
+        };
+
+        if let Some(pin) = inserted {
+            insert_pending_repository_dispatch(
+                &mut transaction,
+                proposed_delivery_id,
+                &request,
+                pin,
+            )
+            .await?;
+            let receipt = PendingGithubRepositoryDispatchReceipt::from_durable_parts(
+                pending_evidence_from_request(proposed_delivery_id, &request, pin)?,
+            );
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(receipt);
+        }
+
+        let durable = load_pending_acceptance_by_replay_key(&mut transaction, &request)
+            .await?
+            .ok_or(GithubSubjectEvidenceStoreError::AuthorityRejected)?;
+        if !pending_acceptance_matches(&durable, &request) {
+            return Err(GithubSubjectEvidenceStoreError::ReplayConflict);
+        }
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(durable.receipt)
+    }
+
+    async fn load_pending_github_repository_dispatch_evidence(
+        &self,
+        tenant: &TenantScope,
+        delivery_id: ProviderDeliveryId,
+    ) -> Result<PendingGithubRepositoryDispatchEvidence, GithubSubjectEvidenceStoreError> {
+        load_pending_repository_dispatch(&self.pool, tenant, delivery_id)
+            .await?
+            .ok_or(GithubSubjectEvidenceStoreError::NotFound)
+    }
+
+    async fn resolve_github_repository_dispatch(
+        &self,
+        request: ResolveGithubRepositoryDispatch,
+    ) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        require_current_repository_dispatch_claim(&mut transaction, &request).await?;
+        let durable_pending = load_pending_repository_dispatch(
+            &mut *transaction,
+            request.pending().tenant(),
+            request.pending().delivery_id(),
+        )
+        .await?
+        .ok_or(GithubSubjectEvidenceStoreError::NotFound)?;
+        if &durable_pending != request.pending() {
+            return Err(GithubSubjectEvidenceStoreError::ReplayConflict);
+        }
+
+        if let Some(existing) = load_delivery_evidence(
+            &mut *transaction,
+            request.pending().tenant(),
+            request.pending().delivery_id(),
+        )
+        .await?
+        {
+            if existing.repository_dispatch_resolution() != Some(request.resolution())
+                || existing.authenticated_event_v1() != Some(request.pending().event())
+                || existing.manifest() != request.pending().manifest()
+            {
+                return Err(GithubSubjectEvidenceStoreError::ReplayConflict);
+            }
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(existing);
+        }
+
+        let subject_id = Uuid::new_v4();
+        insert_resolved_repository_dispatch_evidence(&mut transaction, subject_id, &request)
+            .await?;
+        insert_resolved_repository_dispatch_check(&mut transaction, subject_id, &request).await?;
+        let evidence = resolved_repository_dispatch_evidence(subject_id, &request)?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(evidence)
+    }
+}
+
 /// Links the delivery's database-derived Check and inserts its run receipt
 /// inside the caller's epoch-4 logical-admission transaction.
 #[allow(clippy::too_many_lines)] // One exact SQL statement binds the full admission aggregate.
@@ -132,7 +249,8 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
     require_exact_github_record_authority(transaction, request).await?;
-    let subject_id = link_exact_check_to_run(transaction, request).await?;
+    let subject_id = ensure_workflow_check_subject(transaction, request).await?;
+    let subject_id = link_exact_check_to_run(transaction, request, subject_id).await?;
     let inserted = sqlx::query(
         r"
         INSERT INTO github_workflow_run_subject_evidence (
@@ -188,7 +306,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
           ON repository.tenant_id = evidence.tenant_id
          AND repository.id = evidence.repository_id
         JOIN github_check_subjects AS subject
-          ON subject.id = evidence.github_check_subject_id
+          ON subject.id = $8
          AND subject.tenant_id = evidence.tenant_id
         JOIN workflow_runs AS run
           ON run.repository_id = evidence.repository_id
@@ -248,7 +366,26 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
           AND evidence.github_check_head_sha = $9
           AND run.head_sha = $9
           AND workflow.path = $10
-          AND workflow.path = manifest.workflow_path
+          AND subject.subject_key = workflow.path
+          AND (
+              manifest.workflow_selection_kind = 'exact'
+              AND workflow.path = manifest.workflow_path
+              AND subject.id = evidence.github_check_subject_id
+              OR manifest.workflow_selection_kind = 'all_direct'
+              AND EXISTS (
+                  SELECT 1
+                  FROM provider_delivery_workflow_inventories AS inventory
+                  JOIN provider_delivery_workflow_inventory_entries AS entry
+                    ON entry.inbox_id = inventory.inbox_id
+                   AND entry.tenant_id = inventory.tenant_id
+                  WHERE inventory.inbox_id = evidence.provider_delivery_id
+                    AND inventory.tenant_id = evidence.tenant_id
+                    AND inventory.manifest_digest = manifest.manifest_digest
+                    AND entry.workflow_path = workflow.path
+                    AND entry.source_state = 'ready'
+                    AND entry.source_digest = snapshot.source_digest
+              )
+          )
           AND snapshot.source_digest = $11
           AND run.event_name = $12
           AND run.event_name = COALESCE(
@@ -493,10 +630,183 @@ async fn require_exact_github_replay_authority(
     }
 }
 
+async fn ensure_workflow_check_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
+    insert_all_direct_workflow_check_subject(transaction, request).await?;
+    load_queued_workflow_check_subject(transaction, request).await
+}
+
+async fn insert_all_direct_workflow_check_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let candidate_id = Uuid::new_v4();
+    let external_id = format!("automata-check:{candidate_id}");
+    sqlx::query(
+        r"
+        INSERT INTO github_check_subjects (
+            id, tenant_id, repository_id, provider_delivery_id, subject_key,
+            provider_connection_id, provider_installation_id,
+            github_repository_id, github_app_id, head_sha, check_name,
+            external_id, created_at_ms, desired_updated_at_ms
+        )
+        SELECT $1, evidence.tenant_id, evidence.repository_id,
+               evidence.provider_delivery_id, entry.workflow_path,
+               evidence.provider_connection_id, evidence.provider_installation_id,
+               evidence.github_repository_id, manifest.github_app_id,
+               evidence.github_check_head_sha, manifest.check_name, $2,
+               inbox.accepted_at_ms, inbox.accepted_at_ms
+        FROM github_provider_delivery_evidence AS evidence
+        JOIN provider_delivery_inbox AS inbox
+          ON inbox.id = evidence.provider_delivery_id
+         AND inbox.tenant_id = evidence.tenant_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = evidence.tenant_id
+         AND manifest.repository_id = evidence.repository_id
+         AND manifest.provider_connection_id = evidence.provider_connection_id
+         AND manifest.manifest_revision = evidence.provider_manifest_revision
+         AND manifest.manifest_digest = evidence.provider_manifest_digest
+        JOIN provider_delivery_workflow_inventories AS inventory
+          ON inventory.inbox_id = evidence.provider_delivery_id
+         AND inventory.tenant_id = evidence.tenant_id
+         AND inventory.manifest_digest = manifest.manifest_digest
+        JOIN provider_delivery_workflow_inventory_entries AS entry
+          ON entry.inbox_id = inventory.inbox_id
+         AND entry.tenant_id = inventory.tenant_id
+        WHERE evidence.tenant_id = $3
+          AND evidence.repository_id = $4
+          AND evidence.provider_delivery_id = $5
+          AND manifest.workflow_selection_kind = 'all_direct'
+          AND entry.workflow_path = $6
+          AND entry.source_state = 'ready'
+          AND entry.source_digest = $7
+          AND evidence.github_check_head_sha = $8
+          AND inbox.state = 'claimed'
+          AND inbox.claim_owner_id = $9
+          AND inbox.attempt_count = $10
+          AND inbox.claim_fence = $11
+          AND inbox.claimed_at_ms = $12
+          AND inbox.claim_expires_at_ms = $13
+          AND $14 >= $12
+          AND $14 < $13
+        ON CONFLICT (provider_delivery_id, subject_key) DO NOTHING
+        ",
+    )
+    .bind(candidate_id)
+    .bind(external_id)
+    .bind(request.tenant().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.delivery_id().as_uuid())
+    .bind(request.workflow_path().as_str())
+    .bind(request.source_digest().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.admission_claim().claim().owner().as_uuid())
+    .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
+    .bind(request.admission_claim().claim().fence_i64())
+    .bind(request.admission_claim().claimed_at().get())
+    .bind(request.admission_claim().expires_at().get())
+    .bind(request.admitted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
+async fn load_queued_workflow_check_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
+    let subject_id = sqlx::query_scalar::<_, Uuid>(
+        r"
+        SELECT subject.id
+        FROM github_check_subjects AS subject
+        JOIN github_provider_delivery_evidence AS evidence
+          ON evidence.provider_delivery_id = subject.provider_delivery_id
+         AND evidence.tenant_id = subject.tenant_id
+         AND evidence.repository_id = subject.repository_id
+        JOIN provider_delivery_inbox AS inbox
+          ON inbox.id = evidence.provider_delivery_id
+         AND inbox.tenant_id = evidence.tenant_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = evidence.tenant_id
+         AND manifest.repository_id = evidence.repository_id
+         AND manifest.provider_connection_id = evidence.provider_connection_id
+         AND manifest.manifest_revision = evidence.provider_manifest_revision
+         AND manifest.manifest_digest = evidence.provider_manifest_digest
+        WHERE evidence.tenant_id = $1
+          AND evidence.repository_id = $2
+          AND evidence.provider_delivery_id = $3
+          AND subject.subject_key = $4
+          AND subject.provider_connection_id = evidence.provider_connection_id
+          AND subject.provider_installation_id = evidence.provider_installation_id
+          AND subject.github_repository_id = evidence.github_repository_id
+          AND subject.github_repository_name = evidence.github_repository_name
+          AND subject.github_app_id = manifest.github_app_id
+          AND subject.head_sha = $5
+          AND subject.head_sha = evidence.github_check_head_sha
+          AND subject.check_name = manifest.check_name
+          AND subject.created_at_ms = inbox.accepted_at_ms
+          AND subject.workflow_run_id IS NULL
+          AND subject.linked_at_ms IS NULL
+          AND subject.desired_state = 'queued'
+          AND subject.desired_conclusion IS NULL
+          AND subject.terminal_cause IS NULL
+          AND subject.desired_revision = 1
+          AND subject.desired_updated_at_ms = inbox.accepted_at_ms
+          AND inbox.state = 'claimed'
+          AND inbox.claim_owner_id = $7
+          AND inbox.attempt_count = $8
+          AND inbox.claim_fence = $9
+          AND inbox.claimed_at_ms = $10
+          AND inbox.claim_expires_at_ms = $11
+          AND (
+              manifest.workflow_selection_kind = 'exact'
+              AND subject.id = evidence.github_check_subject_id
+              AND subject.subject_key = manifest.workflow_path
+              OR manifest.workflow_selection_kind = 'all_direct'
+              AND EXISTS (
+                  SELECT 1
+                  FROM provider_delivery_workflow_inventories AS inventory
+                  JOIN provider_delivery_workflow_inventory_entries AS entry
+                    ON entry.inbox_id = inventory.inbox_id
+                   AND entry.tenant_id = inventory.tenant_id
+                  WHERE inventory.inbox_id = evidence.provider_delivery_id
+                    AND inventory.tenant_id = evidence.tenant_id
+                    AND inventory.manifest_digest = manifest.manifest_digest
+                    AND entry.workflow_path = subject.subject_key
+                    AND entry.source_state = 'ready'
+                    AND entry.source_digest = $6
+              )
+          )
+        FOR SHARE OF subject, evidence, inbox, manifest
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.delivery_id().as_uuid())
+    .bind(request.workflow_path().as_str())
+    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.source_digest().as_bytes().as_slice())
+    .bind(request.admission_claim().claim().owner().as_uuid())
+    .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
+    .bind(request.admission_claim().claim().fence_i64())
+    .bind(request.admission_claim().claimed_at().get())
+    .bind(request.admission_claim().expires_at().get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(GithubSubjectEvidenceStoreError::AuthorityRejected)?;
+    GithubCheckSubjectId::from_uuid(subject_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+}
+
 #[allow(clippy::too_many_lines)] // One transition exact-matches the full run and claim authority.
 async fn link_exact_check_to_run(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RecordGithubWorkflowRunSubjectEvidence,
+    subject_id: GithubCheckSubjectId,
 ) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
     let subject_id = sqlx::query_scalar::<_, Uuid>(
         r"
@@ -533,7 +843,7 @@ async fn link_exact_check_to_run(
           AND manifest.provider_connection_id = evidence.provider_connection_id
           AND manifest.manifest_revision = evidence.provider_manifest_revision
           AND manifest.manifest_digest = evidence.provider_manifest_digest
-          AND subject.id = evidence.github_check_subject_id
+          AND subject.id = $23
           AND subject.tenant_id = evidence.tenant_id
           AND subject.provider_delivery_id = evidence.provider_delivery_id
           AND subject.repository_id = evidence.repository_id
@@ -546,7 +856,7 @@ async fn link_exact_check_to_run(
           AND subject.desired_updated_at_ms <= $4
           AND subject.head_sha = evidence.github_check_head_sha
           AND subject.head_sha = $6
-          AND subject.subject_key = manifest.workflow_path
+          AND subject.subject_key = $13
           AND run.repository_id = evidence.repository_id
           AND run.id = $3
           AND run.workflow_id = $7
@@ -570,8 +880,26 @@ async fn link_exact_check_to_run(
           AND run.created_at_ms = $4
           AND workflow.repository_id = run.repository_id
           AND workflow.id = run.workflow_id
-          AND workflow.path = manifest.workflow_path
           AND workflow.path = $13
+          AND (
+              manifest.workflow_selection_kind = 'exact'
+              AND workflow.path = manifest.workflow_path
+              AND subject.id = evidence.github_check_subject_id
+              OR manifest.workflow_selection_kind = 'all_direct'
+              AND EXISTS (
+                  SELECT 1
+                  FROM provider_delivery_workflow_inventories AS inventory
+                  JOIN provider_delivery_workflow_inventory_entries AS entry
+                    ON entry.inbox_id = inventory.inbox_id
+                   AND entry.tenant_id = inventory.tenant_id
+                  WHERE inventory.inbox_id = evidence.provider_delivery_id
+                    AND inventory.tenant_id = evidence.tenant_id
+                    AND inventory.manifest_digest = manifest.manifest_digest
+                    AND entry.workflow_path = workflow.path
+                    AND entry.source_state = 'ready'
+                    AND entry.source_digest = snapshot.source_digest
+              )
+          )
           AND snapshot.id = run.snapshot_id
           AND snapshot.workflow_id = run.workflow_id
           AND snapshot.source_digest = $14
@@ -625,6 +953,7 @@ async fn link_exact_check_to_run(
     .bind(request.admission_claim().claim().fence_i64())
     .bind(request.admission_claim().claimed_at().get())
     .bind(request.admission_claim().expires_at().get())
+    .bind(subject_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -637,7 +966,35 @@ async fn load_matching_current_manifest(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AcceptManifestPinnedGithubDelivery,
 ) -> Result<Option<CurrentManifestPin>, GithubSubjectEvidenceStoreError> {
-    let identity = request.delivery().identity();
+    load_matching_current_manifest_for_delivery(
+        transaction,
+        request.delivery(),
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+    )
+    .await
+}
+
+async fn load_matching_current_manifest_for_dispatch(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+) -> Result<Option<CurrentManifestPin>, GithubSubjectEvidenceStoreError> {
+    load_matching_current_manifest_for_delivery(
+        transaction,
+        request.delivery(),
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+    )
+    .await
+}
+
+async fn load_matching_current_manifest_for_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery: &crate::AcceptProviderDelivery,
+    verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
+    verifier_revision: GithubServerServiceRevision,
+) -> Result<Option<CurrentManifestPin>, GithubSubjectEvidenceStoreError> {
+    let identity = delivery.identity();
     let row = sqlx::query(CURRENT_MANIFEST_SELECT)
         .bind(identity.tenant().as_str())
         .bind(identity.connection_id().as_uuid())
@@ -645,15 +1002,9 @@ async fn load_matching_current_manifest(
         .bind(identity.repository_id().as_i64())
         .bind(identity.repository_visibility().as_durable_str())
         .bind(identity.repository_identity())
-        .bind(request.delivery().accepted_at().get())
-        .bind(
-            request
-                .authenticated_webhook_verifier_fingerprint()
-                .sha256()
-                .as_bytes()
-                .as_slice(),
-        )
-        .bind(request.authenticated_webhook_verifier_revision().as_i64())
+        .bind(delivery.accepted_at().get())
+        .bind(verifier_fingerprint.sha256().as_bytes().as_slice())
+        .bind(verifier_revision.as_i64())
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -665,7 +1016,7 @@ async fn load_matching_current_manifest(
         transaction,
         &manifest,
         GithubServerServiceScope::ChecksWrite,
-        request.delivery().accepted_at(),
+        delivery.accepted_at(),
     )
     .await?;
     let Some(checks_authority) = checks_authority else {
@@ -678,7 +1029,7 @@ async fn load_matching_current_manifest(
                 transaction,
                 &manifest,
                 GithubServerServiceScope::PrivateRepositorySourceRead,
-                request.delivery().accepted_at(),
+                delivery.accepted_at(),
             )
             .await?;
             let Some(authority) = authority else {
@@ -788,6 +1139,271 @@ async fn insert_generic_inbox(
     .await
     .map_err(operation_error)?;
     Ok(row.is_some())
+}
+
+async fn insert_pending_repository_dispatch(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery_id: Uuid,
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+    pin: &CurrentManifestPin,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let identity = request.delivery().identity();
+    let private_id = pin
+        .private_source_authority
+        .as_ref()
+        .map(|selector| selector.authority_id().as_uuid());
+    let private_digest = pin
+        .private_source_authority
+        .as_ref()
+        .map(|selector| selector.identity_digest().as_bytes().to_vec());
+    let private_app_revision = pin
+        .private_source_authority
+        .as_ref()
+        .map(|selector| selector.app_configuration_revision().as_i64());
+    let private_policy_revision = pin
+        .private_source_authority
+        .as_ref()
+        .map(|selector| selector.policy_revision().as_i64());
+    let result = sqlx::query(
+        r"
+        INSERT INTO github_repository_dispatch_pending_evidence (
+            provider_delivery_id, tenant_id, repository_id,
+            provider_connection_id, github_repository_owner_id,
+            provider_manifest_revision, provider_manifest_digest,
+            authenticated_webhook_verifier_fingerprint_sha256,
+            authenticated_webhook_verifier_revision,
+            authenticated_event_envelope_version,
+            authenticated_event_name, authenticated_event_git_ref,
+            checks_authority_id, checks_authority_identity_digest,
+            checks_authority_app_configuration_revision,
+            checks_authority_policy_revision,
+            private_source_authority_id,
+            private_source_authority_identity_digest,
+            private_source_authority_app_configuration_revision,
+            private_source_authority_policy_revision
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,1,'repository_dispatch',$10,
+            $11,$12,$13,$14,$15,$16,$17,$18
+        )
+        ",
+    )
+    .bind(delivery_id)
+    .bind(identity.tenant().as_str())
+    .bind(pin.manifest.repository_id().as_uuid())
+    .bind(identity.connection_id().as_uuid())
+    .bind(request.repository_owner_id().as_i64())
+    .bind(pin.manifest.revision().as_i64())
+    .bind(pin.manifest.digest().as_bytes().as_slice())
+    .bind(
+        request
+            .authenticated_webhook_verifier_fingerprint()
+            .sha256()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(request.authenticated_webhook_verifier_revision().as_i64())
+    .bind(request.event().git_ref())
+    .bind(pin.checks_authority.authority_id().as_uuid())
+    .bind(pin.checks_authority.identity_digest().as_bytes().as_slice())
+    .bind(pin.checks_authority.app_configuration_revision().as_i64())
+    .bind(pin.checks_authority.policy_revision().as_i64())
+    .bind(private_id)
+    .bind(private_digest)
+    .bind(private_app_revision)
+    .bind(private_policy_revision)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if result.rows_affected() != 1 {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    Ok(())
+}
+
+fn pending_evidence_from_request(
+    delivery_id: Uuid,
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+    pin: &CurrentManifestPin,
+) -> Result<PendingGithubRepositoryDispatchEvidence, GithubSubjectEvidenceStoreError> {
+    let delivery_id = ProviderDeliveryId::from_uuid(delivery_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    PendingGithubRepositoryDispatchEvidence::from_durable_parts(
+        delivery_id,
+        request.repository_owner_id(),
+        pin.manifest.clone(),
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+        pin.checks_authority.clone(),
+        pin.private_source_authority.clone(),
+        request.event().clone(),
+        request.delivery().accepted_at(),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+}
+
+async fn insert_resolved_repository_dispatch_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    subject_id: Uuid,
+    request: &ResolveGithubRepositoryDispatch,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let pending = request.pending();
+    let manifest = pending.manifest();
+    let private_id = pending
+        .private_source_authority()
+        .map(|selector| selector.authority_id().as_uuid());
+    let private_digest = pending
+        .private_source_authority()
+        .map(|selector| selector.identity_digest().as_bytes().to_vec());
+    let private_app_revision = pending
+        .private_source_authority()
+        .map(|selector| selector.app_configuration_revision().as_i64());
+    let private_policy_revision = pending
+        .private_source_authority()
+        .map(|selector| selector.policy_revision().as_i64());
+    let result = sqlx::query(
+        r"
+        INSERT INTO github_provider_delivery_evidence (
+            provider_delivery_id, tenant_id, repository_id,
+            provider_connection_id, provider_installation_id,
+            github_repository_id, github_repository_owner_id,
+            github_repository_name, repository_visibility,
+            provider_manifest_revision, provider_manifest_digest,
+            authenticated_webhook_verifier_fingerprint_sha256,
+            authenticated_webhook_verifier_revision,
+            authenticated_event_envelope_version,
+            authenticated_event_name, authenticated_event_git_ref,
+            authenticated_event_source_revision,
+            authenticated_event_source_authority,
+            checks_authority_id, checks_authority_identity_digest,
+            checks_authority_app_configuration_revision,
+            checks_authority_policy_revision,
+            private_source_authority_id,
+            private_source_authority_identity_digest,
+            private_source_authority_app_configuration_revision,
+            private_source_authority_policy_revision,
+            github_check_subject_id, github_check_head_sha
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,
+            'repository_dispatch',$14,$15,$16,$17,$18,$19,$20,$21,$22,
+            $23,$24,$25,$15
+        )
+        ",
+    )
+    .bind(pending.delivery_id().as_uuid())
+    .bind(pending.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .bind(manifest.connection_id().as_uuid())
+    .bind(manifest.installation_id().as_i64())
+    .bind(manifest.github_repository_id().as_i64())
+    .bind(pending.repository_owner_id().as_i64())
+    .bind(manifest.github_repository_name().as_str())
+    .bind(manifest.repository_visibility().as_durable_str())
+    .bind(manifest.revision().as_i64())
+    .bind(manifest.digest().as_bytes().as_slice())
+    .bind(
+        pending
+            .authenticated_webhook_verifier_fingerprint()
+            .sha256()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(pending.authenticated_webhook_verifier_revision().as_i64())
+    .bind(pending.event().git_ref())
+    .bind(request.resolution().source_revision().as_bytes().as_slice())
+    .bind(request.resolution().authority().as_str())
+    .bind(pending.checks_authority().authority_id().as_uuid())
+    .bind(
+        pending
+            .checks_authority()
+            .identity_digest()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(
+        pending
+            .checks_authority()
+            .app_configuration_revision()
+            .as_i64(),
+    )
+    .bind(pending.checks_authority().policy_revision().as_i64())
+    .bind(private_id)
+    .bind(private_digest)
+    .bind(private_app_revision)
+    .bind(private_policy_revision)
+    .bind(subject_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if result.rows_affected() != 1 {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    Ok(())
+}
+
+async fn insert_resolved_repository_dispatch_check(
+    transaction: &mut Transaction<'_, Postgres>,
+    subject_id: Uuid,
+    request: &ResolveGithubRepositoryDispatch,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let pending = request.pending();
+    let manifest = pending.manifest();
+    let external_id = format!("automata-check:{subject_id}");
+    let result = sqlx::query(
+        r"
+        INSERT INTO github_check_subjects (
+            id, tenant_id, repository_id, provider_delivery_id, subject_key,
+            provider_connection_id, provider_installation_id,
+            github_repository_id, github_app_id, head_sha, check_name,
+            external_id, created_at_ms, desired_updated_at_ms
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
+        )
+        ",
+    )
+    .bind(subject_id)
+    .bind(pending.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .bind(pending.delivery_id().as_uuid())
+    .bind(manifest.check_subject_key().as_str())
+    .bind(manifest.connection_id().as_uuid())
+    .bind(manifest.installation_id().as_i64())
+    .bind(manifest.github_repository_id().as_i64())
+    .bind(manifest.github_app_id().as_i64())
+    .bind(request.resolution().source_revision().as_bytes().as_slice())
+    .bind(manifest.check_name().as_str())
+    .bind(external_id)
+    .bind(pending.accepted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if result.rows_affected() != 1 {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    Ok(())
+}
+
+fn resolved_repository_dispatch_evidence(
+    subject_id: Uuid,
+    request: &ResolveGithubRepositoryDispatch,
+) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
+    let pending = request.pending();
+    let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
+        pending.delivery_id(),
+        pending.repository_owner_id(),
+        pending.manifest().clone(),
+        pending.authenticated_webhook_verifier_fingerprint(),
+        pending.authenticated_webhook_verifier_revision(),
+        pending.checks_authority().clone(),
+        pending.private_source_authority().cloned(),
+        subject_id,
+        request.resolution().source_revision(),
+        pending.event().clone(),
+        request.resolution(),
+        pending.accepted_at(),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
 async fn insert_delivery_evidence(
@@ -971,6 +1587,218 @@ fn evidence_from_request(
     result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
+async fn require_current_repository_dispatch_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ResolveGithubRepositoryDispatch,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let pending = request.pending();
+    let claim = request.claim();
+    let authorized = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+        FROM provider_delivery_inbox AS inbox
+        JOIN github_repository_dispatch_pending_evidence AS pending
+          ON pending.provider_delivery_id = inbox.id
+         AND pending.tenant_id = inbox.tenant_id
+         AND pending.provider_connection_id = inbox.connection_id
+        WHERE inbox.id = $1
+          AND inbox.tenant_id = $2
+          AND inbox.provider = 'github'
+          AND inbox.connection_id = $3
+          AND inbox.state = 'claimed'
+          AND inbox.claim_owner_id = $4
+          AND inbox.attempt_count = $5
+          AND inbox.claim_fence = $6
+          AND inbox.claimed_at_ms = $7
+          AND inbox.claim_expires_at_ms = $8
+          AND inbox.accepted_at_ms = $9
+          AND $10 >= inbox.claimed_at_ms
+          AND $10 < inbox.claim_expires_at_ms
+        FOR UPDATE OF inbox
+        ",
+    )
+    .bind(pending.delivery_id().as_uuid())
+    .bind(pending.tenant().as_str())
+    .bind(pending.manifest().connection_id().as_uuid())
+    .bind(claim.claim().owner().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("validated claim attempt fits SMALLINT"))
+    .bind(claim.claim().fence_i64())
+    .bind(claim.claimed_at().get())
+    .bind(claim.expires_at().get())
+    .bind(pending.accepted_at().get())
+    .bind(request.observed_at().get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if authorized != Some(true) {
+        return Err(GithubSubjectEvidenceStoreError::AuthorityRejected);
+    }
+    Ok(())
+}
+
+async fn load_pending_acceptance_by_replay_key(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+) -> Result<Option<DurablePendingAcceptance>, GithubSubjectEvidenceStoreError> {
+    let identity = request.delivery().identity();
+    let query = format!(
+        "{PENDING_EVIDENCE_SELECT} WHERE inbox.provider = $1 AND inbox.connection_id = $2 \
+         AND inbox.delivery_id = $3 {PENDING_EVIDENCE_VISIBILITY_AUTHORITY_EXACT}"
+    );
+    let row = sqlx::query(AssertSqlSafe(query))
+        .bind(identity.provider())
+        .bind(identity.connection_id().as_uuid())
+        .bind(identity.delivery_id())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+    row.map(|row| decode_pending_acceptance(&row)).transpose()
+}
+
+fn decode_pending_acceptance(
+    row: &PgRow,
+) -> Result<DurablePendingAcceptance, GithubSubjectEvidenceStoreError> {
+    let evidence = decode_pending_repository_dispatch(row)?;
+    Ok(DurablePendingAcceptance {
+        receipt: PendingGithubRepositoryDispatchReceipt::from_durable_parts(evidence),
+        tenant_id: row.try_get("inbox_tenant_id").map_err(operation_error)?,
+        provider: row.try_get("inbox_provider").map_err(operation_error)?,
+        connection_id: row
+            .try_get("inbox_connection_id")
+            .map_err(operation_error)?,
+        installation_id: row
+            .try_get("inbox_installation_id")
+            .map_err(operation_error)?,
+        github_repository_id: row
+            .try_get("inbox_repository_id")
+            .map_err(operation_error)?,
+        github_repository_name: row
+            .try_get("inbox_repository_name")
+            .map_err(operation_error)?,
+        repository_visibility: row
+            .try_get("inbox_repository_visibility")
+            .map_err(operation_error)?,
+        delivery_key: row.try_get("inbox_delivery_key").map_err(operation_error)?,
+        request_digest: digest_column(row, "request_digest")?,
+        raw_event_digest: digest_column(row, "raw_event_digest")?,
+        raw_event_object_key: row
+            .try_get("raw_event_object_key")
+            .map_err(operation_error)?,
+        raw_event_size_bytes: row
+            .try_get("raw_event_size_bytes")
+            .map_err(operation_error)?,
+        raw_event_media_type: row
+            .try_get("raw_event_media_type")
+            .map_err(operation_error)?,
+    })
+}
+
+fn pending_acceptance_matches(
+    durable: &DurablePendingAcceptance,
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+) -> bool {
+    let identity = request.delivery().identity();
+    let evidence = durable.receipt.evidence();
+    durable.tenant_id == identity.tenant().as_str()
+        && durable.provider == identity.provider()
+        && durable.connection_id == identity.connection_id().as_uuid()
+        && durable.installation_id == identity.installation_id().as_i64()
+        && durable.github_repository_id == identity.repository_id().as_i64()
+        && durable.github_repository_name == identity.repository_identity()
+        && durable.repository_visibility == identity.repository_visibility().as_durable_str()
+        && durable.delivery_key == identity.delivery_id()
+        && durable.request_digest == request.delivery().request_digest()
+        && durable.raw_event_digest == request.delivery().raw_event().digest()
+        && durable.raw_event_object_key == request.delivery().raw_event().object_key().as_str()
+        && u64::try_from(durable.raw_event_size_bytes).ok()
+            == Some(request.delivery().raw_event().encoded_size())
+        && durable.raw_event_media_type == request.delivery().raw_event().media_type()
+        && evidence.accepted_at() == request.delivery().accepted_at()
+        && evidence.repository_owner_id() == request.repository_owner_id()
+        && evidence.event() == request.event()
+        && evidence.authenticated_webhook_verifier_fingerprint()
+            == request.authenticated_webhook_verifier_fingerprint()
+        && evidence.authenticated_webhook_verifier_revision()
+            == request.authenticated_webhook_verifier_revision()
+}
+
+async fn load_pending_repository_dispatch<'e, E>(
+    executor: E,
+    tenant: &TenantScope,
+    delivery_id: ProviderDeliveryId,
+) -> Result<Option<PendingGithubRepositoryDispatchEvidence>, GithubSubjectEvidenceStoreError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let query = format!(
+        "{PENDING_EVIDENCE_SELECT} WHERE inbox.id = $1 AND inbox.tenant_id = $2 \
+         AND inbox.provider = 'github' {PENDING_EVIDENCE_VISIBILITY_AUTHORITY_EXACT}"
+    );
+    let row = sqlx::query(AssertSqlSafe(query))
+        .bind(delivery_id.as_uuid())
+        .bind(tenant.as_str())
+        .fetch_optional(executor)
+        .await
+        .map_err(operation_error)?;
+    row.map(|row| decode_pending_repository_dispatch(&row))
+        .transpose()
+}
+
+fn decode_pending_repository_dispatch(
+    row: &PgRow,
+) -> Result<PendingGithubRepositoryDispatchEvidence, GithubSubjectEvidenceStoreError> {
+    let manifest = decode_manifest(row)?;
+    let checks_authority =
+        decode_authority_selector(row, manifest.tenant().clone(), "checks_authority")?;
+    let private_source_authority =
+        optional_authority_selector(row, manifest.tenant().clone(), "private_source_authority")?;
+    let delivery_id =
+        ProviderDeliveryId::from_uuid(row.try_get("inbox_id").map_err(operation_error)?)
+            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let owner_id = ProviderRepositoryOwnerId::new(positive_u64(
+        row.try_get("github_repository_owner_id")
+            .map_err(operation_error)?,
+    )?)
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let verifier_fingerprint = GithubProviderWebhookVerifierFingerprint::from_sha256(
+        digest_column(row, "authenticated_webhook_verifier_fingerprint_sha256")?,
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let verifier_revision = GithubServerServiceRevision::new(positive_column(
+        row,
+        "authenticated_webhook_verifier_revision",
+    )?)
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let version: i16 = row
+        .try_get("authenticated_event_envelope_version")
+        .map_err(operation_error)?;
+    let event_name: String = row
+        .try_get("authenticated_event_name")
+        .map_err(operation_error)?;
+    let git_ref: String = row
+        .try_get("authenticated_event_git_ref")
+        .map_err(operation_error)?;
+    if version != 1 || event_name != GithubAuthenticatedEventKind::RepositoryDispatch.as_str() {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    let event =
+        GithubAuthenticatedEventV1::new(GithubAuthenticatedEventKind::RepositoryDispatch, git_ref)
+            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let accepted_at: i64 = row.try_get("accepted_at_ms").map_err(operation_error)?;
+    PendingGithubRepositoryDispatchEvidence::from_durable_parts(
+        delivery_id,
+        owner_id,
+        manifest,
+        verifier_fingerprint,
+        verifier_revision,
+        checks_authority,
+        private_source_authority,
+        event,
+        UnixMillis::new(accepted_at),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+}
+
 async fn load_acceptance_by_replay_key(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AcceptManifestPinnedGithubDelivery,
@@ -1119,17 +1947,9 @@ fn decode_delivery_evidence(
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-    let version: Option<i16> = row
-        .try_get("authenticated_event_envelope_version")
-        .map_err(operation_error)?;
-    let event_name: Option<String> = row
-        .try_get("authenticated_event_name")
-        .map_err(operation_error)?;
-    let git_ref: Option<String> = row
-        .try_get("authenticated_event_git_ref")
-        .map_err(operation_error)?;
-    let result = match (version, event_name, git_ref) {
-        (None, None, None) => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+    decode_delivery_event_evidence(
+        row,
+        DecodedDeliveryEvidenceParts {
             delivery_id,
             owner_id,
             manifest,
@@ -1139,11 +1959,92 @@ fn decode_delivery_evidence(
             private_source_authority,
             subject_id,
             head_sha,
-            UnixMillis::new(accepted_at),
+            accepted_at: UnixMillis::new(accepted_at),
+        },
+    )
+}
+
+struct DecodedDeliveryEvidenceParts {
+    delivery_id: ProviderDeliveryId,
+    owner_id: ProviderRepositoryOwnerId,
+    manifest: GithubProviderManifest,
+    authenticated_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
+    authenticated_verifier_revision: GithubServerServiceRevision,
+    checks_authority: GithubServerServiceAuthoritySelector,
+    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+    subject_id: GithubCheckSubjectId,
+    head_sha: GithubCheckHeadSha,
+    accepted_at: UnixMillis,
+}
+
+type DecodedAuthenticatedEventColumns = (
+    Option<i16>,
+    Option<String>,
+    Option<String>,
+    Option<Vec<u8>>,
+    Option<String>,
+);
+
+fn decode_authenticated_event_columns(
+    row: &PgRow,
+) -> Result<DecodedAuthenticatedEventColumns, GithubSubjectEvidenceStoreError> {
+    Ok((
+        row.try_get("authenticated_event_envelope_version")
+            .map_err(operation_error)?,
+        row.try_get("authenticated_event_name")
+            .map_err(operation_error)?,
+        row.try_get("authenticated_event_git_ref")
+            .map_err(operation_error)?,
+        row.try_get("authenticated_event_source_revision")
+            .map_err(operation_error)?,
+        row.try_get("authenticated_event_source_authority")
+            .map_err(operation_error)?,
+    ))
+}
+
+fn decode_delivery_event_evidence(
+    row: &PgRow,
+    parts: DecodedDeliveryEvidenceParts,
+) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
+    let DecodedDeliveryEvidenceParts {
+        delivery_id,
+        owner_id,
+        manifest,
+        authenticated_verifier_fingerprint,
+        authenticated_verifier_revision,
+        checks_authority,
+        private_source_authority,
+        subject_id,
+        head_sha,
+        accepted_at,
+    } = parts;
+    let (version, event_name, git_ref, source_revision, source_authority) =
+        decode_authenticated_event_columns(row)?;
+    let result = match (
+        version,
+        event_name,
+        git_ref,
+        source_revision,
+        source_authority,
+    ) {
+        (None, None, None, None, None) => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            delivery_id,
+            owner_id,
+            manifest,
+            authenticated_verifier_fingerprint,
+            authenticated_verifier_revision,
+            checks_authority,
+            private_source_authority,
+            subject_id,
+            head_sha,
+            accepted_at,
         ),
-        (Some(1), Some(event_name), Some(git_ref)) => {
+        (Some(1), Some(event_name), Some(git_ref), None, None) => {
             let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
+            if kind == GithubAuthenticatedEventKind::RepositoryDispatch {
+                return Err(GithubSubjectEvidenceStoreError::CorruptData);
+            }
             let event = GithubAuthenticatedEventV1::new(kind, git_ref)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
             ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
@@ -1157,7 +2058,39 @@ fn decode_delivery_evidence(
                 subject_id,
                 head_sha,
                 event,
-                UnixMillis::new(accepted_at),
+                accepted_at,
+            )
+        }
+        (
+            Some(1),
+            Some(event_name),
+            Some(git_ref),
+            Some(source_revision),
+            Some(source_authority),
+        ) => {
+            let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
+                .filter(|kind| *kind == GithubAuthenticatedEventKind::RepositoryDispatch)
+                .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
+            let event = GithubAuthenticatedEventV1::new(kind, git_ref)
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+            let revision = GithubCheckHeadSha::try_from_slice(&source_revision)
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+            let authority =
+                GithubRepositoryDispatchResolutionAuthority::from_durable(&source_authority)
+                    .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
+                delivery_id,
+                owner_id,
+                manifest,
+                authenticated_verifier_fingerprint,
+                authenticated_verifier_revision,
+                checks_authority,
+                private_source_authority,
+                subject_id,
+                head_sha,
+                event,
+                GithubRepositoryDispatchResolution::new(revision, authority),
+                accepted_at,
             )
         }
         _ => return Err(GithubSubjectEvidenceStoreError::CorruptData),
@@ -1467,14 +2400,31 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
     )?)
     .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
 
-    require_exact_text(row, "workflow_path", crate::GITHUB_PROVIDER_WORKFLOW_PATH)?;
+    let workflow_path: String = row.try_get("workflow_path").map_err(operation_error)?;
+    let check_subject_key: String = row.try_get("check_subject_key").map_err(operation_error)?;
+    if workflow_path != check_subject_key {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    let workflow_selection = match row
+        .try_get::<String, _>("workflow_selection_kind")
+        .map_err(operation_error)?
+        .as_str()
+    {
+        "exact" => GithubProviderWorkflowSelection::exact(
+            GithubCheckSubjectKey::new(workflow_path)
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
+        ),
+        "all_direct" if workflow_path == crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY => {
+            GithubProviderWorkflowSelection::all_direct()
+        }
+        _ => return Err(GithubSubjectEvidenceStoreError::CorruptData),
+    };
     require_exact_text(row, "event_name", crate::GITHUB_PROVIDER_EVENT)?;
-    require_exact_text(row, "git_ref", crate::GITHUB_PROVIDER_GIT_REF)?;
-    require_exact_text(
-        row,
-        "check_subject_key",
-        crate::GITHUB_PROVIDER_WORKFLOW_PATH,
-    )?;
+    let git_ref = crate::GithubProviderGitRef::new(
+        row.try_get::<String, _>("git_ref")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     require_exact_text(row, "github_web_origin", crate::GITHUB_PROVIDER_WEB_ORIGIN)?;
     require_exact_text(row, "github_api_origin", crate::GITHUB_PROVIDER_API_ORIGIN)?;
     require_exact_text(
@@ -1520,7 +2470,7 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
         crate::GITHUB_PROVIDER_ARCHIVE_FORMAT,
     )?;
 
-    let manifest = GithubProviderManifest::new(
+    let manifest = GithubProviderManifest::new_with_workflow_selection_and_git_ref(
         tenant,
         connection_id,
         installation_id,
@@ -1539,6 +2489,8 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
         runner_policy,
         runtime_policy_revision,
         runtime_policy_digest,
+        workflow_selection,
+        git_ref,
         check_name,
         GithubProviderOrigins::github_dot_com(),
         limits,
@@ -1608,6 +2560,7 @@ const CURRENT_MANIFEST_SELECT: &str = r"
         revision.runner_policy_media_type,
         revision.runtime_policy_revision,
         revision.runtime_policy_digest,
+        revision.workflow_selection_kind,
         revision.workflow_path, revision.event_name, revision.git_ref,
         revision.check_subject_key, revision.check_name,
         revision.github_web_origin, revision.github_api_origin,
@@ -1642,6 +2595,128 @@ const CURRENT_MANIFEST_SELECT: &str = r"
     FOR SHARE OF current_manifest, revision
 ";
 
+const PENDING_EVIDENCE_SELECT: &str = r"
+    SELECT
+        inbox.id AS inbox_id, inbox.tenant_id AS inbox_tenant_id,
+        inbox.provider AS inbox_provider,
+        inbox.connection_id AS inbox_connection_id,
+        inbox.installation_id AS inbox_installation_id,
+        inbox.provider_repository_id AS inbox_repository_id,
+        inbox.repository_visibility AS inbox_repository_visibility,
+        inbox.repository_identity AS inbox_repository_name,
+        inbox.delivery_id AS inbox_delivery_key,
+        inbox.request_digest, inbox.raw_event_digest,
+        inbox.raw_event_object_key, inbox.raw_event_size_bytes,
+        inbox.raw_event_media_type, inbox.accepted_at_ms,
+        pending.github_repository_owner_id,
+        pending.authenticated_event_envelope_version,
+        pending.authenticated_event_name, pending.authenticated_event_git_ref,
+        pending.authenticated_webhook_verifier_fingerprint_sha256,
+        pending.authenticated_webhook_verifier_revision,
+        pending.checks_authority_id,
+        pending.checks_authority_identity_digest,
+        pending.checks_authority_app_configuration_revision,
+        pending.checks_authority_policy_revision,
+        pending.private_source_authority_id,
+        pending.private_source_authority_identity_digest,
+        pending.private_source_authority_app_configuration_revision,
+        pending.private_source_authority_policy_revision,
+        manifest.tenant_id, manifest.repository_id,
+        manifest.provider_connection_id, manifest.manifest_revision,
+        manifest.manifest_digest, manifest.provider_installation_id,
+        manifest.github_repository_id, manifest.github_repository_name,
+        manifest.repository_visibility, manifest.github_app_id,
+        manifest.github_app_client_id, manifest.github_app_jwt_issuer_kind,
+        manifest.app_key_spki_sha256, manifest.app_configuration_revision,
+        manifest.webhook_verifier_fingerprint_sha256,
+        manifest.webhook_verifier_revision, manifest.policy_revision,
+        manifest.authority_profile,
+        manifest.runner_policy_digest, manifest.runner_policy_object_key,
+        manifest.runner_policy_size_bytes, manifest.runner_policy_media_type,
+        manifest.runtime_policy_revision, manifest.runtime_policy_digest,
+        manifest.workflow_selection_kind,
+        manifest.workflow_path, manifest.event_name, manifest.git_ref,
+        manifest.check_subject_key, manifest.check_name,
+        manifest.github_web_origin, manifest.github_api_origin,
+        manifest.github_archive_origin, manifest.github_rest_api_version,
+        manifest.github_rest_accept, manifest.github_archive_accept,
+        manifest.repository_source_authentication,
+        manifest.repository_source_revision, manifest.repository_archive_format,
+        manifest.webhook_max_body_bytes, manifest.webhook_accept_timeout_ms,
+        manifest.push_webhook_max_commits, manifest.path_filter_max_commits,
+        manifest.path_filter_max_changed_files,
+        manifest.archive_max_compressed_bytes,
+        manifest.archive_max_decompressed_bytes, manifest.archive_max_entries,
+        manifest.archive_max_expanded_bytes,
+        manifest.archive_max_entry_path_bytes, manifest.archive_max_workflows,
+        manifest.workflow_max_bytes
+    FROM provider_delivery_inbox AS inbox
+    JOIN github_repository_dispatch_pending_evidence AS pending
+      ON pending.provider_delivery_id = inbox.id
+     AND pending.tenant_id = inbox.tenant_id
+     AND pending.provider_connection_id = inbox.connection_id
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = pending.tenant_id
+     AND manifest.repository_id = pending.repository_id
+     AND manifest.provider_connection_id = pending.provider_connection_id
+     AND manifest.manifest_revision = pending.provider_manifest_revision
+     AND manifest.manifest_digest = pending.provider_manifest_digest
+     AND manifest.provider_installation_id = inbox.installation_id
+     AND manifest.github_repository_id = inbox.provider_repository_id
+     AND manifest.github_repository_name = inbox.repository_identity
+     AND manifest.repository_visibility = inbox.repository_visibility
+     AND manifest.webhook_verifier_fingerprint_sha256 =
+         pending.authenticated_webhook_verifier_fingerprint_sha256
+     AND manifest.webhook_verifier_revision =
+         pending.authenticated_webhook_verifier_revision
+    JOIN repositories AS repository
+      ON repository.tenant_id = pending.tenant_id
+     AND repository.id = pending.repository_id
+     AND repository.scm_provider = 'github'
+     AND repository.provider_repository_id = manifest.github_repository_id::TEXT
+     AND repository.owner = split_part(manifest.github_repository_name, '/', 1)
+     AND repository.name = split_part(manifest.github_repository_name, '/', 2)
+    JOIN github_server_service_authorities AS checks_authority
+      ON checks_authority.id = pending.checks_authority_id
+     AND checks_authority.tenant_id = pending.tenant_id
+     AND checks_authority.repository_id = pending.repository_id
+     AND checks_authority.provider_connection_id = pending.provider_connection_id
+     AND checks_authority.provider_installation_id = manifest.provider_installation_id
+     AND checks_authority.github_app_id = manifest.github_app_id
+     AND checks_authority.github_repository_id = manifest.github_repository_id
+     AND checks_authority.github_repository_name = manifest.github_repository_name
+     AND checks_authority.service_scope = 'checks_write'
+     AND checks_authority.identity_digest = pending.checks_authority_identity_digest
+     AND checks_authority.app_configuration_revision =
+         pending.checks_authority_app_configuration_revision
+     AND checks_authority.policy_revision = pending.checks_authority_policy_revision
+    LEFT JOIN github_server_service_authorities AS private_source_authority
+      ON private_source_authority.id = pending.private_source_authority_id
+     AND private_source_authority.tenant_id = pending.tenant_id
+     AND private_source_authority.repository_id = pending.repository_id
+     AND private_source_authority.provider_connection_id = pending.provider_connection_id
+     AND private_source_authority.provider_installation_id = manifest.provider_installation_id
+     AND private_source_authority.github_app_id = manifest.github_app_id
+     AND private_source_authority.github_repository_id = manifest.github_repository_id
+     AND private_source_authority.github_repository_name = manifest.github_repository_name
+     AND private_source_authority.service_scope = 'private_repository_source_read'
+     AND private_source_authority.identity_digest =
+         pending.private_source_authority_identity_digest
+     AND private_source_authority.app_configuration_revision =
+         pending.private_source_authority_app_configuration_revision
+     AND private_source_authority.policy_revision =
+         pending.private_source_authority_policy_revision
+";
+
+const PENDING_EVIDENCE_VISIBILITY_AUTHORITY_EXACT: &str = r"
+    AND (
+        manifest.repository_visibility = 'public'
+        AND pending.private_source_authority_id IS NULL
+        OR manifest.repository_visibility = 'private'
+        AND private_source_authority.id IS NOT NULL
+    )
+";
+
 const EVIDENCE_SELECT: &str = r"
     SELECT
         inbox.id AS inbox_id, inbox.tenant_id AS inbox_tenant_id,
@@ -1658,6 +2733,8 @@ const EVIDENCE_SELECT: &str = r"
         evidence.github_repository_owner_id,
         evidence.authenticated_event_envelope_version,
         evidence.authenticated_event_name, evidence.authenticated_event_git_ref,
+        evidence.authenticated_event_source_revision,
+        evidence.authenticated_event_source_authority,
         evidence.authenticated_webhook_verifier_fingerprint_sha256,
         evidence.authenticated_webhook_verifier_revision,
         evidence.checks_authority_id,
@@ -1682,6 +2759,7 @@ const EVIDENCE_SELECT: &str = r"
         manifest.runner_policy_digest, manifest.runner_policy_object_key,
         manifest.runner_policy_size_bytes, manifest.runner_policy_media_type,
         manifest.runtime_policy_revision, manifest.runtime_policy_digest,
+        manifest.workflow_selection_kind,
         manifest.workflow_path, manifest.event_name, manifest.git_ref,
         manifest.check_subject_key, manifest.check_name,
         manifest.github_web_origin, manifest.github_api_origin,

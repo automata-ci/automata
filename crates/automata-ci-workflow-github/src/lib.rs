@@ -10,6 +10,7 @@ mod frontend;
 mod model;
 mod repository_archive;
 mod runner_profile;
+mod schedule;
 mod source;
 mod syntax;
 
@@ -36,15 +37,16 @@ pub use model::{
     GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputDefinition,
     GithubWorkflowDispatchInputType, GithubWorkflowDispatchInputValue,
     GithubWorkflowDispatchInputsError, GithubWorkflowDispatchInputsV1, GithubWorkflowSourcePlan,
-    Job, JobContainer, JobEnvironment, JobId, JobOutputs, JobService, JobServices, JobStrategy,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS, MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
-    MatrixConfiguration, MatrixConfigurations, MatrixDimension, MatrixDimensionValues,
-    MatrixMapping, MatrixValue, MatrixValueEntry, MergeGroupFilter, Needs, PermissionEntry,
-    PermissionLevel, Permissions, PreservedField, PushPullRequestFilter, ReusableWorkflowCall,
-    ReusableWorkflowInputs, ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunDefaults,
-    RunStep, RunnerSelection, SOURCE_PLAN_SCHEMA_VERSION, ScalarValue, SourcePlanVersion, Step,
-    StepExecution, StepId, StrategyMatrix, TriggerConfiguration, TriggerSet, ValueMap,
-    ValueMapEntry, WorkflowJob, WorkflowTriggers,
+    Job, JobContainer, JobEnvironment, JobId, JobOutputs, JobResourceVector, JobResources,
+    JobService, JobServices, JobStrategy, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MatrixConfiguration, MatrixConfigurations,
+    MatrixDimension, MatrixDimensionValues, MatrixMapping, MatrixValue, MatrixValueEntry,
+    MergeGroupFilter, Needs, PermissionEntry, PermissionLevel, Permissions, PreservedField,
+    PushPullRequestFilter, RepositoryDispatchFilter, ReusableWorkflowCall, ReusableWorkflowInputs,
+    ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunDefaults, RunStep, RunnerSelection,
+    SOURCE_PLAN_SCHEMA_VERSION, ScalarValue, SourcePlanVersion, Step, StepExecution, StepId,
+    StrategyMatrix, TriggerConfiguration, TriggerSet, ValueMap, ValueMapEntry, WorkflowJob,
+    WorkflowTriggers,
 };
 pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,
@@ -54,6 +56,11 @@ pub use repository_archive::{
 };
 pub use runner_profile::{
     GithubRunnerProfileCatalog, GithubRunnerProfileError, GithubRunnerProfileMapping,
+};
+pub use schedule::{
+    GithubCronExpression, GithubScheduleEntry, GithubScheduleError, MAX_GITHUB_SCHEDULE_ENTRIES,
+    MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES, MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES,
+    extract_github_schedule_entries, validate_github_schedule_timezone,
 };
 pub use source::{
     SourceFile, SourceId, SourceLocation, SourceModelError, SourceOrigin, SourceProvenance,

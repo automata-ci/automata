@@ -663,7 +663,9 @@ async fn require_active_consume_graph_ids(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND marker.root_invocation_id = $2
+               AND automata_workflow_plan_v2_invocation_published(
+                   marker.run_id, $2
+               )
         FROM workflow_plan_v2_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
@@ -1082,7 +1084,9 @@ async fn discover_activation_candidates(
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT AS now_ms
         ) AS database_clock
         WHERE job.execution_kind = 'steps'
-          AND invocation.id = marker.root_invocation_id
+          AND automata_workflow_plan_v2_invocation_published(
+              marker.run_id, invocation.id
+          )
           AND invocation.plan_schema = 2
           AND invocation.state IN ('pending', 'active')
           AND marker.orchestration_schema = 1
@@ -1104,13 +1108,15 @@ async fn discover_activation_candidates(
           AND NOT EXISTS (
               SELECT 1
               FROM workflow_plan_v2_dependencies AS dependency
-              LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
-                ON result_claim.logical_job_id = dependency.prerequisite_job_id
-               AND result_claim.state = 'finalized'
+              LEFT JOIN workflow_plan_v2_effective_job_results AS result
+                ON result.logical_job_id = dependency.prerequisite_job_id
+               AND result.run_id = dependency.run_id
+               AND result.invocation_id = dependency.invocation_id
+               AND result.claim_state = 'finalized'
               WHERE dependency.run_id = job.run_id
                 AND dependency.invocation_id = job.invocation_id
                 AND dependency.logical_job_id = job.id
-                AND result_claim.logical_job_id IS NULL
+                AND result.logical_job_id IS NULL
           )
           AND ($1::BIGINT IS NULL OR
                (job.created_at_ms, job.run_id, job.invocation_id,
@@ -1182,6 +1188,9 @@ async fn discover_materialization_candidates(
           AND publication.instance_count > 0
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
+          AND automata_workflow_plan_v2_invocation_published(
+              marker.run_id, invocation.id
+          )
           AND invocation.plan_schema = 2
           AND invocation.state IN ('pending', 'active')
           AND marker.orchestration_schema = 1
@@ -1352,26 +1361,26 @@ async fn lock_activation_eligibility_graph(
     if prerequisite_jobs.len() != dependencies.len() {
         return Ok(false);
     }
-    let finalized_results = sqlx::query(
+    let finalized_result_count: i64 = sqlx::query_scalar(
         r"
-        SELECT result_claim.logical_job_id
+        SELECT count(*)::BIGINT
         FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_job_result_claims AS result_claim
-          ON result_claim.logical_job_id = dependency.prerequisite_job_id
-         AND result_claim.state = 'finalized'
+        JOIN workflow_plan_v2_effective_job_results AS result
+          ON result.logical_job_id = dependency.prerequisite_job_id
+         AND result.run_id = dependency.run_id
+         AND result.invocation_id = dependency.invocation_id
+         AND result.claim_state = 'finalized'
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
-        ORDER BY result_claim.logical_job_id
-        FOR SHARE OF result_claim SKIP LOCKED
         ",
     )
     .bind(run_id)
     .bind(invocation_id)
     .bind(logical_job_id)
-    .fetch_all(&mut **transaction)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    if finalized_results.len() != dependencies.len() {
+    if usize::try_from(finalized_result_count).ok() != Some(dependencies.len()) {
         return Ok(false);
     }
     Ok(true)
@@ -1515,7 +1524,9 @@ async fn activation_candidate_is_eligible(
               ON quarantine.logical_job_id = job.id
             WHERE job.id = $1 AND job.run_id = $2 AND job.invocation_id = $3
               AND job.execution_kind = 'steps'
-              AND invocation.id = marker.root_invocation_id
+              AND automata_workflow_plan_v2_invocation_published(
+                  marker.run_id, invocation.id
+              )
               AND invocation.plan_schema = 2
               AND invocation.state IN ('pending', 'active')
               AND marker.orchestration_schema = 1
@@ -1535,13 +1546,15 @@ async fn activation_candidate_is_eligible(
               AND NOT EXISTS (
                   SELECT 1
                   FROM workflow_plan_v2_dependencies AS dependency
-                  LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
-                    ON result_claim.logical_job_id = dependency.prerequisite_job_id
-                   AND result_claim.state = 'finalized'
+                  LEFT JOIN workflow_plan_v2_effective_job_results AS result
+                    ON result.logical_job_id = dependency.prerequisite_job_id
+                   AND result.run_id = dependency.run_id
+                   AND result.invocation_id = dependency.invocation_id
+                   AND result.claim_state = 'finalized'
                   WHERE dependency.run_id = job.run_id
                     AND dependency.invocation_id = job.invocation_id
                     AND dependency.logical_job_id = job.id
-                    AND result_claim.logical_job_id IS NULL
+                    AND result.logical_job_id IS NULL
               )
         )
         ",
@@ -1597,6 +1610,9 @@ async fn materialization_candidate_is_eligible(
               AND publication.runtime_policy_digest = pin.policy_digest
               AND publication.condition_matched AND publication.instance_count > 0
               AND job.execution_kind = 'steps' AND job.state = 'activated'
+              AND automata_workflow_plan_v2_invocation_published(
+                  marker.run_id, invocation.id
+              )
               AND invocation.plan_schema = 2
               AND invocation.state IN ('pending', 'active')
               AND marker.orchestration_schema = 1
@@ -3356,7 +3372,9 @@ async fn require_quarantine_replay_graph(
         r"
         SELECT run.admission_epoch = 4 AND run.plan_schema = 2
                AND marker.orchestration_schema = 1
-               AND marker.root_invocation_id = $3
+               AND automata_workflow_plan_v2_invocation_published(
+                   marker.run_id, $3
+               )
                AND invocation.plan_schema = 2
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id

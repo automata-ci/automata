@@ -6,9 +6,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GithubRepositoryName, GithubServerServiceAuthoritySelector, ProviderConnectionId,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
-    RepositoryOperationError, TenantScope,
+    GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthoritySelector,
+    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    RepositoryId, RepositoryOperationError, TenantScope,
 };
 
 /// Maximum number of outbox claims for one desired projection revision.
@@ -215,12 +215,21 @@ impl std::fmt::Debug for GithubCheckSubjectKey {
     }
 }
 
+/// Closed durable origin of a GitHub Check subject.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GithubCheckSubjectOrigin {
+    /// An authenticated webhook delivery and its signed evidence.
+    ProviderDelivery(ProviderDeliveryId),
+    /// A fenced invocation from an immutable schedule registry revision.
+    ScheduledFire(GithubScheduleFireId),
+}
+
 /// Exact immutable routing and provider identity of a pre-admission Check subject.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubCheckSubjectIdentity {
     tenant: TenantScope,
     repository_id: RepositoryId,
-    delivery_id: ProviderDeliveryId,
+    origin: GithubCheckSubjectOrigin,
     subject_key: GithubCheckSubjectKey,
     connection_id: ProviderConnectionId,
     installation_id: ProviderInstallationId,
@@ -257,7 +266,44 @@ impl GithubCheckSubjectIdentity {
         Ok(Self {
             tenant,
             repository_id,
-            delivery_id,
+            origin: GithubCheckSubjectOrigin::ProviderDelivery(delivery_id),
+            subject_key,
+            connection_id,
+            installation_id,
+            github_repository_id,
+            github_repository_name,
+            app_id,
+            head_sha,
+            name,
+        })
+    }
+
+    /// Constructs the complete identity of a fenced scheduled invocation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a nil Automata repository UUID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_scheduled(
+        tenant: TenantScope,
+        repository_id: RepositoryId,
+        fire_id: GithubScheduleFireId,
+        subject_key: GithubCheckSubjectKey,
+        connection_id: ProviderConnectionId,
+        installation_id: ProviderInstallationId,
+        github_repository_id: ProviderRepositoryId,
+        github_repository_name: GithubRepositoryName,
+        app_id: GithubCheckAppId,
+        head_sha: GithubCheckHeadSha,
+        name: GithubCheckName,
+    ) -> Result<Self, GithubCheckValueError> {
+        if repository_id.as_uuid().is_nil() {
+            return Err(GithubCheckValueError::NilUuid("GitHub Check repository ID"));
+        }
+        Ok(Self {
+            tenant,
+            repository_id,
+            origin: GithubCheckSubjectOrigin::ScheduledFire(fire_id),
             subject_key,
             connection_id,
             installation_id,
@@ -279,10 +325,26 @@ impl GithubCheckSubjectIdentity {
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
     }
-    /// Returns the accepted provider-delivery identity.
+    /// Returns the closed durable subject origin.
     #[must_use]
-    pub const fn delivery_id(&self) -> ProviderDeliveryId {
-        self.delivery_id
+    pub const fn origin(&self) -> GithubCheckSubjectOrigin {
+        self.origin
+    }
+    /// Returns the authenticated delivery identity, when delivery-originated.
+    #[must_use]
+    pub const fn delivery_id(&self) -> Option<ProviderDeliveryId> {
+        match self.origin {
+            GithubCheckSubjectOrigin::ProviderDelivery(delivery_id) => Some(delivery_id),
+            GithubCheckSubjectOrigin::ScheduledFire(_) => None,
+        }
+    }
+    /// Returns the scheduled fire identity, when schedule-originated.
+    #[must_use]
+    pub const fn schedule_fire_id(&self) -> Option<GithubScheduleFireId> {
+        match self.origin {
+            GithubCheckSubjectOrigin::ProviderDelivery(_) => None,
+            GithubCheckSubjectOrigin::ScheduledFire(fire_id) => Some(fire_id),
+        }
     }
     /// Returns the delivery-local subject key.
     #[must_use]

@@ -62,9 +62,10 @@ it with event provenance into logical state. Activation evaluates the
 run-dependent parts, expands bounded strategies, and projects executable
 JobIR. The scheduler and runner do not parse YAML or evaluate provider syntax.
 
-An Automata-only `concurrency.queue` field is under development in this
-frontend and the durable concurrency model. It is an optional extension, not a
-GitHub Actions compatibility feature, and is not supported by the product yet.
+Automata-only `concurrency.queue` and per-job `resources` fields are extensions,
+not GitHub Actions compatibility features. Resource templates cross activation
+into a resolved request/limit contract; the pinned repository runtime policy
+supplies defaults and bounds before scheduling.
 
 The remaining internal boundaries have narrower jobs:
 
@@ -91,6 +92,15 @@ transactions and fencing rather than process-local locks.
 
 S3-compatible storage owns immutable workflow and action bundles, log segments,
 artifacts, cache objects, and final manifests. It is not used for coordination.
+
+Scheduled GitHub workflows use a separate durable path from webhooks. A
+manifest-pinned discovery claim binds an owner-bound provider revision, exact
+default-branch commit, source archive, and sorted schedule inventory before a
+registry revision becomes current. Due occurrences are fenced database-time
+claims; retries retain the same occurrence, while a terminal result advances
+only to its next calendar instant. A scheduled Check and workflow admission
+carry the exact fire identity, so no synthetic delivery or generic GitHub
+credential proxy is introduced.
 
 The Results listener serves job-scoped log, artifact, result, cache, and OIDC
 boundaries. Cache lookup checks the current ref first, then the server-owned
@@ -169,7 +179,11 @@ data or live log transport.
 Later gates add independent control-plane roles, multiple replicas,
 Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
 KubeVirt, Windows native and Hyper-V execution, and macOS native and
-Virtualization.framework execution.
+Virtualization.framework execution. The workspace contains the Rust Kubernetes
+sandbox adapter, its in-sandbox guest transport, and a runner product-config
+variant that uses ambient Kubernetes client authentication and the shared
+environment-profile startup admission. Fleet reconciliation and cluster
+provisioning remain deployment responsibilities.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their

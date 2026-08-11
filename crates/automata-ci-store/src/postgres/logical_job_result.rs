@@ -1676,25 +1676,24 @@ async fn load_prerequisites(
                result.closure_has_skipped, result.finalized_at_ms,
                result.claim_owner_id, result.claim_generation,
                result.claim_started_at_ms, result.claim_expires_at_ms,
-               claim.state AS prerequisite_claim_state,
-               claim.run_id AS prerequisite_claim_run_id,
-               claim.invocation_id AS prerequisite_claim_invocation_id,
-               claim.descriptor_digest AS prerequisite_claim_descriptor_digest,
-               claim.owner_id AS prerequisite_claim_owner_id,
-               claim.generation AS prerequisite_claim_generation,
-               claim.claimed_at_ms AS prerequisite_claim_claimed_at_ms,
-               claim.expires_at_ms AS prerequisite_claim_expires_at_ms
+               result.claim_state AS prerequisite_claim_state,
+               result.run_id AS prerequisite_claim_run_id,
+               result.invocation_id AS prerequisite_claim_invocation_id,
+               result.descriptor_digest AS prerequisite_claim_descriptor_digest,
+               result.claim_owner_id AS prerequisite_claim_owner_id,
+               result.claim_generation AS prerequisite_claim_generation,
+               result.claim_started_at_ms AS prerequisite_claim_claimed_at_ms,
+               result.claim_expires_at_ms AS prerequisite_claim_expires_at_ms,
+               result.carried
         FROM workflow_plan_v2_dependencies AS dependency
         JOIN workflow_plan_v2_jobs AS prerequisite_job
           ON prerequisite_job.run_id = dependency.run_id
          AND prerequisite_job.invocation_id = dependency.invocation_id
          AND prerequisite_job.id = dependency.prerequisite_job_id
-        LEFT JOIN workflow_plan_v2_job_results AS result
+        LEFT JOIN workflow_plan_v2_effective_job_results AS result
           ON result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
          AND result.logical_job_id = dependency.prerequisite_job_id
-        LEFT JOIN workflow_plan_v2_job_result_claims AS claim
-          ON claim.logical_job_id = result.logical_job_id
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
         ORDER BY prerequisite_job.source_order, dependency.prerequisite_job_id
@@ -1721,8 +1720,16 @@ async fn load_prerequisites(
         let prerequisite_outputs = outputs.remove(&prerequisite_id).unwrap_or_default();
         let prerequisite =
             decode_prerequisite(target, &row, prerequisite_id, &prerequisite_outputs)?;
-        verify_prerequisite_descriptor(transaction, target, prerequisite_id, &row, &prerequisite)
+        if !row.try_get::<bool, _>("carried").map_err(operation_error)? {
+            verify_prerequisite_descriptor(
+                transaction,
+                target,
+                prerequisite_id,
+                &row,
+                &prerequisite,
+            )
             .await?;
+        }
         prerequisites.push(prerequisite);
     }
     if !outputs.is_empty() {
@@ -1740,7 +1747,7 @@ async fn load_prerequisite_outputs(
         SELECT dependency.prerequisite_job_id, output.output_name,
                output.sensitivity, output.public_value
         FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_job_result_outputs AS output
+        JOIN workflow_plan_v2_effective_job_result_outputs AS output
           ON output.logical_job_id = dependency.prerequisite_job_id
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,7 +10,8 @@ use automata_ci_blob::{
 use automata_ci_core::{
     CompiledBooleanTemplate, CompiledExpressionTemplate, CompiledValueTemplate,
     ExpressionInstruction, ExpressionLiteral, ExpressionSegment, LogicalJobKind,
-    MAX_LOGICAL_FIELD_BYTES, PlanSourceOrigin, Sha256Digest, WorkflowJobKey,
+    MAX_LOGICAL_FIELD_BYTES, OutputSensitivity, PermissionLevel, PlanSourceOrigin, Sha256Digest,
+    WorkflowJobKey,
 };
 use automata_ci_expression_github::{
     GithubExpressionEvaluator, GithubObject, GithubStatus, GithubValue, MapContext,
@@ -18,8 +19,12 @@ use automata_ci_expression_github::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    AuthenticatedWorkflowDispatchSource, LogicalWorkflowAdmissionRepository,
+    AdmittedReusableInput, AdmittedReusableInputKind, AdmittedReusableInvocation,
+    AdmittedReusableJob, AdmittedReusableOutput, AdmittedReusablePermissions,
+    AdmittedReusableSecret, AdmittedReusableWorkflowCatalogEntry,
+    AdmittedReusableWorkflowExpansion, AuthenticatedGithubDeliveryClaim,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    GithubScheduleFireClaim, LogicalWorkflowAdmissionRepository,
     LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, ProviderDeliveryId,
     ResolveAuthenticatedWorkflowDispatchSource, WorkflowAdmissionIdempotency,
@@ -30,8 +35,10 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AdmissionClock, AdmissionIdGenerator, GITHUB_WORKFLOW_MEDIA_TYPE,
-    JOB_RUNTIME_CONTEXT_MEDIA_TYPE, NoopWorkflowAdmissionObserver, Sha256AdmissionIdGenerator,
+    AdmissionClock, AdmissionIdGenerator, CredentialDiscoveryError, ExpandReusableWorkflowRequest,
+    GITHUB_WORKFLOW_MEDIA_TYPE, GithubReusableWorkflowCatalog, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+    NoopWorkflowAdmissionObserver, ReusableInputBindingSource, ReusableWorkflowExpander,
+    ReusableWorkflowExpansionError, ReusableWorkflowPermissions, Sha256AdmissionIdGenerator,
     SystemAdmissionClock, WORKFLOW_PLAN_MEDIA_TYPE, WorkflowAdmissionFailure,
     WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionRequest,
     WorkflowAdmissionResult, WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
@@ -47,6 +54,8 @@ const AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5: &[u8] =
     b"automata.workflow-admission.request.v5\0";
 const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6: &[u8] =
     b"automata.workflow-admission.request.v6.control-plane-dispatch\0";
+const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7: &[u8] =
+    b"automata.workflow-admission.request.v7.scheduled-github\0";
 const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
     b"automata.workflow-admission.provider-delivery.v2\0";
 const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
@@ -71,6 +80,7 @@ enum AdmissionAuthority {
     ProviderNeutral,
     AuthenticatedGithub(AuthenticatedGithubDeliveryClaim),
     AuthenticatedWorkflowDispatch(WorkflowDispatchAuthorization),
+    ScheduledGithub(GithubScheduleFireClaim),
 }
 
 /// Blob-first, provider-pluggable logical workflow admission service.
@@ -172,6 +182,21 @@ impl WorkflowAdmissionService {
         .await
     }
 
+    /// Publishes and admits one invocation from an exact live scheduled fire.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed unless the operation idempotency, schedule event, source,
+    /// manifest, pre-admission Check, and current fire fence all agree.
+    pub async fn admit_scheduled_github_workflow(
+        &self,
+        request: WorkflowAdmissionRequest,
+        claim: GithubScheduleFireClaim,
+    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
+        self.admit_with_authority(request, AdmissionAuthority::ScheduledGithub(claim))
+            .await
+    }
+
     /// Publishes and admits one authenticated Automata control-plane manual
     /// dispatch with exact repository/workflow/ref identity.
     ///
@@ -252,6 +277,13 @@ impl WorkflowAdmissionService {
         let delivery_id = match &authority {
             AdmissionAuthority::AuthenticatedGithub(claim) => Some(claim.claim().delivery_id()),
             AdmissionAuthority::ProviderNeutral
+            | AdmissionAuthority::AuthenticatedWorkflowDispatch(_)
+            | AdmissionAuthority::ScheduledGithub(_) => None,
+        };
+        let schedule_fire_id = match &authority {
+            AdmissionAuthority::ScheduledGithub(claim) => Some(claim.fire_id()),
+            AdmissionAuthority::ProviderNeutral
+            | AdmissionAuthority::AuthenticatedGithub(_)
             | AdmissionAuthority::AuthenticatedWorkflowDispatch(_) => None,
         };
         let (
@@ -274,6 +306,19 @@ impl WorkflowAdmissionService {
                     ))
             {
                 return Err(WorkflowAdmissionError::Internal);
+            }
+            if let Some(fire_id) = schedule_fire_id {
+                let exact = request.repository().provider() == "github"
+                    && request.plan().event().name() == "schedule"
+                    && request.actor() == Some(automata_ci_store::GITHUB_SCHEDULE_SERVICE_ACTOR)
+                    && matches!(
+                        request.idempotency(),
+                        WorkflowAdmissionIdempotency::Operation(operation_id)
+                            if operation_id.as_uuid() == fire_id.as_uuid()
+                    );
+                if !exact {
+                    return Err(WorkflowAdmissionError::Internal);
+                }
             }
             let source_blob = prepare_blob(
                 "workflow-source",
@@ -343,7 +388,8 @@ impl WorkflowAdmissionService {
                     )?)
                 }
                 AdmissionAuthority::ProviderNeutral
-                | AdmissionAuthority::AuthenticatedGithub(_) => {
+                | AdmissionAuthority::AuthenticatedGithub(_)
+                | AdmissionAuthority::ScheduledGithub(_) => {
                     if request.event_media_type()
                         == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
                     {
@@ -366,9 +412,15 @@ impl WorkflowAdmissionService {
             ))
         })?;
 
-        self.observe_sync_stage(WorkflowAdmissionStage::Materialize, || {
+        let reusable = self.observe_sync_stage(WorkflowAdmissionStage::Materialize, || {
             self.verifier.verify(&request)?;
-            Ok(())
+            prepare_reusable_workflow_expansion(
+                &request,
+                &*self.ids,
+                run_id,
+                &source_blob,
+                &plan_blob,
+            )
         })?;
 
         let command = self.observe_sync_stage(WorkflowAdmissionStage::Encode, || {
@@ -376,12 +428,14 @@ impl WorkflowAdmissionService {
             let request_digest = canonical_request_digest(
                 &request,
                 delivery_id,
+                schedule_fire_id,
                 dispatch_claim.as_ref(),
                 &source_blob,
                 &event_blob,
                 &plan_blob,
                 &base_context_blob,
                 concurrency.as_ref(),
+                reusable.as_ref().map(|prepared| &prepared.graph),
             );
             build_command(
                 &request,
@@ -398,6 +452,7 @@ impl WorkflowAdmissionService {
                 &plan_blob,
                 &base_context_blob,
                 concurrency,
+                reusable.as_ref().map(|prepared| prepared.graph.clone()),
             )
         })?;
 
@@ -407,6 +462,11 @@ impl WorkflowAdmissionService {
             self.publish(&event_blob).await?;
             self.publish(&plan_blob).await?;
             self.publish(&base_context_blob).await?;
+            if let Some(reusable) = &reusable {
+                for blob in &reusable.blobs {
+                    self.publish(blob).await?;
+                }
+            }
             Ok::<(), WorkflowAdmissionError>(())
         }
         .await;
@@ -440,6 +500,7 @@ impl WorkflowAdmissionService {
                     &plan_blob,
                     &base_context_blob,
                     command.concurrency().cloned(),
+                    command.reusable_workflows().cloned(),
                 )?;
                 self.repository
                     .admit_authenticated_github_delivery(command, current_claim, observed_at)
@@ -462,12 +523,36 @@ impl WorkflowAdmissionService {
                     &plan_blob,
                     &base_context_blob,
                     command.concurrency().cloned(),
+                    command.reusable_workflows().cloned(),
                 )?;
                 self.repository
                     .admit_authenticated_workflow_dispatch(
                         command,
                         dispatch_claim.ok_or(WorkflowAdmissionError::WorkflowDispatchEvidence)?,
                     )
+                    .await
+            }
+            AdmissionAuthority::ScheduledGithub(claim) => {
+                let observed_at = self.clock.now();
+                let command = build_command(
+                    &request,
+                    &*self.ids,
+                    observed_at,
+                    repository_id,
+                    workflow_id,
+                    snapshot_id,
+                    command.idempotency().clone(),
+                    run_id,
+                    command.request_digest(),
+                    &source_blob,
+                    &event_blob,
+                    &plan_blob,
+                    &base_context_blob,
+                    command.concurrency().cloned(),
+                    command.reusable_workflows().cloned(),
+                )?;
+                self.repository
+                    .admit_scheduled_github_workflow(command, claim)
                     .await
             }
             AdmissionAuthority::ProviderNeutral => {
@@ -544,6 +629,7 @@ fn build_command(
     plan: &PreparedBlob,
     base_context: &PreparedBlob,
     concurrency: Option<WorkflowConcurrency>,
+    reusable_workflows: Option<AdmittedReusableWorkflowExpansion>,
 ) -> Result<AdmitLogicalWorkflowRun, WorkflowAdmissionError> {
     let logical_job_ids = request
         .plan()
@@ -580,7 +666,10 @@ fn build_command(
                         .ok_or(WorkflowAdmissionError::Internal)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let credential_requirements =
+                crate::discover_job_credential_requirements(request.plan().logical(), job)?;
             AdmittedLogicalWorkflowJob::new(id, key, source_order, kind, prerequisites)
+                .map(|job| job.with_credential_requirements(credential_requirements))
                 .map_err(WorkflowAdmissionError::LogicalValue)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -613,7 +702,8 @@ fn build_command(
         admitted_at,
     )
     .base_context(base_context.metadata.clone())
-    .concurrency(concurrency);
+    .concurrency(concurrency)
+    .reusable_workflows(reusable_workflows);
     if let Some(actor) = request.actor() {
         command = command.actor(actor);
     }
@@ -632,6 +722,507 @@ fn build_command(
 struct PreparedBlob {
     payload: BlobPayload,
     metadata: AdmissionObject,
+}
+
+struct PreparedReusableWorkflowExpansion {
+    blobs: Vec<PreparedBlob>,
+    graph: AdmittedReusableWorkflowExpansion,
+}
+
+#[allow(clippy::too_many_lines)] // Keeps graph and immutable evidence construction auditable together.
+fn prepare_reusable_workflow_expansion(
+    request: &WorkflowAdmissionRequest,
+    ids: &dyn AdmissionIdGenerator,
+    run_id: automata_ci_core::RunId,
+    root_source: &PreparedBlob,
+    root_plan: &PreparedBlob,
+) -> Result<Option<PreparedReusableWorkflowExpansion>, WorkflowAdmissionError> {
+    if !request
+        .plan()
+        .jobs()
+        .iter()
+        .any(|job| matches!(job.execution(), LogicalJobKind::ReusableWorkflow(_)))
+    {
+        return Ok(None);
+    }
+    let catalog = GithubReusableWorkflowCatalog::compile_reachable(
+        request.repository().slug(),
+        request.commit_sha(),
+        request.plan(),
+        request.repository_workflow_sources().iter().cloned(),
+    )?;
+    let root_permissions = ReusableWorkflowPermissions::new(PermissionLevel::Write, [])?;
+    let root_secret_names = request
+        .base_context()
+        .secrets()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let root_invocation_id = ids.logical_invocation_id(run_id);
+    let expansion = ReusableWorkflowExpander::new().expand(ExpandReusableWorkflowRequest::new(
+        run_id,
+        root_invocation_id,
+        request.workflow_path(),
+        request.source(),
+        request.plan(),
+        &catalog,
+        &root_secret_names,
+        &root_permissions,
+    ))?;
+    let repository_id = ids.repository_id(request.tenant(), request.repository());
+    let mut blobs = Vec::new();
+    let mut catalog_objects = BTreeMap::new();
+    let root_catalog_id = ids.snapshot_id(
+        ids.workflow_id(repository_id, request.workflow_path()),
+        root_source.metadata.digest(),
+    );
+    catalog_objects.insert(
+        request.workflow_path().to_owned(),
+        (
+            root_catalog_id,
+            root_source.metadata.clone(),
+            root_plan.metadata.clone(),
+        ),
+    );
+    for entry in catalog.entries() {
+        let source = prepare_blob(
+            "reusable-workflow-source",
+            GITHUB_WORKFLOW_MEDIA_TYPE,
+            entry.source().clone(),
+        )?;
+        let plan = prepare_blob(
+            "reusable-workflow-plan",
+            WORKFLOW_PLAN_MEDIA_TYPE,
+            Bytes::from(
+                serde_json::to_vec(entry.plan())
+                    .map_err(|_| WorkflowAdmissionError::Serialization)?,
+            ),
+        )?;
+        if source.metadata.digest() != entry.source_digest()
+            || plan.metadata.digest() != entry.plan_digest()
+        {
+            return Err(WorkflowAdmissionError::Internal);
+        }
+        let catalog_id = ids.snapshot_id(
+            ids.workflow_id(repository_id, entry.path()),
+            entry.source_digest(),
+        );
+        catalog_objects.insert(
+            entry.path().to_owned(),
+            (catalog_id, source.metadata.clone(), plan.metadata.clone()),
+        );
+        blobs.push(source);
+        blobs.push(plan);
+    }
+
+    let mut admitted_catalog = Vec::with_capacity(catalog_objects.len());
+    for (path, (id, source, plan)) in &catalog_objects {
+        let workflow_plan = workflow_plan_for_path(request, &catalog, path)
+            .ok_or(WorkflowAdmissionError::Internal)?;
+        let contract_digest = workflow_plan
+            .logical()
+            .invocation()
+            .map(digest_json)
+            .transpose()?;
+        let logical_job_count = u16::try_from(workflow_plan.jobs().len())
+            .map_err(|_| WorkflowAdmissionError::Internal)?;
+        let reusable_call_count = u16::try_from(
+            workflow_plan
+                .jobs()
+                .iter()
+                .filter(|job| matches!(job.execution(), LogicalJobKind::ReusableWorkflow(_)))
+                .count(),
+        )
+        .map_err(|_| WorkflowAdmissionError::Internal)?;
+        let descriptor_digest = catalog_descriptor_digest(
+            path,
+            request.commit_sha(),
+            source.digest(),
+            plan.digest(),
+            contract_digest,
+            logical_job_count,
+            reusable_call_count,
+        );
+        admitted_catalog.push(AdmittedReusableWorkflowCatalogEntry::new(
+            *id,
+            path,
+            request.commit_sha(),
+            source.clone(),
+            plan.clone(),
+            contract_digest,
+            descriptor_digest,
+            logical_job_count,
+            reusable_call_count,
+        ));
+    }
+
+    let mut invocation_paths = BTreeMap::new();
+    let mut admitted_invocations = Vec::with_capacity(expansion.invocations().len());
+    for invocation in expansion.invocations() {
+        let (catalog_entry_id, _, _) = catalog_objects
+            .get(invocation.workflow_path())
+            .ok_or(WorkflowAdmissionError::Internal)?;
+        let mut call_path = if let Some(parent_id) = invocation.parent_id() {
+            invocation_paths
+                .get(&parent_id.as_uuid())
+                .cloned()
+                .ok_or(WorkflowAdmissionError::Internal)?
+        } else {
+            Vec::new()
+        };
+        call_path.push(invocation.workflow_path().to_owned());
+        invocation_paths.insert(invocation.id().as_uuid(), call_path.clone());
+        let call_reference_digest = invocation
+            .parent_id()
+            .zip(invocation.caller_job_id())
+            .map(|(parent_id, caller_job_id)| {
+                reusable_call_reference(
+                    request,
+                    &catalog,
+                    expansion.invocations(),
+                    parent_id,
+                    caller_job_id,
+                )
+                .map(call_reference_digest)
+            })
+            .transpose()?;
+        let inputs = invocation
+            .inputs()
+            .iter()
+            .map(|input| {
+                let (kind, value_digest) = match input.source() {
+                    ReusableInputBindingSource::Caller(value) => {
+                        (AdmittedReusableInputKind::Caller, Some(digest_json(value)?))
+                    }
+                    ReusableInputBindingSource::Default(value) => (
+                        AdmittedReusableInputKind::Default,
+                        Some(digest_json(value)?),
+                    ),
+                    ReusableInputBindingSource::ImplicitDefault => {
+                        (AdmittedReusableInputKind::ImplicitDefault, None)
+                    }
+                };
+                Ok(AdmittedReusableInput::new(
+                    input.target(),
+                    input.input_type(),
+                    kind,
+                    value_digest,
+                ))
+            })
+            .collect::<Result<Vec<_>, WorkflowAdmissionError>>()?;
+        let secrets = invocation
+            .secrets()
+            .iter()
+            .map(|secret| AdmittedReusableSecret::new(secret.target(), secret.source()))
+            .collect::<Vec<_>>();
+        let outputs = invocation
+            .outputs()
+            .iter()
+            .map(|output| AdmittedReusableOutput::new(output.key(), output.sensitivity()))
+            .collect::<Vec<_>>();
+        let permission_digest = permissions_digest(invocation.permissions());
+        let permissions = AdmittedReusablePermissions::new(
+            invocation.permissions().default_level(),
+            invocation
+                .permissions()
+                .grants()
+                .iter()
+                .map(|(name, level)| (name.clone(), *level))
+                .collect(),
+            permission_digest,
+        );
+        let jobs = invocation
+            .jobs()
+            .iter()
+            .map(|job| {
+                AdmittedReusableJob::new(
+                    job.id(),
+                    job.key().clone(),
+                    job.source_order(),
+                    job.is_reusable(),
+                    reusable_job_descriptor_digest(invocation.id(), job),
+                    job.prerequisites().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let input_bindings_digest = admitted_inputs_digest(&inputs);
+        let secret_bindings_digest = admitted_secrets_digest(&secrets);
+        let output_contract_digest = admitted_outputs_digest(&outputs);
+        let descriptor_digest = invocation_descriptor_digest(
+            invocation.id(),
+            invocation.parent_id(),
+            invocation.caller_job_id(),
+            *catalog_entry_id,
+            invocation.depth(),
+            &call_path,
+            invocation.source_digest(),
+            invocation.plan_digest(),
+            call_reference_digest,
+            input_bindings_digest,
+            secret_bindings_digest,
+            output_contract_digest,
+            permission_digest,
+            &jobs,
+        );
+        admitted_invocations.push(AdmittedReusableInvocation::new(
+            invocation.id(),
+            invocation.parent_id(),
+            invocation.caller_job_id(),
+            *catalog_entry_id,
+            invocation.depth(),
+            call_path,
+            invocation.workflow_path(),
+            invocation.source_digest(),
+            invocation.plan_digest(),
+            call_reference_digest,
+            input_bindings_digest,
+            secret_bindings_digest,
+            output_contract_digest,
+            descriptor_digest,
+            inputs,
+            secrets,
+            outputs,
+            permissions,
+            jobs,
+        ));
+    }
+    Ok(Some(PreparedReusableWorkflowExpansion {
+        blobs,
+        graph: AdmittedReusableWorkflowExpansion::new(
+            expansion.digest(),
+            admitted_catalog,
+            admitted_invocations,
+        ),
+    }))
+}
+
+fn workflow_plan_for_path<'a>(
+    request: &'a WorkflowAdmissionRequest,
+    catalog: &'a GithubReusableWorkflowCatalog,
+    path: &str,
+) -> Option<&'a automata_ci_core::WorkflowPlan> {
+    if path == request.workflow_path() {
+        Some(request.plan())
+    } else {
+        catalog
+            .entries()
+            .find(|entry| entry.path() == path)
+            .map(crate::CatalogedReusableWorkflow::plan)
+    }
+}
+
+fn reusable_call_reference<'a>(
+    request: &'a WorkflowAdmissionRequest,
+    catalog: &'a GithubReusableWorkflowCatalog,
+    invocations: &[crate::ReusableWorkflowInvocationExpansion],
+    parent_id: automata_ci_store::LogicalWorkflowInvocationId,
+    caller_job_id: LogicalWorkflowJobId,
+) -> Result<&'a str, WorkflowAdmissionError> {
+    let parent = invocations
+        .iter()
+        .find(|invocation| invocation.id() == parent_id)
+        .ok_or(WorkflowAdmissionError::Internal)?;
+    let parent_job = parent
+        .jobs()
+        .iter()
+        .find(|job| job.id() == caller_job_id)
+        .ok_or(WorkflowAdmissionError::Internal)?;
+    let plan = workflow_plan_for_path(request, catalog, parent.workflow_path())
+        .ok_or(WorkflowAdmissionError::Internal)?;
+    let job = plan
+        .jobs()
+        .iter()
+        .find(|job| job.key().value() == parent_job.key())
+        .ok_or(WorkflowAdmissionError::Internal)?;
+    let LogicalJobKind::ReusableWorkflow(call) = job.execution() else {
+        return Err(WorkflowAdmissionError::Internal);
+    };
+    Ok(call.reference().value())
+}
+
+fn digest_json(value: &impl serde::Serialize) -> Result<Sha256Digest, WorkflowAdmissionError> {
+    serde_json::to_vec(value)
+        .map(|bytes| Sha256Digest::from_bytes(Sha256::digest(bytes).into()))
+        .map_err(|_| WorkflowAdmissionError::Serialization)
+}
+
+fn descriptor_digest(domain: &[u8], parts: &[&[u8]]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for part in parts {
+        digest_field(&mut hasher, part);
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn catalog_descriptor_digest(
+    path: &str,
+    revision: &str,
+    source: Sha256Digest,
+    plan: Sha256Digest,
+    contract: Option<Sha256Digest>,
+    jobs: u16,
+    calls: u16,
+) -> Sha256Digest {
+    let contract = contract.map_or([0; 32], Sha256Digest::into_bytes);
+    descriptor_digest(
+        b"automata.reusable-workflow.catalog.v1\0",
+        &[
+            path.as_bytes(),
+            revision.as_bytes(),
+            source.as_bytes(),
+            plan.as_bytes(),
+            &contract,
+            &jobs.to_be_bytes(),
+            &calls.to_be_bytes(),
+        ],
+    )
+}
+
+fn call_reference_digest(reference: &str) -> Sha256Digest {
+    descriptor_digest(
+        b"automata.reusable-workflow.call-reference.v1\0",
+        &[reference.as_bytes()],
+    )
+}
+
+fn permissions_digest(permissions: &ReusableWorkflowPermissions) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.permissions.v1\0");
+    hash_permission(&mut hasher, permissions.default_level());
+    digest_field(
+        &mut hasher,
+        &u64::try_from(permissions.grants().len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (name, level) in permissions.grants() {
+        digest_field(&mut hasher, name.as_bytes());
+        hash_permission(&mut hasher, *level);
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn hash_permission(hasher: &mut Sha256, level: PermissionLevel) {
+    digest_field(
+        hasher,
+        match level {
+            PermissionLevel::None => b"none",
+            PermissionLevel::Read => b"read",
+            PermissionLevel::Write => b"write",
+        },
+    );
+}
+
+fn admitted_inputs_digest(inputs: &[AdmittedReusableInput]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.inputs.v1\0");
+    for input in inputs {
+        digest_field(&mut hasher, input.key().as_bytes());
+        digest_field(&mut hasher, format!("{:?}", input.input_type()).as_bytes());
+        digest_field(&mut hasher, input.kind().as_str().as_bytes());
+        match input.value_digest() {
+            Some(digest) => digest_field(&mut hasher, digest.as_bytes()),
+            None => digest_field(&mut hasher, &[]),
+        }
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn admitted_secrets_digest(secrets: &[AdmittedReusableSecret]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.secrets.v1\0");
+    for secret in secrets {
+        digest_field(&mut hasher, secret.target().as_bytes());
+        digest_field(&mut hasher, secret.source().as_bytes());
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn admitted_outputs_digest(outputs: &[AdmittedReusableOutput]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.outputs.v1\0");
+    for output in outputs {
+        digest_field(&mut hasher, output.key().as_bytes());
+        digest_field(
+            &mut hasher,
+            match output.sensitivity() {
+                OutputSensitivity::Public => b"public",
+                OutputSensitivity::SecretDerived => b"secret_derived",
+            },
+        );
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn reusable_job_descriptor_digest(
+    invocation_id: automata_ci_store::LogicalWorkflowInvocationId,
+    job: &crate::ExpandedReusableJob,
+) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.job-descriptor.v1\0");
+    for part in [
+        invocation_id.as_uuid().as_bytes().as_slice(),
+        job.id().as_uuid().as_bytes().as_slice(),
+        job.key().as_str().as_bytes(),
+        &job.source_order().to_be_bytes(),
+        &[u8::from(job.is_reusable())],
+    ] {
+        digest_field(&mut hasher, part);
+    }
+    for prerequisite in job.prerequisites() {
+        digest_field(&mut hasher, prerequisite.as_uuid().as_bytes());
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invocation_descriptor_digest(
+    invocation_id: automata_ci_store::LogicalWorkflowInvocationId,
+    parent_id: Option<automata_ci_store::LogicalWorkflowInvocationId>,
+    caller_job_id: Option<LogicalWorkflowJobId>,
+    catalog_id: automata_ci_store::WorkflowSnapshotId,
+    depth: u16,
+    call_path: &[String],
+    source: Sha256Digest,
+    plan: Sha256Digest,
+    call_reference: Option<Sha256Digest>,
+    inputs: Sha256Digest,
+    secrets: Sha256Digest,
+    outputs: Sha256Digest,
+    permissions: Sha256Digest,
+    jobs: &[AdmittedReusableJob],
+) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.reusable-workflow.invocation-descriptor.v1\0");
+    digest_field(&mut hasher, invocation_id.as_uuid().as_bytes());
+    for value in [
+        parent_id.map(automata_ci_store::LogicalWorkflowInvocationId::as_uuid),
+        caller_job_id.map(LogicalWorkflowJobId::as_uuid),
+    ] {
+        digest_field(
+            &mut hasher,
+            value
+                .as_ref()
+                .map_or(&[][..], |value| value.as_bytes().as_slice()),
+        );
+    }
+    digest_field(&mut hasher, catalog_id.as_uuid().as_bytes());
+    digest_field(&mut hasher, &depth.to_be_bytes());
+    for path in call_path {
+        digest_field(&mut hasher, path.as_bytes());
+    }
+    for digest in [source, plan, inputs, secrets, outputs, permissions] {
+        digest_field(&mut hasher, digest.as_bytes());
+    }
+    match call_reference {
+        Some(digest) => digest_field(&mut hasher, digest.as_bytes()),
+        None => digest_field(&mut hasher, &[]),
+    }
+    for job in jobs {
+        digest_field(&mut hasher, job.descriptor_digest().as_bytes());
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
 }
 
 fn prepare_blob(
@@ -1020,15 +1611,19 @@ fn namespace_idempotency(
 fn canonical_request_digest(
     request: &WorkflowAdmissionRequest,
     delivery_id: Option<ProviderDeliveryId>,
+    schedule_fire_id: Option<automata_ci_store::GithubScheduleFireId>,
     dispatch_claim: Option<&AuthenticatedWorkflowDispatchClaim>,
     source: &PreparedBlob,
     event: &PreparedBlob,
     plan: &PreparedBlob,
     base_context: &PreparedBlob,
     concurrency: Option<&WorkflowConcurrency>,
+    reusable_workflows: Option<&AdmittedReusableWorkflowExpansion>,
 ) -> Sha256Digest {
     let mut digest = Sha256::new();
-    digest.update(if dispatch_claim.is_some() {
+    digest.update(if schedule_fire_id.is_some() {
+        SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7
+    } else if dispatch_claim.is_some() {
         AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6
     } else if delivery_id.is_some() {
         AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5
@@ -1074,8 +1669,15 @@ fn canonical_request_digest(
         }
         None => digest.update([0]),
     }
+    if let Some(expansion) = reusable_workflows {
+        digest.update([1]);
+        digest_field(&mut digest, expansion.digest().as_bytes());
+    }
     if let Some(delivery_id) = delivery_id {
         digest_field(&mut digest, delivery_id.as_uuid().as_bytes());
+    }
+    if let Some(fire_id) = schedule_fire_id {
+        digest_field(&mut digest, fire_id.as_uuid().as_bytes());
     }
     if let Some(claim) = dispatch_claim {
         let actor = claim.actor();
@@ -1142,6 +1744,9 @@ pub enum WorkflowAdmissionError {
     /// Exact-source recompilation or plan comparison failed.
     #[error(transparent)]
     Verification(#[from] WorkflowPlanVerificationError),
+    /// Repository-local reusable workflow planning failed closed.
+    #[error(transparent)]
+    ReusableExpansion(#[from] ReusableWorkflowExpansionError),
     /// Immutable evidence could not be published or verified.
     #[error("immutable blob publication failed")]
     Blob(#[source] BlobStoreError),
@@ -1154,6 +1759,9 @@ pub enum WorkflowAdmissionError {
     /// Logical workflow graph or receipt metadata failed value validation.
     #[error(transparent)]
     LogicalValue(#[from] LogicalWorkflowAdmissionValueError),
+    /// Credential contexts used a dynamic or malformed name.
+    #[error(transparent)]
+    CredentialDiscovery(#[from] CredentialDiscoveryError),
     /// Canonical serialization of the validated workflow plan failed.
     #[error("workflow plan serialization failed")]
     Serialization,
@@ -1170,11 +1778,14 @@ pub enum WorkflowAdmissionError {
 
 const fn observe_failure(error: &WorkflowAdmissionError) -> WorkflowAdmissionFailure {
     match error {
-        WorkflowAdmissionError::Verification(_) => WorkflowAdmissionFailure::Materialization,
+        WorkflowAdmissionError::Verification(_) | WorkflowAdmissionError::ReusableExpansion(_) => {
+            WorkflowAdmissionFailure::Materialization
+        }
         WorkflowAdmissionError::Blob(_) => WorkflowAdmissionFailure::BlobStore,
         WorkflowAdmissionError::Store(_) => WorkflowAdmissionFailure::DurableStore,
         WorkflowAdmissionError::AdmissionValue(_)
         | WorkflowAdmissionError::LogicalValue(_)
+        | WorkflowAdmissionError::CredentialDiscovery(_)
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::ConcurrencyEvaluation
         | WorkflowAdmissionError::WorkflowDispatchEvidence

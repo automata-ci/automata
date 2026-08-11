@@ -1,5 +1,7 @@
 use automata_ci_core::{Lease, OperationId, Sha256Digest, UnixMillis};
-use automata_ci_protocol::{CommandSequence, LeaseRejectionReason, RunnerSlotOrdinal};
+use automata_ci_protocol::{
+    CommandSequence, LeaseRejectionReason, ManagedSecretBindingOverlay, RunnerSlotOrdinal,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{JobIrContentRef, JournalInvariantError, RuntimeAuthorityContentRef};
@@ -110,6 +112,8 @@ pub struct LeaseOfferRecord {
     lease: Lease,
     job_ir: JobIrContentRef,
     runtime_authorities: RuntimeAuthorityContentRef,
+    #[serde(default)]
+    managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
     command: DurableCommand,
 }
 
@@ -136,8 +140,25 @@ impl LeaseOfferRecord {
             lease,
             job_ir,
             runtime_authorities,
+            managed_secret_bindings: None,
             command,
         })
+    }
+
+    /// Attaches value-free bindings for the exact offered lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed content or any attempt, lease, or fence mismatch.
+    pub fn with_managed_secret_bindings(
+        mut self,
+        overlay: ManagedSecretBindingOverlay,
+    ) -> Result<Self, JournalInvariantError> {
+        overlay
+            .validate_for(&self.lease)
+            .map_err(|_| JournalInvariantError::InvalidManagedSecretBindings)?;
+        self.managed_secret_bindings = Some(overlay);
+        Ok(self)
     }
 
     /// Returns the stable execution slot named by the offer.
@@ -170,6 +191,12 @@ impl LeaseOfferRecord {
         &self.runtime_authorities
     }
 
+    /// Returns the lease-scoped value-free bindings, when carried by the offer.
+    #[must_use]
+    pub const fn managed_secret_bindings(&self) -> Option<&ManagedSecretBindingOverlay> {
+        self.managed_secret_bindings.as_ref()
+    }
+
     /// Returns the command whose cursor advancement is atomic with the offer.
     #[must_use]
     pub const fn command(&self) -> DurableCommand {
@@ -181,7 +208,13 @@ impl LeaseOfferRecord {
             .validate()
             .map_err(|_| JournalInvariantError::InvalidLease)?;
         self.job_ir.validate()?;
-        self.runtime_authorities.validate()
+        self.runtime_authorities.validate()?;
+        if let Some(overlay) = &self.managed_secret_bindings {
+            overlay
+                .validate_for(&self.lease)
+                .map_err(|_| JournalInvariantError::InvalidManagedSecretBindings)?;
+        }
+        Ok(())
     }
 }
 

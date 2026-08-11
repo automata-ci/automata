@@ -352,6 +352,13 @@ fn hash_execution(hasher: &mut Sha256, execution: &LogicalActivationExecutionCon
         }
         None => hasher.update([0]),
     }
+    match execution.triggering_actor() {
+        Some(actor) => {
+            hasher.update([1]);
+            hash_text(hasher, actor);
+        }
+        None => hasher.update([0]),
+    }
     hasher.update(execution.run_id_alias().get().to_be_bytes());
     hasher.update(execution.run_number().to_be_bytes());
     hasher.update(execution.run_attempt().to_be_bytes());
@@ -576,6 +583,22 @@ impl GithubLogicalJobOrchestrationService {
             Ok(plan) => plan,
             Err(error) => return Ok(classify_activation_failure(&error)),
         };
+        lease.before_io(shutdown)?;
+        let permission_ceiling = match self
+            .activations
+            .reusable_workflow_permission_snapshot(
+                prepared.target().tenant(),
+                prepared.target().run_id(),
+                prepared.target().invocation_id(),
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => return classify_activation_store_failure(&error),
+        };
+        if plan.logical().invocation().is_some() != permission_ceiling.is_some() {
+            return Ok(activation_relational_failure());
+        }
         let Ok(validated_plan) = ValidatedLogicalPlan::new(&plan) else {
             return Ok(activation_payload_failure());
         };
@@ -634,6 +657,7 @@ impl GithubLogicalJobOrchestrationService {
                     logical_job,
                     instance,
                     &profiles,
+                    permission_ceiling.as_ref(),
                 )
                 .await
             {
@@ -708,6 +732,7 @@ impl GithubLogicalJobOrchestrationService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Lease, exact evidence, and projection policy remain separate trust boundaries.
     async fn project_and_publish_selected_instance(
         &self,
         lease: &AutonomousActivationLease,
@@ -716,9 +741,10 @@ impl GithubLogicalJobOrchestrationService {
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
+        permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
     ) -> Result<ActivatedLogicalInstanceDescriptor, SelectedActivationFailure> {
         let (runtime_payload, job_payload) = self
-            .project_instance_payloads(prepared, job, instance, profiles)
+            .project_instance_payloads(prepared, job, instance, profiles, permission_ceiling)
             .map_err(SelectedActivationFailure::Operation)?;
         let runtime_descriptor = runtime_payload.descriptor().clone();
         let job_descriptor = job_payload.descriptor().clone();
@@ -754,6 +780,7 @@ impl GithubLogicalJobOrchestrationService {
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
+        permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
     ) -> Result<(BlobPayload, BlobPayload), GithubLogicalJobOrchestrationError> {
         let runtime_key = instance_object_key(prepared.target(), instance, "runtime-context.pb")?;
         let runtime_bytes = automata_ci_protocol_protobuf::encode_job_runtime_context(
@@ -782,18 +809,26 @@ impl GithubLogicalJobOrchestrationService {
         if let Some(actor) = prepared.execution().actor() {
             execution = execution.with_actor(actor);
         }
+        if let Some(actor) = prepared.execution().triggering_actor() {
+            execution = execution.with_triggering_actor(actor);
+        }
         let job_id = deterministic_job_id(prepared.target(), instance);
+        let mut projection = ProjectGithubLogicalJobRequest::new(
+            job,
+            instance,
+            prepared.execution().workflow_id(),
+            prepared.target().run_id(),
+            job_id,
+            execution,
+            profiles,
+            prepared.authority_profile(),
+            prepared.runtime_policy().policy().resource_policy(),
+        );
+        if let Some(permission_ceiling) = permission_ceiling {
+            projection = projection.with_permission_ceiling(permission_ceiling);
+        }
         let projected = GithubLogicalJobProjector::new()
-            .project(ProjectGithubLogicalJobRequest::new(
-                job,
-                instance,
-                prepared.execution().workflow_id(),
-                prepared.target().run_id(),
-                job_id,
-                execution,
-                profiles,
-                prepared.authority_profile(),
-            ))
+            .project(projection)
             .map_err(GithubLogicalJobOrchestrationError::Projection)?;
         if projected.runtime_context_bytes() != runtime_payload.bytes() {
             return Err(GithubLogicalJobOrchestrationError::EncodingMismatch);
@@ -838,7 +873,7 @@ fn activated_instance_descriptor(
 }
 
 #[derive(Debug, Error)]
-enum GithubLogicalJobOrchestrationError {
+pub(crate) enum GithubLogicalJobOrchestrationError {
     /// The selected plan job disagrees with the store-authenticated claim.
     #[error("workflow plan job did not match durable claim evidence")]
     PlanClaimMismatch,
@@ -1049,7 +1084,7 @@ const fn is_base_strategy(strategy: automata_ci_core::StrategyContext) -> bool {
         && strategy.max_parallel() == 1
 }
 
-fn github_activation_context(
+pub(crate) fn github_activation_context(
     plan: &WorkflowPlan,
     execution: &LogicalActivationExecutionContext,
     event_bytes: &[u8],
@@ -1103,6 +1138,9 @@ fn github_activation_context(
     ];
     if let Some(actor) = execution.actor() {
         values.push(("actor".to_owned(), GithubValue::string(actor)));
+    }
+    if let Some(actor) = execution.triggering_actor().or_else(|| execution.actor()) {
+        values.push(("triggering_actor".to_owned(), GithubValue::string(actor)));
     }
     let object =
         GithubObject::new(values).map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)?;

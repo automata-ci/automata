@@ -107,6 +107,7 @@ pub struct WorkflowAdmissionRequest {
     display_title: Option<String>,
     commit_subject: Option<String>,
     run_attempt: Option<u32>,
+    repository_workflow_sources: Vec<crate::RepositoryWorkflowSource>,
 }
 
 /// Named construction path for [`WorkflowAdmissionRequest`].
@@ -147,6 +148,7 @@ impl WorkflowAdmissionRequest {
                 display_title: None,
                 commit_subject: None,
                 run_attempt: None,
+                repository_workflow_sources: Vec::new(),
             },
         }
     }
@@ -248,9 +250,25 @@ impl WorkflowAdmissionRequest {
     pub const fn run_attempt(&self) -> Option<u32> {
         self.run_attempt
     }
+
+    /// Returns exact-revision repository workflow sources available for local reusable calls.
+    #[must_use]
+    pub fn repository_workflow_sources(&self) -> &[crate::RepositoryWorkflowSource] {
+        &self.repository_workflow_sources
+    }
 }
 
 impl WorkflowAdmissionRequestBuilder {
+    /// Supplies verified exact-revision workflow files for reachable local reusable calls.
+    #[must_use]
+    pub fn repository_workflow_sources(
+        mut self,
+        sources: impl IntoIterator<Item = crate::RepositoryWorkflowSource>,
+    ) -> Self {
+        self.request.repository_workflow_sources = sources.into_iter().collect();
+        self
+    }
+
     /// Selects the immutable media type for exact event evidence.
     #[must_use]
     pub fn event_media_type(mut self, media_type: impl Into<String>) -> Self {
@@ -436,6 +454,9 @@ pub enum WorkflowPlanVerificationError {
     /// Canonical manual-dispatch evidence or resolved inputs disagreed with replay.
     #[error("workflow dispatch evidence does not match exact-source recompilation")]
     WorkflowDispatchEvidenceMismatch,
+    /// Canonical scheduler-owned evidence disagreed with exact-source replay.
+    #[error("GitHub schedule evidence does not match exact-source recompilation")]
+    ScheduleEvidenceMismatch,
     /// Exact-source recompilation produced a different plan.
     #[error("supplied workflow plan does not match exact source recompilation")]
     PlanMismatch,

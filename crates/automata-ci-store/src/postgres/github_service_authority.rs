@@ -1461,7 +1461,8 @@ async fn revalidate_handoff_consumer(
                 GithubServerServiceAction::ReconcileCheckRun => "reconcile_run_create",
                 GithubServerServiceAction::PublishCheckRun => "publish",
                 GithubServerServiceAction::FetchPrivateRepositoryRevision
-                | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles => {
+                | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules => {
                     return Err(GithubServerServiceStoreError::HandoffRejected);
                 }
             };
@@ -1509,6 +1510,15 @@ async fn revalidate_handoff_consumer(
             .map(UnixMillis::new)
         }
         GithubServerServiceScope::PrivateRepositorySourceRead => {
+            if consumer.action() == GithubServerServiceAction::DiscoverPrivateRepositorySchedules {
+                return revalidate_schedule_discovery_consumer(
+                    connection,
+                    identity,
+                    consumer,
+                    observed_at,
+                )
+                .await;
+            }
             if !matches!(
                 consumer.action(),
                 GithubServerServiceAction::FetchPrivateRepositoryRevision
@@ -1562,6 +1572,80 @@ async fn revalidate_handoff_consumer(
         }
     };
     claim_expires_at.ok_or(GithubServerServiceStoreError::HandoffRejected)
+}
+
+async fn revalidate_schedule_discovery_consumer(
+    connection: &mut PgConnection,
+    identity: &GithubServerServiceAuthorityIdentity,
+    consumer: GithubServerServiceConsumerClaim,
+    observed_at: UnixMillis,
+) -> Result<UnixMillis, GithubServerServiceStoreError> {
+    if consumer.revision().as_i64() != 1 {
+        return Err(GithubServerServiceStoreError::HandoffRejected);
+    }
+    sqlx::query_scalar::<_, i64>(
+        r"
+        SELECT discovery.claim_expires_at_ms
+          FROM github_schedule_discovery_claims AS discovery
+          JOIN github_provider_manifest_current AS current
+            ON current.tenant_id = discovery.tenant_id
+           AND current.repository_id = discovery.repository_id
+           AND current.provider_connection_id = discovery.provider_connection_id
+           AND current.manifest_revision = discovery.manifest_revision
+           AND current.manifest_digest = discovery.manifest_digest
+          JOIN github_provider_manifest_revisions AS manifest
+            ON manifest.tenant_id = current.tenant_id
+           AND manifest.repository_id = current.repository_id
+           AND manifest.provider_connection_id = current.provider_connection_id
+           AND manifest.manifest_revision = current.manifest_revision
+           AND manifest.manifest_digest = current.manifest_digest
+          JOIN repositories AS repository
+            ON repository.id = discovery.repository_id
+           AND repository.tenant_id = discovery.tenant_id
+           AND repository.scm_provider = 'github'
+           AND repository.provider_repository_id = manifest.github_repository_id::TEXT
+         WHERE discovery.discovery_id = $1
+           AND discovery.state = 'claimed'
+           AND discovery.claim_owner_id = $2
+           AND discovery.claim_fence = $3
+           AND discovery.claimed_at_ms <= $4
+           AND discovery.updated_at_ms <= $4
+           AND discovery.claim_expires_at_ms > $4
+           AND discovery.tenant_id = $5
+           AND discovery.repository_id = $6
+           AND discovery.provider_connection_id = $7
+           AND discovery.source_authority_kind = 'private_repository_source_read'
+           AND discovery.private_source_authority_id = $8
+           AND discovery.private_source_authority_identity_digest = $9
+           AND discovery.private_source_authority_app_configuration_revision = $10
+           AND discovery.private_source_authority_policy_revision = $11
+           AND manifest.provider_installation_id = $12
+           AND manifest.github_app_id = $13
+           AND manifest.github_repository_id = $14
+           AND manifest.github_repository_name = $15
+         FOR SHARE OF discovery, current, manifest, repository
+        ",
+    )
+    .bind(consumer.consumer_id().as_uuid())
+    .bind(consumer.owner().as_uuid())
+    .bind(consumer.fence().as_i64())
+    .bind(observed_at.get())
+    .bind(identity.tenant().as_str())
+    .bind(identity.repository_id().as_uuid())
+    .bind(identity.connection_id().as_uuid())
+    .bind(identity.authority_id().as_uuid())
+    .bind(identity.identity_digest().as_bytes().as_slice())
+    .bind(identity.app_configuration_revision().as_i64())
+    .bind(identity.policy_revision().as_i64())
+    .bind(identity.installation_id().as_i64())
+    .bind(identity.github_app_id().as_i64())
+    .bind(identity.github_repository_id().as_i64())
+    .bind(identity.github_repository_name().as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(operation_error)?
+    .map(UnixMillis::new)
+    .ok_or(GithubServerServiceStoreError::HandoffRejected)
 }
 
 async fn release_handoff(

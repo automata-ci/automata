@@ -18,6 +18,7 @@ automata-ci-core.workspace = true
 automata-ci-expression-github.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-protocol-protobuf.workspace = true
+automata-ci-schedule.workspace = true
 automata-ci-store.workspace = true
 automata-ci-workflow-github.workspace = true
 bytes.workspace = true

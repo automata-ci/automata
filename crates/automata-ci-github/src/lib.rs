@@ -44,5 +44,6 @@ pub use webhook::{
 };
 pub use webhook_event::{
     GithubMergeGroupAction, GithubPullRequestAction, GithubWebhookRef, GithubWebhookRepository,
-    VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubWebhook,
+    VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubRepositoryDispatch,
+    VerifiedGithubWebhook,
 };

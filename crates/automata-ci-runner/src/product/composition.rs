@@ -26,7 +26,8 @@ use automata_ci_runner_runtime::{
 };
 use automata_ci_runner_spool::{FileSpool, FileSpoolOptions};
 use automata_ci_runner_transport::{
-    HyperRunnerControlClient, RunnerControlClient, TransportLimits,
+    HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
+    RunnerEphemeralClient, TransportLimits,
 };
 #[cfg(not(target_os = "linux"))]
 use automata_ci_sandbox_podman::PodmanLaunchTrust;
@@ -48,11 +49,12 @@ mod podman_process_trust;
 #[cfg(target_os = "linux")]
 use podman_process_trust::PodmanProcessTrust;
 
+use super::managed_secret_delivery::ManagedSecretJobExecutor;
 #[cfg(not(target_os = "linux"))]
 use super::state::RuntimeMountSnapshot;
 use super::{
     ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
-    SecretSource, StandardGithubContext,
+    SandboxProductConfig, SecretSource, StandardGithubContext,
     config::required_podman_state_root,
     metrics::RunnerMetrics,
     profile_admission::{
@@ -128,8 +130,18 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
     if shutdown.is_requested() {
         return Ok(());
     }
+    match config.sandbox() {
+        SandboxProductConfig::Podman(_) => run_podman(&config, shutdown).await,
+        SandboxProductConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
+    }
+}
+
+async fn run_podman(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
     require_dedicated_rootless_user()?;
-    let podman_options = prepare_admitted_podman(&config)?;
+    let podman_options = prepare_admitted_podman(config)?;
     let network_policy = config.executor().network();
     let capability_admission =
         verify_configured_capabilities(&podman_options, network_policy, &shutdown.probe).await;
@@ -146,7 +158,7 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
         None => None,
     };
     let composition =
-        compose(&config, &podman_options, &shutdown.probe, admission).map(|composition| {
+        compose_podman(config, &podman_options, &shutdown.probe, admission).map(|composition| {
             if shutdown.is_requested() {
                 None
             } else {
@@ -155,15 +167,62 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
         });
     let started = after_admitted_value(composition, |composition| {
         revalidate_podman_launch_trust(&podman_options)?;
-        mark_admitted_composition_ready(&config, &composition);
-        let supervisor = composition.supervisor.clone();
-        let runtime_shutdown = shutdown.runtime.clone();
-        let runtime = async move { supervisor.run(runtime_shutdown).await };
-        Ok((composition, runtime))
+        Ok(composition)
     })?;
-    let Some((composition, runtime)) = started else {
+    let Some(composition) = started else {
         return Ok(());
     };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+async fn run_kubernetes(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    require_dedicated_rootless_user()?;
+    let kubernetes = config
+        .kubernetes()
+        .ok_or(RunnerProductError::SandboxProviderInvariant)?;
+    let client = kube::Client::try_default()
+        .await
+        .map_err(RunnerProductError::KubernetesClient)?;
+    if shutdown.is_requested() {
+        return Ok(());
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider: Arc<dyn automata_ci_execution::SandboxProvider> = Arc::new(
+        automata_ci_sandbox_kubernetes::KubernetesSandboxProvider::new(
+            client,
+            kubernetes.adapter().clone(),
+        )?,
+    );
+    let provider = match &metrics {
+        Some(metrics) => metrics.instrument_sandbox_provider(provider),
+        None => provider,
+    };
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition =
+        compose_with_provider(config, provider, metrics, &shutdown.probe, false, || Ok(()))?
+            .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(());
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+async fn supervise_composition(
+    config: &RunnerProductConfig,
+    composition: RunnerComposition,
+    metrics_listener: Option<TcpListener>,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    mark_admitted_composition_ready(config, &composition);
+    let supervisor = composition.supervisor.clone();
+    let runtime_shutdown = shutdown.runtime.clone();
+    let runtime = async move { supervisor.run(runtime_shutdown).await };
     let exporter = composition.metrics.as_ref().map(RunnerMetrics::exporter);
     let metrics_service = serve_metrics(metrics_listener, exporter, shutdown.runtime.clone());
     let metrics_sampler = sample_metrics(
@@ -237,7 +296,10 @@ fn admit_effective_user_id(user: u32) -> Result<(), RunnerProductError> {
 fn prepare_admitted_podman(
     config: &RunnerProductConfig,
 ) -> Result<PodmanOptions, RunnerProductError> {
-    let runtime_mount = capture_dedicated_runtime_mount(config.podman().runtime_directory())
+    let podman = config
+        .podman()
+        .ok_or(RunnerProductError::SandboxProviderInvariant)?;
+    let runtime_mount = capture_dedicated_runtime_mount(podman.runtime_directory())
         .map_err(|_| RunnerProductError::PodmanProcessTrust)?;
     let podman_options = build_podman_options(config)?;
     prepare_probe_directories(&podman_options)?;
@@ -288,7 +350,7 @@ fn mark_admitted_composition_ready(config: &RunnerProductConfig, composition: &R
     }
 }
 
-fn compose(
+fn compose_podman(
     config: &RunnerProductConfig,
     podman_options: &PodmanOptions,
     cancellation: &crate::podman_probe::ProbeCancellation,
@@ -300,11 +362,42 @@ fn compose(
     let runner_cgroup = config
         .metrics()
         .and_then(|_| PodmanCommandExecutor::delegated_no_swap_cgroup(&SystemCommandExecutor));
-    let metrics = config
+    let metrics = build_metrics(config, runner_cgroup)?;
+    revalidate_podman_launch_trust(podman_options)?;
+    let provider = build_provider(podman_options.clone(), metrics.as_ref())?;
+    compose_with_provider(
+        config,
+        provider,
+        metrics,
+        cancellation,
+        config
+            .podman()
+            .ok_or(RunnerProductError::SandboxProviderInvariant)?
+            .service_proxy_image()
+            .is_some(),
+        || revalidate_podman_launch_trust(podman_options),
+    )
+}
+
+fn build_metrics(
+    config: &RunnerProductConfig,
+    runner_cgroup: Option<String>,
+) -> Result<Option<RunnerMetrics>, RunnerProductError> {
+    config
         .metrics()
         .map(|_| RunnerMetrics::new(config.inventory().max_parallel_jobs(), runner_cgroup))
         .transpose()
-        .map_err(RunnerProductError::MetricsConfiguration)?;
+        .map_err(RunnerProductError::MetricsConfiguration)
+}
+
+fn compose_with_provider(
+    config: &RunnerProductConfig,
+    provider: Arc<dyn automata_ci_execution::SandboxProvider>,
+    metrics: Option<RunnerMetrics>,
+    cancellation: &crate::podman_probe::ProbeCancellation,
+    service_proxy_configured: bool,
+    revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
+) -> Result<Option<RunnerComposition>, RunnerProductError> {
     let protocol_limits = ProtocolLimits::default();
     let tls = load_client_tls(config.tls())?;
     let transport = match &metrics {
@@ -327,6 +420,11 @@ fn compose(
         transport = metrics.instrument_control(transport);
     }
     let control = Arc::new(TransportControlClientAdapter::new(transport));
+    let ephemeral: Arc<dyn RunnerEphemeralClient> = Arc::new(HyperRunnerEphemeralClient::new(
+        config.control_endpoint(),
+        &tls,
+        TransportLimits::default(),
+    )?);
 
     let journal_options = metrics
         .as_ref()
@@ -350,12 +448,15 @@ fn compose(
         spool_options,
     )?);
 
-    revalidate_podman_launch_trust(podman_options)?;
-    let provider = build_provider(podman_options.clone(), metrics.as_ref())?;
-    let runtime_inventory =
-        build_admitted_runtime_inventory(config, provider.as_ref(), cancellation, podman_options);
+    let runtime_inventory = build_admitted_runtime_inventory(
+        config,
+        provider.as_ref(),
+        cancellation,
+        service_proxy_configured,
+        revalidate_provider_trust,
+    );
     after_admitted_value(runtime_inventory, |runtime_inventory| {
-        let executor = build_executor(config, provider)?;
+        let executor = build_executor(config, provider, ephemeral)?;
         let runtime_config = RunnerRuntimeConfig::new(
             runtime_inventory,
             protocol_limits,
@@ -396,14 +497,15 @@ fn build_admitted_runtime_inventory(
     config: &RunnerProductConfig,
     provider: &dyn automata_ci_execution::SandboxProvider,
     cancellation: &crate::podman_probe::ProbeCancellation,
-    podman_options: &PodmanOptions,
+    service_proxy_configured: bool,
+    revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
 ) -> Result<Option<RunnerCapabilities>, RunnerProductError> {
     let admission = admit_configured_environment_profiles(config, provider, cancellation);
     after_profile_admission(admission, || {
-        revalidate_podman_launch_trust(podman_options)?;
+        revalidate_provider_trust()?;
         Ok(inventory_for_verified_provider(
             config.inventory(),
-            config.podman().service_proxy_image().is_some(),
+            service_proxy_configured,
             provider.capabilities(),
         ))
     })
@@ -427,6 +529,9 @@ fn admit_configured_environment_profiles(
     // The provider's exact create path also provisions the attempt-scoped
     // Docker API when configured, so its advertised feature is covered by the
     // same lifecycle evidence as every environment profile.
+    let capacity = config.executor().resource_capacity();
+    let allocation = automata_ci_core::JobResourceAllocation::new(capacity, capacity)
+        .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
     let result = admit_environment_profiles(
         provider,
         config.environments(),
@@ -435,6 +540,7 @@ fn admit_configured_environment_profiles(
             config.executor().root_filesystem(),
             config.executor().privilege(),
             config.executor().resources(),
+            allocation,
         ),
         cancellation,
     );
@@ -504,33 +610,39 @@ async fn sample_metrics(
 }
 
 fn build_podman_options(config: &RunnerProductConfig) -> Result<PodmanOptions, RunnerProductError> {
-    if config.state().podman().as_os_str()
-        != required_podman_state_root(config.podman().runtime_directory()).as_os_str()
+    let podman = config
+        .podman()
+        .ok_or(RunnerProductError::SandboxProviderInvariant)?;
+    let state_root = config
+        .state()
+        .podman()
+        .ok_or(RunnerProductError::SandboxProviderInvariant)?;
+    if state_root.as_os_str() != required_podman_state_root(podman.runtime_directory()).as_os_str()
     {
         return Err(RunnerProductError::PodmanProcessTrust);
     }
-    ensure_private_directory(config.state().podman())?;
-    let podman_root = PodmanStateRoot::existing(config.state().podman().to_path_buf())?;
+    ensure_private_directory(state_root)?;
+    let podman_root = PodmanStateRoot::existing(state_root.to_path_buf())?;
     let podman_environment = PodmanProcessEnvironment::new(
-        config.podman().home().to_path_buf(),
-        config.podman().runtime_directory().to_path_buf(),
-        config.state().podman().to_path_buf(),
-        config.podman().approved_helper_directory().to_path_buf(),
-        config.podman().conmon_path().to_path_buf(),
-        config.podman().oci_runtime_path().to_path_buf(),
-        config.podman().init_path().to_path_buf(),
-        config.podman().seccomp_profile_path().to_path_buf(),
+        podman.home().to_path_buf(),
+        podman.runtime_directory().to_path_buf(),
+        state_root.to_path_buf(),
+        podman.approved_helper_directory().to_path_buf(),
+        podman.conmon_path().to_path_buf(),
+        podman.oci_runtime_path().to_path_buf(),
+        podman.init_path().to_path_buf(),
+        podman.seccomp_profile_path().to_path_buf(),
     )?;
     let mut podman_options = PodmanOptions::new(
-        PodmanBinary::new(config.podman().binary().to_path_buf())?,
+        PodmanBinary::new(podman.binary().to_path_buf())?,
         podman_root,
         podman_environment,
     )?
-    .with_job_container_engine(config.podman().job_container_engine());
-    if let Some(alias) = config.podman().github_server_host_gateway_alias() {
+    .with_job_container_engine(podman.job_container_engine());
+    if let Some(alias) = podman.github_server_host_gateway_alias() {
         podman_options = podman_options.with_host_gateway_alias(alias.clone());
     }
-    if let Some(image) = config.podman().service_proxy_image() {
+    if let Some(image) = podman.service_proxy_image() {
         podman_options = podman_options.with_service_proxy_image(image.clone());
     }
     Ok(podman_options)
@@ -618,6 +730,7 @@ fn build_provider(
 fn build_executor(
     config: &RunnerProductConfig,
     provider: Arc<dyn automata_ci_execution::SandboxProvider>,
+    ephemeral: Arc<dyn RunnerEphemeralClient>,
 ) -> Result<Arc<dyn JobExecutor>, RunnerProductError> {
     let blobs = build_object_store(config)?;
     let action_preparer = build_action_preparer(config, Arc::clone(&blobs))?;
@@ -644,22 +757,27 @@ fn build_executor(
         config.executor().maximum_output_bytes(),
         config.executor().runner_root().clone(),
     )?;
-    Ok(Arc::new(GithubJobExecutor::new(
+    let executor = Arc::new(GithubJobExecutor::new(
         executor_config,
         GithubJobExecutorPorts::new(
             provider,
             environments,
             action_preparer,
             job_content,
-            // JobIR currently carries only opaque references, not job-scoped
-            // values. Fail closed until the control protocol provides a
-            // credential authority instead of inventing runner-global data.
+            // The reusable base stays secretless. ManagedSecretJobExecutor
+            // replaces this port only on one verified execution.
             Arc::new(NoSecrets),
             contexts,
             toolchain,
             Arc::new(DeterministicOperationIds),
             Arc::new(SystemExecutionClock),
         ),
+    ));
+    Ok(Arc::new(ManagedSecretJobExecutor::new(
+        config.runner_id(),
+        executor,
+        ephemeral,
+        Arc::new(automata_ci_auth::secret::SystemSecureRandom),
     )))
 }
 
@@ -879,6 +997,15 @@ pub enum RunnerProductError {
     /// Rootless Podman initialization failed.
     #[error("runner Podman provider initialization failed")]
     PodmanOpen(#[from] automata_ci_sandbox_podman::PodmanOpenError),
+    /// Product configuration and the selected provider path disagreed.
+    #[error("runner sandbox provider composition invariant failed")]
+    SandboxProviderInvariant,
+    /// Ambient Kubernetes client discovery or authentication failed.
+    #[error("runner Kubernetes client initialization failed")]
+    KubernetesClient(#[source] kube::Error),
+    /// Kubernetes sandbox adapter configuration failed.
+    #[error("runner Kubernetes provider configuration failed")]
+    KubernetesConfiguration(#[from] automata_ci_sandbox_kubernetes::KubernetesConfigurationError),
     /// The configured Podman network admission boundary did not produce usable evidence.
     #[error("runner capability admission failed")]
     CapabilityAdmission,

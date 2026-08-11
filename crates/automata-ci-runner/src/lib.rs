@@ -2,8 +2,10 @@
 //!
 //! The crate diagnoses Linux host capabilities and validates runner
 //! configuration. Before the production command opens a control-plane session,
-//! it requires the configured rootless-Podman network probe and cleanup to
-//! succeed. It then supervises fenced job execution through that provider.
+//! it either requires the configured rootless-Podman network probe and cleanup
+//! to succeed or constructs the authenticated Kubernetes adapter. Both paths
+//! exercise every configured environment through exact lifecycle admission
+//! before supervising fenced job execution.
 //! [`run`] is the `automata-runner` process entry point; diagnostic and product
 //! modules expose the same typed boundaries for embedding and tests.
 

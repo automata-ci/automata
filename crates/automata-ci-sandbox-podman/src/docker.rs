@@ -50,6 +50,14 @@ const UPGRADED_RELAY_THREAD_STACK_BYTES: usize = 128 * 1024;
 // root, so engine teardown removes it while attached output and `docker logs`
 // remain compatible. Never inherit the host default: it is commonly journald.
 const JOB_LOCAL_LOG_DRIVER: &str = "json-file";
+const BUILDX_DEFAULT_IMAGE: &str = "moby/buildkit:buildx-stable-1";
+const BUILDX_DEFAULT_NORMALIZED_REPOSITORY: &str = "docker.io/moby/buildkit";
+const BUILDX_DEFAULT_TAG: &str = "buildx-stable-1";
+const BUILDX_CONTAINER_PREFIX: &str = "buildx_buildkit_";
+const BUILDKIT_STATE_DIRECTORY: &str = "/var/lib/buildkit";
+const BUILDKIT_CONFIG_ARCHIVE_DESTINATION: &str = "/etc";
+const BUILDKIT_GHA_PROVENANCE_FILE: &str = "buildkit/provenance.d/github_actions_context.json";
+const MAX_BUILDKIT_EXECS: usize = 256;
 
 // The distribution image uses Docker's legacy builder with `--file`, `--quiet`,
 // and one `--tag`. Docker 29 emits these four query fields for that command.
@@ -133,6 +141,9 @@ impl JobDockerService {
             launch.outer_cgroup,
             launch.resources,
             options.process_environment().clone(),
+            options
+                .buildkit_runtime()
+                .map(|runtime| runtime.image().reference().to_owned()),
         ));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -324,6 +335,26 @@ struct ProxyPolicy {
     resources: ResourceLimits,
     ports: Mutex<BTreeMap<String, BTreeMap<String, PublishedPort>>>,
     launch_validator: Arc<dyn DockerLaunchValidator>,
+    buildkit: Option<BuildKitPolicy>,
+}
+
+#[derive(Debug)]
+struct BuildKitPolicy {
+    image: String,
+    state: Mutex<BuildKitState>,
+}
+
+#[derive(Debug, Default)]
+struct BuildKitState {
+    container: Option<OwnedBuildKitContainer>,
+    execs: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+struct OwnedBuildKitContainer {
+    name: String,
+    identifier: Option<String>,
+    volume: String,
 }
 
 trait DockerLaunchValidator: std::fmt::Debug + Send + Sync {
@@ -343,6 +374,7 @@ impl ProxyPolicy {
         cgroup_parent: String,
         resources: ResourceLimits,
         process_environment: PodmanProcessEnvironment,
+        buildkit_image: Option<String>,
     ) -> Self {
         Self::new_with_validator(
             sandbox,
@@ -350,6 +382,7 @@ impl ProxyPolicy {
             cgroup_parent,
             resources,
             Arc::new(process_environment),
+            buildkit_image,
         )
     }
 
@@ -359,6 +392,7 @@ impl ProxyPolicy {
         cgroup_parent: String,
         resources: ResourceLimits,
         launch_validator: Arc<dyn DockerLaunchValidator>,
+        buildkit_image: Option<String>,
     ) -> Self {
         let mut owner_labels = Map::new();
         owner_labels.insert(
@@ -376,6 +410,10 @@ impl ProxyPolicy {
             resources,
             ports: Mutex::new(BTreeMap::new()),
             launch_validator,
+            buildkit: buildkit_image.map(|image| BuildKitPolicy {
+                image,
+                state: Mutex::new(BuildKitState::default()),
+            }),
         }
     }
 
@@ -389,27 +427,545 @@ impl ProxyPolicy {
                 let target = self.rewrite_build_target(target)?;
                 Ok(AuthorizedRequest::passthrough(target, body.to_vec()))
             }
-            DockerRoute::ContainerCreate { name } => {
-                let (body, ports) = self.rewrite_container_create(body)?;
-                Ok(AuthorizedRequest {
-                    target: target.to_owned(),
-                    body,
-                    response: ResponseTransform::RecordContainer { name, ports },
-                })
+            DockerRoute::Info => self.authorize_info(target, body),
+            DockerRoute::ImagePull => self.authorize_buildkit_image_pull(target, body),
+            DockerRoute::ImageInspect { identifier } => {
+                if is_buildx_default_image(&identifier) {
+                    require_empty_body(body)?;
+                    let target = self.rewrite_buildkit_image_inspect_target(target)?;
+                    Ok(AuthorizedRequest {
+                        target,
+                        body: body.to_vec(),
+                        response: ResponseTransform::RewriteBuildKitImageInspect,
+                        buildkit_container_reservation: None,
+                    })
+                } else if self.is_configured_buildkit_image(&identifier) {
+                    Err(())
+                } else {
+                    Ok(AuthorizedRequest::passthrough(
+                        target.to_owned(),
+                        body.to_vec(),
+                    ))
+                }
             }
-            DockerRoute::ContainerInspect { identifier } => Ok(AuthorizedRequest {
-                target: target.to_owned(),
-                body: body.to_vec(),
-                response: ResponseTransform::RewriteInspect { identifier },
-            }),
-            DockerRoute::Ping
-            | DockerRoute::Version
-            | DockerRoute::ImageInspect
-            | DockerRoute::ImageDelete
-            | DockerRoute::ContainerOperation => Ok(AuthorizedRequest::passthrough(
+            DockerRoute::ImageDelete { identifier } => {
+                if is_buildx_default_image(&identifier)
+                    || self.is_configured_buildkit_image(&identifier)
+                {
+                    Err(())
+                } else {
+                    Ok(AuthorizedRequest::passthrough(
+                        target.to_owned(),
+                        body.to_vec(),
+                    ))
+                }
+            }
+            DockerRoute::ContainerCreate { name } => {
+                self.authorize_container_create(target, name, body)
+            }
+            DockerRoute::ContainerInspect { identifier } => {
+                self.authorize_container_inspect(target, body, identifier)
+            }
+            DockerRoute::ContainerOperation {
+                identifier,
+                operation,
+            } => {
+                if self.is_owned_buildkit_container(&identifier)? {
+                    Self::authorize_buildkit_container_operation(
+                        target,
+                        body,
+                        &identifier,
+                        operation,
+                    )
+                } else if is_buildx_container_name(&identifier) {
+                    Err(())
+                } else {
+                    Ok(AuthorizedRequest::passthrough(
+                        target.to_owned(),
+                        body.to_vec(),
+                    ))
+                }
+            }
+            DockerRoute::ExecOperation {
+                identifier,
+                operation,
+            } => self.authorize_buildkit_exec_operation(target, body, &identifier, operation),
+            DockerRoute::VolumeDelete { identifier } => {
+                self.authorize_buildkit_volume_delete(target, body, &identifier)
+            }
+            DockerRoute::Ping | DockerRoute::Version => Ok(AuthorizedRequest::passthrough(
                 target.to_owned(),
                 body.to_vec(),
             )),
+        }
+    }
+
+    fn authorize_container_create(
+        &self,
+        target: &str,
+        name: Option<String>,
+        body: &[u8],
+    ) -> Result<AuthorizedRequest, ()> {
+        let image = request_image(body)?;
+        let special_name = name.as_deref().is_some_and(is_buildx_container_name);
+        let special_image = image.as_deref().is_some_and(|image| {
+            is_buildx_default_image(image) || self.is_configured_buildkit_image(image)
+        });
+        if special_name || special_image {
+            let name = name.ok_or(())?;
+            let body = self.rewrite_buildkit_container_create(target, &name, body)?;
+            Ok(AuthorizedRequest {
+                target: target.to_owned(),
+                body,
+                response: ResponseTransform::RecordBuildKitContainer { name: name.clone() },
+                buildkit_container_reservation: Some(name),
+            })
+        } else {
+            let (body, ports) = self.rewrite_container_create(body)?;
+            Ok(AuthorizedRequest {
+                target: target.to_owned(),
+                body,
+                response: ResponseTransform::RecordContainer { name, ports },
+                buildkit_container_reservation: None,
+            })
+        }
+    }
+
+    fn authorize_info(&self, target: &str, body: &[u8]) -> Result<AuthorizedRequest, ()> {
+        self.buildkit()?;
+        validate_empty_query(target)?;
+        require_empty_body(body)?;
+        Ok(AuthorizedRequest {
+            target: target.to_owned(),
+            body: Vec::new(),
+            response: ResponseTransform::RewriteInfo,
+            buildkit_container_reservation: None,
+        })
+    }
+
+    fn authorize_container_inspect(
+        &self,
+        target: &str,
+        body: &[u8],
+        identifier: String,
+    ) -> Result<AuthorizedRequest, ()> {
+        if self.is_owned_buildkit_container(&identifier)? {
+            validate_empty_query(target)?;
+            require_empty_body(body)?;
+            Ok(AuthorizedRequest::passthrough(
+                target.to_owned(),
+                Vec::new(),
+            ))
+        } else if is_buildx_container_name(&identifier) {
+            self.buildkit()?;
+            validate_empty_query(target)?;
+            require_empty_body(body)?;
+            Ok(AuthorizedRequest {
+                target: target.to_owned(),
+                body: Vec::new(),
+                response: ResponseTransform::InspectBuildKitCandidate { name: identifier },
+                buildkit_container_reservation: None,
+            })
+        } else {
+            Ok(AuthorizedRequest {
+                target: target.to_owned(),
+                body: body.to_vec(),
+                response: ResponseTransform::RewriteInspect { identifier },
+                buildkit_container_reservation: None,
+            })
+        }
+    }
+
+    fn buildkit(&self) -> Result<&BuildKitPolicy, ()> {
+        self.buildkit.as_ref().ok_or(())
+    }
+
+    fn is_configured_buildkit_image(&self, image: &str) -> bool {
+        self.buildkit
+            .as_ref()
+            .is_some_and(|buildkit| buildkit.image == image)
+    }
+
+    fn authorize_buildkit_image_pull(
+        &self,
+        target: &str,
+        body: &[u8],
+    ) -> Result<AuthorizedRequest, ()> {
+        self.buildkit()?;
+        validate_buildkit_image_pull_query(target)?;
+        require_empty_body(body)?;
+        Ok(AuthorizedRequest {
+            target: target.to_owned(),
+            body: Vec::new(),
+            response: ResponseTransform::SyntheticImagePull,
+            buildkit_container_reservation: None,
+        })
+    }
+
+    fn rewrite_buildkit_image_inspect_target(&self, target: &str) -> Result<String, ()> {
+        let buildkit = self.buildkit()?;
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        if !query.is_empty() {
+            return Err(());
+        }
+        let stripped = strip_api_version(path)?;
+        let prefix = &path[..path.len().checked_sub(stripped.len()).ok_or(())?];
+        Ok(format!(
+            "{prefix}/images/{}/json",
+            percent_encode(&buildkit.image)
+        ))
+    }
+
+    fn rewrite_buildkit_container_create(
+        &self,
+        target: &str,
+        name: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, ()> {
+        let buildkit = self.buildkit()?;
+        validate_buildkit_create_query(target, name)?;
+        if !is_buildx_container_name(name) {
+            return Err(());
+        }
+        let volume = format!("{name}_state");
+        let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
+        let object = document.as_object_mut().ok_or(())?;
+        let image = object.get("Image").and_then(Value::as_str).ok_or(())?;
+        if image != BUILDX_DEFAULT_IMAGE {
+            return Err(());
+        }
+        validate_buildkit_command(object.get("Cmd"))?;
+        for field in ["Entrypoint", "Env", "User", "WorkingDir", "Volumes"] {
+            reject_nonempty(object, field)?;
+        }
+        for field in [
+            "Hostname",
+            "Domainname",
+            "ExposedPorts",
+            "Healthcheck",
+            "OnBuild",
+            "StopSignal",
+            "StopTimeout",
+            "Shell",
+            "NetworkingConfig",
+        ] {
+            reject_nonempty(object, field)?;
+        }
+        reject_true(object, "ArgsEscaped")?;
+        for field in [
+            "AttachStdin",
+            "AttachStdout",
+            "AttachStderr",
+            "Tty",
+            "OpenStdin",
+            "StdinOnce",
+            "NetworkDisabled",
+        ] {
+            reject_true(object, field)?;
+        }
+        let labels = object_field_or_empty(object, "Labels")?;
+        if !labels.is_empty() {
+            return Err(());
+        }
+        for (label, value) in &self.owner_labels {
+            if labels.contains_key(label) {
+                return Err(());
+            }
+            labels.insert(label.clone(), value.clone());
+        }
+        object.insert("Image".to_owned(), Value::String(buildkit.image.clone()));
+
+        let host = object
+            .entry("HostConfig")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or(())?;
+        self.rewrite_buildkit_host_config(host, &volume)?;
+
+        let encoded = serde_json::to_vec(&document).map_err(|_| ())?;
+        let mut state = buildkit.state.lock().map_err(|_| ())?;
+        if state.container.is_some() {
+            return Err(());
+        }
+        state.container = Some(OwnedBuildKitContainer {
+            name: name.to_owned(),
+            identifier: None,
+            volume: format!("{name}_state"),
+        });
+        Ok(encoded)
+    }
+
+    fn rewrite_buildkit_host_config(
+        &self,
+        host: &mut Map<String, Value>,
+        volume: &str,
+    ) -> Result<(), ()> {
+        validate_buildkit_host_config(host, volume)?;
+        force_job_local_log_config(host)?;
+        host.insert(
+            "NetworkMode".to_owned(),
+            Value::String(self.network_namespace.clone()),
+        );
+        host.insert(
+            "CgroupParent".to_owned(),
+            Value::String(self.cgroup_parent.clone()),
+        );
+        host.insert(
+            "RestartPolicy".to_owned(),
+            json!({"Name": "no", "MaximumRetryCount": 0}),
+        );
+        host.insert("Privileged".to_owned(), Value::Bool(true));
+        host.insert("Init".to_owned(), Value::Bool(true));
+        host.insert("ReadonlyRootfs".to_owned(), Value::Bool(false));
+        host.insert("PublishAllPorts".to_owned(), Value::Bool(false));
+        host.insert("PortBindings".to_owned(), Value::Object(Map::new()));
+        host.insert(
+            "Mounts".to_owned(),
+            json!([{
+                "Type": "volume",
+                "Source": volume,
+                "Target": BUILDKIT_STATE_DIRECTORY,
+                "ReadOnly": false,
+            }]),
+        );
+        let cpu_period = 100_000_u64;
+        let cpu_quota = u64::from(self.resources.cpu_millis())
+            .checked_mul(cpu_period)
+            .ok_or(())?
+            / 1_000;
+        host.insert("Memory".to_owned(), json!(self.resources.memory_bytes()));
+        host.insert("CpuPeriod".to_owned(), json!(cpu_period));
+        host.insert("CpuQuota".to_owned(), json!(cpu_quota));
+        Ok(())
+    }
+
+    fn is_owned_buildkit_container(&self, identifier: &str) -> Result<bool, ()> {
+        let Some(buildkit) = self.buildkit.as_ref() else {
+            return Ok(false);
+        };
+        let state = buildkit.state.lock().map_err(|_| ())?;
+        Ok(state.container.as_ref().is_some_and(|container| {
+            container.name == identifier
+                || container.identifier.as_deref() == Some(identifier)
+                || container
+                    .identifier
+                    .as_ref()
+                    .is_some_and(|owned| identifier.len() >= 12 && owned.starts_with(identifier))
+        }))
+    }
+
+    fn authorize_buildkit_container_operation(
+        target: &str,
+        body: &[u8],
+        _identifier: &str,
+        operation: ContainerOperation,
+    ) -> Result<AuthorizedRequest, ()> {
+        let response = match operation {
+            ContainerOperation::Start | ContainerOperation::Stop => {
+                validate_empty_query(target)?;
+                require_empty_body(body)?;
+                ResponseTransform::Passthrough
+            }
+            ContainerOperation::Logs => {
+                validate_buildkit_logs_query(target)?;
+                require_empty_body(body)?;
+                ResponseTransform::Passthrough
+            }
+            ContainerOperation::Remove => {
+                validate_buildkit_remove_query(target)?;
+                require_empty_body(body)?;
+                ResponseTransform::Passthrough
+            }
+            ContainerOperation::Archive => {
+                validate_buildkit_archive_query(target)?;
+                validate_buildkit_config_archive(body)?;
+                ResponseTransform::Passthrough
+            }
+            ContainerOperation::ExecCreate => {
+                validate_buildkit_exec_create(body)?;
+                validate_empty_query(target)?;
+                ResponseTransform::RecordBuildKitExec
+            }
+            ContainerOperation::Wait | ContainerOperation::Attach => return Err(()),
+        };
+        Ok(AuthorizedRequest {
+            target: target.to_owned(),
+            body: body.to_vec(),
+            response,
+            buildkit_container_reservation: None,
+        })
+    }
+
+    fn authorize_buildkit_exec_operation(
+        &self,
+        target: &str,
+        body: &[u8],
+        identifier: &str,
+        operation: ExecOperation,
+    ) -> Result<AuthorizedRequest, ()> {
+        let buildkit = self.buildkit()?;
+        if !buildkit
+            .state
+            .lock()
+            .map_err(|_| ())?
+            .execs
+            .contains(identifier)
+        {
+            return Err(());
+        }
+        validate_empty_query(target)?;
+        match operation {
+            ExecOperation::Start => validate_buildkit_exec_start(body)?,
+            ExecOperation::Inspect => require_empty_body(body)?,
+        }
+        Ok(AuthorizedRequest::passthrough(
+            target.to_owned(),
+            body.to_vec(),
+        ))
+    }
+
+    fn authorize_buildkit_volume_delete(
+        &self,
+        target: &str,
+        body: &[u8],
+        identifier: &str,
+    ) -> Result<AuthorizedRequest, ()> {
+        let buildkit = self.buildkit()?;
+        let owned = buildkit
+            .state
+            .lock()
+            .map_err(|_| ())?
+            .container
+            .as_ref()
+            .is_some_and(|container| container.volume == identifier);
+        if !owned {
+            return Err(());
+        }
+        validate_empty_query(target)?;
+        require_empty_body(body)?;
+        Ok(AuthorizedRequest::passthrough(
+            target.to_owned(),
+            body.to_vec(),
+        ))
+    }
+
+    fn cancel_buildkit_container_reservation(&self, name: &str) {
+        let Some(buildkit) = self.buildkit.as_ref() else {
+            return;
+        };
+        let Ok(mut state) = buildkit.state.lock() else {
+            return;
+        };
+        if state
+            .container
+            .as_ref()
+            .is_some_and(|container| container.name == name && container.identifier.is_none())
+        {
+            state.container = None;
+        }
+    }
+
+    fn finish_buildkit_container_create(
+        &self,
+        name: &str,
+        identifier: Option<String>,
+    ) -> Result<(), ()> {
+        let buildkit = self.buildkit()?;
+        let mut state = buildkit.state.lock().map_err(|_| ())?;
+        let container = state.container.as_mut().ok_or(())?;
+        if container.name != name || container.identifier.is_some() {
+            return Err(());
+        }
+        match identifier {
+            Some(identifier) if valid_backend_identifier(&identifier) => {
+                container.identifier = Some(identifier);
+                Ok(())
+            }
+            _ => {
+                state.container = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn record_buildkit_exec(&self, identifier: &str) -> Result<(), ()> {
+        if !valid_backend_identifier(identifier) {
+            return Err(());
+        }
+        let buildkit = self.buildkit()?;
+        let mut state = buildkit.state.lock().map_err(|_| ())?;
+        if state.execs.len() >= MAX_BUILDKIT_EXECS || !state.execs.insert(identifier.to_owned()) {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn adopt_buildkit_container(&self, name: &str, body: &[u8]) -> Result<(), ()> {
+        let buildkit = self.buildkit()?;
+        let document: Value = serde_json::from_slice(body).map_err(|_| ())?;
+        let object = document.as_object().ok_or(())?;
+        let identifier = object.get("Id").and_then(Value::as_str).ok_or(())?;
+        if !valid_backend_identifier(identifier)
+            || object
+                .get("Name")
+                .and_then(Value::as_str)
+                .map(|actual| actual.trim_start_matches('/'))
+                != Some(name)
+            || document.pointer("/Config/Image").and_then(Value::as_str)
+                != Some(buildkit.image.as_str())
+            || document
+                .pointer("/Config/Labels/io.automata.owner")
+                .and_then(Value::as_str)
+                != Some("automata-runner")
+            || document
+                .pointer("/Config/Labels/io.automata.job-engine")
+                .and_then(Value::as_str)
+                != self
+                    .owner_labels
+                    .get("io.automata.job-engine")
+                    .and_then(Value::as_str)
+            || document
+                .pointer("/HostConfig/Privileged")
+                .and_then(Value::as_bool)
+                != Some(true)
+            || document
+                .pointer("/HostConfig/NetworkMode")
+                .and_then(Value::as_str)
+                != Some(self.network_namespace.as_str())
+            || document
+                .pointer("/HostConfig/CgroupParent")
+                .and_then(Value::as_str)
+                != Some(self.cgroup_parent.as_str())
+        {
+            return Err(());
+        }
+        let expected_volume = format!("{name}_state");
+        let mounts = object.get("Mounts").and_then(Value::as_array).ok_or(())?;
+        if mounts.len() != 1
+            || mounts[0].get("Name").and_then(Value::as_str) != Some(expected_volume.as_str())
+            || mounts[0].get("Destination").and_then(Value::as_str)
+                != Some(BUILDKIT_STATE_DIRECTORY)
+            || mounts[0].get("RW").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(());
+        }
+        let mut state = buildkit.state.lock().map_err(|_| ())?;
+        match state.container.as_ref() {
+            Some(container)
+                if container.name == name
+                    && container.identifier.as_deref() == Some(identifier) =>
+            {
+                Ok(())
+            }
+            None => {
+                state.container = Some(OwnedBuildKitContainer {
+                    name: name.to_owned(),
+                    identifier: Some(identifier.to_owned()),
+                    volume: expected_volume,
+                });
+                Ok(())
+            }
+            Some(_) => Err(()),
         }
     }
 
@@ -438,11 +994,7 @@ impl ProxyPolicy {
         let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
         let object = document.as_object_mut().ok_or(())?;
         reject_nonempty(object, "Volumes")?;
-        let labels = object
-            .entry("Labels")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or(())?;
+        let labels = object_field_or_empty(object, "Labels")?;
         for (name, value) in &self.owner_labels {
             if labels.contains_key(name) {
                 return Err(());
@@ -554,6 +1106,54 @@ impl ProxyPolicy {
         network.insert("Ports".to_owned(), Value::Object(exposed));
         serde_json::to_vec(&document).map_err(|_| ())
     }
+
+    fn rewrite_info(body: &[u8]) -> Result<Vec<u8>, ()> {
+        let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
+        let object = document.as_object_mut().ok_or(())?;
+        object.insert(
+            "CgroupDriver".to_owned(),
+            Value::String("cgroupfs".to_owned()),
+        );
+        if let Some(options) = object.get_mut("SecurityOptions") {
+            let options = options.as_array_mut().ok_or(())?;
+            options.retain(|option| {
+                option.as_str().is_none_or(|value| {
+                    !value.contains("name=userns") && !value.contains("name=rootless")
+                })
+            });
+        }
+        serde_json::to_vec(&document).map_err(|_| ())
+    }
+
+    fn rewrite_buildkit_image_inspect(&self, body: &[u8]) -> Result<Vec<u8>, ()> {
+        self.buildkit()?;
+        let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
+        let object = document.as_object_mut().ok_or(())?;
+        object.remove("Descriptor");
+        object.insert("RepoTags".to_owned(), json!([BUILDX_DEFAULT_IMAGE]));
+        serde_json::to_vec(&document).map_err(|_| ())
+    }
+}
+
+struct BuildKitContainerReservation<'a> {
+    policy: &'a ProxyPolicy,
+    name: String,
+    active: bool,
+}
+
+impl BuildKitContainerReservation<'_> {
+    fn commit(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for BuildKitContainerReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.policy
+                .cancel_buildkit_container_reservation(&self.name);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -561,6 +1161,7 @@ struct AuthorizedRequest {
     target: String,
     body: Vec<u8>,
     response: ResponseTransform,
+    buildkit_container_reservation: Option<String>,
 }
 
 impl AuthorizedRequest {
@@ -569,6 +1170,7 @@ impl AuthorizedRequest {
             target,
             body,
             response: ResponseTransform::Passthrough,
+            buildkit_container_reservation: None,
         }
     }
 }
@@ -576,6 +1178,12 @@ impl AuthorizedRequest {
 #[derive(Debug)]
 enum ResponseTransform {
     Passthrough,
+    SyntheticImagePull,
+    RewriteInfo,
+    RewriteBuildKitImageInspect,
+    InspectBuildKitCandidate {
+        name: String,
+    },
     RecordContainer {
         name: Option<String>,
         ports: BTreeMap<String, PublishedPort>,
@@ -583,6 +1191,10 @@ enum ResponseTransform {
     RewriteInspect {
         identifier: String,
     },
+    RecordBuildKitContainer {
+        name: String,
+    },
+    RecordBuildKitExec,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -594,25 +1206,65 @@ struct PublishedPort {
 enum DockerRoute {
     Ping,
     Version,
+    Info,
     Build,
-    ImageInspect,
-    ImageDelete,
-    ContainerCreate { name: Option<String> },
-    ContainerInspect { identifier: String },
-    ContainerOperation,
+    ImagePull,
+    ImageInspect {
+        identifier: String,
+    },
+    ImageDelete {
+        identifier: String,
+    },
+    ContainerCreate {
+        name: Option<String>,
+    },
+    ContainerInspect {
+        identifier: String,
+    },
+    ContainerOperation {
+        identifier: String,
+        operation: ContainerOperation,
+    },
+    ExecOperation {
+        identifier: String,
+        operation: ExecOperation,
+    },
+    VolumeDelete {
+        identifier: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContainerOperation {
+    Start,
+    Wait,
+    Attach,
+    Logs,
+    Stop,
+    Remove,
+    Archive,
+    ExecCreate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecOperation {
+    Start,
+    Inspect,
 }
 
 impl DockerRoute {
     const fn metric_route(&self) -> DockerProxyRoute {
         match self {
             Self::Ping => DockerProxyRoute::Ping,
-            Self::Version => DockerProxyRoute::Version,
+            Self::Version | Self::Info => DockerProxyRoute::Version,
             Self::Build => DockerProxyRoute::Build,
-            Self::ImageInspect => DockerProxyRoute::ImageInspect,
-            Self::ImageDelete => DockerProxyRoute::ImageDelete,
+            Self::ImagePull | Self::ImageInspect { .. } => DockerProxyRoute::ImageInspect,
+            Self::ImageDelete { .. } => DockerProxyRoute::ImageDelete,
             Self::ContainerCreate { .. } => DockerProxyRoute::ContainerCreate,
             Self::ContainerInspect { .. } => DockerProxyRoute::ContainerInspect,
-            Self::ContainerOperation => DockerProxyRoute::ContainerOperation,
+            Self::ContainerOperation { .. }
+            | Self::ExecOperation { .. }
+            | Self::VolumeDelete { .. } => DockerProxyRoute::ContainerOperation,
         }
     }
 
@@ -622,7 +1274,9 @@ impl DockerRoute {
         match (method, path) {
             ("HEAD" | "GET", "/_ping") => Ok(Self::Ping),
             ("GET", "/version") => Ok(Self::Version),
+            ("GET", "/info") => Ok(Self::Info),
             ("POST", "/build") => Ok(Self::Build),
+            ("POST", "/images/create") => Ok(Self::ImagePull),
             ("POST", "/containers/create") => Ok(Self::ContainerCreate {
                 name: query_parameters(query)
                     .find(|(name, _)| *name == "name")
@@ -638,36 +1292,89 @@ fn parse_object_route(method: &str, path: &str) -> Result<DockerRoute, ()> {
     let components = path.split('/').collect::<Vec<_>>();
     match components.as_slice() {
         ["", "images", identifier, "json"] if method == "GET" && valid_object(identifier) => {
-            Ok(DockerRoute::ImageInspect)
+            Ok(DockerRoute::ImageInspect {
+                identifier: percent_decode(identifier)?,
+            })
         }
         ["", "images", identifier] if method == "DELETE" && valid_object(identifier) => {
-            Ok(DockerRoute::ImageDelete)
+            Ok(DockerRoute::ImageDelete {
+                identifier: percent_decode(identifier)?,
+            })
         }
         ["", "containers", identifier, "json"] if method == "GET" && valid_object(identifier) => {
             Ok(DockerRoute::ContainerInspect {
                 identifier: percent_decode(identifier)?,
             })
         }
-        ["", "containers", identifier, operation]
-            if valid_object(identifier)
-                && matches!(
-                    (method, *operation),
-                    ("POST", "start" | "wait" | "attach") | ("GET", "logs")
-                ) =>
+        ["", "containers", identifier, "start"] if method == "POST" && valid_object(identifier) => {
+            Ok(container_operation(identifier, ContainerOperation::Start)?)
+        }
+        ["", "containers", identifier, "wait"] if method == "POST" && valid_object(identifier) => {
+            Ok(container_operation(identifier, ContainerOperation::Wait)?)
+        }
+        ["", "containers", identifier, "attach"]
+            if method == "POST" && valid_object(identifier) =>
         {
-            Ok(DockerRoute::ContainerOperation)
+            Ok(container_operation(identifier, ContainerOperation::Attach)?)
+        }
+        ["", "containers", identifier, "logs"] if method == "GET" && valid_object(identifier) => {
+            Ok(container_operation(identifier, ContainerOperation::Logs)?)
+        }
+        ["", "containers", identifier, "stop"] if method == "POST" && valid_object(identifier) => {
+            Ok(container_operation(identifier, ContainerOperation::Stop)?)
+        }
+        ["", "containers", identifier, "archive"]
+            if method == "PUT" && valid_object(identifier) =>
+        {
+            Ok(container_operation(
+                identifier,
+                ContainerOperation::Archive,
+            )?)
+        }
+        ["", "containers", identifier, "exec"] if method == "POST" && valid_object(identifier) => {
+            Ok(container_operation(
+                identifier,
+                ContainerOperation::ExecCreate,
+            )?)
         }
         ["", "containers", identifier] if method == "DELETE" && valid_object(identifier) => {
-            Ok(DockerRoute::ContainerOperation)
+            Ok(container_operation(identifier, ContainerOperation::Remove)?)
+        }
+        ["", "exec", identifier, "start"] if method == "POST" && valid_object(identifier) => {
+            Ok(DockerRoute::ExecOperation {
+                identifier: percent_decode(identifier)?,
+                operation: ExecOperation::Start,
+            })
+        }
+        ["", "exec", identifier, "json"] if method == "GET" && valid_object(identifier) => {
+            Ok(DockerRoute::ExecOperation {
+                identifier: percent_decode(identifier)?,
+                operation: ExecOperation::Inspect,
+            })
+        }
+        ["", "volumes", identifier] if method == "DELETE" && valid_object(identifier) => {
+            Ok(DockerRoute::VolumeDelete {
+                identifier: percent_decode(identifier)?,
+            })
         }
         _ => Err(()),
     }
+}
+
+fn container_operation(identifier: &str, operation: ContainerOperation) -> Result<DockerRoute, ()> {
+    Ok(DockerRoute::ContainerOperation {
+        identifier: percent_decode(identifier)?,
+        operation,
+    })
 }
 
 fn strip_api_version(path: &str) -> Result<&str, ()> {
     let Some(rest) = path.strip_prefix("/v") else {
         return Ok(path);
     };
+    if !rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return Ok(path);
+    }
     let Some(separator) = rest.find('/') else {
         return Err(());
     };
@@ -690,6 +1397,408 @@ fn valid_object(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._~:%@+-".contains(&byte))
+}
+
+fn is_buildx_default_image(value: &str) -> bool {
+    matches!(
+        value,
+        BUILDX_DEFAULT_IMAGE | "docker.io/moby/buildkit:buildx-stable-1"
+    )
+}
+
+fn is_buildx_container_name(value: &str) -> bool {
+    value
+        .strip_prefix(BUILDX_CONTAINER_PREFIX)
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && value.len() <= 128
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        })
+}
+
+fn valid_backend_identifier(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn request_image(body: &[u8]) -> Result<Option<String>, ()> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
+    Ok(value
+        .get("Image")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
+fn decoded_query(target: &str) -> Result<BTreeMap<String, String>, ()> {
+    let query = target.split_once('?').map_or("", |(_, query)| query);
+    let mut result = BTreeMap::new();
+    if query.is_empty() {
+        return Ok(result);
+    }
+    for parameter in query.split('&') {
+        let (name, value) = parameter.split_once('=').ok_or(())?;
+        let name = percent_decode(name)?;
+        let value = percent_decode(value)?;
+        if name.is_empty() || result.insert(name, value).is_some() {
+            return Err(());
+        }
+    }
+    Ok(result)
+}
+
+fn validate_empty_query(target: &str) -> Result<(), ()> {
+    decoded_query(target)?.is_empty().then_some(()).ok_or(())
+}
+
+fn validate_buildkit_image_pull_query(target: &str) -> Result<(), ()> {
+    let query = decoded_query(target)?;
+    (query.len() == 2
+        && query.get("fromImage").map(String::as_str) == Some(BUILDX_DEFAULT_NORMALIZED_REPOSITORY)
+        && query.get("tag").map(String::as_str) == Some(BUILDX_DEFAULT_TAG))
+    .then_some(())
+    .ok_or(())
+}
+
+fn validate_buildkit_create_query(target: &str, name: &str) -> Result<(), ()> {
+    let query = decoded_query(target)?;
+    (query.len() == 1 && query.get("name").map(String::as_str) == Some(name))
+        .then_some(())
+        .ok_or(())
+}
+
+fn validate_buildkit_logs_query(target: &str) -> Result<(), ()> {
+    let query = decoded_query(target)?;
+    (query.len() == 2
+        && query.get("stdout").map(String::as_str) == Some("1")
+        && query.get("stderr").map(String::as_str) == Some("1"))
+    .then_some(())
+    .ok_or(())
+}
+
+fn validate_buildkit_remove_query(target: &str) -> Result<(), ()> {
+    let query = decoded_query(target)?;
+    let allowed = query.len() <= 2
+        && query.get("v").map(String::as_str) == Some("1")
+        && query.get("force").is_none_or(|value| value.as_str() == "1")
+        && query
+            .keys()
+            .all(|key| matches!(key.as_str(), "v" | "force"));
+    allowed.then_some(()).ok_or(())
+}
+
+fn validate_buildkit_archive_query(target: &str) -> Result<(), ()> {
+    let query = decoded_query(target)?;
+    (query.len() == 2
+        && query.get("path").map(String::as_str) == Some(BUILDKIT_CONFIG_ARCHIVE_DESTINATION)
+        && query.get("noOverwriteDirNonDir").map(String::as_str) == Some("true"))
+    .then_some(())
+    .ok_or(())
+}
+
+fn require_empty_body(body: &[u8]) -> Result<(), ()> {
+    body.is_empty().then_some(()).ok_or(())
+}
+
+fn validate_buildkit_command(value: Option<&Value>) -> Result<(), ()> {
+    if value.is_none_or(empty_json) {
+        return Ok(());
+    }
+    let command = value.and_then(Value::as_array).ok_or(())?;
+    let command = command
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(())?;
+    (command
+        == [
+            "--allow-insecure-entitlement",
+            "security.insecure",
+            "--allow-insecure-entitlement",
+            "network.host",
+        ])
+    .then_some(())
+    .ok_or(())
+}
+
+fn validate_buildkit_host_config(
+    host: &Map<String, Value>,
+    expected_volume: &str,
+) -> Result<(), ()> {
+    if host.get("Privileged").and_then(Value::as_bool) != Some(true)
+        || host.get("Init").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(());
+    }
+    for field in [
+        "Binds",
+        "Devices",
+        "DeviceRequests",
+        "CapAdd",
+        "CapDrop",
+        "VolumesFrom",
+        "Links",
+        "GroupAdd",
+        "Sysctls",
+        "Tmpfs",
+        "SecurityOpt",
+        "MaskedPaths",
+        "ReadonlyPaths",
+        "ExtraHosts",
+        "Dns",
+        "DnsOptions",
+        "DnsSearch",
+        "Ulimits",
+        "StorageOpt",
+        "PortBindings",
+        "ContainerIDFile",
+        "VolumeDriver",
+        "Annotations",
+        "Cgroup",
+    ] {
+        reject_nonempty(host, field)?;
+    }
+    for field in [
+        "AutoRemove",
+        "ReadonlyRootfs",
+        "PublishAllPorts",
+        "OomKillDisable",
+    ] {
+        reject_true(host, field)?;
+    }
+    for field in [
+        "PidMode",
+        "IpcMode",
+        "UTSMode",
+        "UsernsMode",
+        "CgroupnsMode",
+        "Runtime",
+        "Isolation",
+    ] {
+        reject_nonempty(host, field)?;
+    }
+    reject_buildkit_resource_overrides(host)?;
+    if let Some(network) = host.get("NetworkMode").and_then(Value::as_str)
+        && !matches!(network, "" | "default" | "bridge")
+    {
+        return Err(());
+    }
+    if let Some(cgroup) = host.get("CgroupParent").and_then(Value::as_str)
+        && !matches!(cgroup, "" | "/docker/buildx")
+    {
+        return Err(());
+    }
+    if let Some(policy) = host.get("RestartPolicy")
+        && !policy.is_null()
+    {
+        let policy = policy.as_object().ok_or(())?;
+        if policy
+            .keys()
+            .any(|key| !matches!(key.as_str(), "Name" | "MaximumRetryCount"))
+            || !policy.get("MaximumRetryCount").is_none_or(empty_json)
+            || !policy
+                .get("Name")
+                .and_then(Value::as_str)
+                .is_none_or(|name| matches!(name, "" | "no" | "unless-stopped"))
+        {
+            return Err(());
+        }
+    }
+    validate_buildkit_mounts(host.get("Mounts"), expected_volume)
+}
+
+fn reject_buildkit_resource_overrides(host: &Map<String, Value>) -> Result<(), ()> {
+    for field in [
+        "Memory",
+        "MemorySwap",
+        "MemoryReservation",
+        "KernelMemory",
+        "CpuPeriod",
+        "CpuQuota",
+        "CpuShares",
+        "NanoCpus",
+        "CpuRealtimePeriod",
+        "CpuRealtimeRuntime",
+        "CpusetCpus",
+        "CpusetMems",
+        "PidsLimit",
+        "ShmSize",
+        "OomScoreAdj",
+        "IOMaximumIOps",
+        "IOMaximumBandwidth",
+        "BlkioWeight",
+        "BlkioWeightDevice",
+        "BlkioDeviceReadBps",
+        "BlkioDeviceWriteBps",
+        "BlkioDeviceReadIOps",
+        "BlkioDeviceWriteIOps",
+        "DeviceCgroupRules",
+        "MemorySwappiness",
+        "CpuCount",
+        "CpuPercent",
+        // Reject alternate JSON casing too, so a duplicate key cannot win in
+        // a backend with case-insensitive Go decoding.
+        "CPUPeriod",
+        "CPUQuota",
+        "CPUShares",
+    ] {
+        reject_nonempty(host, field)?;
+    }
+    Ok(())
+}
+
+fn validate_buildkit_mounts(value: Option<&Value>, expected_volume: &str) -> Result<(), ()> {
+    let mounts = value.and_then(Value::as_array).ok_or(())?;
+    if mounts.len() != 1 {
+        return Err(());
+    }
+    let mount = mounts[0].as_object().ok_or(())?;
+    if mount.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            "Type"
+                | "Source"
+                | "Target"
+                | "ReadOnly"
+                | "Consistency"
+                | "BindOptions"
+                | "VolumeOptions"
+                | "TmpfsOptions"
+                | "ImageOptions"
+                | "ClusterOptions"
+        )
+    }) || mount.get("Type").and_then(Value::as_str) != Some("volume")
+        || mount.get("Source").and_then(Value::as_str) != Some(expected_volume)
+        || mount.get("Target").and_then(Value::as_str) != Some(BUILDKIT_STATE_DIRECTORY)
+        || mount
+            .get("ReadOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || mount
+            .get("Consistency")
+            .is_some_and(|value| !empty_json(value))
+        || [
+            "BindOptions",
+            "VolumeOptions",
+            "TmpfsOptions",
+            "ImageOptions",
+            "ClusterOptions",
+        ]
+        .into_iter()
+        .any(|field| mount.get(field).is_some_and(|value| !empty_json(value)))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_buildkit_exec_create(body: &[u8]) -> Result<(), ()> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
+    let object = value.as_object().ok_or(())?;
+    if object.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            "User"
+                | "Privileged"
+                | "Tty"
+                | "ConsoleSize"
+                | "AttachStdin"
+                | "AttachStderr"
+                | "AttachStdout"
+                | "DetachKeys"
+                | "Env"
+                | "WorkingDir"
+                | "Cmd"
+        )
+    }) || object.get("AttachStdin").and_then(Value::as_bool) != Some(true)
+        || object.get("AttachStdout").and_then(Value::as_bool) != Some(true)
+        || object.get("AttachStderr").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(());
+    }
+    for field in [
+        "User",
+        "Privileged",
+        "Tty",
+        "ConsoleSize",
+        "DetachKeys",
+        "Env",
+        "WorkingDir",
+    ] {
+        if object.get(field).is_some_and(|value| !empty_json(value)) {
+            return Err(());
+        }
+    }
+    let command = object
+        .get("Cmd")
+        .and_then(Value::as_array)
+        .ok_or(())?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(())?;
+    matches!(
+        command.as_slice(),
+        ["buildctl", "debug", "workers"] | ["buildkitd", "--version"] | ["buildctl", "dial-stdio"]
+    )
+    .then_some(())
+    .ok_or(())
+}
+
+fn validate_buildkit_exec_start(body: &[u8]) -> Result<(), ()> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
+    let object = value.as_object().ok_or(())?;
+    if object
+        .keys()
+        .any(|field| !matches!(field.as_str(), "Detach" | "Tty" | "ConsoleSize"))
+    {
+        return Err(());
+    }
+    for field in ["Detach", "Tty", "ConsoleSize"] {
+        if object.get(field).is_some_and(|value| !empty_json(value)) {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn validate_buildkit_config_archive(body: &[u8]) -> Result<(), ()> {
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut provenance_seen = false;
+    for entry in archive.entries().map_err(|_| ())? {
+        let mut entry = entry.map_err(|_| ())?;
+        let header = entry.header();
+        let path = entry.path().map_err(|_| ())?;
+        let path = path.to_str().ok_or(())?.trim_end_matches('/');
+        let mode = header.mode().map_err(|_| ())?;
+        if header.uid().map_err(|_| ())? != 0
+            || header.gid().map_err(|_| ())? != 0
+            || mode & !0o755 != 0
+        {
+            return Err(());
+        }
+        if header.entry_type().is_dir() {
+            if !matches!(path, "buildkit" | "buildkit/provenance.d") || mode != 0o755 {
+                return Err(());
+            }
+            continue;
+        }
+        if !header.entry_type().is_file()
+            || path != BUILDKIT_GHA_PROVENANCE_FILE
+            || provenance_seen
+            || mode != 0o644
+        {
+            return Err(());
+        }
+        let mut payload = Vec::new();
+        entry.read_to_end(&mut payload).map_err(|_| ())?;
+        let context: Value = serde_json::from_slice(&payload).map_err(|_| ())?;
+        if !context.is_object() {
+            return Err(());
+        }
+        provenance_seen = true;
+    }
+    Ok(())
 }
 
 fn parse_port_bindings(value: Option<Value>) -> Result<BTreeMap<String, PublishedPort>, ()> {
@@ -739,6 +1848,19 @@ fn reject_nonempty(object: &Map<String, Value>, field: &str) -> Result<(), ()> {
     } else {
         Ok(())
     }
+}
+
+fn object_field_or_empty<'a>(
+    object: &'a mut Map<String, Value>,
+    field: &str,
+) -> Result<&'a mut Map<String, Value>, ()> {
+    let value = object
+        .entry(field.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if value.is_null() {
+        *value = Value::Object(Map::new());
+    }
+    value.as_object_mut().ok_or(())
 }
 
 fn reject_true(object: &Map<String, Value>, field: &str) -> Result<(), ()> {
@@ -815,6 +1937,15 @@ fn handle_connection(
     let is_build = route
         .as_ref()
         .is_ok_and(|route| matches!(route, DockerRoute::Build));
+    let is_archive = route.as_ref().is_ok_and(|route| {
+        matches!(
+            route,
+            DockerRoute::ContainerOperation {
+                operation: ContainerOperation::Archive,
+                ..
+            }
+        )
+    });
     let Ok(route) = route else {
         observer.observe(PodmanEvent::DockerRejected {
             reason: DockerProxyRejection::Policy,
@@ -822,7 +1953,7 @@ fn handle_connection(
         return send_rejection(&mut client, 403, "Docker API operation is not allowed");
     };
     let mut observation = DockerRequestObservation::new(observer, route.metric_route());
-    if parsed.chunked && !is_build {
+    if parsed.chunked && !is_build && !is_archive {
         observer.observe(PodmanEvent::DockerRejected {
             reason: DockerProxyRejection::UnsupportedTransfer,
         });
@@ -830,7 +1961,7 @@ fn handle_connection(
         return send_rejection(
             &mut client,
             400,
-            "chunked bodies are only accepted for Docker builds",
+            "chunked body is not accepted for this Docker API operation",
         );
     }
     if is_build && !parsed.chunked && parsed.content_length as u64 > MAX_BUILD_CONTEXT_BYTES {
@@ -842,6 +1973,15 @@ fn handle_connection(
     }
     let body = if is_build {
         Vec::new()
+    } else if is_archive && parsed.chunked {
+        let Ok(body) = read_chunked_body(&mut client, MAX_CONTROL_BODY_BYTES) else {
+            observer.observe(PodmanEvent::DockerRejected {
+                reason: DockerProxyRejection::RequestTooLarge,
+            });
+            observation.complete(DockerProxyOutcome::Rejected, 0);
+            return send_rejection(&mut client, 413, "Docker API request is too large");
+        };
+        body
     } else {
         let Ok(body) = read_fixed_body(&mut client, parsed.content_length, MAX_CONTROL_BODY_BYTES)
         else {
@@ -861,6 +2001,20 @@ fn handle_connection(
         observation.complete(DockerProxyOutcome::Rejected, 0);
         return send_rejection(&mut client, 403, "Docker API operation is not allowed");
     };
+    let mut reservation = authorized
+        .buildkit_container_reservation
+        .as_ref()
+        .map(|name| BuildKitContainerReservation {
+            policy,
+            name: name.clone(),
+            active: true,
+        });
+
+    if matches!(&authorized.response, ResponseTransform::SyntheticImagePull) {
+        let response_bytes = send_synthetic_buildkit_pull(&mut client)?;
+        observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+        return Ok(());
+    }
 
     let mut backend = UnixStream::connect(backend_socket)?;
     let upgrade = parsed.upgrade;
@@ -911,6 +2065,42 @@ fn handle_connection(
             observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
             Ok(())
         }
+        ResponseTransform::SyntheticImagePull => unreachable!("handled before backend connect"),
+        ResponseTransform::RewriteInfo => {
+            let mut response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
+            if response.success() {
+                response.body = ProxyPolicy::rewrite_info(&response.body)
+                    .map_err(|()| io::Error::other("invalid Docker info response"))?;
+            }
+            let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+            response.write_to(&mut client)?;
+            observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+            Ok(())
+        }
+        ResponseTransform::RewriteBuildKitImageInspect => {
+            let mut response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
+            if response.success() {
+                response.body = policy
+                    .rewrite_buildkit_image_inspect(&response.body)
+                    .map_err(|()| io::Error::other("invalid BuildKit image inspect response"))?;
+            }
+            let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+            response.write_to(&mut client)?;
+            observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+            Ok(())
+        }
+        ResponseTransform::InspectBuildKitCandidate { name } => {
+            let response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
+            if response.success() {
+                policy
+                    .adopt_buildkit_container(&name, &response.body)
+                    .map_err(|()| io::Error::other("unowned BuildKit container response"))?;
+            }
+            let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+            response.write_to(&mut client)?;
+            observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+            Ok(())
+        }
         ResponseTransform::RecordContainer { name, ports } => {
             let response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
             if response.success()
@@ -933,6 +2123,43 @@ fn handle_connection(
                 response.body = policy
                     .rewrite_inspect(&identifier, &response.body)
                     .map_err(|()| io::Error::other("invalid Docker inspect response"))?;
+            }
+            let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+            response.write_to(&mut client)?;
+            observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+            Ok(())
+        }
+        ResponseTransform::RecordBuildKitContainer { name } => {
+            let response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
+            let identifier = response
+                .success()
+                .then(|| {
+                    response.json_body().and_then(|value| {
+                        value.get("Id").and_then(Value::as_str).map(str::to_owned)
+                    })
+                })
+                .flatten();
+            policy
+                .finish_buildkit_container_create(&name, identifier)
+                .map_err(|()| io::Error::other("BuildKit container policy state is unavailable"))?;
+            if let Some(reservation) = reservation.as_mut() {
+                reservation.commit();
+            }
+            let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+            response.write_to(&mut client)?;
+            observation.complete(DockerProxyOutcome::Forwarded, response_bytes);
+            Ok(())
+        }
+        ResponseTransform::RecordBuildKitExec => {
+            let response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
+            if response.success() {
+                let identifier = response
+                    .json_body()
+                    .and_then(|value| value.get("Id").and_then(Value::as_str).map(str::to_owned))
+                    .ok_or_else(|| io::Error::other("invalid BuildKit exec response"))?;
+                policy
+                    .record_buildkit_exec(&identifier)
+                    .map_err(|()| io::Error::other("BuildKit exec policy state is unavailable"))?;
             }
             let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
             response.write_to(&mut client)?;
@@ -1097,7 +2324,7 @@ impl ParsedHeader {
         let target = request.next().ok_or(())?;
         let version = request.next().ok_or(())?;
         if request.next().is_some()
-            || !matches!(method, "GET" | "HEAD" | "POST" | "DELETE")
+            || !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "DELETE")
             || !target.starts_with('/')
             || target.len() > 8 * 1024
             || version != "HTTP/1.1"
@@ -1751,6 +2978,17 @@ fn send_rejection(stream: &mut UnixStream, status: u16, message: &str) -> io::Re
     stream.write_all(&body)
 }
 
+fn send_synthetic_buildkit_pull(stream: &mut UnixStream) -> io::Result<u64> {
+    let body = b"{\"status\":\"Image is available from the verified local store\"}\r\n";
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    Ok(u64::try_from(body.len()).unwrap_or(u64::MAX))
+}
+
 fn query_parameters(query: &str) -> impl Iterator<Item = (&str, &str)> {
     query
         .split('&')
@@ -1931,6 +3169,23 @@ mod observer_tests {
             "/observer.slice".to_owned(),
             ResourceLimits::new(16 * 1024 * 1024, 1_000, 32).expect("resources"),
             Arc::new(StaticLaunchValidator(valid)),
+            None,
+        )
+    }
+
+    fn buildkit_policy() -> ProxyPolicy {
+        let provider = ProviderId::new("observer-test").expect("provider");
+        let sandbox = SandboxHandle::new(provider, "private-sandbox-sentinel").expect("sandbox");
+        ProxyPolicy::new_with_validator(
+            &sandbox,
+            42,
+            "/observer.slice".to_owned(),
+            ResourceLimits::new(16 * 1024 * 1024, 1_000, 32).expect("resources"),
+            Arc::new(StaticLaunchValidator(true)),
+            Some(format!(
+                "registry.example.invalid/buildkit/runtime@sha256:{}",
+                "66".repeat(32)
+            )),
         )
     }
 
@@ -1942,6 +3197,101 @@ mod observer_tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).expect("read response");
         response
+    }
+
+    fn send_owned_request(mut stream: UnixStream, request: &[u8]) -> Vec<u8> {
+        stream.write_all(request).expect("write request");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish request");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        response
+    }
+
+    fn request(method: &str, target: &str, body: &[u8]) -> Vec<u8> {
+        let mut request = format!(
+            "{method} {target} HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        request
+    }
+
+    fn buildkit_create_request_body(name: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "Image": BUILDX_DEFAULT_IMAGE,
+            "Cmd": [
+                "--allow-insecure-entitlement",
+                "security.insecure",
+                "--allow-insecure-entitlement",
+                "network.host"
+            ],
+            "Labels": null,
+            "HostConfig": {
+                "Privileged": true,
+                "Init": true,
+                "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+                "Mounts": [{
+                    "Type": "volume",
+                    "Source": format!("{name}_state"),
+                    "Target": BUILDKIT_STATE_DIRECTORY,
+                    "ReadOnly": false
+                }]
+            }
+        }))
+        .expect("create body")
+    }
+
+    fn buildkit_exec_request_body() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "AttachStdin": true,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "Cmd": ["buildctl", "dial-stdio"]
+        }))
+        .expect("exec body")
+    }
+
+    fn serve_buildkit_lifecycle(
+        listener: UnixListener,
+        container_id: String,
+        exec_id: String,
+    ) -> thread::JoinHandle<Vec<(String, Vec<u8>)>> {
+        thread::spawn(move || {
+            let mut captured = Vec::new();
+            for index in 0..7 {
+                let (mut connection, _) = listener.accept().expect("backend connection");
+                let header = read_header(&mut connection).expect("backend request header");
+                let parsed = ParsedHeader::parse(&header).expect("backend parsed header");
+                let body = read_fixed_body(
+                    &mut connection,
+                    parsed.content_length,
+                    MAX_CONTROL_BODY_BYTES,
+                )
+                .expect("backend request body");
+                captured.push((parsed.target, body));
+                let response_body = match index {
+                    0 => serde_json::to_vec(&json!({"Id": container_id}))
+                        .expect("container response"),
+                    2 => serde_json::to_vec(&json!({"Id": exec_id})).expect("exec response"),
+                    3 => b"{\"Running\":true}".to_vec(),
+                    _ => Vec::new(),
+                };
+                write!(
+                    connection,
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    if index == 0 { "201 Created" } else { "200 OK" },
+                    response_body.len()
+                )
+                .expect("backend response header");
+                connection
+                    .write_all(&response_body)
+                    .expect("backend response body");
+            }
+            captured
+        })
     }
 
     fn temporary_backend_socket() -> PathBuf {
@@ -2031,6 +3381,162 @@ mod observer_tests {
         .expect("failed launch trust must reject without a backend connection");
         let response = worker.join().expect("client worker");
         assert!(response.starts_with(b"HTTP/1.1 403"));
+    }
+
+    #[test]
+    fn buildkit_pull_is_disabled_by_default_and_verified_alias_never_contacts_backend() {
+        const PULL: &[u8] = b"POST /v1.44/images/create?fromImage=docker.io%2Fmoby%2Fbuildkit&tag=buildx-stable-1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let missing = Path::new("/definitely-missing-buildkit-backend.sock");
+
+        let observer = CapturingObserver::default();
+        let policy = policy();
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        let worker = thread::spawn(move || send_request(client, PULL));
+        handle_connection(server, missing, &policy, &observer)
+            .expect("disabled BuildKit route is rejected locally");
+        assert!(
+            worker
+                .join()
+                .expect("disabled client worker")
+                .starts_with(b"HTTP/1.1 403")
+        );
+
+        let observer = CapturingObserver::default();
+        let policy = buildkit_policy();
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        let worker = thread::spawn(move || send_request(client, PULL));
+        handle_connection(server, missing, &policy, &observer)
+            .expect("verified local alias response does not need a backend");
+        let response = worker.join().expect("enabled client worker");
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(
+            response
+                .windows(b"verified local store".len())
+                .any(|window| window == b"verified local store")
+        );
+    }
+
+    #[test]
+    fn buildkit_exec_and_archive_requests_are_bounded_before_backend_access() {
+        let policy = buildkit_policy();
+        let observer = CapturingObserver::default();
+        let oversized = MAX_CONTROL_BODY_BYTES + 1;
+        let missing = Path::new("/definitely-missing-buildkit-bounds-backend.sock");
+        for (method, target) in [
+            ("POST", "/v1.44/containers/buildx_buildkit_neutral0/exec"),
+            (
+                "PUT",
+                "/v1.44/containers/buildx_buildkit_neutral0/archive?path=%2Fetc&noOverwriteDirNonDir=true",
+            ),
+        ] {
+            let header =
+                format!("{method} {target} HTTP/1.1\r\nContent-Length: {oversized}\r\n\r\n")
+                    .into_bytes();
+            let (client, server) = UnixStream::pair().expect("socket pair");
+            let worker = thread::spawn(move || send_owned_request(client, &header));
+            handle_connection(server, missing, &policy, &observer)
+                .expect("oversized request is rejected before backend access");
+            assert!(
+                worker
+                    .join()
+                    .expect("bounded client worker")
+                    .starts_with(b"HTTP/1.1 413"),
+                "{method} {target}"
+            );
+        }
+        let events = observer.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    PodmanEvent::DockerRejected {
+                        reason: DockerProxyRejection::RequestTooLarge
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn buildkit_proxy_lifecycle_rewrites_records_and_cleans_up_exact_objects() {
+        let name = "buildx_buildkit_neutral-0123456789abcdef0";
+        let volume = format!("{name}_state");
+        let container_id = "aa".repeat(32);
+        let exec_id = "bb".repeat(32);
+        let create_body = buildkit_create_request_body(name);
+        let exec_body = buildkit_exec_request_body();
+        let requests = vec![
+            request(
+                "POST",
+                &format!("/v1.44/containers/create?name={name}"),
+                &create_body,
+            ),
+            request(
+                "POST",
+                &format!("/v1.44/containers/{container_id}/start"),
+                &[],
+            ),
+            request(
+                "POST",
+                &format!("/v1.44/containers/{container_id}/exec"),
+                &exec_body,
+            ),
+            request("GET", &format!("/v1.44/exec/{exec_id}/json"), &[]),
+            request(
+                "POST",
+                &format!("/v1.44/containers/{container_id}/stop"),
+                &[],
+            ),
+            request(
+                "DELETE",
+                &format!("/v1.44/containers/{container_id}?v=1"),
+                &[],
+            ),
+            request("DELETE", &format!("/v1.44/volumes/{volume}"), &[]),
+        ];
+
+        let socket = temporary_backend_socket();
+        let listener = UnixListener::bind(&socket).expect("fake backend listener");
+        let backend = serve_buildkit_lifecycle(listener, container_id.clone(), exec_id);
+        let policy = buildkit_policy();
+        let observer = CapturingObserver::default();
+        for request in requests {
+            let (client, server) = UnixStream::pair().expect("socket pair");
+            let worker = thread::spawn(move || send_owned_request(client, &request));
+            handle_connection(server, &socket, &policy, &observer)
+                .expect("BuildKit lifecycle request");
+            assert!(
+                worker
+                    .join()
+                    .expect("BuildKit lifecycle client")
+                    .starts_with(b"HTTP/1.1 2")
+            );
+        }
+        let captured = backend.join().expect("backend worker");
+        let rewritten: Value =
+            serde_json::from_slice(&captured[0].1).expect("rewritten create body");
+        assert_eq!(
+            rewritten["Image"],
+            json!(format!(
+                "registry.example.invalid/buildkit/runtime@sha256:{}",
+                "66".repeat(32)
+            ))
+        );
+        assert_eq!(rewritten["Labels"]["io.automata.owner"], "automata-runner");
+        assert_eq!(
+            rewritten["Labels"]["io.automata.job-engine"],
+            "private-sandbox-sentinel"
+        );
+        assert_eq!(rewritten["HostConfig"]["NetworkMode"], "ns:/proc/42/ns/net");
+        assert_eq!(captured[2].1, exec_body);
+        assert_eq!(
+            captured[5].0,
+            format!("/v1.44/containers/{container_id}?v=1")
+        );
+        assert_eq!(captured[6].0, format!("/v1.44/volumes/{volume}"));
+        fs::remove_file(socket).expect("remove fake backend socket");
     }
 
     #[test]

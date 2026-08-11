@@ -29,7 +29,7 @@ use super::files::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -55,7 +55,7 @@ pub struct RunnerProductConfig {
     spool: SpoolProtectionConfig,
     inventory: RunnerCapabilities,
     environments: BTreeMap<EnvironmentProfile, SandboxEnvironment>,
-    podman: PodmanProductConfig,
+    sandbox: SandboxProductConfig,
     executor: ExecutorProductConfig,
     object_store: ObjectStoreProductConfig,
     github: GithubProductConfig,
@@ -136,10 +136,28 @@ impl RunnerProductConfig {
         &self.environments
     }
 
-    /// Returns rootless-Podman host process policy.
+    /// Returns the selected sandbox-provider product policy.
     #[must_use]
-    pub const fn podman(&self) -> &PodmanProductConfig {
-        &self.podman
+    pub const fn sandbox(&self) -> &SandboxProductConfig {
+        &self.sandbox
+    }
+
+    /// Returns rootless-Podman host process policy when that provider is selected.
+    #[must_use]
+    pub const fn podman(&self) -> Option<&PodmanProductConfig> {
+        match &self.sandbox {
+            SandboxProductConfig::Podman(config) => Some(config),
+            SandboxProductConfig::Kubernetes(_) => None,
+        }
+    }
+
+    /// Returns Kubernetes sandbox policy when that provider is selected.
+    #[must_use]
+    pub const fn kubernetes(&self) -> Option<&KubernetesProductConfig> {
+        match &self.sandbox {
+            SandboxProductConfig::Podman(_) => None,
+            SandboxProductConfig::Kubernetes(config) => Some(config),
+        }
     }
 
     /// Returns per-job resource, isolation, path, and tool policy.
@@ -178,7 +196,7 @@ impl std::fmt::Debug for RunnerProductConfig {
             .field("spool", &self.spool)
             .field("inventory", &self.inventory)
             .field("environment_count", &self.environments.len())
-            .field("podman", &self.podman)
+            .field("sandbox", &self.sandbox)
             .field("executor", &self.executor)
             .field("object_store", &self.object_store)
             .field("github", &self.github)
@@ -206,7 +224,7 @@ impl MetricsProductConfig {
 pub struct StateRoots {
     journal: StateRoot,
     spool: SpoolRoot,
-    podman: PathBuf,
+    podman: Option<PathBuf>,
 }
 
 impl StateRoots {
@@ -224,8 +242,31 @@ impl StateRoots {
 
     /// Returns the rootless-Podman adapter state root.
     #[must_use]
-    pub fn podman(&self) -> &Path {
-        &self.podman
+    pub fn podman(&self) -> Option<&Path> {
+        self.podman.as_deref()
+    }
+}
+
+/// Mutually exclusive sandbox-provider product configuration.
+#[derive(Clone, Debug)]
+pub enum SandboxProductConfig {
+    /// Execute jobs through the local rootless-Podman adapter.
+    Podman(PodmanProductConfig),
+    /// Execute jobs as Kubernetes Pods through the authenticated ambient client.
+    Kubernetes(KubernetesProductConfig),
+}
+
+/// Validated Kubernetes product configuration and operator attestations.
+#[derive(Clone, Debug)]
+pub struct KubernetesProductConfig {
+    adapter: automata_ci_sandbox_kubernetes::KubernetesSandboxConfig,
+}
+
+impl KubernetesProductConfig {
+    /// Returns the secret-free adapter configuration used with the ambient Kubernetes client.
+    #[must_use]
+    pub const fn adapter(&self) -> &automata_ci_sandbox_kubernetes::KubernetesSandboxConfig {
+        &self.adapter
     }
 }
 
@@ -383,6 +424,7 @@ impl PodmanProductConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorProductConfig {
     resources: ResourceLimits,
+    resource_capacity: ResourceCapacity,
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
@@ -401,6 +443,12 @@ impl ExecutorProductConfig {
     #[must_use]
     pub const fn resources(&self) -> ResourceLimits {
         self.resources
+    }
+
+    /// Returns every configured per-job resource dimension.
+    #[must_use]
+    pub const fn resource_capacity(&self) -> ResourceCapacity {
+        self.resource_capacity
     }
 
     /// Returns the job sandbox egress policy.
@@ -705,6 +753,12 @@ pub enum RunnerProductConfigError {
     /// Rootless Podman process configuration is invalid.
     #[error("runner Podman configuration is invalid")]
     InvalidPodman,
+    /// Exactly one supported sandbox provider was not selected.
+    #[error("runner sandbox provider selection is invalid")]
+    InvalidSandboxProvider,
+    /// Kubernetes adapter policy or operator attestations are invalid.
+    #[error("runner Kubernetes configuration is invalid")]
+    InvalidKubernetes,
     /// GitHub executor policy or toolchain paths are invalid.
     #[error("runner executor configuration is invalid")]
     InvalidExecutor,
@@ -732,7 +786,10 @@ struct RawRunnerProductConfig {
     tls: RawClientTlsSources,
     spool: RawSpoolProtectionConfig,
     inventory: RawInventory,
-    podman: RawPodmanProductConfig,
+    #[serde(default)]
+    podman: Option<RawPodmanProductConfig>,
+    #[serde(default)]
+    kubernetes: Option<RawKubernetesProductConfig>,
     executor: RawExecutorProductConfig,
     object_store: RawObjectStoreProductConfig,
     github: RawGithubProductConfig,
@@ -745,36 +802,75 @@ impl RawRunnerProductConfig {
         if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {
             return Err(RunnerProductConfigError::UnsupportedSchema);
         }
+        let kubernetes_selected = match (&self.podman, &self.kubernetes) {
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            _ => return Err(RunnerProductConfigError::InvalidSandboxProvider),
+        };
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
-        let state = self.state.validate()?;
+        let state = self.state.validate(!kubernetes_selected)?;
         let tls = self.tls.validate()?;
         let spool = self.spool.validate()?;
-        let executor = self.executor.validate()?;
+        let executor = self.executor.validate(kubernetes_selected)?;
         let github = self.github.validate()?;
         let metrics = self
             .metrics
             .map(RawMetricsProductConfig::validate)
             .transpose()?;
-        let podman = self.podman.validate(github.server_url())?;
-        let required_podman_state = required_podman_state_root(podman.runtime_directory());
-        if state.podman().as_os_str() != required_podman_state.as_os_str() {
-            return Err(RunnerProductConfigError::InvalidPodman);
+        let sandbox = match (self.podman, self.kubernetes) {
+            (Some(raw), None) => {
+                let podman = raw.validate(github.server_url())?;
+                let required_podman_state = required_podman_state_root(podman.runtime_directory());
+                if state.podman().is_none_or(|configured| {
+                    configured.as_os_str() != required_podman_state.as_os_str()
+                }) {
+                    return Err(RunnerProductConfigError::InvalidPodman);
+                }
+                if [state.journal().as_path(), state.spool().as_path()]
+                    .into_iter()
+                    .any(|durable| {
+                        durable.starts_with(podman.runtime_directory())
+                            || podman.runtime_directory().starts_with(durable)
+                    })
+                {
+                    return Err(RunnerProductConfigError::InvalidStateRoots);
+                }
+                SandboxProductConfig::Podman(podman)
+            }
+            (None, Some(raw)) => SandboxProductConfig::Kubernetes(raw.validate(&executor)?),
+            _ => return Err(RunnerProductConfigError::InvalidSandboxProvider),
+        };
+        let podman_features = match &sandbox {
+            SandboxProductConfig::Podman(podman) => Some((
+                podman.job_container_engine(),
+                podman.service_proxy_image().is_some(),
+            )),
+            SandboxProductConfig::Kubernetes(_) => None,
+        };
+        let (inventory, environments) =
+            self.inventory
+                .validate(self.runner_id, &executor, podman_features)?;
+        match &sandbox {
+            SandboxProductConfig::Podman(_) => {
+                if inventory.resources_per_job().ephemeral_disk_bytes() != 0
+                    || inventory.resources_per_job().gpu_count() != 0
+                {
+                    return Err(RunnerProductConfigError::InvalidInventory);
+                }
+            }
+            SandboxProductConfig::Kubernetes(kubernetes) => {
+                if inventory.resources_per_job().ephemeral_disk_bytes() != 0
+                    && !kubernetes.adapter.ephemeral_storage_enforced()
+                {
+                    return Err(RunnerProductConfigError::InvalidKubernetes);
+                }
+                if inventory.resources_per_job().gpu_count() != 0
+                    && kubernetes.adapter.gpu_resource_name().is_none()
+                {
+                    return Err(RunnerProductConfigError::InvalidKubernetes);
+                }
+            }
         }
-        if [state.journal().as_path(), state.spool().as_path()]
-            .into_iter()
-            .any(|durable| {
-                durable.starts_with(podman.runtime_directory())
-                    || podman.runtime_directory().starts_with(durable)
-            })
-        {
-            return Err(RunnerProductConfigError::InvalidStateRoots);
-        }
-        let (inventory, environments) = self.inventory.validate(
-            self.runner_id,
-            &executor,
-            podman.job_container_engine(),
-            podman.service_proxy_image().is_some(),
-        )?;
         let object_store = self.object_store.validate()?;
         Ok(RunnerProductConfig {
             runner_id: self.runner_id,
@@ -784,7 +880,7 @@ impl RawRunnerProductConfig {
             spool,
             inventory,
             environments,
-            podman,
+            sandbox,
             executor,
             object_store,
             github,
@@ -817,12 +913,17 @@ impl RawMetricsProductConfig {
 struct RawStateRoots {
     journal: PathBuf,
     spool: PathBuf,
-    podman: PathBuf,
+    #[serde(default)]
+    podman: Option<PathBuf>,
 }
 
 impl RawStateRoots {
-    fn validate(self) -> Result<StateRoots, RunnerProductConfigError> {
-        let roots = [&self.journal, &self.spool, &self.podman];
+    fn validate(self, require_podman: bool) -> Result<StateRoots, RunnerProductConfigError> {
+        if require_podman != self.podman.is_some() {
+            return Err(RunnerProductConfigError::InvalidStateRoots);
+        }
+        let mut roots = vec![&self.journal, &self.spool];
+        roots.extend(self.podman.iter());
         if roots
             .iter()
             .any(|path| validate_absolute_path(path).is_err())
@@ -939,8 +1040,7 @@ impl RawInventory {
         self,
         runner_id: RunnerId,
         executor: &ExecutorProductConfig,
-        job_container_engine: automata_ci_sandbox_podman::JobContainerEngine,
-        service_proxy_configured: bool,
+        podman_features: Option<(automata_ci_sandbox_podman::JobContainerEngine, bool)>,
     ) -> Result<
         (
             RunnerCapabilities,
@@ -968,7 +1068,9 @@ impl RawInventory {
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         let resources = self.resources_per_job.validate()?;
-        if resources.execution != executor.resources() {
+        if resources.capacity != executor.resource_capacity()
+            || resources.execution != executor.resources()
+        {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
         let mut environments = BTreeMap::new();
@@ -993,13 +1095,15 @@ impl RawInventory {
             sandbox_features.insert(SandboxFeature::PRIVILEGED_USER);
         }
         let sandbox = SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features);
-        let mut container_features = match job_container_engine {
-            automata_ci_sandbox_podman::JobContainerEngine::Disabled => BTreeSet::new(),
-            automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi => {
+        let mut container_features = match podman_features.map(|features| features.0) {
+            None | Some(automata_ci_sandbox_podman::JobContainerEngine::Disabled) => {
+                BTreeSet::new()
+            }
+            Some(automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi) => {
                 BTreeSet::from([ContainerFeature::DOCKER_COMPATIBLE_API])
             }
         };
-        if service_proxy_configured {
+        if podman_features.is_some_and(|features| features.1) {
             container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
         }
         let inventory = RunnerCapabilities::new(runner_id, platform)
@@ -1029,6 +1133,8 @@ struct RawResources {
     cpu_millis: u32,
     memory_bytes: u64,
     ephemeral_disk_bytes: u64,
+    #[serde(default)]
+    gpu_count: u16,
     pids: u32,
 }
 
@@ -1039,13 +1145,6 @@ struct ValidatedResources {
 
 impl RawResources {
     fn validate(self) -> Result<ValidatedResources, RunnerProductConfigError> {
-        // The current rootless-Podman adapter enforces CPU, memory, and PID
-        // limits, but it has no proven per-sandbox storage quota. Advertising
-        // a nonzero disk capacity would let the scheduler place work against a
-        // limit that the runner cannot enforce.
-        if self.ephemeral_disk_bytes != 0 {
-            return Err(RunnerProductConfigError::InvalidInventory);
-        }
         let execution = ResourceLimits::new(self.memory_bytes, self.cpu_millis, self.pids)
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         Ok(ValidatedResources {
@@ -1053,7 +1152,7 @@ impl RawResources {
                 self.cpu_millis,
                 self.memory_bytes,
                 self.ephemeral_disk_bytes,
-                0,
+                self.gpu_count,
             ),
             execution,
         })
@@ -1208,6 +1307,98 @@ impl RawPodmanProductConfig {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKubernetesProductConfig {
+    namespace: String,
+    guest_image: String,
+    network_isolation_verified: bool,
+    #[serde(default)]
+    ephemeral_storage_enforcement_verified: bool,
+    process_limit_enforcement: u32,
+    #[serde(default)]
+    gpu_resource_name: Option<String>,
+    node_selector: BTreeMap<String, String>,
+    #[serde(default)]
+    runtime_class_name: Option<String>,
+    #[serde(default = "default_kubernetes_run_as")]
+    run_as_user: i64,
+    #[serde(default = "default_kubernetes_run_as")]
+    run_as_group: i64,
+    #[serde(default = "default_kubernetes_operation_timeout_seconds")]
+    operation_timeout_seconds: u64,
+    #[serde(default = "default_kubernetes_readiness_timeout_seconds")]
+    readiness_timeout_seconds: u64,
+}
+
+impl RawKubernetesProductConfig {
+    fn validate(
+        self,
+        executor: &ExecutorProductConfig,
+    ) -> Result<KubernetesProductConfig, RunnerProductConfigError> {
+        if !self.network_isolation_verified
+            || executor.network() != NetworkPolicy::Disabled
+            || executor.privilege() != SandboxPrivilegePolicy::Unprivileged
+            || self.process_limit_enforcement != executor.resources().pids()
+            || executor.resources().memory_bytes()
+                < automata_ci_sandbox_kubernetes::MINIMUM_KUBERNETES_SANDBOX_MEMORY_BYTES
+        {
+            return Err(RunnerProductConfigError::InvalidKubernetes);
+        }
+        let guest_image = ImmutableImage::new(self.guest_image)
+            .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        let mut adapter = automata_ci_sandbox_kubernetes::KubernetesSandboxConfig::new(
+            self.namespace,
+            guest_image,
+            automata_ci_sandbox_kubernetes::VerifiedNetworkIsolation,
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_timeouts(
+            Duration::from_secs(self.operation_timeout_seconds),
+            Duration::from_secs(self.readiness_timeout_seconds),
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_run_as(self.run_as_user, self.run_as_group)
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_verified_process_limit(
+            automata_ci_sandbox_kubernetes::VerifiedProcessLimitEnforcement::new(
+                self.process_limit_enforcement,
+            )
+            .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?,
+        )
+        .with_node_selector(self.node_selector)
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        if self.ephemeral_storage_enforcement_verified {
+            adapter = adapter.with_verified_ephemeral_storage(
+                automata_ci_sandbox_kubernetes::VerifiedEphemeralStorageEnforcement,
+            );
+        }
+        if let Some(resource_name) = self.gpu_resource_name {
+            adapter = adapter
+                .with_gpu_resource_name(resource_name)
+                .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        }
+        if let Some(runtime_class_name) = self.runtime_class_name {
+            adapter = adapter
+                .with_runtime_class_name(runtime_class_name)
+                .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        }
+        Ok(KubernetesProductConfig { adapter })
+    }
+}
+
+const fn default_kubernetes_run_as() -> i64 {
+    65_532
+}
+
+const fn default_kubernetes_operation_timeout_seconds() -> u64 {
+    30
+}
+
+const fn default_kubernetes_readiness_timeout_seconds() -> u64 {
+    300
+}
+
 fn validate_service_proxy_image(value: String) -> Result<ImmutableImage, ()> {
     let repository = value
         .rsplit_once("@sha256:")
@@ -1262,12 +1453,21 @@ struct RawExecutorProductConfig {
 }
 
 impl RawExecutorProductConfig {
-    fn validate(self) -> Result<ExecutorProductConfig, RunnerProductConfigError> {
-        let resources = self
+    fn validate(
+        self,
+        allow_extended_resources: bool,
+    ) -> Result<ExecutorProductConfig, RunnerProductConfigError> {
+        let validated_resources = self
             .resources
             .validate()
-            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?
-            .execution;
+            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
+        if !allow_extended_resources
+            && (validated_resources.capacity.ephemeral_disk_bytes() != 0
+                || validated_resources.capacity.gpu_count() != 0)
+        {
+            return Err(RunnerProductConfigError::InvalidExecutor);
+        }
+        let resources = validated_resources.execution;
         let network = match self.network {
             RawNetworkPolicy::Disabled => NetworkPolicy::Disabled,
             RawNetworkPolicy::PrivateEgress => NetworkPolicy::PrivateEgress,
@@ -1317,6 +1517,7 @@ impl RawExecutorProductConfig {
         .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
         Ok(ExecutorProductConfig {
             resources,
+            resource_capacity: validated_resources.capacity,
             network,
             root_filesystem,
             privilege,

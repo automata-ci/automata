@@ -86,6 +86,14 @@ fn repository(
                 },
                 "selector": "Ubuntu-24.04"
             }],
+            "resources": {
+                "defaults": {
+                    "requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                    "limits": {"cpu_millis": 1000, "memory_bytes": 1073741824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+                },
+                "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8589934592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+            },
             "schema": 1
         },
         "check_name": "Automata CI",

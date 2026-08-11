@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::{
     AdmissionObject, LogicalActivationPreparationReceipt, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES, ObjectKey, StoreError,
-    TenantScope, WorkflowRuntimePolicyPin,
+    LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES, ObjectKey,
+    ReusableWorkflowPermissionSnapshot, StoreError, TenantScope, WorkflowRuntimePolicyPin,
 };
 
 /// Maximum duration of one logical-job activation claim.
@@ -707,6 +707,7 @@ pub struct LogicalActivationExecutionContext {
     workflow_name: String,
     git_ref: String,
     actor: Option<String>,
+    triggering_actor: Option<String>,
     run_id_alias: RunIdAlias,
     run_number: u64,
     run_attempt: u32,
@@ -754,6 +755,7 @@ impl LogicalActivationExecutionContext {
             workflow_name,
             git_ref,
             actor,
+            triggering_actor: None,
             run_id_alias,
             run_number,
             run_attempt,
@@ -782,6 +784,27 @@ impl LogicalActivationExecutionContext {
     #[must_use]
     pub fn actor(&self) -> Option<&str> {
         self.actor.as_deref()
+    }
+
+    /// Returns the current physical-attempt initiator when this is a rerun.
+    #[must_use]
+    pub fn triggering_actor(&self) -> Option<&str> {
+        self.triggering_actor.as_deref()
+    }
+
+    /// Attaches the store-authenticated current physical-attempt initiator.
+    ///
+    /// # Errors
+    ///
+    /// Rejects blank, oversized, or control-bearing actor identities.
+    pub fn with_triggering_actor(
+        mut self,
+        triggering_actor: impl Into<String>,
+    ) -> Result<Self, LogicalActivationValueError> {
+        let triggering_actor = triggering_actor.into();
+        validate_bounded_text(&triggering_actor, "triggering actor")?;
+        self.triggering_actor = Some(triggering_actor);
+        Ok(self)
     }
 
     /// Returns the stable positive numeric alias for the internal run ID.
@@ -1305,6 +1328,17 @@ pub enum LogicalActivationStoreError {
 /// Persistence boundary for current logical-job activation descriptors.
 #[async_trait]
 pub trait LogicalActivationRepository: std::fmt::Debug + Send + Sync {
+    /// Loads the immutable permission ceiling for one sealed reusable child.
+    /// Root invocations and unpublished children return no snapshot.
+    async fn reusable_workflow_permission_snapshot(
+        &self,
+        _tenant: &TenantScope,
+        _run_id: RunId,
+        _invocation_id: LogicalWorkflowInvocationId,
+    ) -> Result<Option<ReusableWorkflowPermissionSnapshot>, LogicalActivationStoreError> {
+        Ok(None)
+    }
+
     /// Replaces an exact live claim with the next generation and a new bounded
     /// interval. Concurrent exact retries replay the replacement fence; stale
     /// or divergent renewals fail closed.

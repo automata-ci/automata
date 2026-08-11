@@ -4,6 +4,7 @@ use std::{
     fmt,
 };
 
+use automata_ci_core::JobResourceAllocation;
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, NetworkPolicy,
     OperationId, OperationOutcome, ProviderError, ResourceLimits, RootFilesystemPolicy,
@@ -23,6 +24,7 @@ pub(super) struct ProfileAdmissionPolicy {
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
     resources: ResourceLimits,
+    resource_allocation: JobResourceAllocation,
 }
 
 impl ProfileAdmissionPolicy {
@@ -31,12 +33,14 @@ impl ProfileAdmissionPolicy {
         root_filesystem: RootFilesystemPolicy,
         privilege: SandboxPrivilegePolicy,
         resources: ResourceLimits,
+        resource_allocation: JobResourceAllocation,
     ) -> Self {
         Self {
             network,
             root_filesystem,
             privilege,
             resources,
+            resource_allocation,
         }
     }
 }
@@ -202,7 +206,8 @@ impl ProfileAdmissionContext<'_> {
             self.policy.root_filesystem,
             self.policy.resources,
         )
-        .with_privilege(self.policy.privilege);
+        .with_privilege(self.policy.privilege)
+        .with_resource_allocation(self.policy.resource_allocation);
         let record = self.create(environment, &spec, operation_ids.destroy)?;
         self.inspect(environment, &record, operation_ids.destroy)?;
         self.destroy(&record, operation_ids.destroy)
@@ -727,11 +732,19 @@ mod tests {
     }
 
     fn policy() -> ProfileAdmissionPolicy {
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources");
+        let capacity = automata_ci_core::ResourceCapacity::new(
+            resources.cpu_millis(),
+            resources.memory_bytes(),
+            0,
+            0,
+        );
         ProfileAdmissionPolicy::new(
             NetworkPolicy::Disabled,
             RootFilesystemPolicy::Writable,
             SandboxPrivilegePolicy::Administrator,
-            ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources"),
+            resources,
+            JobResourceAllocation::new(capacity, capacity).expect("allocation"),
         )
     }
 

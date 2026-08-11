@@ -6,6 +6,7 @@ use crate::{
     SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy,
     ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
 };
+use automata_ci_core::JobResourceAllocation;
 
 /// Immutable whole-job sandbox request. The profile is exact and contains no
 /// hosted-label resolution or mutable image reference.
@@ -19,6 +20,7 @@ pub struct SandboxSpec {
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
     resources: ResourceLimits,
+    resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
 }
 
@@ -48,6 +50,7 @@ impl SandboxSpec {
             root_filesystem,
             privilege: SandboxPrivilegePolicy::Unprivileged,
             resources,
+            resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
         }
     }
@@ -112,6 +115,36 @@ impl SandboxSpec {
     #[must_use]
     pub const fn resources(&self) -> ResourceLimits {
         self.resources
+    }
+
+    /// Attaches the complete placement-request and enforcement-limit contract.
+    ///
+    /// Providers that support request-aware placement consume this value;
+    /// providers that only enforce hard limits continue to use [`Self::resources`].
+    #[must_use]
+    pub const fn with_resource_allocation(mut self, allocation: JobResourceAllocation) -> Self {
+        self.resource_allocation = Some(allocation);
+        self
+    }
+
+    /// Returns the complete request/limit contract, when selected by the workflow.
+    #[must_use]
+    pub const fn resource_allocation(&self) -> Option<JobResourceAllocation> {
+        self.resource_allocation
+    }
+
+    /// Returns whether placement-aware and provider-neutral hard limits agree.
+    ///
+    /// Providers must reject two disagreeing CPU or memory limits instead of
+    /// silently choosing one. PID limits remain represented only by
+    /// [`Self::resources`].
+    #[must_use]
+    pub const fn has_coherent_resource_contract(&self) -> bool {
+        let Some(allocation) = self.resource_allocation else {
+            return true;
+        };
+        allocation.limits().cpu_millis() == self.resources.cpu_millis()
+            && allocation.limits().memory_bytes() == self.resources.memory_bytes()
     }
 
     /// Adds services which the provider must create, make healthy, and own as
