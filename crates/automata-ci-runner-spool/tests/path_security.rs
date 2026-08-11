@@ -1,12 +1,17 @@
 mod support;
 
-use std::{fs, path::Path, sync::Arc};
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
+use std::{fs, sync::Arc};
 
+#[cfg(unix)]
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, DurableContentRef, DurableContentStore, FileSpool, ProtectionId, SpoolError,
-    SpoolRoot, SpoolRootError,
+    ContentKind, DurableContentStore, FileSpool, SpoolError, SpoolRoot, SpoolRootError,
 };
+#[cfg(unix)]
+use automata_ci_runner_spool::{DurableContentRef, ProtectionId};
+#[cfg(unix)]
 use sha2::{Digest as _, Sha256};
 use support::{Scratch, TestProtector, adopt, content_path};
 
@@ -21,12 +26,18 @@ fn spool_root_rejects_relative_root_traversal_and_temporary_hierarchy() {
         SpoolRoot::explicit("relative/content"),
         Err(SpoolRootError::Relative)
     ));
+    let mut filesystem_root = std::env::current_dir().expect("current directory");
+    while filesystem_root.pop() {}
     assert!(matches!(
-        SpoolRoot::explicit(Path::new("/")),
+        SpoolRoot::explicit(&filesystem_root),
         Err(SpoolRootError::FilesystemRoot)
     ));
+    #[cfg(unix)]
+    let traversal = scratch.path().join("child").join("..").join("content");
+    #[cfg(target_os = "windows")]
+    let traversal = PathBuf::from(r"C:\automata\child\..\content");
     assert!(matches!(
-        SpoolRoot::explicit(scratch.path().join("child").join("..").join("content")),
+        SpoolRoot::explicit(traversal),
         Err(SpoolRootError::Traversal)
     ));
     assert!(matches!(

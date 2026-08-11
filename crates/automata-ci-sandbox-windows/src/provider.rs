@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt,
+    fmt, io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, TryLockError,
@@ -35,6 +35,7 @@ use crate::{
 };
 
 const DESTROY_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
+const DESTROY_REMOVE_TIMEOUT: Duration = Duration::from_secs(2);
 const DESTROY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
@@ -681,8 +682,13 @@ fn complete_pending_destroy(
             return Err(error);
         }
     };
-    let removed = remove_owned_tree(&crate::filesystem::target_to_host(&entry.scratch))
-        .and_then(|()| remove_owned_tree(&crate::filesystem::target_to_host(&entry.workspace)));
+    let removed =
+        remove_owned_tree_after_quiesce(&crate::filesystem::target_to_host(&entry.scratch))
+            .and_then(|()| {
+                remove_owned_tree_after_quiesce(&crate::filesystem::target_to_host(
+                    &entry.workspace,
+                ))
+            });
     if removed.is_err() {
         let _ = transition_entry_phase_at(
             state,
@@ -990,6 +996,27 @@ fn quiesce_entry(entry: &SandboxEntry) -> Result<MutexGuard<'_, ()>, ProviderErr
                 kill_entry_group(entry)?;
                 std::thread::sleep(DESTROY_POLL_INTERVAL);
             }
+        }
+    }
+}
+
+fn remove_owned_tree_after_quiesce(path: &Path) -> io::Result<()> {
+    let deadline = Instant::now() + DESTROY_REMOVE_TIMEOUT;
+    loop {
+        match remove_owned_tree(path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if (matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::DirectoryNotEmpty
+                        | io::ErrorKind::WouldBlock
+                ) || matches!(error.raw_os_error(), Some(32 | 33)))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(DESTROY_POLL_INTERVAL);
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -1579,13 +1606,14 @@ mod tests {
             .attach(record.handle(), &NeverCancelled)
             .expect("attach sandbox");
         let pid_file = scratch.join("descendant.pid");
-        let command = descendant_command(&workspace, &pid_file);
+        let ready_file = scratch.join("descendant.ready");
+        let command = descendant_command(&workspace, &pid_file, &ready_file);
         let execution = thread::spawn(move || endpoint.exec(&command, &NeverCancelled));
         let descendant = wait_for_pid(&pid_file, Duration::from_secs(8))
             .expect("long-running descendant publishes its PID");
         assert!(
-            wait_for_process_alive(descendant, Duration::from_secs(5)),
-            "descendant process {descendant} never became observable"
+            wait_for_file(&ready_file, Duration::from_secs(8)),
+            "descendant process {descendant} never published readiness"
         );
 
         provider
@@ -1653,15 +1681,28 @@ mod tests {
         .with_scratch(target(scratch))
     }
 
-    fn descendant_command(workspace: &Path, pid_file: &Path) -> ExecutionCommand {
+    fn descendant_command(
+        workspace: &Path,
+        pid_file: &Path,
+        ready_file: &Path,
+    ) -> ExecutionCommand {
         let system_root = system_root();
         let powershell = system_root
             .join("System32")
             .join("WindowsPowerShell")
             .join("v1.0")
             .join("powershell.exe");
-        let script = "$child = Start-Process -FilePath $env:COMSPEC \
-                      -ArgumentList '/d','/c','ping -n 30 127.0.0.1 > nul' -PassThru; \
+        let child_script = workspace.join("long-running-child.ps1");
+        fs::write(
+            &child_script,
+            "[System.IO.File]::WriteAllText($env:AUTOMATA_CHILD_READY, 'ready'); \
+             [System.Threading.Thread]::Sleep(30000)",
+        )
+        .expect("write long-running child script");
+        let script = "$child = Start-Process -FilePath $env:AUTOMATA_POWERSHELL \
+                      -ArgumentList '-NoLogo','-NoProfile','-NonInteractive',\
+                        '-ExecutionPolicy','Bypass','-File',$env:AUTOMATA_CHILD_SCRIPT \
+                      -PassThru; \
                       [System.IO.File]::WriteAllText(\
                         $env:AUTOMATA_PID_FILE, [string]$child.Id); \
                       [System.Threading.Thread]::Sleep(30000)";
@@ -1683,9 +1724,13 @@ mod tests {
             variable("SystemRoot", &system_root),
             variable("WINDIR", &system_root),
             variable("COMSPEC", &comspec),
+            variable("PATH", &system_root.join("System32")),
             variable("TEMP", &temp),
             variable("TMP", &temp),
             variable("AUTOMATA_PID_FILE", pid_file),
+            variable("AUTOMATA_CHILD_READY", ready_file),
+            variable("AUTOMATA_CHILD_SCRIPT", &child_script),
+            variable("AUTOMATA_POWERSHELL", &powershell),
         ])
         .expect("execution environment");
         ExecutionCommand::new(
@@ -1739,15 +1784,15 @@ mod tests {
         assert!(!process_is_alive(pid), "descendant process {pid} survived");
     }
 
-    fn wait_for_process_alive(pid: u32, timeout: Duration) -> bool {
+    fn wait_for_file(path: &Path, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if process_is_alive(pid) {
+            if path.is_file() {
                 return true;
             }
             thread::sleep(Duration::from_millis(25));
         }
-        process_is_alive(pid)
+        path.is_file()
     }
 
     fn process_is_alive(pid: u32) -> bool {

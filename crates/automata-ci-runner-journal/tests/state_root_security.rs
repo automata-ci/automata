@@ -1,13 +1,16 @@
 mod support;
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[cfg(unix)]
+use std::fs;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 
+#[cfg(unix)]
 use automata_ci_core::RunnerId;
 use automata_ci_runner_journal::{FileJournal, JournalError, StateRoot, StateRootError};
-use support::{Fixture, Scratch, journal_file};
+#[cfg(unix)]
+use support::journal_file;
+use support::{Fixture, Scratch};
 
 #[test]
 fn state_root_rejects_relative_root_traversal_and_temporary_hierarchy() {
@@ -15,18 +18,22 @@ fn state_root_rejects_relative_root_traversal_and_temporary_hierarchy() {
         StateRoot::explicit("relative/state").expect_err("relative"),
         StateRootError::Relative
     );
+    let mut filesystem_root = std::env::current_dir().expect("current directory");
+    while filesystem_root.pop() {}
     assert_eq!(
-        StateRoot::explicit(Path::new(std::path::MAIN_SEPARATOR_STR)).expect_err("root"),
+        StateRoot::explicit(&filesystem_root).expect_err("root"),
         StateRootError::FilesystemRoot
     );
     let scratch = Scratch::new("traversal-policy");
+    #[cfg(unix)]
+    let traversal = scratch.path().join("..").join("escape");
+    #[cfg(target_os = "windows")]
+    let traversal = PathBuf::from(r"C:\automata\child\..\escape");
     assert_eq!(
-        StateRoot::explicit(scratch.path().join("..").join("escape")).expect_err("traversal"),
+        StateRoot::explicit(traversal).expect_err("traversal"),
         StateRootError::Traversal
     );
-    let temporary = PathBuf::from(std::path::MAIN_SEPARATOR_STR)
-        .join("tmp")
-        .join("runner-state");
+    let temporary = filesystem_root.join("tmp").join("runner-state");
     assert_eq!(
         StateRoot::explicit(temporary).expect_err("temporary hierarchy"),
         StateRootError::TemporaryHierarchy
@@ -38,6 +45,7 @@ fn state_root_rejects_relative_root_traversal_and_temporary_hierarchy() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn state_root_and_files_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
