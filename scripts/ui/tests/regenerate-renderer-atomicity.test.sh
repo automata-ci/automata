@@ -9,7 +9,18 @@ verifier="${repository_root}/scripts/ui/verify-renderer-assets.sh"
 scratch_root="${repository_root}/target/task-tmp/renderer-atomicity-test"
 mkdir -p -- "${scratch_root}"
 scratch_directory="$(mktemp -d "${scratch_root}/case.XXXXXXXX")"
+test_phase='initialization'
 cleanup() {
+    local status=$?
+    if (( status != 0 )); then
+        printf 'renderer atomicity test failed: phase=%s status=%s\n' \
+            "${test_phase}" "${status}" >&2
+        while IFS= read -r -d '' log_file; do
+            printf '%s\n' "--- ${log_file##*/} ---" >&2
+            sed -n '1,120p' "${log_file}" >&2
+        done < <(find "${scratch_directory}" -maxdepth 1 -type f \
+            -name '*.log' -print0 | LC_ALL=C sort -z)
+    fi
     rm -rf -- "${scratch_directory}"
 }
 trap cleanup EXIT
@@ -136,6 +147,7 @@ run_fault_case() {
 run_fault_case sbom 71
 run_fault_case verifier 72
 
+test_phase='preparing-recovery'
 # A kill after the preparation journal is written but before the backup is
 # complete cannot have changed live files. Restart removes that exact scratch
 # and the partial preparing directory without attempting a rollback.
@@ -279,6 +291,7 @@ grep -Fqx -- 'committed generated contract' "${live_directory}/generated_contrac
 [[ ! -e "${commit_directory}" && ! -e "${commit_state}/active" ]]
 
 reset_case rollback-failure
+test_phase='verifier-lock-custody'
 rollback_failure_temporary="${scratch_directory}/temporary-rollback-failure"
 rollback_failure_state="${scratch_directory}/state-rollback-failure"
 set +e
@@ -388,7 +401,13 @@ printf '%s\n' \
     'fi' \
     'exit 86' \
     > "${fake_verifier_repository}/bin/node"
-chmod 0755 -- "${fake_verifier_repository}/bin/node"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'exit 88' \
+    > "${fake_verifier_repository}/bin/python3"
+chmod 0755 -- \
+    "${fake_verifier_repository}/bin/node" \
+    "${fake_verifier_repository}/bin/python3"
 
 set +e
 PATH="${fake_verifier_repository}/bin:/usr/bin:/bin" \
@@ -483,6 +502,7 @@ assert_live_set_is_unchanged
 [[ ! -e "${rollback_failure_state}/active" ]]
 
 reset_case killed
+test_phase='active-recovery'
 killed_temporary="${scratch_directory}/temporary-killed"
 killed_state="${scratch_directory}/state-killed"
 set +e
@@ -562,6 +582,7 @@ assert_live_set_is_unchanged
 # transaction's recorded scratch before an intentionally failing toolchain
 # preflight can stop a new regeneration.
 entrypoint_repository="${scratch_directory}/entrypoint-repository"
+test_phase='entrypoint-recovery'
 entrypoint_state="${entrypoint_repository}/ui/renderer/.regeneration-transaction"
 entrypoint_scratch="${entrypoint_repository}/target/agent-scratch/ssr"
 entrypoint_temporary="${entrypoint_scratch}/regenerate.entrypoint-kill"
@@ -671,6 +692,7 @@ done
 [[ ! -e "${entrypoint_state}/active" && ! -e "${entrypoint_temporary}" ]]
 
 reset_case committed-kill
+test_phase='committed-recovery'
 committed_kill_temporary="${scratch_directory}/temporary-committed-kill"
 committed_kill_state="${scratch_directory}/state-committed-kill"
 set +e
@@ -755,6 +777,7 @@ grep -Fqx -- 'committed before cleanup' "${live_directory}/generated_contract.rs
 # Candidate verification rejects path indirection, every non-file asset entry,
 # and any generated-Rust text outside the exact three-asset contract.
 candidate_fixture="${scratch_directory}/candidate-fixture"
+test_phase='candidate-verification'
 mkdir -p -- "${candidate_fixture}/renderer" "${candidate_fixture}/assets"
 cp -a -- \
     "${repository_root}/crates/automata-ci-ui-renderer/assets/." \
@@ -885,6 +908,7 @@ line_number() {
 }
 
 lock_line="$(line_number "${regenerator}" 'flock --exclusive --nonblock')"
+test_phase='source-order-contract'
 recover_line="$(line_number "${regenerator}" 'automata_renderer_transaction_recover')"
 # These are literal source patterns.
 # shellcheck disable=SC2016
