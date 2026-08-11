@@ -175,6 +175,32 @@ class CandidateContract(unittest.TestCase):
         self.assertRegex(identity["image"]["manifest_digest"], candidate.OCI_DIGEST)
         self.assertEqual(identity["release"], self.release)
 
+    def test_canonical_oci_archive_uses_extractable_directory_modes(self) -> None:
+        output = self.root / "candidate.tar"
+        candidate.create(
+            argparse.Namespace(
+                context=self.context,
+                oci_archive=self.oci,
+                output=output,
+                github_output=None,
+            )
+        )
+        with tarfile.open(output, "r:") as archive:
+            image_archive = archive.extractfile(candidate.IMAGE_ARCHIVE_NAME)
+            self.assertIsNotNone(image_archive)
+            image_bytes = image_archive.read()
+
+        with tarfile.open(fileobj=io.BytesIO(image_bytes), mode="r:") as archive:
+            members = {member.name: member for member in archive.getmembers()}
+
+        for name in ("blobs", "blobs/sha256"):
+            self.assertTrue(members[name].isdir())
+            self.assertEqual(members[name].mode, 0o755)
+        for name, member in members.items():
+            if name not in {"blobs", "blobs/sha256"}:
+                self.assertTrue(member.isfile())
+                self.assertEqual(member.mode, 0o444)
+
     def test_mismatched_image_provenance_fails_before_candidate_output(self) -> None:
         self.write_oci(revision="b" * 40)
         output = self.root / "candidate.tar"
