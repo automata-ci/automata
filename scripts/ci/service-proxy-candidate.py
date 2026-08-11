@@ -240,7 +240,8 @@ def load_oci(archive_bytes: bytes, source: dict, source_sha256: str) -> tuple[st
 def add_tar_directory(archive: tarfile.TarFile, name: str, mtime: int) -> None:
     info = tarfile.TarInfo(name)
     info.type = tarfile.DIRTYPE
-    info.mode = 0o555
+    # OCI transports extract parent entries before creating their children.
+    info.mode = 0o755
     info.uid = info.gid = 0
     info.uname = info.gname = ""
     info.mtime = mtime
