@@ -87,6 +87,9 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
     }
 }
 
+// One transaction reauthorizes the caller and decodes the complete immutable
+// workflow source descriptor without exposing a partially validated record.
+#[allow(clippy::too_many_lines)]
 async fn resolve_authenticated_dispatch_source(
     store: &PostgresStore,
     request: ResolveAuthenticatedWorkflowDispatchSource,
