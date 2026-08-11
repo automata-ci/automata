@@ -53,6 +53,8 @@ fn malformed_arguments_never_echo_secret_material() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_automata"))
             .args(&arguments)
+            .env_remove("RUST_BACKTRACE")
+            .env_remove("RUST_LIB_BACKTRACE")
             .output()
             .expect("control-plane process must start");
 
