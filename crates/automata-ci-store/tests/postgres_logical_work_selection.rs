@@ -438,6 +438,11 @@ async fn admit_authenticated_fixture(
         )?],
         now,
     )
+    .base_context(admission_object(
+        format!("admission/{namespace}/base-context"),
+        4,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()?;
     let mut fixture = AuthenticatedFixture {
         namespace,
@@ -546,7 +551,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -566,8 +571,11 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 fn admission_object(key: String, digest: u8, media_type: &str) -> AdmissionObject {

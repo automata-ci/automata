@@ -1355,6 +1355,11 @@ fn fixture(tenant: &str, namespace: u128) -> Fixture {
         vec![logical_job],
         UnixMillis::new(1_000),
     )
+    .base_context(admission_object(
+        format!("logical-result/{namespace}/base-context"),
+        &[0x15; 512],
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("logical admission");
     Fixture {
@@ -1455,6 +1460,11 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
         logical_jobs,
         UnixMillis::new(1_000),
     )
+    .base_context(admission_object(
+        format!("logical-result/{namespace}/base-context"),
+        &[0x15; 512],
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("dependency admission");
     [base_id, prepare_id, build_id].map(|logical_job_id| Fixture {
@@ -1598,7 +1608,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -1618,8 +1628,11 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
@@ -1655,11 +1668,7 @@ async fn claim_activation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             preparation.descriptor().clone(),
             preparation.claim().clone(),
-            admission_object(
-                format!("logical-result/{owner}/base-context.pb"),
-                &[0x51; 64],
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            preparation.descriptor().base_context().clone(),
             admission_object(
                 format!("logical-result/{owner}/needs-context.pb"),
                 &[0x52; 64],
@@ -1872,6 +1881,19 @@ fn prepared_instance(
     .with_output_definitions(definitions);
     let execution = claimed.execution();
     let workspace = "/srv/work/project";
+    let mut job_execution = JobExecutionContext::new(
+        execution.workflow_name(),
+        execution.git_ref(),
+        workspace,
+        admission_reference(claimed.event()),
+        activation_reference(&runtime),
+    )
+    .with_run_id_alias(execution.run_id_alias())
+    .with_run_number(execution.run_number())
+    .with_run_attempt(execution.run_attempt());
+    if let Some(actor) = execution.actor() {
+        job_execution = job_execution.with_actor(actor);
+    }
     let envelope = JobIrEnvelope::new(
         execution.workflow_id(),
         JobSource::new(
@@ -1881,15 +1903,7 @@ fn prepared_instance(
             ".github/workflows/ci.yml",
             "push",
         ),
-        JobExecutionContext::new(
-            execution.workflow_name(),
-            execution.git_ref(),
-            workspace,
-            admission_reference(claimed.event()),
-            activation_reference(&runtime),
-        )
-        .with_run_number(execution.run_number())
-        .with_run_attempt(execution.run_attempt()),
+        job_execution,
         job,
     );
     envelope.validate().expect("current JobIR");
