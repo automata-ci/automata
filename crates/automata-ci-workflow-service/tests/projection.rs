@@ -22,15 +22,15 @@ use automata_ci_store::{
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
     WorkflowAdmissionIdempotency,
 };
+use automata_ci_workflow_github::{
+    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
+    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+};
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionFailure,
     WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionRequest,
     WorkflowAdmissionRequestError, WorkflowAdmissionService, WorkflowAdmissionStage,
     WorkflowAdmissionStageOutcome,
-};
-use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
-    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use bytes::Bytes;
 use uuid::Uuid;
@@ -95,10 +95,7 @@ async fn admission_resolves_max_queue_concurrency_from_safe_context() {
 
     let command = repository.take_command();
     let concurrency = command.concurrency().expect("workflow concurrency");
-    assert_eq!(
-        concurrency.display_key(),
-        "queue-refs/heads/main-stable"
-    );
+    assert_eq!(concurrency.display_key(), "queue-refs/heads/main-stable");
     assert_eq!(concurrency.normalized_key(), "queue-refs/heads/main-stable");
     assert!(concurrency.cancel_in_progress());
     assert_eq!(concurrency.queue_policy(), QueuePolicy::Max);
@@ -369,8 +366,8 @@ jobs:
             path: Arc::from(".github/workflows/queue.yml"),
         },
     );
-    let parsed = GithubWorkflowFrontend::default()
-        .parse(ParseWorkflowRequest::new(provenance, &source));
+    let parsed =
+        GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, &source));
     assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
     let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
         parsed.plan().expect("parsed plan"),
@@ -391,8 +388,8 @@ jobs:
         automata_ci_workflow_service::AdmissionRepositoryCoordinates::new(
             "github",
             "repository-queue",
-            "synthetic",
-            "queue",
+            "automata-ci",
+            "automata",
         )
         .expect("repository"),
         ".github/workflows/queue.yml",
