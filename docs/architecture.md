@@ -182,4 +182,4 @@ Virtualization.framework execution.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their
-acceptance gates are listed in the [implementation plan](implementation-plan.md#planned-provider-scope).
+acceptance gates are listed in the [implementation plan](implementation-plan.md#provider-scope).
