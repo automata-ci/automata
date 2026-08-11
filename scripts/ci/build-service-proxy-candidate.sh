@@ -82,6 +82,7 @@ env -u SOURCE_DATE_EPOCH podman build \
   --build-arg "AUTOMATA_VERSION=${version}" \
   --file "$context/Containerfile" \
   --format oci \
+  --identity-label=false \
   --network none \
   --pull=never \
   --timestamp "$source_date_epoch" \

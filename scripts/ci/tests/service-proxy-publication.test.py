@@ -447,6 +447,16 @@ class PublicationContract(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "version differs"):
             self.prepare("changed-version-output")
 
+    def test_production_builder_emits_the_exact_process_contract(self) -> None:
+        containerfile = (
+            REPOSITORY_ROOT / "images/service-proxy/Containerfile"
+        ).read_text(encoding="utf-8")
+        builder = (
+            REPOSITORY_ROOT / "scripts/ci/build-service-proxy-candidate.sh"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(containerfile.count("\nWORKDIR /\n"), 1)
+        self.assertEqual(builder.count("  --identity-label=false \\\n"), 1)
+
     def test_reviewed_lock_and_dispatch_inputs_are_exact(self) -> None:
         lock_path, lock, _ = self.load_review()
         digest = lock["image"].rsplit("@", 1)[1]

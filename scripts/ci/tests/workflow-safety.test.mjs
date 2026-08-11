@@ -111,6 +111,33 @@ function serviceProxyJobs() {
   };
 }
 
+function assertRegistryAttestationsUsePrivateHome(
+  job,
+  { expectedCount, home },
+) {
+  assert.ok(
+    job.includes(`ATTESTATION_HOME: \${{ github.workspace }}/${home}`),
+  );
+  assert.ok(
+    job.includes(`DOCKER_CONFIG: \${{ github.workspace }}/${home}/.docker`),
+  );
+  const registryAttestations = job
+    .split(/^      - name: /m)
+    .filter(
+      (step) =>
+        step.includes("uses: actions/attest@") &&
+        step.includes("push-to-registry: true"),
+    );
+  assert.equal(registryAttestations.length, expectedCount);
+  for (const step of registryAttestations) {
+    assert.match(
+      step,
+      /env:\n          HOME: \$\{\{ env\.ATTESTATION_HOME \}\}\n        uses: actions\/attest@/,
+    );
+  }
+  assert.match(job, /rm -f --[\s\S]*"\$DOCKER_CONFIG\/config\.json"/);
+}
+
 test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () => {
   const ci = source(".github/workflows/ci.yml");
   const store = section(ci, "\n  postgres_store:", "\n  postgres_integrations:");
@@ -361,6 +388,26 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     /group: publish-runner-profile-\$\{\{ inputs\.operation \}\}/,
   );
   assert.match(promote, /environment: profile-promotion/);
+});
+
+test("registry attestations use the isolated Docker credential home", () => {
+  const profile = source(".github/workflows/profile-image.yml");
+  const profileCandidate = section(profile, "\n  candidate:", "\n  promote:");
+  const { candidate: serviceProxyCandidate } = serviceProxyJobs();
+  const { stage } = releaseJobs();
+
+  assertRegistryAttestationsUsePrivateHome(profileCandidate, {
+    expectedCount: 3,
+    home: "target/task-tmp/profile-attestation-home",
+  });
+  assertRegistryAttestationsUsePrivateHome(serviceProxyCandidate, {
+    expectedCount: 3,
+    home: "target/task-tmp/service-proxy-attestation-home",
+  });
+  assertRegistryAttestationsUsePrivateHome(stage, {
+    expectedCount: 4,
+    home: "target/task-tmp/release/attestation-home",
+  });
 });
 
 test("service-proxy publication is GitHub-hosted, two-phase, and least-privileged", () => {

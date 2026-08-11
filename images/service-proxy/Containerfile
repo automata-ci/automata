@@ -34,5 +34,6 @@ COPY --chmod=0444 source-provenance.json \
 COPY --chmod=0444 sbom/automata-ci-service-proxy.cdx.json \
     /usr/share/sbom/automata-ci-service-proxy.cdx.json
 
+WORKDIR /
 USER 65532:65532
 ENTRYPOINT ["/usr/libexec/automata-ci-service-proxy"]

@@ -257,10 +257,11 @@ jobs:
       packages: write
     env:
       ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
+      ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/service-proxy-attestation-home
       CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
       CANDIDATE_DOWNLOAD: ${{ github.workspace }}/target/service-proxy-candidate-download
       CANDIDATE_SOURCE_DIRECTORY: ${{ github.workspace }}/target/service-proxy-candidate-source
-      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/service-proxy-docker-config
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/service-proxy-attestation-home/.docker
       REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-registry-auth.json
       REVIEW_DIRECTORY: ${{ github.workspace }}/target/service-proxy-review
     steps:
@@ -343,7 +344,8 @@ jobs:
       - name: Install image publication tooling
         run: |
           install -d -m 0700 -- \
-            "$DOCKER_CONFIG" "$(dirname -- "$REGISTRY_AUTH_FILE")"
+            "$ATTESTATION_HOME" "$DOCKER_CONFIG" \
+            "$(dirname -- "$REGISTRY_AUTH_FILE")"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends skopeo
 
@@ -446,6 +448,8 @@ jobs:
           done
 
       - name: Attest candidate build provenance
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-service-proxy
@@ -453,6 +457,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest exact canonical CycloneDX SBOM
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-service-proxy
@@ -462,6 +468,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest exact service-proxy source identity
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-service-proxy

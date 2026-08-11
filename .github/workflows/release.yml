@@ -287,9 +287,10 @@ jobs:
       id-token: write
       packages: write
     env:
+      ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/release/attestation-home
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
-      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release/docker-config
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release/attestation-home/.docker
       RUST_BACKTRACE: "1"
       TMPDIR: ${{ github.workspace }}/target/task-tmp/release
     steps:
@@ -341,7 +342,7 @@ jobs:
 
       - name: Install release build dependencies
         run: |
-          install -d -m 0700 -- "$TMPDIR" "$DOCKER_CONFIG"
+          install -d -m 0700 -- "$TMPDIR" "$ATTESTATION_HOME" "$DOCKER_CONFIG"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends binutils musl-tools podman
 
@@ -932,6 +933,8 @@ jobs:
           bind_version_tag ghcr.io/automata-ci/automata-runner "$RUNNER_DIGEST"
 
       - name: Attest Automata image provenance
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata
@@ -940,6 +943,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest Automata image SBOM
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata
@@ -949,6 +954,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest runner image provenance
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-runner
@@ -957,6 +964,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest runner image SBOM
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-runner
@@ -1058,7 +1067,9 @@ jobs:
 
       - name: Sign out of GHCR after staging
         if: ${{ always() }}
-        run: docker logout ghcr.io || true
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$DOCKER_CONFIG/config.json"
 
   prepare_crates:
     name: Prepare crates.io publication

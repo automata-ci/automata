@@ -142,10 +142,11 @@ jobs:
       id-token: write
       packages: write
     env:
+      ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/profile-attestation-home
       CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
       CANDIDATE_PROFILE_DIRECTORY: ${{ github.workspace }}/target/profile-candidate-source/images/github-hosted-ubuntu-24.04-x64
       CANDIDATE_SOURCE_DIRECTORY: ${{ github.workspace }}/target/profile-candidate-source
-      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/profile-docker-config
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/profile-attestation-home/.docker
       REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/profile-registry-auth.json
     steps:
       - name: Check out trusted publisher source
@@ -316,7 +317,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
-          install -d -m 0700 -- "$DOCKER_CONFIG"
+          install -d -m 0700 -- "$ATTESTATION_HOME" "$DOCKER_CONFIG"
           printf '%s' "$GHCR_TOKEN" |
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           printf '%s' "$GHCR_TOKEN" |
@@ -404,6 +405,8 @@ jobs:
           upload-release-assets: false
 
       - name: Attest candidate provenance
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
@@ -411,6 +414,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest candidate SBOM
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
@@ -419,6 +424,8 @@ jobs:
           push-to-registry: true
 
       - name: Attest candidate source identity
+        env:
+          HOME: ${{ env.ATTESTATION_HOME }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/automata-ci/automata-ubuntu-24.04-x64
