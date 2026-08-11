@@ -791,6 +791,11 @@ async fn build_logical_metrics_fixture(
         ],
         admitted_at,
     )
+    .base_context(logical_metrics_object(
+        format!("metrics/{suffix}/base-context.pb"),
+        21,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .actor("metrics-observer")
     .build()?;
     Ok(LogicalMetricsFixture {
@@ -925,7 +930,7 @@ fn logical_metrics_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -945,9 +950,11 @@ fn logical_metrics_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .actor(command.actor().unwrap_or_default())
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.actor(command.actor().unwrap_or_default()).build()?)
 }
 
 async fn assert_logical_admission_evidence(
@@ -1080,11 +1087,7 @@ async fn prepare_logical_metrics_job(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             claimed.descriptor().clone(),
             claimed.claim().clone(),
-            logical_metrics_object(
-                format!("metrics/{suffix}/{job_id}/base.pb"),
-                31,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            claimed.descriptor().base_context().clone(),
             logical_metrics_object(
                 format!("metrics/{suffix}/{job_id}/needs.pb"),
                 32,

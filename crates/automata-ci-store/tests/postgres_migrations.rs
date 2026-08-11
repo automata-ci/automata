@@ -825,6 +825,7 @@ async fn g1_upgrade_fences_populated_legacy_execution_state_without_fake_metadat
             .bind(job)
             .execute(database.pool())
             .await?;
+        complete_run_before_id_alias_upgrade(&database, run).await?;
         database.store().migrate().await?;
         let current_compatibility: (i32, i32, i32) = sqlx::query_as(
             "SELECT minimum_admission_epoch, job_ir_schema, runner_requirements_schema FROM automata_cluster_compatibility WHERE singleton",
@@ -1073,6 +1074,7 @@ async fn job_ir_v4_upgrade_fences_v3_then_v5_upgrade_rejects_obsolete_history() 
             .bind(run)
             .execute(database.pool())
             .await?;
+        complete_run_before_id_alias_upgrade(&database, run).await?;
         database.store().migrate().await?;
         let compatibility: (i32, i32, i32) = sqlx::query_as(
             "SELECT minimum_admission_epoch, job_ir_schema, runner_requirements_schema FROM automata_cluster_compatibility WHERE singleton",
@@ -1522,6 +1524,7 @@ async fn artifact_reservation_upgrade_backfills_populated_v8_rows() -> TestResul
             .bind(seed.job_id.as_uuid())
             .execute(database.pool())
             .await?;
+        complete_run_before_id_alias_upgrade(&database, seed.run_id.as_uuid()).await?;
         database.store().migrate().await?;
         Ok(())
     })
@@ -1791,6 +1794,22 @@ async fn apply_initial_migrations(database: &TestDatabase, migration_count: usiz
     for migration in TEST_MIGRATOR.iter().take(migration_count) {
         connection.apply(table_name, migration).await?;
     }
+    Ok(())
+}
+
+async fn complete_run_before_id_alias_upgrade(database: &TestDatabase, run_id: Uuid) -> TestResult {
+    let updated = sqlx::query(
+        r"
+        UPDATE workflow_runs
+        SET status = 'completed', updated_at_ms = GREATEST(updated_at_ms, 2)
+        WHERE id = $1
+          AND status IN ('queued', 'in_progress')
+        ",
+    )
+    .bind(run_id)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
     Ok(())
 }
 
