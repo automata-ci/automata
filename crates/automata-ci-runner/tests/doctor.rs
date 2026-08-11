@@ -9,9 +9,10 @@ use std::{
 use automata_ci_runner::capability_probe::{
     PODMAN_NETWORK_ISOLATION, ProbeReasonCode, ProbeStatus,
 };
+#[cfg(not(target_os = "linux"))]
+use automata_ci_runner::doctor::inspect_with_options;
 use automata_ci_runner::doctor::{
-    ServerHttpPolicy, ServerHttpPolicyError, ServerStatus, inspect, inspect_with_options,
-    probe_server_with_policy,
+    ServerHttpPolicy, ServerHttpPolicyError, ServerStatus, inspect, probe_server_with_policy,
 };
 
 #[test]
