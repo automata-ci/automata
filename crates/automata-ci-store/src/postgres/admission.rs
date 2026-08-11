@@ -805,6 +805,9 @@ pub(super) async fn assign_concurrency_slot(
 
     running = discard_terminal_slot(transaction, running).await?;
     delete_terminal_pending_runs(transaction, repository_id, concurrency).await?;
+    if running.is_none() {
+        running = take_oldest_pending_run(transaction, repository_id, concurrency).await?;
+    }
     if concurrency.queue_policy() == automata_ci_core::QueuePolicy::Single {
         let old_pending = active_pending_runs(transaction, repository_id, concurrency).await?;
         for old_pending in old_pending {
@@ -882,7 +885,7 @@ async fn active_pending_runs(
         JOIN workflow_runs AS run ON run.id = pending.run_id
         WHERE pending.repository_id = $1 AND pending.normalized_key = $2
           AND run.status IN ('queued', 'in_progress')
-        ORDER BY pending.enqueued_at_ms, pending.run_id
+        ORDER BY pending.queue_sequence
         ",
     )
     .bind(repository_id.as_uuid())
@@ -890,6 +893,45 @@ async fn active_pending_runs(
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)
+}
+
+async fn take_oldest_pending_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: RepositoryId,
+    concurrency: &WorkflowConcurrency,
+) -> Result<Option<Uuid>, WorkflowAdmissionStoreError> {
+    let run_id: Option<Uuid> = sqlx::query_scalar(
+        r"
+        SELECT pending.run_id
+        FROM concurrency_group_pending_runs AS pending
+        JOIN workflow_runs AS run ON run.id = pending.run_id
+        WHERE pending.repository_id = $1 AND pending.normalized_key = $2
+          AND run.status IN ('queued', 'in_progress')
+        ORDER BY pending.queue_sequence
+        LIMIT 1
+        FOR UPDATE OF pending, run
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(concurrency.normalized_key())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if let Some(run_id) = run_id {
+        sqlx::query(
+            r"
+            DELETE FROM concurrency_group_pending_runs
+            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
+            ",
+        )
+        .bind(repository_id.as_uuid())
+        .bind(concurrency.normalized_key())
+        .bind(run_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+    }
+    Ok(run_id)
 }
 
 async fn delete_terminal_pending_runs(
@@ -979,6 +1021,21 @@ struct PreemptedAttempt {
     protocol_version: Option<RunnerProtocolVersion>,
 }
 
+struct CancellableRun {
+    status: String,
+    updated_at: UnixMillis,
+}
+
+struct LogicalCancellationState {
+    root_invocation_id: Uuid,
+    marker_state: String,
+    marker_revision: i64,
+    marker_updated_at: i64,
+    invocation_state: String,
+    invocation_revision: i64,
+    invocation_updated_at: i64,
+}
+
 async fn cancel_run(
     transaction: &mut Transaction<'_, Postgres>,
     encryption: Option<&RunnerPayloadEncryption>,
@@ -986,32 +1043,63 @@ async fn cancel_run(
     preempting_run_id: RunId,
     observed_at: UnixMillis,
 ) -> Result<(), WorkflowAdmissionStoreError> {
-    let status: String = sqlx::query_scalar(
-        r"
-        SELECT status
-        FROM workflow_runs
-        WHERE id = $1
-        FOR UPDATE
-        ",
+    let Some(run) = lock_cancellable_run(transaction, run_id).await? else {
+        return Ok(());
+    };
+    let logical_cancellation = prepare_logical_concurrency_cancellation(
+        transaction,
+        run_id,
+        preempting_run_id,
+        &run,
+        observed_at,
     )
-    .bind(run_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
+    .await?;
+    let cancelled_at = logical_cancellation
+        .unwrap_or_else(|| UnixMillis::new(observed_at.get().max(run.updated_at.get())));
+
+    for attempt in load_preempted_attempts(transaction, run_id).await? {
+        cancel_attempt(
+            transaction,
+            encryption,
+            preempting_run_id,
+            cancelled_at,
+            attempt,
+        )
+        .await?;
+    }
+    if logical_cancellation.is_some() {
+        finalize_logical_concurrency_cancellation(transaction, run_id, cancelled_at).await?;
+    }
+    mark_workflow_run_cancelled(transaction, run_id, cancelled_at).await
+}
+
+async fn lock_cancellable_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+) -> Result<Option<CancellableRun>, WorkflowAdmissionStoreError> {
+    let run =
+        sqlx::query("SELECT status, updated_at_ms FROM workflow_runs WHERE id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(operation_error)?;
+    let status: String = run.try_get("status").map_err(operation_error)?;
+    let updated_at = UnixMillis::new(run.try_get("updated_at_ms").map_err(operation_error)?);
     match status.as_str() {
-        "queued" | "in_progress" => {}
-        "completed" | "cancelled" => return Ok(()),
+        "queued" | "in_progress" => Ok(Some(CancellableRun { status, updated_at })),
+        "completed" | "cancelled" => Ok(None),
         _ => {
-            return Err(StoreError::corrupt_data(
-                "workflow run has an invalid cancellation status",
-            )
-            .into());
+            Err(StoreError::corrupt_data("workflow run has an invalid cancellation status").into())
         }
     }
+}
 
-    // Keep this as a distinct READ COMMITTED statement after acquiring the
-    // run lock. A materializer that owned a compatible run lock first may
-    // have committed a new attempt while this transaction waited.
+async fn load_preempted_attempts(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+) -> Result<Vec<PreemptedAttempt>, WorkflowAdmissionStoreError> {
+    // Re-read after the run lock. A materializer may have committed a new
+    // attempt while this READ COMMITTED transaction waited for that lock.
     let rows = sqlx::query(
         r"
         SELECT attempt.id, attempt.lifecycle, attempt.changed_at_ms,
@@ -1041,29 +1129,25 @@ async fn cancel_run(
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let attempts = rows
-        .iter()
+    rows.iter()
         .map(decode_preempted_attempt)
-        .collect::<Result<Vec<_>, _>>()?;
-    for attempt in attempts {
-        cancel_attempt(
-            transaction,
-            encryption,
-            preempting_run_id,
-            observed_at,
-            attempt,
-        )
-        .await?;
-    }
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn mark_workflow_run_cancelled(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    cancelled_at: UnixMillis,
+) -> Result<(), WorkflowAdmissionStoreError> {
     let updated = sqlx::query(
         r"
         UPDATE workflow_runs
-        SET status = 'cancelled', updated_at_ms = greatest(updated_at_ms, $2)
+        SET status = 'cancelled', updated_at_ms = $2
         WHERE id = $1 AND status IN ('queued','in_progress')
         ",
     )
     .bind(run_id)
-    .bind(observed_at.get())
+    .bind(cancelled_at.get())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -1071,6 +1155,298 @@ async fn cancel_run(
     if updated != 1 {
         return Err(StoreError::corrupt_data(
             "locked active workflow run disappeared during cancellation",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn prepare_logical_concurrency_cancellation(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    preempting_run_id: RunId,
+    run: &CancellableRun,
+    observed_at: UnixMillis,
+) -> Result<Option<UnixMillis>, WorkflowAdmissionStoreError> {
+    let Some(state) = lock_logical_cancellation_state(transaction, run_id).await? else {
+        return Ok(None);
+    };
+    let dependent_updated_at =
+        lock_logical_cancellation_dependents(transaction, run_id, state.root_invocation_id).await?;
+    let cancelled_at = UnixMillis::new(
+        observed_at
+            .get()
+            .max(run.updated_at.get())
+            .max(state.marker_updated_at)
+            .max(state.invocation_updated_at)
+            .max(dependent_updated_at),
+    );
+    insert_logical_cancellation_evidence(
+        transaction,
+        run_id,
+        preempting_run_id,
+        run,
+        &state,
+        cancelled_at,
+    )
+    .await?;
+    Ok(Some(cancelled_at))
+}
+
+async fn lock_logical_cancellation_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+) -> Result<Option<LogicalCancellationState>, WorkflowAdmissionStoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT marker.root_invocation_id,
+               marker.state AS marker_state,
+               marker.revision AS marker_revision,
+               marker.updated_at_ms AS marker_updated_at_ms,
+               invocation.state AS invocation_state,
+               invocation.revision AS invocation_revision,
+               invocation.updated_at_ms AS invocation_updated_at_ms
+        FROM workflow_plan_v2_runs AS marker
+        JOIN workflow_plan_v2_invocations AS invocation
+          ON invocation.run_id = marker.run_id
+         AND invocation.id = marker.root_invocation_id
+        WHERE marker.run_id = $1
+        FOR UPDATE OF marker, invocation
+        ",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let state = LogicalCancellationState {
+        root_invocation_id: row.try_get("root_invocation_id").map_err(operation_error)?,
+        marker_state: row.try_get("marker_state").map_err(operation_error)?,
+        marker_revision: row.try_get("marker_revision").map_err(operation_error)?,
+        marker_updated_at: row
+            .try_get("marker_updated_at_ms")
+            .map_err(operation_error)?,
+        invocation_state: row.try_get("invocation_state").map_err(operation_error)?,
+        invocation_revision: row
+            .try_get("invocation_revision")
+            .map_err(operation_error)?,
+        invocation_updated_at: row
+            .try_get("invocation_updated_at_ms")
+            .map_err(operation_error)?,
+    };
+    if !matches!(state.marker_state.as_str(), "pending" | "active")
+        || !matches!(state.invocation_state.as_str(), "pending" | "active")
+        || state.marker_revision <= 0
+        || state.marker_revision == i64::MAX
+        || state.invocation_revision <= 0
+        || state.invocation_revision == i64::MAX
+    {
+        return Err(StoreError::corrupt_data(
+            "active workflow run has non-cancellable logical orchestration state",
+        )
+        .into());
+    }
+    Ok(Some(state))
+}
+
+async fn lock_logical_cancellation_dependents(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    root_invocation_id: Uuid,
+) -> Result<i64, WorkflowAdmissionStoreError> {
+    let job_rows = sqlx::query(
+        r"
+        SELECT updated_at_ms
+        FROM workflow_plan_v2_jobs
+        WHERE run_id = $1 AND invocation_id = $2
+        ORDER BY source_order, id
+        FOR UPDATE
+        ",
+    )
+    .bind(run_id)
+    .bind(root_invocation_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if job_rows.is_empty() {
+        return Err(StoreError::corrupt_data(
+            "logical concurrency cancellation found no admitted jobs",
+        )
+        .into());
+    }
+    let mut updated_at = 0;
+    for job in &job_rows {
+        updated_at = updated_at.max(
+            job.try_get::<i64, _>("updated_at_ms")
+                .map_err(operation_error)?,
+        );
+    }
+    let check_rows = sqlx::query(
+        r"
+        SELECT desired_updated_at_ms
+        FROM github_check_subjects
+        WHERE workflow_run_id = $1
+        ORDER BY id
+        FOR UPDATE
+        ",
+    )
+    .bind(run_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if check_rows.len() > 1 {
+        return Err(StoreError::corrupt_data(
+            "logical workflow run has multiple linked GitHub Checks",
+        )
+        .into());
+    }
+    for check in &check_rows {
+        updated_at = updated_at.max(
+            check
+                .try_get::<i64, _>("desired_updated_at_ms")
+                .map_err(operation_error)?,
+        );
+    }
+    Ok(updated_at)
+}
+
+async fn insert_logical_cancellation_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    preempting_run_id: RunId,
+    run: &CancellableRun,
+    state: &LogicalCancellationState,
+    cancelled_at: UnixMillis,
+) -> Result<(), WorkflowAdmissionStoreError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_concurrency_cancellations (
+            run_id, root_invocation_id, preempting_run_id,
+            prior_workflow_status, prior_workflow_updated_at_ms,
+            prior_marker_state, prior_marker_revision, prior_marker_updated_at_ms,
+            prior_invocation_state, prior_invocation_revision,
+            prior_invocation_updated_at_ms, cancelled_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (run_id) DO NOTHING
+        ",
+    )
+    .bind(run_id)
+    .bind(state.root_invocation_id)
+    .bind(preempting_run_id.as_uuid())
+    .bind(&run.status)
+    .bind(run.updated_at.get())
+    .bind(&state.marker_state)
+    .bind(state.marker_revision)
+    .bind(state.marker_updated_at)
+    .bind(&state.invocation_state)
+    .bind(state.invocation_revision)
+    .bind(state.invocation_updated_at)
+    .bind(cancelled_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    if inserted != 1 {
+        return Err(StoreError::corrupt_data(
+            "active logical run already has concurrency cancellation evidence",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn finalize_logical_concurrency_cancellation(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    cancelled_at: UnixMillis,
+) -> Result<(), WorkflowAdmissionStoreError> {
+    sqlx::query(
+        r"
+        UPDATE workflow_plan_v2_jobs
+        SET state = 'cancelled',
+            activation_owner_id = NULL,
+            activation_claimed_at_ms = NULL,
+            activation_expires_at_ms = NULL,
+            updated_at_ms = $2
+        WHERE run_id = $1
+          AND state IN ('pending', 'activating', 'activated', 'skipped')
+        ",
+    )
+    .bind(run_id)
+    .bind(cancelled_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let invocation_rows = sqlx::query(
+        r"
+        UPDATE workflow_plan_v2_invocations
+        SET state = 'cancelled', revision = revision + 1, updated_at_ms = $2
+        WHERE run_id = $1 AND state IN ('pending','active')
+          AND revision < 9223372036854775807
+        ",
+    )
+    .bind(run_id)
+    .bind(cancelled_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    let marker_rows = sqlx::query(
+        r"
+        UPDATE workflow_plan_v2_runs
+        SET state = 'cancelled', revision = revision + 1, updated_at_ms = $2
+        WHERE run_id = $1 AND state IN ('pending','active')
+          AND revision < 9223372036854775807
+        ",
+    )
+    .bind(run_id)
+    .bind(cancelled_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    if invocation_rows != 1 || marker_rows != 1 {
+        return Err(StoreError::corrupt_data(
+            "logical concurrency cancellation lost orchestration ownership",
+        )
+        .into());
+    }
+    let (linked, updated): (i64, i64) = sqlx::query_as(
+        r"
+        WITH linked AS MATERIALIZED (
+            SELECT id
+            FROM github_check_subjects
+            WHERE workflow_run_id = $1
+            FOR UPDATE
+        ), updated AS (
+            UPDATE github_check_subjects AS subject
+            SET desired_state = 'completed',
+                desired_conclusion = 'cancelled',
+                terminal_cause = 'workflow_cancelled',
+                desired_revision = desired_revision + 1,
+                desired_updated_at_ms = $2
+            FROM linked
+            WHERE subject.id = linked.id
+              AND subject.desired_state IN ('queued', 'in_progress')
+              AND subject.desired_conclusion IS NULL
+              AND subject.terminal_cause IS NULL
+              AND subject.desired_updated_at_ms <= $2
+            RETURNING subject.id
+        )
+        SELECT (SELECT count(*) FROM linked),
+               (SELECT count(*) FROM updated)
+        ",
+    )
+    .bind(run_id)
+    .bind(cancelled_at.get())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if (linked, updated) != (0, 0) && (linked, updated) != (1, 1) {
+        return Err(StoreError::corrupt_data(
+            "logical concurrency cancellation could not terminalize its linked GitHub Check",
         )
         .into());
     }
@@ -1671,6 +2047,47 @@ pub(super) async fn reconcile_terminal_concurrency(
     let Some(concurrency_key) = concurrency_key else {
         return Ok(None);
     };
+    let running =
+        lock_running_concurrency_slot(transaction, repository_id, concurrency_key).await?;
+    delete_terminal_pending_by_key(transaction, repository_id, concurrency_key).await?;
+    let pending_member = delete_pending_member(
+        transaction,
+        repository_id,
+        concurrency_key,
+        run_id.as_uuid(),
+    )
+    .await?;
+    if running != Some(run_id.as_uuid()) {
+        if pending_member {
+            advance_concurrency_generation(
+                transaction,
+                repository_id,
+                concurrency_key,
+                observed_at,
+            )
+            .await?;
+        }
+        return Ok(None);
+    }
+
+    let promotable =
+        take_oldest_pending_by_key(transaction, repository_id, concurrency_key).await?;
+    replace_running_concurrency_slot(
+        transaction,
+        repository_id,
+        concurrency_key,
+        promotable,
+        observed_at,
+    )
+    .await?;
+    Ok(promotable.map(RunId::from_uuid))
+}
+
+async fn lock_running_concurrency_slot(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+) -> Result<Option<Uuid>, StoreError> {
     let row = sqlx::query(
         r"
         SELECT running_run_id
@@ -1685,9 +2102,14 @@ pub(super) async fn reconcile_terminal_concurrency(
     .await
     .map_err(StoreError::operation)?
     .ok_or_else(|| StoreError::corrupt_data("run references a missing concurrency group"))?;
-    let running: Option<Uuid> = row
-        .try_get("running_run_id")
-        .map_err(StoreError::operation)?;
+    row.try_get("running_run_id").map_err(StoreError::operation)
+}
+
+async fn delete_terminal_pending_by_key(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+) -> Result<(), StoreError> {
     sqlx::query(
         r"
         DELETE FROM concurrency_group_pending_runs AS pending
@@ -1702,70 +2124,69 @@ pub(super) async fn reconcile_terminal_concurrency(
     .execute(&mut **transaction)
     .await
     .map_err(StoreError::operation)?;
+    Ok(())
+}
 
-    let pending_member: bool = sqlx::query_scalar(
+async fn delete_pending_member(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+    run_id: Uuid,
+) -> Result<bool, StoreError> {
+    let removed: Option<Uuid> = sqlx::query_scalar(
         r"
-        SELECT EXISTS (
-            SELECT 1 FROM concurrency_group_pending_runs
-            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
-        )
+        DELETE FROM concurrency_group_pending_runs
+        WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
+        RETURNING run_id
         ",
     )
     .bind(repository_id)
     .bind(concurrency_key)
-    .bind(run_id.as_uuid())
-    .fetch_one(&mut **transaction)
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(StoreError::operation)?;
-    if pending_member {
-        sqlx::query(
-            r"
-            DELETE FROM concurrency_group_pending_runs
-            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
-            ",
-        )
-        .bind(repository_id)
-        .bind(concurrency_key)
-        .bind(run_id.as_uuid())
-        .execute(&mut **transaction)
-        .await
-        .map_err(StoreError::operation)?;
-    }
-    if running != Some(run_id.as_uuid()) {
-        if pending_member {
-            let rows = sqlx::query(
-                r"
-                UPDATE concurrency_groups
-                SET generation = generation + 1,
-                    updated_at_ms = greatest(updated_at_ms, $3)
-                WHERE repository_id = $1 AND normalized_key = $2
-                  AND generation < 9223372036854775807
-                ",
-            )
-            .bind(repository_id)
-            .bind(concurrency_key)
-            .bind(observed_at.get())
-            .execute(&mut **transaction)
-            .await
-            .map_err(StoreError::operation)?
-            .rows_affected();
-            if rows != 1 {
-                return Err(StoreError::corrupt_data(
-                    "concurrency generation is exhausted",
-                ));
-            }
-        }
-        return Ok(None);
-    }
+    Ok(removed.is_some())
+}
 
-    let promotable: Option<Uuid> = sqlx::query_scalar(
+async fn advance_concurrency_generation(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+    observed_at: UnixMillis,
+) -> Result<(), StoreError> {
+    let rows = sqlx::query(
+        r"
+        UPDATE concurrency_groups
+        SET generation = generation + 1,
+            updated_at_ms = greatest(updated_at_ms, $3)
+        WHERE repository_id = $1 AND normalized_key = $2
+          AND generation < 9223372036854775807
+        ",
+    )
+    .bind(repository_id)
+    .bind(concurrency_key)
+    .bind(observed_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(StoreError::operation)?
+    .rows_affected();
+    require_concurrency_generation(rows)
+}
+
+async fn take_oldest_pending_by_key(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+) -> Result<Option<Uuid>, StoreError> {
+    let run_id: Option<Uuid> = sqlx::query_scalar(
         r"
         SELECT pending.run_id
         FROM concurrency_group_pending_runs AS pending
         JOIN workflow_runs AS queued ON queued.id = pending.run_id
         WHERE pending.repository_id = $1 AND pending.normalized_key = $2
           AND queued.status IN ('queued', 'in_progress')
-        ORDER BY pending.enqueued_at_ms, pending.run_id
+        ORDER BY pending.queue_sequence
         LIMIT 1
         FOR UPDATE OF pending, queued
         ",
@@ -1775,7 +2196,7 @@ pub(super) async fn reconcile_terminal_concurrency(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(StoreError::operation)?;
-    if let Some(promoted) = promotable {
+    if let Some(run_id) = run_id {
         sqlx::query(
             r"
             DELETE FROM concurrency_group_pending_runs
@@ -1784,11 +2205,21 @@ pub(super) async fn reconcile_terminal_concurrency(
         )
         .bind(repository_id)
         .bind(concurrency_key)
-        .bind(promoted)
+        .bind(run_id)
         .execute(&mut **transaction)
         .await
         .map_err(StoreError::operation)?;
     }
+    Ok(run_id)
+}
+
+async fn replace_running_concurrency_slot(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: Uuid,
+    concurrency_key: &str,
+    running: Option<Uuid>,
+    observed_at: UnixMillis,
+) -> Result<(), StoreError> {
     let rows = sqlx::query(
         r"
         UPDATE concurrency_groups
@@ -1801,18 +2232,22 @@ pub(super) async fn reconcile_terminal_concurrency(
     )
     .bind(repository_id)
     .bind(concurrency_key)
-    .bind(promotable)
+    .bind(running)
     .bind(observed_at.get())
     .execute(&mut **transaction)
     .await
     .map_err(StoreError::operation)?
     .rows_affected();
+    require_concurrency_generation(rows)
+}
+
+fn require_concurrency_generation(rows: u64) -> Result<(), StoreError> {
     if rows != 1 {
         return Err(StoreError::corrupt_data(
             "concurrency generation is exhausted",
         ));
     }
-    Ok(promotable.map(RunId::from_uuid))
+    Ok(())
 }
 
 async fn lock_concurrency_advisory(

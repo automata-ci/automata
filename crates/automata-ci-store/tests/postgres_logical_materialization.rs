@@ -738,6 +738,45 @@ async fn zero_instance_activation_creates_no_claim_job_attempt_or_legacy_edge() 
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn logical_concurrency_preemption_fences_unmaterialized_work() -> TestResult {
+    run_with_database(|database| async move {
+        let race =
+            prepare_materialization_race_fixture(&database, "logical-preemption", 25_000).await?;
+        let replacement = replacement_admission(&race.fixture, 0xd0, 1_200)?;
+        database.store().admit_workflow(replacement.command).await?;
+
+        let states: (String, String, String) = sqlx::query_as(
+            r"
+            SELECT run.status, marker.state, invocation.state
+            FROM workflow_runs AS run
+            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+            JOIN workflow_plan_v2_invocations AS invocation
+              ON invocation.run_id = marker.run_id
+             AND invocation.id = marker.root_invocation_id
+            WHERE run.id = $1
+            ",
+        )
+        .bind(race.fixture.command.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            states,
+            ("cancelled".into(), "cancelled".into(), "cancelled".into())
+        );
+        let cancellation_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow_plan_v2_concurrency_cancellations WHERE run_id = $1",
+        )
+        .bind(race.fixture.command.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(cancellation_count, 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn cancellation_first_rejects_a_waiting_materialization_without_partial_rows() -> TestResult {
     run_with_database(|database| async move {
         let race =
@@ -909,7 +948,7 @@ async fn prepare_materialization_race_fixture(
     tenant: &str,
     namespace: u128,
 ) -> TestResult<MaterializationRaceFixture> {
-    let mut fixture = fixture(database, tenant, namespace).await?;
+    let mut fixture = fixture_with_concurrency(database, tenant, namespace, true).await?;
     seed_tenant(database, &fixture.tenant).await?;
     admit_authenticated_fixture(database, &mut fixture, false).await?;
     let activated_claim = claim_activation(database, &fixture, namespace + 100).await?;
@@ -934,19 +973,6 @@ async fn prepare_materialization_race_fixture(
     let consumed = select_materialization(database, namespace + 190, namespace + 200).await?;
     assert_eq!(consumed.selected().target(), &expected_target);
     let claimed = consumed.authority().clone();
-    sqlx::query(
-        r"
-        INSERT INTO concurrency_groups (
-            repository_id, normalized_key, display_key,
-            running_run_id, generation, updated_at_ms
-        ) VALUES ($1, $2, $2, $3, 1, 1100)
-        ",
-    )
-    .bind(fixture.command.repository().id().as_uuid())
-    .bind(MATERIALIZATION_RACE_GROUP)
-    .bind(fixture.command.run_id().as_uuid())
-    .execute(database.pool())
-    .await?;
     Ok(MaterializationRaceFixture {
         fixture,
         prepared,
@@ -1217,38 +1243,19 @@ async fn row_count(pool: &PgPool, table: &'static str, id: Uuid) -> TestResult<i
 }
 
 async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> TestResult<Fixture> {
+    fixture_with_concurrency(database, tenant, namespace, false).await
+}
+
+async fn fixture_with_concurrency(
+    database: &TestDatabase,
+    tenant: &str,
+    namespace: u128,
+    concurrency: bool,
+) -> TestResult<Fixture> {
     let clock_origin_ms = database_now_ms(database).await?;
     let tenant_scope = TenantScope::from_authenticated_tenant_id(tenant)?;
-    let connection_id = ProviderConnectionId::from_uuid(Uuid::from_u128(namespace + 20))?;
-    let installation_id = ProviderInstallationId::new(u64::try_from(namespace + 30)?)?;
-    let github_repository_id = ProviderRepositoryId::new(u64::try_from(namespace + 40)?)?;
-    let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(1);
-    let manifest = GithubProviderManifest::new(
-        tenant_scope.clone(),
-        connection_id,
-        installation_id,
-        github_repository_id,
-        GithubRepositoryName::new(format!("example/project-{namespace}"))?,
-        ProviderRepositoryVisibility::Public,
-        GithubServerServiceAppId::new(u64::try_from(namespace + 50)?)?,
-        GithubServerServiceAppClientId::new(format!("Iv1.materialization-{namespace}"))?,
-        GithubServerServiceJwtIssuer::AppClientId,
-        Sha256Digest::from_bytes([0x61; 32]),
-        GithubServerServiceRevision::new(1)?,
-        GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes(
-            [0x62; 32],
-        ))?,
-        GithubServerServiceRevision::new(1)?,
-        GithubServerServiceRevision::new(1)?,
-        JobAuthorityProfile::Standard,
-        runtime_policy.runner_policy,
-        runtime_policy.revision,
-        runtime_policy.semantic_digest,
-        GithubCheckName::new("Automata CI")?,
-        GithubProviderOrigins::github_dot_com(),
-        GithubProviderManifestLimits::github_dot_com_ci(),
-        GithubProviderManifestRevision::new(1)?,
-    );
+    let manifest = materialization_manifest(tenant_scope.clone(), namespace)?;
+    let github_repository_id = manifest.github_repository_id();
     let workflow_id = WorkflowId::from_uuid(Uuid::from_u128(namespace + 2));
     let snapshot_id = WorkflowSnapshotId::from_uuid(Uuid::from_u128(namespace + 3));
     let run_id = RunId::from_uuid(Uuid::from_u128(namespace + 4));
@@ -1266,7 +1273,7 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         Vec::new(),
     )
     .expect("logical job");
-    let command = AdmitLogicalWorkflowRun::builder(
+    let mut command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("materialize-{namespace}"))
             .expect("idempotency"),
@@ -1302,9 +1309,14 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
     .base_context(runtime_context_object(
         format!("materialization/{namespace}/base-context.pb"),
         0x15,
-    ))
-    .build()
-    .expect("logical admission");
+    ));
+    if concurrency {
+        command = command.concurrency(Some(WorkflowConcurrency::new(
+            MATERIALIZATION_RACE_GROUP,
+            false,
+        )?));
+    }
+    let command = command.build().expect("logical admission");
     Ok(Fixture {
         tenant: tenant.to_owned(),
         namespace,
@@ -1315,6 +1327,42 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         plan,
         plan_bytes,
     })
+}
+
+fn materialization_manifest(
+    tenant_scope: TenantScope,
+    namespace: u128,
+) -> TestResult<GithubProviderManifest> {
+    let connection_id = ProviderConnectionId::from_uuid(Uuid::from_u128(namespace + 20))?;
+    let installation_id = ProviderInstallationId::new(u64::try_from(namespace + 30)?)?;
+    let github_repository_id = ProviderRepositoryId::new(u64::try_from(namespace + 40)?)?;
+    let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(1);
+    Ok(GithubProviderManifest::new(
+        tenant_scope,
+        connection_id,
+        installation_id,
+        github_repository_id,
+        GithubRepositoryName::new(format!("example/project-{namespace}"))?,
+        ProviderRepositoryVisibility::Public,
+        GithubServerServiceAppId::new(u64::try_from(namespace + 50)?)?,
+        GithubServerServiceAppClientId::new(format!("Iv1.materialization-{namespace}"))?,
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([0x61; 32]),
+        GithubServerServiceRevision::new(1)?,
+        GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes(
+            [0x62; 32],
+        ))?,
+        GithubServerServiceRevision::new(1)?,
+        GithubServerServiceRevision::new(1)?,
+        JobAuthorityProfile::Standard,
+        runtime_policy.runner_policy,
+        runtime_policy.revision,
+        runtime_policy.semantic_digest,
+        GithubCheckName::new("Automata CI")?,
+        GithubProviderOrigins::github_dot_com(),
+        GithubProviderManifestLimits::github_dot_com_ci(),
+        GithubProviderManifestRevision::new(1)?,
+    ))
 }
 
 fn materialization_workflow_plan() -> WorkflowPlan {
@@ -1544,6 +1592,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.concurrency(command.concurrency().cloned());
     Ok(builder.build()?)
 }
 

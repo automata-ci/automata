@@ -1,8 +1,8 @@
 mod common;
 
 use automata_ci_core::{
-    AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, RunId,
-    RunnerRequirements, Sha256Digest, UnixMillis, WorkflowId,
+    AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, QueuePolicy,
+    RunId, RunnerRequirements, Sha256Digest, UnixMillis, WorkflowId,
 };
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AdmissionObject, AdmissionRepository, AdmitWorkflowRun,
@@ -171,6 +171,54 @@ async fn cancel_in_progress_serializes_with_claim_without_an_orphan_lease() -> T
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates an isolated PostgreSQL schema"]
+async fn max_queue_retains_fifo_order_and_recovers_a_stale_running_slot() -> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        seed_run_number_counter(&database, &seed).await?;
+        let snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
+        let active =
+            admission_case_with_concurrency(&seed, snapshot_id, 51, 10, false, QueuePolicy::Max)?;
+        let first =
+            admission_case_with_concurrency(&seed, snapshot_id, 52, 20, false, QueuePolicy::Max)?;
+        let second =
+            admission_case_with_concurrency(&seed, snapshot_id, 53, 30, false, QueuePolicy::Max)?;
+        for case in [&active, &first, &second] {
+            database
+                .store()
+                .admit_workflow(case.command.clone())
+                .await?;
+        }
+        assert_eq!(running_run(&database, &seed).await?, active.run_id);
+        assert_eq!(
+            pending_runs(&database, &seed).await?,
+            [first.run_id, second.run_id]
+        );
+
+        sqlx::query("UPDATE workflow_runs SET status = 'completed' WHERE id = $1")
+            .bind(active.run_id.as_uuid())
+            .execute(database.pool())
+            .await?;
+        let third =
+            admission_case_with_concurrency(&seed, snapshot_id, 54, 40, false, QueuePolicy::Max)?;
+        database
+            .store()
+            .admit_workflow(third.command.clone())
+            .await?;
+
+        assert_eq!(running_run(&database, &seed).await?, first.run_id);
+        assert_eq!(
+            pending_runs(&database, &seed).await?,
+            [second.run_id, third.run_id]
+        );
+        assert_eq!(run_status(&database, second.run_id).await?, "queued");
+        assert_eq!(run_status(&database, third.run_id).await?, "queued");
+        Ok(())
+    })
+    .await
+}
+
 async fn seed_run_number_counter(database: &TestDatabase, seed: &SeedData) -> TestResult {
     sqlx::query(
         r"
@@ -190,6 +238,24 @@ fn admission_case(
     snapshot_id: WorkflowSnapshotId,
     tag: u8,
     admitted_at: i64,
+) -> TestResult<AdmissionCase> {
+    admission_case_with_concurrency(
+        seed,
+        snapshot_id,
+        tag,
+        admitted_at,
+        true,
+        QueuePolicy::Single,
+    )
+}
+
+fn admission_case_with_concurrency(
+    seed: &SeedData,
+    snapshot_id: WorkflowSnapshotId,
+    tag: u8,
+    admitted_at: i64,
+    cancel_in_progress: bool,
+    queue_policy: QueuePolicy,
 ) -> TestResult<AdmissionCase> {
     let run_id = RunId::new();
     let job_id = JobId::new();
@@ -237,13 +303,46 @@ fn admission_case(
         vec![job],
         UnixMillis::new(admitted_at),
     )
-    .concurrency(Some(WorkflowConcurrency::new(GROUP, true)?))
+    .concurrency(Some(
+        WorkflowConcurrency::new(GROUP, cancel_in_progress)?.with_queue_policy(queue_policy),
+    ))
     .build()?;
     Ok(AdmissionCase {
         command,
         run_id,
         attempt_id,
     })
+}
+
+async fn running_run(database: &TestDatabase, seed: &SeedData) -> TestResult<RunId> {
+    let run_id: uuid::Uuid = sqlx::query_scalar(
+        r"
+        SELECT running_run_id
+        FROM concurrency_groups
+        WHERE repository_id = $1 AND normalized_key = $2
+        ",
+    )
+    .bind(seed.repository_id)
+    .bind(GROUP)
+    .fetch_one(database.pool())
+    .await?;
+    Ok(RunId::from_uuid(run_id))
+}
+
+async fn pending_runs(database: &TestDatabase, seed: &SeedData) -> TestResult<Vec<RunId>> {
+    let run_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r"
+        SELECT run_id
+        FROM concurrency_group_pending_runs
+        WHERE repository_id = $1 AND normalized_key = $2
+        ORDER BY queue_sequence
+        ",
+    )
+    .bind(seed.repository_id)
+    .bind(GROUP)
+    .fetch_all(database.pool())
+    .await?;
+    Ok(run_ids.into_iter().map(RunId::from_uuid).collect())
 }
 
 fn object(digest_tag: u8, key: impl Into<String>, media_type: &str) -> TestResult<AdmissionObject> {

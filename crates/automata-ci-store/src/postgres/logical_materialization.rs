@@ -1150,11 +1150,30 @@ fn instance_query() -> &'static str {
       AND publication.condition_matched
       AND publication.instance_count > 0
       AND logical_job.execution_kind = 'steps'
-      AND logical_job.state = 'activated'
       AND invocation.plan_schema = 2
-      AND invocation.state IN ('pending', 'active')
       AND marker.orchestration_schema = 1
-      AND marker.state IN ('pending', 'active')
+      AND (
+          (
+              logical_job.state = 'activated'
+              AND invocation.state IN ('pending', 'active')
+              AND marker.state IN ('pending', 'active')
+          ) OR (
+              logical_job.state = 'cancelled'
+              AND invocation.state = 'cancelled'
+              AND marker.state = 'cancelled'
+              AND run.status = 'cancelled'
+              AND EXISTS (
+                  SELECT 1
+                  FROM workflow_plan_v2_concurrency_cancellations AS cancellation
+                  WHERE cancellation.run_id = run.id
+                    AND cancellation.root_invocation_id = invocation.id
+                    AND cancellation.cancelled_at_ms = logical_job.updated_at_ms
+                    AND cancellation.cancelled_at_ms = invocation.updated_at_ms
+                    AND cancellation.cancelled_at_ms = marker.updated_at_ms
+                    AND cancellation.cancelled_at_ms = run.updated_at_ms
+              )
+          )
+      )
       AND run.admission_epoch = 4
       AND run.plan_schema = 2
     FOR UPDATE OF instance
