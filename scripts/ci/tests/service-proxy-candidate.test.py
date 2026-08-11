@@ -171,6 +171,11 @@ class CandidateContract(unittest.TestCase):
                 ),
             )
             identity = json.load(archive.extractfile(candidate.IDENTITY_NAME))
+            oci_bytes = archive.extractfile(candidate.IMAGE_ARCHIVE_NAME).read()
+        with tarfile.open(fileobj=io.BytesIO(oci_bytes), mode="r:") as archive:
+            members = {member.name: member for member in archive.getmembers()}
+        self.assertEqual(members["blobs"].mode, 0o755)
+        self.assertEqual(members["blobs/sha256"].mode, 0o755)
         self.assertEqual(identity["image"]["name"], candidate.IMAGE_NAME)
         self.assertRegex(identity["image"]["manifest_digest"], candidate.OCI_DIGEST)
         self.assertEqual(identity["release"], self.release)
