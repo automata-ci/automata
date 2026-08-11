@@ -69,6 +69,40 @@ npm run check
 npm audit --audit-level=low
 ```
 
+Generate production-source coverage for the Vitest unit and integration suites
+with:
+
+```sh
+npm run test:coverage
+```
+
+Coverage includes every TypeScript and TSX file under `src/`, including files
+that no test imports, and writes reports beneath the ignored `coverage/`
+directory. The terminal summary is accompanied by
+`coverage/coverage-summary.json`, `coverage/lcov.info`, and the browsable
+`coverage/index.html`. Reports are still written when a test fails so the
+failure can be diagnosed with its partial coverage data. The build-verifier and
+Playwright suites remain separate contract and browser checks; this command
+does not claim to measure their execution.
+
+The checked-in aggregate coverage floors are based on the reviewed CI-pinned
+Node 24.19.0 baseline:
+
+| Metric | Baseline | Enforced floor | Headroom |
+| --- | ---: | ---: | ---: |
+| Statements | 93.99% | 93% | 0.99 points |
+| Branches | 85.29% | 84% | 1.29 points |
+| Functions | 97.18% | 96% | 1.18 points |
+| Lines | 94.00% | 93% | 1.00 point |
+
+Each floor is a whole-number percentage below the measured result and leaves at
+least 0.99 points of margin. Branches and functions use the next lower whole
+number because truncating those baselines would leave only 0.29 and 0.18 points
+of margin. CI runs this threshold check; raise the floors after reviewed
+coverage improvements, and lower them only with a new reproducible baseline and
+an explicit justification. These aggregate floors are a regression guard, not
+a substitute for reviewing per-file gaps.
+
 For the interactive static demo, run the Vite development server and open the
 printed local URL. Changes hot-reload in the browser:
 
@@ -79,10 +113,9 @@ npm run dev
 The demo is explicitly marked as sample data and does not claim that its
 workflow runs were executed. Repository, branch, and commit links point to real
 allowlisted GitHub destinations; artifact downloads remain unavailable because
-the static site has no authenticated backend. The demo itself requires
-JavaScript, while the production application remains server-rendered. It is the
-same build intended for a future GitHub Pages preview; no hosted preview is
-currently deployed.
+the static site has no authenticated backend. The demo requires JavaScript,
+while the production application remains server-rendered. The same build is
+deployed at <https://automata-ci.github.io/automata/> from the default branch.
 
 The screenshot suite uses Chromium to exercise the populated and empty
 repository directory, the full run-list → run-summary → job-log path, both
@@ -102,10 +135,10 @@ of reusing an ambient process and serves the build from `/automata/`, matching
 the GitHub Pages project-site topology. The preview build verifier rejects
 root-relative executable/style URLs, missing assets, unexpected output, and
 other subpath-breaking output before the browser suite starts, then checks the
-exact non-empty PNG set before publication. The Pages workflow is intended as
-the future deployment path for this same build. Until Pages is enabled and
-deployed, screenshots remain local or review artifacts, and the root README
-does not link to hosted captures. The suite also checks native demo routing,
+exact non-empty PNG set before publication. The Pages workflow deploys this
+build from `main`; pull requests build and verify it without publishing.
+Screenshots remain local or workflow review artifacts and are not presented as
+executed-run evidence. The suite also checks native demo routing,
 keyboard focus, mobile disclosures, layout shift, document overflow, forced
 colors, reduced motion, theme persistence, and browser runtime errors.
 
