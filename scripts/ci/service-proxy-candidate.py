@@ -137,9 +137,9 @@ def load_oci(archive_bytes: bytes, source: dict, source_sha256: str) -> tuple[st
         index.get("schemaVersion") != 2
         or index.get("mediaType") != "application/vnd.oci.image.index.v1+json"
         or not isinstance(manifests, list)
-        or len(manifests) != 1
+        or not manifests
     ):
-        fail("OCI index must describe exactly one image manifest")
+        fail("OCI index must describe an image manifest")
 
     referenced_members = {"index.json", "oci-layout"}
 
@@ -162,6 +162,22 @@ def load_oci(archive_bytes: bytes, source: dict, source_sha256: str) -> tuple[st
     manifest_descriptor, manifest_bytes = descriptor_blob(manifests[0], "manifest")
     if manifest_descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
         fail("OCI manifest media type differs")
+    manifest_identity = (
+        manifest_descriptor["digest"],
+        manifest_descriptor["size"],
+        manifest_descriptor["mediaType"],
+    )
+    for duplicate in manifests[1:]:
+        duplicate_descriptor, duplicate_bytes = descriptor_blob(
+            duplicate, "manifest"
+        )
+        duplicate_identity = (
+            duplicate_descriptor.get("digest"),
+            duplicate_descriptor.get("size"),
+            duplicate_descriptor.get("mediaType"),
+        )
+        if duplicate_identity != manifest_identity or duplicate_bytes != manifest_bytes:
+            fail("OCI index must resolve to exactly one unique image manifest")
     try:
         manifest = json.loads(manifest_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError):

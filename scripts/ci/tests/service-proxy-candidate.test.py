@@ -78,6 +78,8 @@ class CandidateContract(unittest.TestCase):
         reference_name: str | None = None,
         archive_mtime: int = 0,
         extra_member: bool = False,
+        duplicate_manifest: bool = False,
+        distinct_manifest: bool = False,
     ) -> None:
         source_sha = hashlib.sha256(self.source_bytes).hexdigest()
         labels = {
@@ -122,9 +124,25 @@ class CandidateContract(unittest.TestCase):
             manifest_descriptor["annotations"] = {
                 "org.opencontainers.image.ref.name": reference_name
             }
+        manifests = [manifest_descriptor]
+        if duplicate_manifest:
+            duplicate_descriptor = dict(manifest_descriptor)
+            duplicate_descriptor["annotations"] = {
+                "org.opencontainers.image.ref.name": "transport-duplicate"
+            }
+            manifests.append(duplicate_descriptor)
+        distinct_manifest_bytes = b""
+        distinct_manifest_descriptor = None
+        if distinct_manifest:
+            distinct_manifest_bytes = manifest + b"\n"
+            distinct_manifest_descriptor = self.descriptor(
+                distinct_manifest_bytes,
+                "application/vnd.oci.image.manifest.v1+json",
+            )
+            manifests.append(distinct_manifest_descriptor)
         index = json.dumps(
             {
-                "manifests": [manifest_descriptor],
+                "manifests": manifests,
                 "mediaType": "application/vnd.oci.image.index.v1+json",
                 "schemaVersion": 2,
             },
@@ -139,6 +157,11 @@ class CandidateContract(unittest.TestCase):
         }
         if extra_member:
             members["unreferenced"] = b"must not survive"
+        if distinct_manifest_descriptor is not None:
+            members[
+                "blobs/sha256/"
+                + distinct_manifest_descriptor["digest"].removeprefix("sha256:")
+            ] = distinct_manifest_bytes
         with tarfile.open(self.oci, "w") as archive:
             for name, contents in members.items():
                 info = tarfile.TarInfo(name)
@@ -224,6 +247,42 @@ class CandidateContract(unittest.TestCase):
             )
         )
         self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_duplicate_transport_descriptors_canonicalize_to_one_manifest(self) -> None:
+        first = self.root / "first.tar"
+        candidate.create(
+            argparse.Namespace(
+                context=self.context,
+                oci_archive=self.oci,
+                output=first,
+                github_output=None,
+            )
+        )
+        self.write_oci(duplicate_manifest=True)
+        second = self.root / "second.tar"
+        candidate.create(
+            argparse.Namespace(
+                context=self.context,
+                oci_archive=self.oci,
+                output=second,
+                github_output=None,
+            )
+        )
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_distinct_image_manifests_fail_closed(self) -> None:
+        self.write_oci(distinct_manifest=True)
+        output = self.root / "candidate.tar"
+        with self.assertRaisesRegex(SystemExit, "exactly one unique"):
+            candidate.create(
+                argparse.Namespace(
+                    context=self.context,
+                    oci_archive=self.oci,
+                    output=output,
+                    github_output=None,
+                )
+            )
+        self.assertFalse(output.exists())
 
     def test_unreferenced_oci_member_fails_closed(self) -> None:
         self.write_oci(extra_member=True)
