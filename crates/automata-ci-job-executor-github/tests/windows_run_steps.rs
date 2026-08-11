@@ -63,6 +63,18 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
             .with_file(CommandFileKind::Output, b"digest=abc123\r\n".to_vec()),
         PhaseResponse::success(),
     ]);
+    let producer = run_step("producer", "Producer", "Write-Output 'producer'").with_environment(
+        BTreeMap::from([
+            (
+                "github_artifacts".to_owned(),
+                ValueSource::Literal("shadow-artifacts".to_owned()),
+            ),
+            (
+                "github_artifacts_list".to_owned(),
+                ValueSource::Literal("shadow-artifacts-list".to_owned()),
+            ),
+        ]),
+    );
     let second = run_step_with_working_directory(
         "consumer",
         "Consumer",
@@ -80,13 +92,7 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
         OutputSensitivity::Public,
     )
     .expect("output definition");
-    let job = windows_envelope_with_output_definitions(
-        vec![
-            run_step("producer", "Producer", "Write-Output 'producer'"),
-            second,
-        ],
-        vec![output],
-    );
+    let job = windows_envelope_with_output_definitions(vec![producer, second], vec![output]);
     fixture.executor.admit(&job).expect("Windows job admits");
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
@@ -122,6 +128,21 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
         r"D:\a\automata\automata\subdir"
     );
     assert_eq!(environment_value(commands[1], "mixed"), Some("two"));
+    for name in ["GITHUB_ARTIFACTS", "GITHUB_ARTIFACTS_LIST"] {
+        assert_eq!(
+            commands[0]
+                .environment()
+                .values()
+                .iter()
+                .filter(|variable| variable.name().as_str().eq_ignore_ascii_case(name))
+                .count(),
+            1,
+            "artifact control variables must replace case-insensitive aliases"
+        );
+        assert!(
+            !environment_value(commands[0], name).is_some_and(|value| value.starts_with("shadow"))
+        );
+    }
     assert_eq!(
         commands[1]
             .environment()

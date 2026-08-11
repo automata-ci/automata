@@ -78,6 +78,8 @@ const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
 const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\nif [ ! -f \"$1\" ]; then exit 44; fi\nvalue=$(\"$0\" < \"$1\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
+const WINDOWS_ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\n$ErrorActionPreference = 'Stop'\n$path = $env:AUTOMATA_INTERNAL_ARTIFACT_PATH\nif (-not [System.IO.File]::Exists($path)) { exit 44 }\n$stream = $null\n$hasher = $null\ntry {\n  $stream = [System.IO.File]::OpenRead($path)\n  $hasher = [System.Security.Cryptography.SHA256]::Create()\n  $bytes = $hasher.ComputeHash($stream)\n  $digest = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()\n  [Console]::Out.Write($digest)\n} finally {\n  if ($null -ne $stream) { $stream.Dispose() }\n  if ($null -ne $hasher) { $hasher.Dispose() }\n}";
+const WINDOWS_ARTIFACT_PATH_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_ARTIFACT_PATH";
 const ARTIFACT_HASH_OUTPUT_BYTES: usize = 128;
 const ARTIFACT_HASH_TIMEOUT: Duration = Duration::from_mins(5);
 const ARTIFACTS_LIST_ENVIRONMENT: &str = "GITHUB_ARTIFACTS_LIST";
@@ -4212,7 +4214,7 @@ impl GithubJobExecutor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn run_phase(
         &self,
         endpoint: &dyn ExecutionEndpoint,
@@ -4284,6 +4286,7 @@ impl GithubJobExecutor {
             attempt_id,
             execution.phase,
             &paths.workspace,
+            command.environment(),
             &completed.artifacts,
             artifact_hash_timeout,
             cancellation,
@@ -4441,6 +4444,7 @@ impl GithubJobExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn read_command_files(
         &self,
         endpoint: &dyn ExecutionEndpoint,
@@ -4581,6 +4585,7 @@ impl GithubJobExecutor {
         attempt_id: AttemptId,
         phase: u32,
         workspace: &TargetPath,
+        launch_environment: &automata_ci_execution::ExecutionEnvironment,
         declarations: &ArtifactDeclarationCommandFile,
         timeout: Duration,
         cancellation: &dyn ExecutorCancellation,
@@ -4618,6 +4623,7 @@ impl GithubJobExecutor {
                         phase,
                         file_index,
                         workspace,
+                        launch_environment,
                         file.path(),
                         remaining,
                         cancellation,
@@ -4645,29 +4651,24 @@ impl GithubJobExecutor {
         phase: u32,
         file_index: u32,
         workspace: &TargetPath,
+        launch_environment: &automata_ci_execution::ExecutionEnvironment,
         declared_path: &str,
         timeout: Duration,
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<String, ExecutorAdapterError> {
-        let sh = required_tool(self.ports.toolchain.sh())?;
-        let sha256sum = required_tool(self.ports.toolchain.sha256sum())?;
-        let argv = ExecutionArgv::new(
-            sh,
-            vec![
-                "-c".to_owned(),
-                ARTIFACT_HASH_SCRIPT.to_owned(),
-                sha256sum.as_str().to_owned(),
-                declared_path.to_owned(),
-            ],
-        )
-        .map_err(|_| invalid_job())?;
+        let (argv, environment) = artifact_hash_invocation(
+            self.ports.toolchain.as_ref(),
+            workspace.platform(),
+            launch_environment,
+            declared_path,
+        )?;
         let command = ExecutionCommand::new(
             self.ports
                 .operation_ids
                 .artifact_hash_operation_id(attempt_id, phase, file_index),
             argv,
             workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            environment,
             timeout,
             ARTIFACT_HASH_OUTPUT_BYTES,
         )
@@ -5784,7 +5785,10 @@ fn add_command_file_environment(
         ),
         (ARTIFACTS_LIST_ENVIRONMENT, &paths.artifacts_list),
     ] {
-        values.retain(|variable| variable.name().as_str() != name);
+        values.retain(|variable| match path.platform() {
+            TargetPlatform::Posix => variable.name().as_str() != name,
+            TargetPlatform::Windows => !variable.name().as_str().eq_ignore_ascii_case(name),
+        });
         values.push(automata_ci_execution::EnvironmentVariable::new(
             automata_ci_execution::EnvironmentName::new(name)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?,
@@ -6400,6 +6404,80 @@ fn required_tool(path: Option<&TargetPath>) -> Result<TargetPath, ExecutorAdapte
         .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported))
 }
 
+fn artifact_hash_invocation(
+    toolchain: &dyn GithubToolchain,
+    platform: TargetPlatform,
+    launch_environment: &automata_ci_execution::ExecutionEnvironment,
+    declared_path: &str,
+) -> Result<(ExecutionArgv, automata_ci_execution::ExecutionEnvironment), ExecutorAdapterError> {
+    match platform {
+        TargetPlatform::Posix => {
+            let sh = required_tool(toolchain.sh())?;
+            let sha256sum = required_tool(toolchain.sha256sum())?;
+            let argv = ExecutionArgv::new(
+                sh,
+                vec![
+                    "-c".to_owned(),
+                    ARTIFACT_HASH_SCRIPT.to_owned(),
+                    sha256sum.as_str().to_owned(),
+                    declared_path.to_owned(),
+                ],
+            )
+            .map_err(|_| invalid_job())?;
+            Ok((argv, automata_ci_execution::ExecutionEnvironment::empty()))
+        }
+        TargetPlatform::Windows => {
+            windows_artifact_hash_invocation(toolchain, launch_environment, declared_path)
+        }
+    }
+}
+
+fn windows_artifact_hash_invocation(
+    toolchain: &dyn GithubToolchain,
+    launch_environment: &automata_ci_execution::ExecutionEnvironment,
+    declared_path: &str,
+) -> Result<(ExecutionArgv, automata_ci_execution::ExecutionEnvironment), ExecutorAdapterError> {
+    const LAUNCH_VARIABLES: [&str; 7] = [
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "TEMP",
+        "TMP",
+        "PATHEXT",
+        "PSModulePath",
+    ];
+    let pwsh = required_tool(toolchain.pwsh())?;
+    let argv = ExecutionArgv::new(
+        pwsh,
+        vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            WINDOWS_ARTIFACT_HASH_SCRIPT.to_owned(),
+        ],
+    )
+    .map_err(|_| invalid_job())?;
+    let mut values = launch_environment
+        .values()
+        .iter()
+        .filter(|variable| {
+            LAUNCH_VARIABLES
+                .iter()
+                .any(|name| variable.name().as_str().eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    values.push(automata_ci_execution::EnvironmentVariable::new(
+        automata_ci_execution::EnvironmentName::new(WINDOWS_ARTIFACT_PATH_ENVIRONMENT)
+            .map_err(|_| invalid_job())?,
+        automata_ci_execution::EnvironmentValue::new(declared_path).map_err(|_| invalid_job())?,
+    ));
+    let environment = automata_ci_execution::ExecutionEnvironment::new(values)
+        .map_err(|_| resource_exhausted())?;
+    Ok((argv, environment))
+}
+
 fn powershell_arguments(script: &str) -> Vec<String> {
     let script = script.replace('\'', "''");
     vec!["-command".into(), format!(". '{script}'")]
@@ -6895,13 +6973,19 @@ mod tests {
             Some(vec![r"C:\runner root\probe script.py".to_owned()])
         );
 
-        for metacharacter in ['"', '%', '&', '|', '<', '>', '^', '(', ')'] {
+        for metacharacter in ['%', '&', '^', '(', ')'] {
             let unsafe_script = TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd"))
-                .expect("generic Windows path");
+                .expect("filesystem-valid Windows path");
             assert_eq!(
                 windows_script_arguments(WindowsScriptShell::Cmd, &unsafe_script),
                 None,
                 "cmd metacharacter {metacharacter:?} must fail closed"
+            );
+        }
+        for metacharacter in ['"', '|', '<', '>'] {
+            assert!(
+                TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd")).is_err(),
+                "filesystem-invalid Windows metacharacter {metacharacter:?} must fail closed"
             );
         }
         let literal_bang =
