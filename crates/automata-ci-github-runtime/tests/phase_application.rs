@@ -127,6 +127,35 @@ fn action_state_is_visible_only_to_the_exact_paired_post_action() {
 }
 
 #[test]
+fn action_pre_applies_job_and_invocation_state_without_publishing_outputs() {
+    let invocation = ActionInvocationId::new("setup-42").expect("valid invocation ID");
+    let step_id = StepId::new("setup").expect("valid step ID");
+    let applied = GithubCompletedStepApplicator::default()
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &StepScope::new(step_id.clone(), StepPhase::ActionPre(invocation.clone())),
+            &commands(
+                b"MODE=ready\n",
+                b"must_not_escape=pre\n",
+                b"/from-pre\n",
+                b"saved=value\n",
+                b"pre summary\n",
+            ),
+        )
+        .expect("bounded pre state");
+    let next = applied.next_state();
+
+    assert_eq!(value(next.environment(), "MODE"), Some("ready"));
+    assert_eq!(next.prepend_path().collect::<Vec<_>>(), ["/from-pre"]);
+    assert!(next.outputs(&step_id).is_none());
+    assert_eq!(
+        value(&next.post_action_environment(&invocation), "STATE_saved"),
+        Some("value")
+    );
+    assert_eq!(applied.summary().markdown(), "pre summary\n");
+}
+
+#[test]
 fn action_post_preserves_main_outputs_and_merges_exact_updates() {
     let invocation = ActionInvocationId::new("artifact-main-42").expect("valid invocation ID");
     let step_id = StepId::new("artifact").expect("valid step ID");

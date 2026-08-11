@@ -273,3 +273,34 @@ fn configured_dispatch_replay_remains_closed_without_persisted_input_evidence() 
         "github.compile.workflow_dispatch_input_evidence_required",
     );
 }
+
+#[test]
+fn configured_dispatch_replay_accepts_exact_durable_input_evidence() {
+    let source = format!(
+        "on:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: choice\n        required: true\n        options: [test, live]\n      dry_run:\n        type: boolean\n{JOB}"
+    );
+    let durable_inputs = payload([
+        (
+            "target",
+            GithubWorkflowDispatchInputValue::String("live".to_owned()),
+        ),
+        ("dry_run", GithubWorkflowDispatchInputValue::Boolean(true)),
+    ]);
+    let initial = compile(&source, Some(durable_inputs.clone()));
+    assert!(initial.is_accepted(), "{:#?}", initial.diagnostics());
+
+    let parsed = support::parse(&source);
+    let replay = GithubWorkflowCompiler::new().compile(
+        CompileWorkflowRequest::for_preselected_event_with_metadata_v1(
+            parsed.plan().expect("source plan"),
+            initial.plan().expect("initial plan").event().clone(),
+            GithubEventMetadataV1::workflow_dispatch(durable_inputs),
+        ),
+    );
+    assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());
+    assert_eq!(replay.plan(), initial.plan());
+    assert_eq!(
+        replay.workflow_dispatch_inputs(),
+        initial.workflow_dispatch_inputs()
+    );
+}

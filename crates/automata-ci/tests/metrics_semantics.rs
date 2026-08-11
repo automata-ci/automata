@@ -81,7 +81,7 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         .filter_map(|line| line.split_once(' ').map(|(sample, _value)| sample))
         .filter(|sample| is_semantic_metric(sample.split('{').next().expect("sample name")))
         .count();
-    assert_eq!(semantic_series, 1_001);
+    assert_eq!(semantic_series, 1_002);
     let all_series = exposition
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -102,6 +102,7 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         "automata_ci_control_plane_runner_control_ingress_bytes_total{kind=\"log_batch\"} 13",
         "automata_ci_control_plane_runner_control_lease_offer_events_total{outcome=\"published\"} 1",
         "automata_ci_control_plane_runner_transport_connection_events_total{outcome=\"admitted\"} 1",
+        "automata_ci_control_plane_runner_transport_connection_events_total{outcome=\"drain_aborted\"} 1",
         "automata_ci_control_plane_runner_transport_tls_handshakes_total{outcome=\"accepted\"} 1",
         "automata_ci_control_plane_runner_transport_requests_total{route=\"handshake\",stage=\"response\",outcome=\"success\"} 1",
         "automata_ci_control_plane_runner_transport_requests_in_flight{route=\"handshake\"} 0",
@@ -160,6 +161,10 @@ fn record_semantic_observations(metrics: &ControlPlaneMetrics) {
     );
     RunnerControlObserver::observe_lease_offer(metrics, LeaseOfferObservation::Published);
     RunnerTransportObserver::observe_connection(metrics, RunnerTransportConnectionEvent::Admitted);
+    RunnerTransportObserver::observe_connection(
+        metrics,
+        RunnerTransportConnectionEvent::DrainAborted,
+    );
     RunnerTransportObserver::observe_tls(
         metrics,
         RunnerTransportTlsOutcome::Accepted,

@@ -1201,10 +1201,8 @@ fn authenticated_event_source_revision(
         automata_ci_github::VerifiedGithubWebhook::Push(push) if !push.deleted() => {
             Some(push.after_commit_sha())
         }
-        automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request)
-            if pull_request.head_repository() == pull_request.repository() =>
-        {
-            Some(pull_request.head_revision().as_str())
+        automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
+            Some(pull_request.merge_revision().as_str())
         }
         automata_ci_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
             Some(merge_group.head_revision().as_str())
@@ -1260,6 +1258,7 @@ fn admission_error(error: &WorkflowAdmissionError) -> GithubDeliveryWorkflowProc
         | WorkflowAdmissionError::AdmissionValue(_)
         | WorkflowAdmissionError::LogicalValue(_)
         | WorkflowAdmissionError::ConcurrencyEvaluation
+        | WorkflowAdmissionError::WorkflowDispatchEvidence
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::Internal => {
             GithubDeliveryWorkflowProcessorError::InvariantViolation

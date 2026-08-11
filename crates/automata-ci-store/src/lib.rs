@@ -67,7 +67,8 @@ pub use blocked::{
 };
 pub use bootstrap::{
     EnsureTenant, MAX_STATIC_RUNNERS, ProductBootstrapRepository, ProductBootstrapStoreError,
-    StaticBootstrapValueError, StaticRunnerFleet, StaticRunnerRegistration,
+    RunnerCapabilityReadiness, StaticBootstrapValueError, StaticRunnerFleet,
+    StaticRunnerRegistration,
 };
 pub use cancellation::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
@@ -230,10 +231,12 @@ pub use logical_materialization::{
 };
 pub use logical_orchestration::{
     AdmitLogicalWorkflowRun, AdmitLogicalWorkflowRunBuilder, AdmittedLogicalWorkflowJob,
-    LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
-    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    LOGICAL_ORCHESTRATION_SCHEMA,
+    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
+    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
+    ResolveAuthenticatedWorkflowDispatchSource,
 };
 pub use logical_run_finalization::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,

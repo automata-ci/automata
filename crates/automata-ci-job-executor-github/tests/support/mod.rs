@@ -711,6 +711,20 @@ pub fn action_step(id: &str, repository: &str) -> StepIr {
     )
 }
 
+pub fn local_action_step(id: &str, path: &str) -> StepIr {
+    StepIr::new(
+        StepId::new(id).expect("valid step"),
+        ValueTemplate::literal(id).expect("step name template"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::action(
+            ActionReference::Local {
+                path: path.to_owned(),
+            },
+            BTreeMap::new(),
+        ),
+    )
+}
+
 pub fn prepared_node24_action() -> PreparedAction {
     prepared_node24_action_with_post_condition("always()")
 }
@@ -749,6 +763,38 @@ pub fn prepared_node24_action_with_post_condition(post_condition: &str) -> Prepa
             PreparedInput::new("token", Some(PreparedValue::Expression(token)))
                 .expect("valid token input"),
         ],
+        Vec::new(),
+        PreparedActionExecution::Javascript(Box::new(javascript)),
+    )
+    .expect("valid JavaScript definition");
+    PreparedAction::with_definition(digest, archive, "", definition).expect("valid action")
+}
+
+pub fn prepared_node24_action_with_pre() -> PreparedAction {
+    prepared_node24_action_with_pre_condition("always()")
+}
+
+pub fn prepared_node24_action_with_pre_condition(pre_condition: &str) -> PreparedAction {
+    let compiler = GithubConditionCompiler::default();
+    let always = compiler
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("valid lifecycle condition");
+    let pre_condition = compiler
+        .compile_condition(Some(pre_condition), GithubConditionPhase::Step)
+        .expect("valid pre condition");
+    let javascript = PreparedJavascriptAction::new(
+        JavascriptRuntime::Node24,
+        "dist/main.js",
+        Some("dist/pre.js".to_owned()),
+        pre_condition,
+        Some("dist/post.js".to_owned()),
+        always,
+    )
+    .expect("valid JavaScript action");
+    let archive = Bytes::from_static(b"validated-pre-action-archive");
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    let definition = PreparedActionDefinition::new(
+        Vec::new(),
         Vec::new(),
         PreparedActionExecution::Javascript(Box::new(javascript)),
     )
@@ -1007,7 +1053,7 @@ impl ExecutionEndpoint for FakeEndpoint {
             )
             .map_err(|_| execution_error(ExecutionStage::Exec));
         }
-        if let Some(output) = artifact_hash_output(request, &state) {
+        if let Some(output) = artifact_hash_output(request, &state.files) {
             return output;
         }
         let response = state
@@ -1110,14 +1156,15 @@ impl ExecutionEndpoint for FakeEndpoint {
 
 fn artifact_hash_output(
     request: &ExecutionCommand,
-    state: &EndpointState,
+    files: &BTreeMap<String, Vec<u8>>,
 ) -> Option<Result<ExecutionOutput, ExecutionError>> {
-    let is_hash = request
-        .argv()
-        .arguments()
-        .get(1)
-        .is_some_and(|argument| argument.contains("automata-artifact-sha256"));
-    if request.argv().program().as_str() != "/usr/bin/sh" || !is_hash {
+    if request.argv().program().as_str() != "/usr/bin/sh"
+        || !request
+            .argv()
+            .arguments()
+            .get(1)
+            .is_some_and(|argument| argument.contains("automata-artifact-sha256"))
+    {
         return None;
     }
     let declared = request
@@ -1133,32 +1180,32 @@ fn artifact_hash_output(
             request.working_directory().as_str().trim_end_matches('/')
         )
     };
-    let Some(bytes) = state.files.get(&resolved) else {
-        return Some(
-            execution_output(ExecutionTermination::Exited(44), Vec::new(), false)
-                .map_err(|_| execution_error(ExecutionStage::Exec)),
-        );
-    };
+    let (termination, output) = files.get(&resolved).map_or_else(
+        || (ExecutionTermination::Exited(44), Vec::new()),
+        |bytes| {
+            (
+                ExecutionTermination::Exited(0),
+                vec![(
+                    ExecutionOutputStream::Stdout,
+                    sha256_hex(bytes).into_bytes(),
+                )],
+            )
+        },
+    );
     Some(
-        execution_output(
-            ExecutionTermination::Exited(0),
-            vec![(
-                ExecutionOutputStream::Stdout,
-                sha256_hex(bytes).into_bytes(),
-            )],
-            false,
-        )
-        .map_err(|_| execution_error(ExecutionStage::Exec)),
+        execution_output(termination, output, false)
+            .map_err(|_| execution_error(ExecutionStage::Exec)),
     )
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::with_capacity(64), |mut output, byte| {
-            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-            output
-        })
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn execution_error(stage: ExecutionStage) -> ExecutionError {

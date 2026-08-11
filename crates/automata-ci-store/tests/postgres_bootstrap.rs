@@ -1,13 +1,16 @@
 #[allow(dead_code)]
 mod common;
 
+use std::time::Duration;
+
 use automata_ci_core::{
     Architecture, OperatingSystem, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId,
     RunnerLabel, RunnerPlatform, Sha256Digest, UnixMillis,
 };
 use automata_ci_store::{
     EnsureTenant, MAX_STATIC_RUNNERS, ProductBootstrapRepository as _, ProductBootstrapStoreError,
-    RunnerSlotCount, StaticRunnerFleet, StaticRunnerRegistration, TenantScope,
+    RunnerCapabilityReadiness, RunnerSlotCount, StaticRunnerFleet, StaticRunnerRegistration,
+    TenantScope,
 };
 
 use common::{TestResult, run_with_database};
@@ -151,6 +154,12 @@ async fn durable_runner_capability_admission_is_canonical_bound_and_oidc_dark() 
                 resource: "runner capability admission"
             })
         ));
+        database
+            .store()
+            .verify_runner_capability_readiness(
+                RunnerCapabilityReadiness::unavailable().with_github_oidc(),
+            )
+            .await?;
 
         let mismatched = runner_capabilities(RunnerId::new(), [RunnerFeature::SHELL_STEPS]);
         sqlx::query("UPDATE runners SET capabilities = $2 WHERE id = $1")
@@ -531,6 +540,107 @@ async fn concurrent_replicas_converge_on_one_idempotent_fleet() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn aborting_an_in_flight_fleet_transaction_rolls_back_and_allows_exact_retry() -> TestResult {
+    run_with_database(|database| async move {
+        const TENANT: &str = "aborted-bootstrap";
+
+        let runner_id = RunnerId::new();
+        let configured = fleet(TENANT, runner_id);
+        let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        sqlx::query("LOCK TABLE runner_groups IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+
+        let store = database.store().clone();
+        let interrupted_fleet = configured.clone();
+        let apply =
+            tokio::spawn(async move { store.apply_static_runner_fleet(interrupted_fleet).await });
+        let blocked_backend =
+            match wait_for_backend_blocked_by(database.pool(), blocker_pid, "FROM runner_groups")
+                .await
+            {
+                Ok(blocked_backend) => blocked_backend,
+                Err(error) => {
+                    blocker.rollback().await?;
+                    apply.abort();
+                    let _ = apply.await;
+                    return Err(error);
+                }
+            };
+        assert_ne!(blocked_backend, blocker_pid);
+        assert!(!apply.is_finished());
+
+        let tenant_visible: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)")
+                .bind(TENANT)
+                .fetch_one(database.pool())
+                .await?;
+        assert!(
+            !tenant_visible,
+            "the transaction's completed tenant insert must remain uncommitted while blocked"
+        );
+
+        apply.abort();
+        let cancellation = tokio::time::timeout(Duration::from_secs(2), apply)
+            .await
+            .map_err(|_| "aborted fleet future did not stop")?
+            .expect_err("aborted fleet future cannot complete");
+        assert!(cancellation.is_cancelled());
+        blocker.rollback().await?;
+
+        let partial_state: (bool, bool, bool) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                sqlx::query_as(
+                    r"
+                SELECT
+                    EXISTS (SELECT 1 FROM tenants WHERE id = $1),
+                    EXISTS (SELECT 1 FROM runner_groups WHERE tenant_id = $1),
+                    EXISTS (SELECT 1 FROM runners WHERE tenant_id = $1)
+                ",
+                )
+                .bind(TENANT)
+                .fetch_one(database.pool())
+                .await
+            })
+            .await
+            .map_err(|_| "aborted transaction did not release its connection and locks")??;
+        assert_eq!(partial_state, (false, false, false));
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            database.store().apply_static_runner_fleet(configured),
+        )
+        .await
+        .map_err(|_| "exact retry remained blocked behind the aborted transaction")??;
+        let durable: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM tenants WHERE id = $1),
+                (SELECT count(*) FROM runner_groups WHERE tenant_id = $1),
+                (SELECT count(*) FROM runners WHERE tenant_id = $1)
+            ",
+        )
+        .bind(TENANT)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable, (1, 1, 1));
+        let certificate_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_machine_certificates WHERE runner_id = $1",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(certificate_count, 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn undeclared_group_member_is_fatal_instead_of_broadening_routing() -> TestResult {
     run_with_database(|database| async move {
         let configured = fleet("membership-bootstrap", RunnerId::new());
@@ -580,4 +690,36 @@ async fn undeclared_group_member_is_fatal_instead_of_broadening_routing() -> Tes
         Ok(())
     })
     .await
+}
+
+async fn wait_for_backend_blocked_by(
+    pool: &sqlx::PgPool,
+    blocking_backend_pid: i32,
+    query_fragment: &str,
+) -> TestResult<i32> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting_backend_pid: Option<i32> = sqlx::query_scalar(
+                r"
+                SELECT pid
+                FROM pg_stat_activity
+                WHERE pid <> $1
+                  AND $1 = ANY(pg_blocking_pids(pid))
+                  AND query LIKE '%' || $2 || '%'
+                ORDER BY pid
+                LIMIT 1
+                ",
+            )
+            .bind(blocking_backend_pid)
+            .bind(query_fragment)
+            .fetch_optional(pool)
+            .await?;
+            if let Some(waiting_backend_pid) = waiting_backend_pid {
+                return Ok(waiting_backend_pid);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("backend did not block on expected {query_fragment} lock"))?
 }

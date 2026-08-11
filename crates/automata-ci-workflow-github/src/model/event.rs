@@ -8,6 +8,8 @@ pub enum EventName {
     Push,
     /// A pull-request activity event.
     PullRequest,
+    /// A merge-queue group activity event.
+    MergeGroup,
     /// A manually dispatched workflow invocation.
     WorkflowDispatch,
     /// A scheduled cron invocation.
@@ -16,6 +18,38 @@ pub enum EventName {
     WorkflowCall,
     /// An event name preserved for diagnostics but unsupported by current compilation.
     Other(String),
+}
+
+/// Source-preserving activity filter for merge-queue group events.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MergeGroupFilter {
+    pub(crate) types: Option<Vec<Spanned<String>>>,
+    pub(crate) extensions: Vec<PreservedField>,
+}
+
+impl MergeGroupFilter {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            types: None,
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Returns configured merge-group activity types in source order.
+    pub fn types(&self) -> &[Spanned<String>] {
+        self.types.as_deref().unwrap_or_default()
+    }
+
+    /// Returns whether the `types` key appeared, including an empty list.
+    pub const fn types_configured(&self) -> bool {
+        self.types.is_some()
+    }
+
+    /// Returns fields retained from source but unsupported by current selection.
+    pub fn extensions(&self) -> &[PreservedField] {
+        &self.extensions
+    }
 }
 
 /// Source-preserving branch, tag, path, and activity filters for push or pull requests.
@@ -135,6 +169,8 @@ pub enum TriggerConfiguration {
     Push(PushPullRequestFilter),
     /// Pull-request selection filters.
     PullRequest(PushPullRequestFilter),
+    /// Merge-group activity filters.
+    MergeGroup(MergeGroupFilter),
     /// Optional manual-dispatch configuration retained as YAML.
     WorkflowDispatch(Option<YamlNode>),
     /// Schedule configuration retained for bounded cron selection.

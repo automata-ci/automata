@@ -354,13 +354,52 @@ impl ProductBootstrapStoreError {
     }
 }
 
+/// Server-owned readiness gates for capability-bearing runner inventory.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RunnerCapabilityReadiness {
+    github_oidc: bool,
+}
+
+impl RunnerCapabilityReadiness {
+    /// Returns the fail-closed readiness set used when no product proved an
+    /// optional capability operational on this replica.
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self { github_oidc: false }
+    }
+
+    /// Admits GitHub-compatible workload OIDC after product composition has
+    /// verified the public route, exact key material, and durable readiness.
+    #[must_use]
+    pub const fn with_github_oidc(mut self) -> Self {
+        self.github_oidc = true;
+        self
+    }
+
+    /// Returns whether OIDC-bearing runner inventory may remain active.
+    #[must_use]
+    pub const fn github_oidc(self) -> bool {
+        self.github_oidc
+    }
+}
+
 /// Startup-only persistence operations for product-owned bootstrap state.
 #[async_trait]
 pub trait ProductBootstrapRepository: Send + Sync {
     /// Verifies that every durable runner capability remains admissible to the
     /// current product before any server-owned bootstrap state can be skipped
     /// or applied.
-    async fn verify_runner_capability_admission(&self) -> Result<(), ProductBootstrapStoreError>;
+    async fn verify_runner_capability_admission(&self) -> Result<(), ProductBootstrapStoreError> {
+        self.verify_runner_capability_readiness(RunnerCapabilityReadiness::unavailable())
+            .await
+    }
+
+    /// Verifies durable runner capabilities against optional products whose
+    /// operational readiness was proved during this replica's startup.
+    async fn verify_runner_capability_readiness(
+        &self,
+        readiness: RunnerCapabilityReadiness,
+    ) -> Result<(), ProductBootstrapStoreError>;
 
     /// Creates the tenant when absent and otherwise leaves it unchanged.
     async fn ensure_tenant(&self, request: EnsureTenant) -> Result<(), ProductBootstrapStoreError>;

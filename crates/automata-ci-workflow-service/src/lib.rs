@@ -13,6 +13,7 @@ mod autonomous_workflow;
 mod github;
 mod github_activation;
 mod github_autonomous;
+mod github_dispatch;
 mod id;
 mod logical_projection;
 mod materialization;
@@ -21,6 +22,7 @@ mod observer;
 mod orchestration;
 mod port;
 mod result_projection;
+mod reusable_workflow;
 mod run_finalization;
 mod runner_policy;
 mod service;
@@ -47,6 +49,16 @@ pub use github_activation::{
     GithubLogicalActivationEvaluator,
 };
 pub use github_autonomous::GithubAutonomousWorkflowPhaseExecutor;
+pub use github_dispatch::{
+    AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, DurableGithubWorkflowDispatchRequest,
+    GithubWorkflowDispatchError,
+    GithubWorkflowDispatchEvidenceError, GithubWorkflowDispatchEvidenceV1,
+    GithubWorkflowDispatchRequest, GithubWorkflowDispatchRequestError,
+    GithubWorkflowDispatchService, WorkflowDispatchAuthorization,
+};
+pub use automata_ci_workflow_github::{
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
+};
 pub use id::{Sha256AdmissionIdGenerator, SystemAdmissionClock};
 pub use logical_projection::{
     GithubLogicalJobProjector, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, LogicalJobProjectionError,
@@ -64,6 +76,15 @@ pub use port::{AdmissionClock, AdmissionIdGenerator, WorkflowPlanVerifier};
 pub use result_projection::{
     LOGICAL_RESULT_PROJECTION_CLAIM_MILLIS, LogicalResultProjectionError,
     LogicalResultProjectionOutcome, LogicalResultProjectionService,
+};
+pub use reusable_workflow::{
+    CatalogedReusableWorkflow, ExpandReusableWorkflowRequest, ExpandedReusableInput,
+    ExpandedReusableJob, ExpandedReusableOutput, ExpandedReusableSecret,
+    GithubReusableWorkflowCatalog, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
+    MAX_REUSABLE_WORKFLOW_DEPTH, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS,
+    MAX_REUSABLE_WORKFLOW_INVOCATIONS, RepositoryWorkflowSource, ReusableInputBindingSource,
+    ReusableWorkflowExpander, ReusableWorkflowExpansion, ReusableWorkflowExpansionError,
+    ReusableWorkflowInvocationExpansion, ReusableWorkflowLimits, ReusableWorkflowPermissions,
 };
 pub use run_finalization::{
     LOGICAL_RUN_FINALIZATION_CLAIM_MILLIS, LogicalRunFinalizationError,

@@ -12,6 +12,7 @@ readme = "README.md"
 publish.workspace = true
 
 [dependencies]
+automata-ci-auth.workspace = true
 automata-ci-blob.workspace = true
 automata-ci-core.workspace = true
 automata-ci-expression-github.workspace = true
@@ -20,6 +21,7 @@ automata-ci-protocol-protobuf.workspace = true
 automata-ci-store.workspace = true
 automata-ci-workflow-github.workspace = true
 bytes.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

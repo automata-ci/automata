@@ -665,6 +665,7 @@ const fn map_store_error(error: GithubOidcStoreError) -> ControlPortError {
 pub(crate) struct GithubOidcProduct {
     pub(crate) router: Router,
     pub(crate) authority_issuer: Arc<dyn OptionalRuntimeAuthorityIssuer>,
+    operationally_ready: bool,
 }
 
 impl GithubOidcProduct {
@@ -672,7 +673,13 @@ impl GithubOidcProduct {
         Self {
             router: Router::new(),
             authority_issuer: Arc::new(UnavailableGithubOidcRuntimeAuthorityIssuer),
+            operationally_ready: false,
         }
+    }
+
+    /// Returns whether this replica proved the complete OIDC product ready.
+    pub(crate) const fn operationally_ready(&self) -> bool {
+        self.operationally_ready
     }
 }
 
@@ -753,6 +760,7 @@ pub(crate) async fn build_github_oidc_product(
     Ok(GithubOidcProduct {
         router,
         authority_issuer: Arc::new(authority_issuer),
+        operationally_ready: true,
     })
 }
 
@@ -1496,6 +1504,7 @@ norlX3KEHNe7cTke5cP4OA==";
     #[tokio::test]
     async fn disabled_product_guard_blocks_only_entitled_github_jobs() {
         let unavailable = GithubOidcProduct::unavailable();
+        assert!(!unavailable.operationally_ready());
         let entitled = RuntimeFixture::new("github", JobPermissionRequest::WriteAll, "push");
         assert_eq!(
             unavailable

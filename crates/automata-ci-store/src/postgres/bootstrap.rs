@@ -9,7 +9,7 @@ use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerId};
 
 use crate::{
     EnsureTenant, MAX_STATIC_RUNNERS, ProductBootstrapRepository, ProductBootstrapStoreError,
-    StaticRunnerFleet, StaticRunnerRegistration,
+    RunnerCapabilityReadiness, StaticRunnerFleet, StaticRunnerRegistration,
 };
 
 use super::PostgresStore;
@@ -19,7 +19,10 @@ const RUNNER_CAPABILITY_ADMISSION_TOTAL_LIMIT: usize = MAX_STATIC_RUNNERS;
 
 #[async_trait]
 impl ProductBootstrapRepository for PostgresStore {
-    async fn verify_runner_capability_admission(&self) -> Result<(), ProductBootstrapStoreError> {
+    async fn verify_runner_capability_readiness(
+        &self,
+        readiness: RunnerCapabilityReadiness,
+    ) -> Result<(), ProductBootstrapStoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
@@ -95,6 +98,7 @@ impl ProductBootstrapRepository for PostgresStore {
                 if capabilities
                     .features()
                     .contains(&RunnerFeature::OIDC_TOKENS)
+                    && !readiness.github_oidc()
                 {
                     return Err(ProductBootstrapStoreError::drift(
                         "runner capability admission",

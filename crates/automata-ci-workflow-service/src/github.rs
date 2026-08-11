@@ -6,7 +6,13 @@ use automata_ci_workflow_github::{
     ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 
-use crate::{WorkflowAdmissionRequest, WorkflowPlanVerificationError, WorkflowPlanVerifier};
+use crate::{
+    WorkflowAdmissionRequest, WorkflowPlanVerificationError, WorkflowPlanVerifier,
+    github_dispatch::{
+        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE,
+        GithubWorkflowDispatchEvidenceV1,
+    },
+};
 
 /// GitHub adapter that re-parses and recompiles exact admitted source.
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,13 +44,39 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
                 diagnostic_codes(parsed.diagnostics()),
             ));
         }
-        let compiled =
-            GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_preselected_event(
-                parsed.plan().ok_or_else(|| {
-                    WorkflowPlanVerificationError::FrontendRejected("no plan".into())
-                })?,
+        let parsed_plan = parsed.plan().ok_or_else(|| {
+            WorkflowPlanVerificationError::FrontendRejected("no plan".into())
+        })?;
+        let compile_request = if admission.plan().event().name() == "workflow_dispatch" {
+            if admission.event_media_type()
+                != AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
+            {
+                return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
+            }
+            let evidence = GithubWorkflowDispatchEvidenceV1::decode(admission.event())
+                .map_err(|_| {
+                    WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch
+                })?;
+            if !evidence.matches_admission(admission) {
+                return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
+            }
+            CompileWorkflowRequest::for_preselected_event_with_metadata_v1(
+                parsed_plan,
                 admission.plan().event().clone(),
-            ));
+                evidence.metadata(),
+            )
+        } else {
+            if admission.event_media_type()
+                == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
+            {
+                return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
+            }
+            CompileWorkflowRequest::for_preselected_event(
+                parsed_plan,
+                admission.plan().event().clone(),
+            )
+        };
+        let compiled = GithubWorkflowCompiler::new().compile(compile_request);
         if !compiled.is_accepted() {
             return Err(WorkflowPlanVerificationError::CompilationRejected(
                 diagnostic_codes(compiled.diagnostics()),
@@ -52,6 +84,11 @@ impl WorkflowPlanVerifier for GithubWorkflowPlanVerifier {
         }
         if compiled.plan() != Some(admission.plan()) {
             return Err(WorkflowPlanVerificationError::PlanMismatch);
+        }
+        if admission.plan().event().name() == "workflow_dispatch"
+            && compiled.workflow_dispatch_inputs() != Some(admission.base_context().inputs())
+        {
+            return Err(WorkflowPlanVerificationError::WorkflowDispatchEvidenceMismatch);
         }
         Ok(())
     }

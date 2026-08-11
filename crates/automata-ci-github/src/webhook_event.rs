@@ -222,10 +222,13 @@ pub struct VerifiedGithubPullRequest {
     head_repository: GithubWebhookRepository,
     number: NonZeroU64,
     action: GithubPullRequestAction,
+    merged: bool,
     head_revision: ExactRevision,
     base_revision: ExactRevision,
+    merge_revision: ExactRevision,
     head_ref: Box<str>,
     base_ref: Box<str>,
+    git_ref: Box<str>,
 }
 
 impl VerifiedGithubPullRequest {
@@ -283,6 +286,12 @@ impl VerifiedGithubPullRequest {
         self.action
     }
 
+    /// Returns whether this event describes a pull request that was merged.
+    #[must_use]
+    pub const fn merged(&self) -> bool {
+        self.merged
+    }
+
     /// Returns the canonical pull-request head commit.
     #[must_use]
     pub const fn head_revision(&self) -> &ExactRevision {
@@ -295,6 +304,12 @@ impl VerifiedGithubPullRequest {
         &self.base_revision
     }
 
+    /// Returns the merge-branch commit used as `GITHUB_SHA` for this event.
+    #[must_use]
+    pub const fn merge_revision(&self) -> &ExactRevision {
+        &self.merge_revision
+    }
+
     /// Returns the validated unqualified pull-request head branch.
     #[must_use]
     pub fn head_ref(&self) -> &str {
@@ -305,6 +320,12 @@ impl VerifiedGithubPullRequest {
     #[must_use]
     pub fn base_ref(&self) -> &str {
         &self.base_ref
+    }
+
+    /// Returns the full ref GitHub assigns to the workflow run.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
     }
 }
 
@@ -322,10 +343,13 @@ impl fmt::Debug for VerifiedGithubPullRequest {
             .field("head_repository", &self.head_repository)
             .field("number", &self.number)
             .field("action", &self.action)
+            .field("merged", &self.merged)
             .field("head_revision", &"[redacted]")
             .field("base_revision", &"[redacted]")
+            .field("merge_revision", &"[redacted]")
             .field("head_ref", &"[redacted]")
             .field("base_ref", &"[redacted]")
+            .field("git_ref", &"[redacted]")
             .finish()
     }
 }
@@ -445,6 +469,8 @@ struct PullRequestPayload {
 #[derive(Deserialize)]
 struct PullRequestObjectPayload {
     number: u64,
+    merged: bool,
+    merge_commit_sha: Option<String>,
     head: PullRequestBranchPayload,
     base: PullRequestBranchPayload,
 }
@@ -529,8 +555,22 @@ pub(crate) fn normalize_pull_request(
     let head_repository = payload.pull_request.head.repo.normalize()?;
     let head_revision = exact_revision(payload.pull_request.head.sha)?;
     let base_revision = exact_revision(payload.pull_request.base.sha)?;
+    let merge_revision = payload
+        .pull_request
+        .merge_commit_sha
+        .ok_or(GithubWebhookError::InvalidPayload)
+        .and_then(exact_revision)?;
     let head_ref = normalize_branch_name(payload.pull_request.head.git_ref)?;
     let base_ref = normalize_branch_name(payload.pull_request.base.git_ref)?;
+    if payload.pull_request.merged && action != GithubPullRequestAction::Closed {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    let git_ref = if payload.pull_request.merged {
+        format!("refs/heads/{base_ref}")
+    } else {
+        format!("refs/pull/{number}/merge")
+    }
+    .into_boxed_str();
 
     Ok(VerifiedGithubPullRequest {
         authenticated,
@@ -539,10 +579,13 @@ pub(crate) fn normalize_pull_request(
         head_repository,
         number,
         action,
+        merged: payload.pull_request.merged,
         head_revision,
         base_revision,
+        merge_revision,
         head_ref,
         base_ref,
+        git_ref,
     })
 }
 

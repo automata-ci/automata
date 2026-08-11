@@ -8,6 +8,8 @@ use automata_ci_store::{
 use bytes::Bytes;
 use thiserror::Error;
 
+use crate::WORKFLOW_EVENT_MEDIA_TYPE;
+
 const MAX_IDENTITY_BYTES: usize = 1_024;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 25 * 1024 * 1024;
@@ -94,6 +96,7 @@ pub struct WorkflowAdmissionRequest {
     workflow_path: String,
     source: Bytes,
     event: Bytes,
+    event_media_type: String,
     plan: WorkflowPlan,
     base_context: JobRuntimeContext,
     idempotency: WorkflowAdmissionIdempotency,
@@ -133,6 +136,7 @@ impl WorkflowAdmissionRequest {
                 workflow_path: workflow_path.into(),
                 source,
                 event,
+                event_media_type: WORKFLOW_EVENT_MEDIA_TYPE.to_owned(),
                 plan,
                 base_context,
                 idempotency,
@@ -175,6 +179,12 @@ impl WorkflowAdmissionRequest {
     /// Returns the exact immutable provider event bytes.
     pub const fn event(&self) -> &Bytes {
         &self.event
+    }
+
+    /// Returns the immutable event evidence media type.
+    #[must_use]
+    pub fn event_media_type(&self) -> &str {
+        &self.event_media_type
     }
 
     #[must_use]
@@ -241,6 +251,13 @@ impl WorkflowAdmissionRequest {
 }
 
 impl WorkflowAdmissionRequestBuilder {
+    /// Selects the immutable media type for exact event evidence.
+    #[must_use]
+    pub fn event_media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.request.event_media_type = media_type.into();
+        self
+    }
+
     /// Sets the canonical source commit identifier.
     #[must_use]
     pub fn commit_sha(mut self, commit_sha: impl Into<String>) -> Self {
@@ -301,6 +318,7 @@ impl WorkflowAdmissionRequestBuilder {
         validate_text(&request.commit_sha, "commit SHA")?;
         validate_text(&request.git_ref, "Git ref")?;
         validate_text(&request.workflow_name, "workflow name")?;
+        validate_text(&request.event_media_type, "event media type")?;
         if let Some(actor) = &request.actor {
             validate_text(actor, "actor")?;
         }
@@ -415,6 +433,9 @@ pub enum WorkflowPlanVerificationError {
     /// Event-aware provider compilation rejected the parsed source.
     #[error("workflow source recompilation was rejected: {0}")]
     CompilationRejected(String),
+    /// Canonical manual-dispatch evidence or resolved inputs disagreed with replay.
+    #[error("workflow dispatch evidence does not match exact-source recompilation")]
+    WorkflowDispatchEvidenceMismatch,
     /// Exact-source recompilation produced a different plan.
     #[error("supplied workflow plan does not match exact source recompilation")]
     PlanMismatch,

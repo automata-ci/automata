@@ -10,3 +10,4 @@ pub(crate) mod rbac_management;
 pub(crate) mod repository_secrets;
 pub(crate) mod secret_api;
 pub(crate) mod web;
+pub(crate) mod workflow_dispatch_api;

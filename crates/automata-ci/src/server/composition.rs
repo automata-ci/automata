@@ -59,15 +59,16 @@ use automata_ci_store::{
     PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
     ProductBootstrapRepository as _, RepositoryPublicationRepository,
     RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
-    RunnerCommandOutbox, RunnerControlTransactionRepository, RunnerLeaseOfferRepository,
-    RunnerLeaseRequestRepository, RunnerOperationReceiptRepository, RunnerSessionRepository,
-    SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
+    RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
+    RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
+    RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
     SecretMutationRecoveryRepository,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
-    GithubAutonomousWorkflowPhaseExecutor, LogicalResultProjectionService,
-    LogicalRunFinalizationService, SystemAdmissionClock, WorkflowAdmissionObserver,
+    GithubAutonomousWorkflowPhaseExecutor, GithubWorkflowDispatchService,
+    GithubWorkflowPlanVerifier, LogicalResultProjectionService, LogicalRunFinalizationService,
+    SystemAdmissionClock, WorkflowAdmissionObserver, WorkflowAdmissionService,
 };
 use axum::Router;
 use bytes::Bytes;
@@ -105,6 +106,7 @@ use crate::app::{
         repository_secret_browser_router,
     },
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
+    workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
         SetupPageAvailabilityError, SetupPageAvailabilityState, WebData,
@@ -120,6 +122,7 @@ use super::secret_cleanup::{
 use super::secret_custody::SecretCustodyVerifier;
 use super::secret_management::OperationalRepositorySecretBackend;
 use super::secret_mutation_recovery::{SecretMutationRecoveryLoop, SecretMutationRecoveryPorts};
+use super::workflow_dispatch::OperationalWorkflowDispatchBackend;
 
 const MAX_TLS_CERTIFICATES: usize = 32;
 const MAX_TLS_CERTIFICATE_DER_BYTES: usize = 1024 * 1024;
@@ -268,7 +271,13 @@ impl ProductionComponents {
             logical_activation_worker,
             logical_materialization_worker,
         );
-        apply_product_bootstrap(config, store.as_ref()).await?;
+        let github_oidc = build_github_oidc_product(config.github_oidc(), store.as_ref()).await?;
+        let capability_readiness = if github_oidc.operationally_ready() {
+            RunnerCapabilityReadiness::unavailable().with_github_oidc()
+        } else {
+            RunnerCapabilityReadiness::unavailable()
+        };
+        apply_product_bootstrap(config, store.as_ref(), capability_readiness).await?;
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -298,7 +307,7 @@ impl ProductionComponents {
                     ));
                 data
             });
-        let human = build_human_api(
+        let mut human = build_human_api(
             config,
             store.clone(),
             blob_store.clone(),
@@ -317,6 +326,25 @@ impl ProductionComponents {
             metrics,
         )
         .await?;
+        if github_provider.is_some() {
+            let admission_repository: Arc<dyn LogicalWorkflowAdmissionRepository> = store.clone();
+            let admission = WorkflowAdmissionService::with_system_ports(
+                Arc::clone(&blob_store),
+                admission_repository,
+                Arc::new(GithubWorkflowPlanVerifier::new()),
+            )
+            .with_observer(Arc::new(metrics.clone()));
+            let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> = Arc::new(
+                OperationalWorkflowDispatchBackend::new(GithubWorkflowDispatchService::new(
+                    admission,
+                )),
+            );
+            let dispatch_clock: Arc<dyn Clock> = Arc::new(SystemClock);
+            human.router = human.router.merge(workflow_dispatch_api_router(
+                dispatch_backend,
+                dispatch_clock,
+            ));
+        }
         let github_job_runtime_authority_issuer = github_provider.as_ref().map_or_else(
             unavailable_github_job_runtime_authority_issuer,
             GithubProviderRuntime::job_runtime_authority_issuer,
@@ -339,7 +367,6 @@ impl ProductionComponents {
         };
         let web_data: Arc<dyn WebData> = Arc::new(live_web_data);
         let maintenance_loop = build_maintenance_loop(config, store.clone(), metrics)?;
-        let github_oidc = build_github_oidc_product(config.github_oidc(), store.as_ref()).await?;
         let (results_api, results_runtime_authority_issuer) =
             build_results(config, store.as_ref(), blob_store.clone(), metrics)?;
         let runtime_authority_issuer = compose_runtime_authority_issuer(
@@ -452,12 +479,13 @@ impl ProductionComponents {
 async fn apply_product_bootstrap(
     config: &ServerConfig,
     store: &PostgresStore,
+    readiness: RunnerCapabilityReadiness,
 ) -> Result<(), ServerCompositionError> {
-    // This audit must precede the no-configuration return. The only current
-    // production INSERT of runner capabilities is the static fleet applied
-    // below, whose parser independently rejects OIDC advertisement.
+    // This audit must precede the no-configuration return. Both durable and
+    // static capability inventory are admitted against products whose full
+    // operational readiness this replica has already proved.
     store
-        .verify_runner_capability_admission()
+        .verify_runner_capability_readiness(readiness)
         .await
         .map_err(|_| ServerCompositionError::ProductBootstrap)?;
     if config.static_runner_registration_file.is_none() {
@@ -469,7 +497,7 @@ async fn apply_product_bootstrap(
     let fleet = config
         .static_runner_registration_file
         .as_deref()
-        .map(|path| load_static_runner_fleet(path, observed_seconds))
+        .map(|path| load_static_runner_fleet(path, observed_seconds, readiness))
         .transpose()
         .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
 

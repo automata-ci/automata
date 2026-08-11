@@ -78,24 +78,26 @@ impl CompletedStepApplicator for GithubCompletedStepApplicator {
             next.prepend_path.push(path.clone());
         }
 
-        let mut outputs = if matches!(scope.phase(), StepPhase::ActionPost(_)) {
+        if !matches!(scope.phase(), StepPhase::ActionPre(_)) {
+            let mut outputs = if matches!(scope.phase(), StepPhase::ActionPost(_)) {
+                next.outputs
+                    .iter()
+                    .find(|entry| entry.step_id == *scope.step_id())
+                    .map_or_else(Vec::new, |entry| entry.values.clone())
+            } else {
+                Vec::new()
+            };
+            for command in commands.output().commands() {
+                replace_name_value(&mut outputs, command.clone(), str::eq_ignore_ascii_case);
+            }
             next.outputs
-                .iter()
-                .find(|entry| entry.step_id == *scope.step_id())
-                .map_or_else(Vec::new, |entry| entry.values.clone())
-        } else {
-            Vec::new()
-        };
-        for command in commands.output().commands() {
-            replace_name_value(&mut outputs, command.clone(), str::eq_ignore_ascii_case);
-        }
-        next.outputs
-            .retain(|entry| entry.step_id != *scope.step_id());
-        if !outputs.is_empty() {
-            next.outputs.push(StepOutputState {
-                step_id: scope.step_id().clone(),
-                values: outputs,
-            });
+                .retain(|entry| entry.step_id != *scope.step_id());
+            if !outputs.is_empty() {
+                next.outputs.push(StepOutputState {
+                    step_id: scope.step_id().clone(),
+                    values: outputs,
+                });
+            }
         }
 
         match scope.phase() {
@@ -104,7 +106,9 @@ impl CompletedStepApplicator for GithubCompletedStepApplicator {
                     notices.push(PhaseApplicationNotice::StateIgnoredForRunStep);
                 }
             }
-            StepPhase::ActionMain(invocation_id) | StepPhase::ActionPost(invocation_id) => {
+            StepPhase::ActionPre(invocation_id)
+            | StepPhase::ActionMain(invocation_id)
+            | StepPhase::ActionPost(invocation_id) => {
                 let state_index = next
                     .action_states
                     .iter()

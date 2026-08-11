@@ -20,18 +20,18 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_github::{
-    GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
-    X_HUB_SIGNATURE_256,
+    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubWebhookVerifier,
+    MAX_GITHUB_WEBHOOK_BODY_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_github_delivery::{
     GithubDeliveryClock, GithubDeliveryConnection, GithubDeliveryIngress,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
-    GithubCheckName, GithubCheckSubjectId, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderRunnerPolicyObject, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
@@ -432,6 +432,18 @@ fn private_body() -> Bytes {
     )
 }
 
+fn public_pull_request_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER_COMMIT}","head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}}}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301}}}}"#
+    ))
+}
+
+fn public_merge_group_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"checks_requested","merge_group":{{"head_sha":"{AFTER_COMMIT}","head_ref":"refs/heads/merge-queue/main/group-7","base_sha":"{BEFORE_COMMIT}","base_ref":"refs/heads/main","head_commit":{{}}}},"repository":{{"id":101,"private":false,"visibility":"public","name":"public-repository","full_name":"octo-public/public-repository","owner":{{"id":1001,"login":"octo-public"}}}},"installation":{{"id":11}},"sender":{{"id":301}}}}"#
+    ))
+}
+
 fn hmac_sha256(secret: &[u8], body: &[u8]) -> [u8; 32] {
     const BLOCK_BYTES: usize = 64;
     assert!(
@@ -463,12 +475,16 @@ fn signature(body: &[u8]) -> String {
 }
 
 fn signed_request(uri: &str, delivery_id: &str, body: Bytes) -> Request {
+    signed_event_request(uri, delivery_id, "push", body)
+}
+
+fn signed_event_request(uri: &str, delivery_id: &str, event_name: &str, body: Bytes) -> Request {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
         .header(X_HUB_SIGNATURE_256, signature(&body))
-        .header(X_GITHUB_EVENT, "push")
+        .header(X_GITHUB_EVENT, event_name)
         .header(X_GITHUB_DELIVERY, delivery_id)
         .body(Body::from(body))
         .expect("request")
@@ -609,6 +625,78 @@ async fn one_public_router_accepts_mixed_repositories_outside_human_auth() {
         request.delivery().identity().repository_visibility()
             == ProviderRepositoryVisibility::Private
     }));
+}
+
+#[tokio::test]
+async fn product_router_preserves_legacy_push_and_opts_supported_events_into_v1() {
+    let (blobs, subjects) = default_ports();
+    let app = app(Arc::clone(&blobs), Arc::clone(&subjects));
+    for (event_name, delivery_id, body) in [
+        ("push", "routed-push", public_body()),
+        (
+            "pull_request",
+            "routed-pull-request",
+            public_pull_request_body(),
+        ),
+        (
+            "merge_group",
+            "routed-merge-group",
+            public_merge_group_body(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(signed_event_request(
+                GITHUB_WEBHOOK_PATH,
+                delivery_id,
+                event_name,
+                body,
+            ))
+            .await
+            .expect("routed event response");
+        assert_fixed_response(response, StatusCode::ACCEPTED).await;
+    }
+
+    let requests = subjects.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(blobs.completed(), 3);
+    let legacy = &requests[0];
+    assert!(legacy.authenticated_event_v1().is_none());
+    assert_eq!(
+        legacy.delivery().raw_event().media_type(),
+        GITHUB_PUSH_EVENT_MEDIA_TYPE
+    );
+
+    for (request, expected_kind, expected_ref) in [
+        (
+            &requests[1],
+            GithubAuthenticatedEventKind::PullRequest,
+            "refs/pull/7/merge",
+        ),
+        (
+            &requests[2],
+            GithubAuthenticatedEventKind::MergeGroup,
+            "refs/heads/merge-queue/main/group-7",
+        ),
+    ] {
+        let event = request
+            .authenticated_event_v1()
+            .expect("version-one routing evidence");
+        assert_eq!(event.kind(), expected_kind);
+        assert_eq!(event.git_ref(), expected_ref);
+        assert_eq!(
+            request.delivery().raw_event().media_type(),
+            GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        );
+        assert!(
+            request
+                .delivery()
+                .raw_event()
+                .object_key()
+                .as_str()
+                .starts_with("provider-deliveries/github/event-v1/sha256/")
+        );
+    }
 }
 
 #[tokio::test]

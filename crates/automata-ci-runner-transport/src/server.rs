@@ -107,6 +107,9 @@ impl RunnerControlServer {
     ///
     /// TLS/HTTP failures on individual untrusted connections are isolated to
     /// those connections. Only failure of the listener accept loop is fatal.
+    /// Panics are not a recoverable connection outcome: the workspace release
+    /// profile aborts the process, so verifier and handler implementations must
+    /// report expected failures through their typed results instead of panicking.
     ///
     /// # Errors
     ///
@@ -120,7 +123,9 @@ impl RunnerControlServer {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 joined = tasks.join_next(), if !tasks.is_empty() => {
-                    let _ = joined;
+                    if let Some(Ok(Some(event))) = joined {
+                        self.observer.observe_connection(event);
+                    }
                 }
                 accepted = self.listener.accept() => {
                     let Ok((stream, _)) = accepted else {
@@ -150,20 +155,34 @@ impl RunnerControlServer {
                     };
                     tasks.spawn(async move {
                         let _connection_permit = connection_permit;
-                        serve_connection(stream, state).await;
+                        serve_connection(stream, state).await
                     });
                 }
             }
         }
 
         connection_shutdown.cancel();
-        let drain = async { while tasks.join_next().await.is_some() {} };
+        let drain = async {
+            while let Some(joined) = tasks.join_next().await {
+                if let Ok(Some(event)) = joined {
+                    self.observer.observe_connection(event);
+                }
+            }
+        };
         if timeout(self.transport_limits.graceful_shutdown_timeout(), drain)
             .await
             .is_err()
         {
             tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(Some(event)) => self.observer.observe_connection(event),
+                    Err(error) if error.is_cancelled() => self
+                        .observer
+                        .observe_connection(RunnerTransportConnectionEvent::DrainAborted),
+                    _ => {}
+                }
+            }
         }
 
         fatal.map_or(Ok(()), Err)
@@ -191,7 +210,10 @@ struct ConnectionState {
     shutdown: CancellationToken,
 }
 
-async fn serve_connection(stream: TcpStream, state: ConnectionState) {
+async fn serve_connection(
+    stream: TcpStream,
+    state: ConnectionState,
+) -> Option<RunnerTransportConnectionEvent> {
     let tls_started = Instant::now();
     let tls = match timeout(
         state.transport_limits.tls_handshake_timeout(),
@@ -204,13 +226,13 @@ async fn serve_connection(stream: TcpStream, state: ConnectionState) {
             state
                 .observer
                 .observe_tls(RunnerTransportTlsOutcome::Rejected, tls_started.elapsed());
-            return;
+            return None;
         }
         Err(_) => {
             state
                 .observer
                 .observe_tls(RunnerTransportTlsOutcome::Timeout, tls_started.elapsed());
-            return;
+            return None;
         }
     };
 
@@ -219,7 +241,7 @@ async fn serve_connection(stream: TcpStream, state: ConnectionState) {
             RunnerTransportTlsOutcome::InvalidProtocol,
             tls_started.elapsed(),
         );
-        return;
+        return None;
     }
 
     let Some(evidence) = peer_evidence(&tls) else {
@@ -227,7 +249,7 @@ async fn serve_connection(stream: TcpStream, state: ConnectionState) {
             RunnerTransportTlsOutcome::InvalidPeerIdentity,
             tls_started.elapsed(),
         );
-        return;
+        return None;
     };
     state
         .observer
@@ -276,16 +298,19 @@ async fn serve_connection(stream: TcpStream, state: ConnectionState) {
         terminal_event,
         RunnerTransportConnectionEvent::Http2Closed | RunnerTransportConnectionEvent::Http2Error
     ) {
-        state.observer.observe_connection(terminal_event);
-        return;
+        return Some(terminal_event);
     }
     connection.as_mut().graceful_shutdown();
-    let _ = timeout(
-        state.transport_limits.graceful_shutdown_timeout(),
-        &mut connection,
-    )
-    .await;
-    state.observer.observe_connection(terminal_event);
+    if terminal_event == RunnerTransportConnectionEvent::LifetimeExpired {
+        let _ = timeout(
+            state.transport_limits.graceful_shutdown_timeout(),
+            &mut connection,
+        )
+        .await;
+    } else {
+        let _ = (&mut connection).await;
+    }
+    Some(terminal_event)
 }
 
 fn peer_evidence(tls: &TlsStream<TcpStream>) -> Option<MachineAuthenticationEvidence> {

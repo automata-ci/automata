@@ -121,6 +121,17 @@ const presentationModes = [
 
 const colorSchemes = ["light", "dark"] as const;
 
+const themePresentationContracts = {
+  dark: {
+    background: "rgb(13, 17, 23)",
+    toggleName: "Use light theme",
+  },
+  light: {
+    background: "rgb(255, 255, 255)",
+    toggleName: "Use dark theme",
+  },
+} as const;
+
 for (const previewPage of previewPages) {
   for (const presentation of presentationModes) {
     for (const colorScheme of colorSchemes) {
@@ -128,24 +139,35 @@ for (const previewPage of previewPages) {
         presentation.name === "desktop" ? "" : `-${presentation.name}`;
       const screenshotName = `${previewPage.name}${viewportLabel}-${colorScheme}`;
 
-      test(`capture ${screenshotName}`, async ({ page }) => {
+      test(`presentation contract ${screenshotName}`, async ({ page }) => {
         await mkdir(screenshotDirectory, { recursive: true });
         const runtimeIssues = collectRuntimeIssues(page);
         await observeLayoutShifts(page);
         await page.setViewportSize(presentation.viewport);
         await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
-        await page.goto(previewPage.url, { waitUntil: "networkidle" });
-        await waitForStableRender(page, previewPage.heading);
+        try {
+          await page.goto(previewPage.url, { waitUntil: "networkidle" });
+          await waitForStableRender(page, previewPage.heading);
 
-        expect(await cumulativeLayoutShift(page)).toBeLessThanOrEqual(0.01);
-        await expectNoDocumentOverflow(page);
-        expect(runtimeIssues).toEqual([]);
-
-        await page.screenshot({
-          animations: "disabled",
-          fullPage: true,
-          path: path.join(screenshotDirectory, `${screenshotName}.png`),
-        });
+          expect(await cumulativeLayoutShift(page)).toBeLessThanOrEqual(0.01);
+          await expectNoDocumentOverflow(page);
+          await expectPreviewPresentation(
+            page,
+            presentation.viewport,
+            colorScheme,
+          );
+          expect(runtimeIssues).toEqual([]);
+        } finally {
+          // These are Pages and human-review artifacts, not pixel baselines.
+          // Capturing in the failure path preserves the page that explains a
+          // deterministic contract failure without coupling the gate to host-
+          // dependent font and rasterization output.
+          await page.screenshot({
+            animations: "disabled",
+            fullPage: true,
+            path: path.join(screenshotDirectory, `${screenshotName}.png`),
+          });
+        }
       });
     }
   }
@@ -1803,6 +1825,63 @@ async function expectNoDocumentOverflow(page: Page): Promise<void> {
       ),
     )
     .toBeLessThanOrEqual(1);
+}
+
+async function expectPreviewPresentation(
+  page: Page,
+  viewport: { readonly width: number; readonly height: number },
+  colorScheme: (typeof colorSchemes)[number],
+): Promise<void> {
+  const themeContract = themePresentationContracts[colorScheme];
+  await expect.poll(() => activeTheme(page)).toBe(colorScheme);
+  await expect.poll(() => bodyBackground(page)).toBe(themeContract.background);
+  await expect(
+    page.getByRole("button", { name: themeContract.toggleName }),
+  ).toBeVisible();
+
+  for (const selector of [".site-header", "#main-content", ".site-footer"]) {
+    const landmark = page.locator(selector);
+    await expect(landmark).toHaveCount(1);
+    await expect(landmark).toBeVisible();
+  }
+
+  const layout = await page.evaluate(() => {
+    const bounds = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error(`Missing presentation landmark: ${selector}`);
+      }
+      const rectangle = element.getBoundingClientRect();
+      return {
+        bottom: rectangle.bottom,
+        height: rectangle.height,
+        left: rectangle.left,
+        right: rectangle.right,
+        top: rectangle.top,
+        width: rectangle.width,
+      };
+    };
+
+    return {
+      content: bounds("#main-content"),
+      footer: bounds(".site-footer"),
+      header: bounds(".site-header"),
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+    };
+  });
+
+  expect(layout.viewportWidth).toBe(viewport.width);
+  expect(layout.viewportHeight).toBe(viewport.height);
+  for (const landmark of [layout.header, layout.content, layout.footer]) {
+    expect(landmark.height).toBeGreaterThan(0);
+    expect(landmark.width).toBeGreaterThan(0);
+    expect(landmark.left).toBeGreaterThanOrEqual(-1);
+    expect(landmark.right).toBeLessThanOrEqual(viewport.width + 1);
+  }
+  expect(layout.header.top).toBeGreaterThanOrEqual(-1);
+  expect(layout.content.top).toBeGreaterThanOrEqual(layout.header.bottom - 1);
+  expect(layout.footer.top).toBeGreaterThanOrEqual(layout.content.bottom - 1);
 }
 
 async function hasVisibleOutline(locator: Locator): Promise<boolean> {

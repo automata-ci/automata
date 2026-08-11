@@ -10,7 +10,8 @@ use automata_ci_core::{
     RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel, Sha256Digest, UnixMillis,
 };
 use automata_ci_store::{
-    MAX_STATIC_RUNNERS, RunnerSlotCount, StaticRunnerFleet, StaticRunnerRegistration, TenantScope,
+    MAX_STATIC_RUNNERS, RunnerCapabilityReadiness, RunnerSlotCount, StaticRunnerFleet,
+    StaticRunnerRegistration, TenantScope,
 };
 use rustls::pki_types::{CertificateDer, pem::PemObject as _};
 use serde::Deserialize;
@@ -65,19 +66,38 @@ struct StaticClientCertificateEntry {
 pub(crate) fn load_static_runner_fleet(
     path: &Path,
     now_seconds: i64,
+    readiness: RunnerCapabilityReadiness,
 ) -> Result<StaticRunnerFleet, StaticRunnerRegistrationError> {
     if !path.is_absolute() {
         return Err(StaticRunnerRegistrationError::RelativePath);
     }
     let document = read_privileged_file(path, MAX_STATIC_REGISTRATION_BYTES)?;
-    parse_document(&document, now_seconds, |certificate_path| {
+    parse_document_with_readiness(&document, now_seconds, readiness, |certificate_path| {
         read_privileged_file(certificate_path, MAX_CLIENT_CERTIFICATE_BYTES)
     })
 }
 
+#[cfg(test)]
 fn parse_document<F>(
     bytes: &[u8],
     now_seconds: i64,
+    load_certificate: F,
+) -> Result<StaticRunnerFleet, StaticRunnerRegistrationError>
+where
+    F: FnMut(&Path) -> Result<Vec<u8>, StaticRunnerRegistrationError>,
+{
+    parse_document_with_readiness(
+        bytes,
+        now_seconds,
+        RunnerCapabilityReadiness::unavailable(),
+        load_certificate,
+    )
+}
+
+fn parse_document_with_readiness<F>(
+    bytes: &[u8],
+    now_seconds: i64,
+    readiness: RunnerCapabilityReadiness,
     mut load_certificate: F,
 ) -> Result<StaticRunnerFleet, StaticRunnerRegistrationError>
 where
@@ -98,7 +118,7 @@ where
     let mut runners = Vec::with_capacity(document.runners.len());
     for entry in document.runners {
         let runner_id = canonical_runner_id(&entry.id)?;
-        let capabilities = canonical_capabilities(&entry.capabilities)?;
+        let capabilities = canonical_capabilities(&entry.capabilities, readiness)?;
         let labels = entry
             .labels
             .into_iter()
@@ -172,6 +192,7 @@ fn canonical_label(value: &str) -> Result<RunnerLabel, StaticRunnerRegistrationE
 
 fn canonical_capabilities(
     value: &Value,
+    readiness: RunnerCapabilityReadiness,
 ) -> Result<RunnerCapabilities, StaticRunnerRegistrationError> {
     validate_capability_keys(value)?;
     let capabilities: RunnerCapabilities = serde_json::from_value(value.clone())
@@ -181,11 +202,10 @@ fn canonical_capabilities(
     if &canonical != value {
         return Err(StaticRunnerRegistrationError::InvalidCapabilities);
     }
-    // Static fleet input has no server-owned proof that the OIDC public route
-    // and signing-key fleet are operationally ready on every replica.
     if capabilities
         .features()
         .contains(&RunnerFeature::OIDC_TOKENS)
+        && !readiness.github_oidc()
     {
         return Err(StaticRunnerRegistrationError::InvalidCapabilities);
     }
@@ -827,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn document_rejects_oidc_capability_without_server_operational_readiness() {
+    fn document_gates_oidc_capability_on_server_operational_readiness() {
         let id = RunnerId::new();
         let certificate = client_certificate("runner-a");
         let mut document: Value =
@@ -865,6 +885,20 @@ mod tests {
             )
             .expect_err("OIDC-capable static fleet must stay dark"),
             StaticRunnerRegistrationError::InvalidCapabilities
+        );
+
+        let admitted = parse_document_with_readiness(
+            &serde_json::to_vec(&document).expect("JSON"),
+            NOW,
+            RunnerCapabilityReadiness::unavailable().with_github_oidc(),
+            |_| Ok(certificate.pem.clone()),
+        )
+        .expect("a ready OIDC product admits the exact advertised capability");
+        assert!(
+            admitted.runners()[0]
+                .capabilities()
+                .features()
+                .contains(&RunnerFeature::OIDC_TOKENS)
         );
     }
 
@@ -1128,8 +1162,12 @@ mod tests {
     #[test]
     fn errors_never_retain_paths() {
         let marker = format!("static-registration-sensitive-{}", RunnerId::new());
-        let error =
-            load_static_runner_fleet(Path::new(&marker), NOW).expect_err("relative path must fail");
+        let error = load_static_runner_fleet(
+            Path::new(&marker),
+            NOW,
+            RunnerCapabilityReadiness::unavailable(),
+        )
+        .expect_err("relative path must fail");
         assert_eq!(error, StaticRunnerRegistrationError::RelativePath);
         assert!(!error.to_string().contains(&marker));
         assert!(!format!("{error:?}").contains(&marker));

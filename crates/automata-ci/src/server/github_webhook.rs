@@ -96,7 +96,7 @@ async fn accept_github_webhook(
         return Err(GithubWebhookHttpOutcome::InvalidRequest);
     }
     require_exact_json(request.headers())?;
-    require_github_header_shapes(request.headers())?;
+    let ingress_route = require_github_header_shapes(request.headers())?;
     let _permit = admission
         .try_acquire_owned()
         .map_err(|_| GithubWebhookHttpOutcome::Unavailable)?;
@@ -104,10 +104,15 @@ async fn accept_github_webhook(
     let (parts, body) = request.into_parts();
     let raw_body = collect_raw_body(body).await?;
     ensure_before_deadline(deadline)?;
-    registry
-        .accept(&parts.headers, raw_body)
-        .await
-        .map_err(GithubWebhookHttpOutcome::from_ingress)?;
+    match ingress_route {
+        GithubWebhookIngressRoute::Legacy => registry.accept(&parts.headers, raw_body).await,
+        GithubWebhookIngressRoute::AuthenticatedEventV1 => {
+            registry
+                .accept_authenticated_event_v1(&parts.headers, raw_body)
+                .await
+        }
+    }
+    .map_err(GithubWebhookHttpOutcome::from_ingress)?;
     ensure_before_deadline(deadline)?;
     Ok(())
 }
@@ -131,7 +136,9 @@ fn require_exact_json(headers: &HeaderMap) -> Result<(), GithubWebhookHttpOutcom
     Ok(())
 }
 
-fn require_github_header_shapes(headers: &HeaderMap) -> Result<(), GithubWebhookHttpOutcome> {
+fn require_github_header_shapes(
+    headers: &HeaderMap,
+) -> Result<GithubWebhookIngressRoute, GithubWebhookHttpOutcome> {
     let signature = unique_header(headers, X_HUB_SIGNATURE_256)?;
     let Some(encoded_signature) = signature.strip_prefix(GITHUB_SIGNATURE_PREFIX) else {
         return Err(GithubWebhookHttpOutcome::AuthenticationFailed);
@@ -163,7 +170,16 @@ fn require_github_header_shapes(headers: &HeaderMap) -> Result<(), GithubWebhook
     {
         return Err(GithubWebhookHttpOutcome::AuthenticationFailed);
     }
-    Ok(())
+    Ok(match event {
+        b"pull_request" | b"merge_group" => GithubWebhookIngressRoute::AuthenticatedEventV1,
+        _ => GithubWebhookIngressRoute::Legacy,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubWebhookIngressRoute {
+    Legacy,
+    AuthenticatedEventV1,
 }
 
 fn unique_header<'headers>(

@@ -110,6 +110,27 @@ impl LifecycleObserver {
         .await
         .unwrap_or_else(|_| panic!("connection observer did not record {count} HTTP/2 terminals"));
     }
+
+    async fn wait_for_tls(&self, expected: RunnerTransportTlsOutcome, count: usize) {
+        timeout(TEST_WATCHDOG, async {
+            loop {
+                let changed = self.changed.notified();
+                let observed = self
+                    .tls
+                    .lock()
+                    .expect("TLS outcome lock")
+                    .iter()
+                    .filter(|outcome| **outcome == expected)
+                    .count();
+                if observed >= count {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("TLS observer did not record {count} {expected:?} outcomes"));
+    }
 }
 
 impl RunnerTransportObserver for LifecycleObserver {
@@ -202,6 +223,9 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
     observer
         .wait_for_connection(RunnerTransportConnectionEvent::Admitted, 1)
         .await;
+    observer
+        .wait_for_tls(RunnerTransportTlsOutcome::Accepted, 1)
+        .await;
 
     let rejected = raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)));
     assert!(
@@ -268,6 +292,111 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
 }
 
 #[tokio::test]
+async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
+    const LIFETIME: Duration = Duration::from_secs(5);
+
+    let pki = TestPki::new();
+    let observer = Arc::new(LifecycleObserver::default());
+    let handler = TestHandler::new(HandlerMode::Reply);
+    let limits = TransportLimits::default()
+        .with_server_request_timeouts(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("short request timeouts")
+        .with_connection_lifetime(LIFETIME)
+        .expect("fixed connection lifetime")
+        .with_graceful_shutdown_timeout(Duration::from_millis(10))
+        .expect("bounded lifetime drain")
+        .with_concurrency_limits(1, 16, 16)
+        .expect("one concurrent connection");
+    let running = spawn_lifecycle_server(
+        &pki,
+        RecordingVerifier::accepting(),
+        handler.clone(),
+        &limits,
+        Arc::clone(&observer),
+    )
+    .await;
+
+    let (first_sender, first_connection) =
+        raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)))
+            .await
+            .expect("first H2 connection");
+    observer
+        .wait_for_connection(RunnerTransportConnectionEvent::Admitted, 1)
+        .await;
+    observer
+        .wait_for_tls(RunnerTransportTlsOutcome::Accepted, 1)
+        .await;
+    assert_eq!(
+        observer.tls_outcomes(),
+        [RunnerTransportTlsOutcome::Accepted]
+    );
+
+    tokio::time::pause();
+    yield_to_connection_lifetime().await;
+    advance(LIFETIME + Duration::from_millis(1)).await;
+    observer
+        .wait_for_connection(RunnerTransportConnectionEvent::LifetimeExpired, 1)
+        .await;
+    assert_eq!(
+        observer.connection_events(),
+        [
+            RunnerTransportConnectionEvent::Admitted,
+            RunnerTransportConnectionEvent::LifetimeExpired,
+        ]
+    );
+    timeout(TEST_WATCHDOG, first_connection)
+        .await
+        .expect("expired client connection watchdog")
+        .expect("expired client connection task");
+    drop(first_sender);
+    tokio::time::resume();
+
+    let (mut replacement_sender, replacement_connection) =
+        raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)))
+            .await
+            .expect("connection permit after lifetime expiry");
+    let response = replacement_sender
+        .send_request(raw_hello_request(running.address))
+        .await
+        .expect("request after lifetime expiry");
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect replacement response");
+    assert_eq!(handler.calls(), 1);
+
+    running.stop().await;
+    assert_eq!(
+        observer.connection_events(),
+        [
+            RunnerTransportConnectionEvent::Admitted,
+            RunnerTransportConnectionEvent::LifetimeExpired,
+            RunnerTransportConnectionEvent::Admitted,
+            RunnerTransportConnectionEvent::Shutdown,
+        ]
+    );
+    assert_eq!(
+        observer.tls_outcomes(),
+        [
+            RunnerTransportTlsOutcome::Accepted,
+            RunnerTransportTlsOutcome::Accepted,
+        ]
+    );
+    drop(replacement_sender);
+    timeout(TEST_WATCHDOG, replacement_connection)
+        .await
+        .expect("replacement client connection watchdog")
+        .expect("replacement client connection task");
+}
+
+#[tokio::test]
 async fn shutdown_cancels_in_flight_handler_and_drains_its_response() {
     let pki = TestPki::new();
     let observer = Arc::new(LifecycleObserver::default());
@@ -330,6 +459,96 @@ async fn shutdown_cancels_in_flight_handler_and_drains_its_response() {
 }
 
 #[tokio::test]
+async fn stalled_h2_shutdown_is_aborted_once_by_the_listener_deadline() {
+    const GRACE: Duration = Duration::from_secs(1);
+
+    let pki = TestPki::new();
+    let observer = Arc::new(LifecycleObserver::default());
+    let handler = TestHandler::new(HandlerMode::WaitForCancellation);
+    let limits = TransportLimits::default()
+        .with_graceful_shutdown_timeout(GRACE)
+        .expect("one-second grace period")
+        .with_concurrency_limits(1, 16, 16)
+        .expect("one concurrent connection");
+    let running = spawn_lifecycle_server(
+        &pki,
+        RecordingVerifier::accepting(),
+        handler.clone(),
+        &limits,
+        Arc::clone(&observer),
+    )
+    .await;
+    let (mut sender, connection) =
+        raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)))
+            .await
+            .expect("stalled H2 connection");
+    let request = raw_hello_request(running.address);
+    let response_task = tokio::spawn(async move { sender.send_request(request).await });
+    handler.wait_until_started().await;
+
+    tokio::time::pause();
+    let shutdown_started = tokio::time::Instant::now();
+    running.shutdown.cancel();
+    yield_to_shutdown_drain().await;
+    wait_for_handler_cancellation(&handler).await;
+    assert_eq!(
+        observer.connection_events(),
+        [RunnerTransportConnectionEvent::Admitted]
+    );
+
+    advance(
+        GRACE
+            .checked_sub(Duration::from_millis(1))
+            .expect("grace exceeds one millisecond"),
+    )
+    .await;
+    assert!(!running.task.is_finished());
+    assert_eq!(
+        observer.connection_events(),
+        [RunnerTransportConnectionEvent::Admitted]
+    );
+
+    advance(Duration::from_millis(2)).await;
+    for _ in 0..8 {
+        if running.task.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        running.task.is_finished(),
+        "the listener must abort an H2 stream that exceeds its drain deadline"
+    );
+    assert_eq!(
+        tokio::time::Instant::now() - shutdown_started,
+        GRACE + Duration::from_millis(1)
+    );
+    tokio::time::resume();
+
+    running.finish().await;
+    assert!(handler.cancellation_seen());
+    assert_eq!(
+        observer.connection_events(),
+        [
+            RunnerTransportConnectionEvent::Admitted,
+            RunnerTransportConnectionEvent::DrainAborted,
+        ]
+    );
+    assert!(
+        timeout(TEST_WATCHDOG, response_task)
+            .await
+            .expect("aborted H2 response watchdog")
+            .expect("aborted H2 response task")
+            .is_err(),
+        "a forcibly aborted H2 stream cannot produce a response"
+    );
+    timeout(TEST_WATCHDOG, connection)
+        .await
+        .expect("aborted H2 connection watchdog")
+        .expect("aborted H2 connection task");
+}
+
+#[tokio::test]
 async fn grace_timeout_aborts_a_connection_stalled_before_tls() {
     const GRACE: Duration = Duration::from_secs(1);
 
@@ -388,8 +607,11 @@ async fn grace_timeout_aborts_a_connection_stalled_before_tls() {
     assert_tcp_closed_without_data(&mut stalled).await;
     assert_eq!(handler.calls(), 0);
     assert_eq!(
-        observer.connection_events().first(),
-        Some(&RunnerTransportConnectionEvent::Admitted)
+        observer.connection_events(),
+        [
+            RunnerTransportConnectionEvent::Admitted,
+            RunnerTransportConnectionEvent::DrainAborted,
+        ]
     );
 }
 
@@ -481,11 +703,35 @@ async fn wait_for_flag(flag: &AtomicBool, changed: &Notify) {
     .expect("handler lifecycle flag watchdog");
 }
 
+async fn wait_for_handler_cancellation(handler: &TestHandler) {
+    const SCHEDULER_TURNS: usize = 32;
+    for _ in 0..SCHEDULER_TURNS {
+        if handler.cancellation_seen() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        handler.cancellation_seen(),
+        "handler did not observe shutdown cancellation"
+    );
+}
+
 async fn yield_to_shutdown_drain() {
     // The public server observer deliberately has no pre-TLS drain event, so a
     // stalled handshake cannot expose a stronger test-side gate. Tokio time is
     // frozen here; bounded scheduler turns let the cancellation-woken accept
     // loop install its grace timer without consuming any of that grace period.
+    const SCHEDULER_TURNS: usize = 32;
+    for _ in 0..SCHEDULER_TURNS {
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn yield_to_connection_lifetime() {
+    // TLS admission is observed immediately before the HTTP/2 connection
+    // future installs its lifetime timer. Tokio time is frozen, so bounded
+    // scheduler turns install that timer without consuming the lifetime.
     const SCHEDULER_TURNS: usize = 32;
     for _ in 0..SCHEDULER_TURNS {
         tokio::task::yield_now().await;

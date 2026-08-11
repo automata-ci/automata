@@ -515,6 +515,40 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    fn ipv4(address: SocketAddr) -> SocketAddrV4 {
+        match address {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => panic!("expected IPv4"),
+        }
+    }
+
+    fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("backend accept failed: {error}"),
+            }
+        }
+    }
+
+    fn wait_for_session_count(limiter: &SlotLimiter, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while limiter.in_use() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "session count remained {} instead of {expected}",
+                limiter.in_use()
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn later_bind_failure_rolls_back_every_earlier_listener() {
         let reservation = TcpListener::bind((LOOPBACK, 0)).expect("reserve port");
@@ -674,15 +708,76 @@ mod tests {
     }
 
     #[test]
+    fn tcp_session_contention_rejects_overload_and_reuses_the_released_slot() {
+        let backend = TcpListener::bind((LOOPBACK, 0)).expect("backend listener");
+        backend.set_nonblocking(true).expect("nonblocking backend");
+        let target = ipv4(backend.local_addr().expect("backend address"));
+        let mapping = Mapping::new(Transport::Tcp, target, 0);
+        let mut proxy =
+            PreparedProxy::prepare_with_limits(&[mapping], 1, 1, Duration::from_secs(30))
+                .expect("prepare proxy");
+        let front = SocketAddrV4::new(LOOPBACK, proxy.ports().expect("ports")[0]);
+
+        let first = TcpStream::connect(front).expect("first client");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("admit first session");
+        assert_eq!(proxy.tcp_sessions.in_use(), 1);
+        let first_upstream = accept_before(&backend, Duration::from_secs(1));
+
+        let mut overloaded = TcpStream::connect(front).expect("overloaded client");
+        overloaded
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .expect("overloaded client timeout");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("reject overloaded session");
+        assert_eq!(proxy.tcp_sessions.in_use(), 1);
+        let mut byte = [0_u8; 1];
+        match overloaded.read(&mut byte) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) => {}
+            Ok(length) => {
+                panic!("over-capacity connection received {length} bytes instead of being closed")
+            }
+            Err(error) => panic!("over-capacity connection did not close promptly: {error}"),
+        }
+        assert!(
+            matches!(backend.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+
+        first.shutdown(Shutdown::Both).expect("close first client");
+        first_upstream
+            .shutdown(Shutdown::Both)
+            .expect("close first upstream");
+        wait_for_session_count(&proxy.tcp_sessions, 0);
+
+        let replacement = TcpStream::connect(front).expect("replacement client");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("admit replacement session");
+        assert_eq!(proxy.tcp_sessions.in_use(), 1);
+        let replacement_upstream = accept_before(&backend, Duration::from_secs(1));
+        replacement
+            .shutdown(Shutdown::Both)
+            .expect("close replacement client");
+        replacement_upstream
+            .shutdown(Shutdown::Both)
+            .expect("close replacement upstream");
+        wait_for_session_count(&proxy.tcp_sessions, 0);
+    }
+
+    #[test]
     fn udp_association_table_is_hard_capped_and_idle_entries_expire() {
         let backend = UdpSocket::bind((LOOPBACK, 0)).expect("backend");
         backend
             .set_read_timeout(Some(Duration::from_millis(50)))
             .expect("backend timeout");
-        let target = match backend.local_addr().expect("backend address") {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => panic!("expected IPv4"),
-        };
+        let target = ipv4(backend.local_addr().expect("backend address"));
         let mapping = Mapping::new(Transport::Udp, target, 0);
         let mut proxy =
             PreparedProxy::prepare_with_limits(&[mapping], 1, 1, Duration::from_millis(200))
@@ -706,6 +801,7 @@ mod tests {
         let (length, proxy_source) = backend.recv_from(&mut buffer).expect("first forwarded");
         assert_eq!(&buffer[..length], b"one");
         assert_eq!(proxy.udp_associations.len(), 1);
+        assert_eq!(proxy.udp_tokens.len(), 1);
         backend
             .send_to(b"reply-one", proxy_source)
             .expect("backend response");
@@ -723,9 +819,16 @@ mod tests {
         assert!(backend.recv_from(&mut buffer).is_err());
         assert_eq!(proxy.udp_associations.len(), 1);
 
-        thread::sleep(Duration::from_millis(220));
+        let expired_at = Instant::now()
+            .checked_sub(proxy.udp_association_idle)
+            .expect("representable expired activity");
+        proxy
+            .udp_associations
+            .values_mut()
+            .for_each(|association| association.last_client_activity = expired_at);
         proxy.poll_once(Duration::ZERO).expect("expire idle entry");
         assert!(proxy.udp_associations.is_empty());
+        assert!(proxy.udp_tokens.is_empty());
 
         second
             .send_to(b"two", front)
@@ -742,5 +845,113 @@ mod tests {
             receive_storage,
             "UDP listener and association events reuse one bounded allocation"
         );
+    }
+
+    #[test]
+    fn udp_association_reuses_identity_refreshes_activity_and_rejects_stale_tokens() {
+        let backend = UdpSocket::bind((LOOPBACK, 0)).expect("backend");
+        backend
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .expect("backend timeout");
+        let target = ipv4(backend.local_addr().expect("backend address"));
+        let mut proxy = PreparedProxy::prepare_with_limits(
+            &[Mapping::new(Transport::Udp, target, 0)],
+            1,
+            2,
+            Duration::from_secs(30),
+        )
+        .expect("prepare proxy");
+        let front = SocketAddrV4::new(LOOPBACK, proxy.ports().expect("ports")[0]);
+        let client = UdpSocket::bind((LOOPBACK, 0)).expect("client");
+        client
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .expect("client timeout");
+        let client_address = ipv4(client.local_addr().expect("client address"));
+        let key = AssociationKey {
+            listener_index: 0,
+            client: client_address,
+        };
+        let mut datagram = [0_u8; 32];
+
+        client.send_to(b"first", front).expect("first request");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("route first request");
+        let (length, first_source) = backend.recv_from(&mut datagram).expect("first forwarded");
+        assert_eq!(&datagram[..length], b"first");
+        let first_token = proxy
+            .udp_associations
+            .get(&key)
+            .expect("first association")
+            .token;
+
+        let old_activity = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("representable earlier activity");
+        proxy
+            .udp_associations
+            .get_mut(&key)
+            .expect("first association")
+            .last_client_activity = old_activity;
+        client.send_to(b"second", front).expect("second request");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("route second request");
+        let (length, second_source) = backend.recv_from(&mut datagram).expect("second forwarded");
+        assert_eq!(&datagram[..length], b"second");
+        assert_eq!(
+            second_source, first_source,
+            "one client reuses one upstream socket"
+        );
+        let association = proxy
+            .udp_associations
+            .get(&key)
+            .expect("reused association");
+        assert_eq!(association.token, first_token);
+        assert!(association.last_client_activity > old_activity);
+
+        backend
+            .send_to(b"second-response", second_source)
+            .expect("backend response");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("route backend response");
+        let (length, source) = client.recv_from(&mut datagram).expect("client response");
+        assert_eq!(&datagram[..length], b"second-response");
+        assert_eq!(source, SocketAddr::V4(front));
+
+        let expired_at = Instant::now()
+            .checked_sub(proxy.udp_association_idle)
+            .expect("representable expired activity");
+        proxy
+            .udp_associations
+            .get_mut(&key)
+            .expect("association before expiry")
+            .last_client_activity = expired_at;
+        proxy.expire_udp_associations(Instant::now());
+        assert!(proxy.udp_associations.is_empty());
+        assert!(proxy.udp_tokens.is_empty());
+
+        proxy.handle_udp_response(first_token);
+        assert!(proxy.udp_associations.is_empty());
+        assert!(proxy.udp_tokens.is_empty());
+
+        client
+            .send_to(b"replacement", front)
+            .expect("replacement request");
+        proxy
+            .poll_once(Duration::from_millis(100))
+            .expect("route replacement request");
+        let (length, _) = backend
+            .recv_from(&mut datagram)
+            .expect("replacement forwarded");
+        assert_eq!(&datagram[..length], b"replacement");
+        let replacement_token = proxy
+            .udp_associations
+            .get(&key)
+            .expect("replacement association")
+            .token;
+        assert_ne!(replacement_token, first_token);
+        assert_eq!(proxy.udp_tokens.get(&replacement_token), Some(&key));
     }
 }

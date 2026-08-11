@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use automata_ci_core::{RunId, UnixMillis, WorkflowId};
+use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
@@ -10,26 +11,46 @@ use super::{
         record_github_workflow_run_subject_evidence_in_transaction,
         validate_github_workflow_run_subject_evidence_in_transaction,
     },
+    secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
 };
 use crate::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    GithubSubjectEvidenceStoreError, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    GithubSubjectEvidenceStoreError,
+    LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowInvocationId, RecordGithubWorkflowRunSubjectEvidence, RepositoryId, StoreError,
-    ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
+    LogicalWorkflowInvocationId, ObjectKey, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
+    ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
+    ValidateGithubWorkflowRunSubjectEvidenceReplay,
+    WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency,
+    WorkflowAdmissionStoreError, WorkflowSnapshotId,
 };
 
-#[derive(Clone, Copy)]
 enum SubjectEvidenceAdmission {
     AuthenticatedGithub {
         current_claim: AuthenticatedGithubDeliveryClaim,
         observed_at: UnixMillis,
     },
+    AuthenticatedWorkflowDispatch {
+        claim: AuthenticatedWorkflowDispatchClaim,
+    },
 }
+
+const WORKFLOW_DISPATCH_PERMISSION: &str = "runs:dispatch";
+const WORKFLOW_DISPATCH_AUDIT_ACTION: &str = "workflow.dispatch";
+const WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND: &str = "workflow_run";
+const WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-dispatch.audit.v1\0";
 
 #[async_trait]
 impl LogicalWorkflowAdmissionRepository for PostgresStore {
+    async fn resolve_authenticated_workflow_dispatch_source(
+        &self,
+        request: ResolveAuthenticatedWorkflowDispatchSource,
+    ) -> Result<Option<AuthenticatedWorkflowDispatchSource>, LogicalWorkflowAdmissionStoreError>
+    {
+        resolve_authenticated_dispatch_source(self, request).await
+    }
+
     async fn admit_logical_workflow(
         &self,
         _command: AdmitLogicalWorkflowRun,
@@ -53,6 +74,170 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
         )
         .await
     }
+
+    async fn admit_authenticated_workflow_dispatch(
+        &self,
+        command: AdmitLogicalWorkflowRun,
+        claim: AuthenticatedWorkflowDispatchClaim,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        admit_logical_workflow_transaction(
+            self,
+            command,
+            SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim },
+        )
+        .await
+    }
+}
+
+async fn resolve_authenticated_dispatch_source(
+    store: &PostgresStore,
+    request: ResolveAuthenticatedWorkflowDispatchSource,
+) -> Result<Option<AuthenticatedWorkflowDispatchSource>, LogicalWorkflowAdmissionStoreError> {
+    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    let actor = authorize_human_repository_action(
+        &mut transaction,
+        request.actor(),
+        WORKFLOW_DISPATCH_PERMISSION,
+        request.repository_id().as_uuid(),
+    )
+    .await?;
+    let Some(actor) = actor else {
+        return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
+    };
+    if actor.tenant_id != request.actor().tenant_id().as_str()
+        || actor.authorization_revision
+            != i64::try_from(request.actor().authorization_revision().value())
+                .unwrap_or(i64::MAX)
+        || actor.principal_id.hyphenated().to_string() != request.actor().principal_id().as_str()
+        || actor.session_id.hyphenated().to_string() != request.actor().session_id().as_str()
+    {
+        return Err(StoreError::corrupt_data(
+            "reauthorized workflow dispatch source actor disagrees with its request",
+        )
+        .into());
+    }
+
+    // DISTINCT plus LIMIT 2 makes conflicting immutable descriptors at the
+    // same exact repository/workflow/ref/commit identity a bounded fail-closed
+    // corruption outcome rather than silently selecting one historical run.
+    let rows = sqlx::query(
+        r"
+        SELECT DISTINCT repository.scm_provider,
+               repository.provider_repository_id,
+               repository.owner, repository.name, workflow.path,
+               snapshot.source_digest, snapshot.source_object_key,
+               snapshot.source_size_bytes, snapshot.source_media_type
+        FROM repositories AS repository
+        JOIN github_provider_manifest_current AS current_manifest
+          ON current_manifest.tenant_id = repository.tenant_id
+         AND current_manifest.repository_id = repository.id
+        JOIN workflow_definitions AS workflow
+          ON workflow.repository_id = repository.id
+        JOIN workflow_runs AS run
+          ON run.repository_id = repository.id
+         AND run.workflow_id = workflow.id
+        JOIN workflow_snapshots AS snapshot
+          ON snapshot.id = run.snapshot_id
+         AND snapshot.workflow_id = workflow.id
+        JOIN github_workflow_run_subject_evidence AS evidence
+          ON evidence.tenant_id = repository.tenant_id
+         AND evidence.repository_id = repository.id
+         AND evidence.workflow_id = workflow.id
+         AND evidence.snapshot_id = snapshot.id
+         AND evidence.run_id = run.id
+         AND evidence.workflow_path = workflow.path
+         AND evidence.source_digest = snapshot.source_digest
+         AND evidence.git_ref = run.git_ref
+        WHERE repository.tenant_id = $1
+          AND repository.id = $2
+          AND workflow.id = $3
+          AND run.git_ref = $4
+          AND run.head_sha = $5
+          AND run.admission_epoch = $6
+        LIMIT 2
+        ",
+    )
+    .bind(&actor.tenant_id)
+    .bind(request.repository_id().as_uuid())
+    .bind(request.workflow_id().as_uuid())
+    .bind(request.git_ref())
+    .bind(request.commit_sha_bytes())
+    .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(operation_error)?;
+    let [row] = rows.as_slice() else {
+        if rows.is_empty() {
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(None);
+        }
+        return Err(StoreError::corrupt_data(
+            "signed GitHub admissions disagree on exact workflow source",
+        )
+        .into());
+    };
+    let provider = row
+        .try_get::<String, _>("scm_provider")
+        .map_err(operation_error)?;
+    if provider != "github" {
+        return Err(StoreError::corrupt_data(
+            "signed GitHub workflow source belongs to a non-GitHub repository",
+        )
+        .into());
+    }
+    let digest = row
+        .try_get::<Vec<u8>, _>("source_digest")
+        .map_err(operation_error)?;
+    let digest: [u8; 32] = digest.try_into().map_err(|_| {
+        StoreError::corrupt_data("signed GitHub workflow source digest is invalid")
+    })?;
+    let size = row
+        .try_get::<Option<i64>, _>("source_size_bytes")
+        .map_err(operation_error)?
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| {
+            StoreError::corrupt_data("signed GitHub workflow source size is invalid")
+        })?;
+    let media_type = row
+        .try_get::<Option<String>, _>("source_media_type")
+        .map_err(operation_error)?
+        .ok_or_else(|| {
+            StoreError::corrupt_data("signed GitHub workflow source media type is absent")
+        })?;
+    let source = AdmissionObject::new(
+        Sha256Digest::from_bytes(digest),
+        ObjectKey::new(
+            row.try_get::<String, _>("source_object_key")
+                .map_err(operation_error)?,
+        )
+        .map_err(|_| StoreError::corrupt_data("signed GitHub source object key is invalid"))?,
+        size,
+        &media_type,
+    )
+    .map_err(|_| StoreError::corrupt_data("signed GitHub source descriptor is invalid"))?;
+    let repository = crate::AdmissionRepository::new(
+        request.repository_id(),
+        provider,
+        row.try_get::<String, _>("provider_repository_id")
+            .map_err(operation_error)?,
+        row.try_get::<String, _>("owner")
+            .map_err(operation_error)?,
+        row.try_get::<String, _>("name")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
+    let source = AuthenticatedWorkflowDispatchSource::new(
+        repository,
+        request.workflow_id(),
+        row.try_get::<String, _>("path")
+            .map_err(operation_error)?,
+        request.git_ref(),
+        request.commit_sha(),
+        source,
+    )
+    .map_err(|_| StoreError::corrupt_data("signed GitHub dispatch source is invalid"))?;
+    transaction.commit().await.map_err(operation_error)?;
+    Ok(Some(source))
 }
 
 async fn admit_logical_workflow_transaction(
@@ -60,29 +245,25 @@ async fn admit_logical_workflow_transaction(
     command: AdmitLogicalWorkflowRun,
     subject_evidence: SubjectEvidenceAdmission,
 ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-    if command.repository().provider() != "github"
-        || !matches!(
-            command.idempotency(),
-            WorkflowAdmissionIdempotency::ProviderDelivery(_)
-        )
-        || command.admitted_at()
-            != match subject_evidence {
-                SubjectEvidenceAdmission::AuthenticatedGithub { observed_at, .. } => observed_at,
-            }
-    {
-        return Err(StoreError::corrupt_data(
-            "authenticated GitHub admission has an invalid provider boundary",
-        )
-        .into());
-    }
+    validate_subject_evidence_boundary(&command, &subject_evidence)?;
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    let dispatch_actor =
+        authorize_dispatch_subject(&mut transaction, &command, &subject_evidence).await?;
+    let github_subject_evidence_required = matches!(
+        &subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedGithub { .. }
+    );
 
-    if !claim_idempotency_receipt(&mut transaction, &command, true).await? {
-        let (receipt, admitted_at) = replay_receipt(&mut transaction, &command, true).await?;
+    if !claim_idempotency_receipt(&mut transaction, &command, github_subject_evidence_required)
+        .await?
+    {
+        let (receipt, admitted_at) =
+            replay_receipt(&mut transaction, &command, github_subject_evidence_required).await?;
         validate_replayed_subject_evidence(
             &mut transaction,
             &command,
-            subject_evidence,
+            &subject_evidence,
+            dispatch_actor.as_ref(),
             admitted_at,
         )
         .await?;
@@ -90,7 +271,12 @@ async fn admit_logical_workflow_transaction(
         return Ok(receipt);
     }
 
-    resolve_repository(&mut transaction, &command).await?;
+    if matches!(
+        &subject_evidence,
+        SubjectEvidenceAdmission::AuthenticatedGithub { .. }
+    ) {
+        resolve_repository(&mut transaction, &command).await?;
+    }
     let publication = lock_repository_publication_snapshot(
         &mut transaction,
         command.tenant().as_str(),
@@ -113,7 +299,13 @@ async fn admit_logical_workflow_transaction(
     insert_run(&mut transaction, &command, run_number, &publication).await?;
     insert_logical_run_and_invocation(&mut transaction, &command).await?;
     finalize_receipt(&mut transaction, &command).await?;
-    record_new_subject_evidence(&mut transaction, &command, subject_evidence).await?;
+    record_new_subject_evidence(
+        &mut transaction,
+        &command,
+        &subject_evidence,
+        dispatch_actor.as_ref(),
+    )
+    .await?;
     insert_logical_jobs(&mut transaction, &command).await?;
     seal_logical_graph(&mut transaction, &command).await?;
     if let Some(concurrency) = command.concurrency() {
@@ -141,6 +333,126 @@ async fn admit_logical_workflow_transaction(
     ))
 }
 
+fn validate_subject_evidence_boundary(
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedGithub { observed_at, .. } => {
+            if command.repository().provider() != "github"
+                || !matches!(
+                    command.idempotency(),
+                    WorkflowAdmissionIdempotency::ProviderDelivery(_)
+                )
+                || command.admitted_at() != *observed_at
+            {
+                return Err(StoreError::corrupt_data(
+                    "authenticated GitHub admission has an invalid provider boundary",
+                )
+                .into());
+            }
+        }
+        SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
+            let operation_matches = matches!(
+                command.idempotency(),
+                WorkflowAdmissionIdempotency::Operation(operation_id)
+                    if *operation_id == claim.operation_id()
+            );
+            let base_context_matches = command
+                .base_context()
+                .is_some_and(|context| context.digest() == claim.base_context_digest());
+            if command.repository().provider() != "github"
+                || command.event_name() != "workflow_dispatch"
+                || claim.actor().tenant_id().as_str() != command.tenant().as_str()
+                || claim.repository_id() != command.repository().id()
+                || claim.workflow_id() != command.workflow_id()
+                || claim.workflow_path() != command.workflow_path()
+                || claim.git_ref() != command.git_ref()
+                || command.actor() != Some(claim.actor().principal_id().as_str())
+                || claim.event_digest() != command.event().digest()
+                || !base_context_matches
+                || !operation_matches
+            {
+                return Err(StoreError::corrupt_data(
+                    "authenticated workflow dispatch has an invalid exact-target boundary",
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_dispatch_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+) -> Result<Option<AuthorizedHumanRepositoryAction>, LogicalWorkflowAdmissionStoreError> {
+    let SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } = subject_evidence else {
+        return Ok(None);
+    };
+    require_existing_dispatch_repository(transaction, command).await?;
+    let actor = authorize_human_repository_action(
+        transaction,
+        claim.actor(),
+        WORKFLOW_DISPATCH_PERMISSION,
+        command.repository().id().as_uuid(),
+    )
+    .await?;
+    let Some(actor) = actor else {
+        return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
+    };
+    if actor.tenant_id != command.tenant().as_str()
+        || actor.authorization_revision
+            != i64::try_from(claim.actor().authorization_revision().value()).unwrap_or(i64::MAX)
+        || actor.principal_id.hyphenated().to_string() != claim.actor().principal_id().as_str()
+        || actor.session_id.hyphenated().to_string() != claim.actor().session_id().as_str()
+    {
+        return Err(StoreError::corrupt_data(
+            "reauthorized workflow dispatch actor disagrees with its claim",
+        )
+        .into());
+    }
+    Ok(Some(actor))
+}
+
+async fn require_existing_dispatch_repository(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT scm_provider, provider_repository_id, owner, name
+        FROM repositories
+        WHERE tenant_id = $1 AND id = $2
+        FOR SHARE
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(row) = row else {
+        return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
+    };
+    let repository = command.repository();
+    let exact = row
+        .try_get::<String, _>("scm_provider")
+        .map_err(operation_error)?
+        == repository.provider()
+        && row
+            .try_get::<String, _>("provider_repository_id")
+            .map_err(operation_error)?
+            == repository.provider_repository_id()
+        && row.try_get::<String, _>("owner").map_err(operation_error)? == repository.owner()
+        && row.try_get::<String, _>("name").map_err(operation_error)? == repository.name();
+    if !exact {
+        return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
+    }
+    Ok(())
+}
+
 fn map_concurrency_error(error: WorkflowAdmissionStoreError) -> LogicalWorkflowAdmissionStoreError {
     match error {
         WorkflowAdmissionStoreError::Store(error) => error.into(),
@@ -159,7 +471,8 @@ fn map_concurrency_error(error: WorkflowAdmissionStoreError) -> LogicalWorkflowA
 async fn record_new_subject_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
-    subject_evidence: SubjectEvidenceAdmission,
+    subject_evidence: &SubjectEvidenceAdmission,
+    dispatch_actor: Option<&AuthorizedHumanRepositoryAction>,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
         SubjectEvidenceAdmission::AuthenticatedGithub {
@@ -167,7 +480,7 @@ async fn record_new_subject_evidence(
             observed_at: _,
         } => {
             let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
-                current_claim,
+                *current_claim,
                 command,
             )
             .map_err(|_| {
@@ -178,13 +491,22 @@ async fn record_new_subject_evidence(
                 .map_err(subject_evidence_error)?;
             Ok(())
         }
+        SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
+            let actor = dispatch_actor.ok_or_else(|| {
+                StoreError::corrupt_data(
+                    "authenticated workflow dispatch lost its authorized actor",
+                )
+            })?;
+            record_workflow_dispatch_audit(transaction, command, claim, actor).await
+        }
     }
 }
 
 async fn validate_replayed_subject_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
-    subject_evidence: SubjectEvidenceAdmission,
+    subject_evidence: &SubjectEvidenceAdmission,
+    dispatch_actor: Option<&AuthorizedHumanRepositoryAction>,
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
@@ -193,8 +515,8 @@ async fn validate_replayed_subject_evidence(
             observed_at,
         } => {
             let request = ValidateGithubWorkflowRunSubjectEvidenceReplay::from_logical_admission(
-                current_claim,
-                observed_at,
+                *current_claim,
+                *observed_at,
                 admitted_at,
                 command,
             )
@@ -206,7 +528,144 @@ async fn validate_replayed_subject_evidence(
                 .map_err(subject_evidence_error)?;
             Ok(())
         }
+        SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
+            let actor = dispatch_actor.ok_or_else(|| {
+                StoreError::corrupt_data("workflow dispatch replay lost its authorized actor")
+            })?;
+            validate_workflow_dispatch_audit(transaction, command, claim, actor, admitted_at).await
+        }
     }
+}
+
+async fn record_workflow_dispatch_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: &AuthenticatedWorkflowDispatchClaim,
+    actor: &AuthorizedHumanRepositoryAction,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let event_id = workflow_dispatch_audit_event_id(command.request_digest());
+    sqlx::query(
+        r"
+        INSERT INTO security_audit_events (
+            event_id, tenant_id, occurred_at_ms, actor_kind,
+            actor_principal_id, actor_session_id, authorization_revision,
+            action, outcome, resource_kind, resource_id, request_id
+        ) VALUES (
+            $1,$2,$3,'human',$4,$5,$6,$7,'succeeded',$8,$9,$10
+        )
+        ON CONFLICT (event_id) DO NOTHING
+        ",
+    )
+    .bind(event_id)
+    .bind(&actor.tenant_id)
+    .bind(command.admitted_at().get())
+    .bind(actor.principal_id)
+    .bind(actor.session_id)
+    .bind(actor.authorization_revision)
+    .bind(WORKFLOW_DISPATCH_AUDIT_ACTION)
+    .bind(WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND)
+    .bind(command.run_id().to_string())
+    .bind(actor.request_id.as_deref())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    validate_workflow_dispatch_audit(transaction, command, claim, actor, command.admitted_at())
+        .await
+}
+
+async fn validate_workflow_dispatch_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: &AuthenticatedWorkflowDispatchClaim,
+    actor: &AuthorizedHumanRepositoryAction,
+    admitted_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT tenant_id, occurred_at_ms, actor_kind, actor_principal_id,
+               actor_session_id, authorization_revision, action, outcome,
+               resource_kind, resource_id
+        FROM security_audit_events
+        WHERE event_id = $1
+        FOR UPDATE
+        ",
+    )
+    .bind(workflow_dispatch_audit_event_id(command.request_digest()))
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(row) = row else {
+        return Err(StoreError::corrupt_data(
+            "workflow dispatch admission audit evidence is absent",
+        )
+        .into());
+    };
+    let resource_id = command.run_id().to_string();
+    let exact = row
+        .try_get::<String, _>("tenant_id")
+        .map_err(operation_error)?
+        == actor.tenant_id
+        && row
+            .try_get::<i64, _>("occurred_at_ms")
+            .map_err(operation_error)?
+            == admitted_at.get()
+        && row
+            .try_get::<String, _>("actor_kind")
+            .map_err(operation_error)?
+            == "human"
+        && row
+            .try_get::<Option<Uuid>, _>("actor_principal_id")
+            .map_err(operation_error)?
+            == Some(actor.principal_id)
+        && row
+            .try_get::<Option<Uuid>, _>("actor_session_id")
+            .map_err(operation_error)?
+            == Some(actor.session_id)
+        && row
+            .try_get::<Option<i64>, _>("authorization_revision")
+            .map_err(operation_error)?
+            == Some(actor.authorization_revision)
+        && row
+            .try_get::<String, _>("action")
+            .map_err(operation_error)?
+            == WORKFLOW_DISPATCH_AUDIT_ACTION
+        && row
+            .try_get::<String, _>("outcome")
+            .map_err(operation_error)?
+            == "succeeded"
+        && row
+            .try_get::<String, _>("resource_kind")
+            .map_err(operation_error)?
+            == WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND
+        && row
+            .try_get::<Option<String>, _>("resource_id")
+            .map_err(operation_error)?
+            .as_deref()
+            == Some(resource_id.as_str())
+        && claim.actor().tenant_id().as_str() == actor.tenant_id
+        && claim.actor().principal_id().as_str() == actor.principal_id.hyphenated().to_string()
+        && claim.actor().session_id().as_str() == actor.session_id.hyphenated().to_string()
+        && i64::try_from(claim.actor().authorization_revision().value()).ok()
+            == Some(actor.authorization_revision);
+    if !exact {
+        return Err(StoreError::corrupt_data(
+            "workflow dispatch admission audit evidence is inconsistent",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn workflow_dispatch_audit_event_id(request_digest: Sha256Digest) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN);
+    digest.update(request_digest.as_bytes());
+    let digest: [u8; 32] = digest.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn subject_evidence_error(

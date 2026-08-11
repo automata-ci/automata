@@ -6,8 +6,8 @@ use crate::{
     EventName, GithubChangedFilesV1, GithubEventMetadataV1, GithubWorkflowDispatchContract,
     GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputDefinition,
     GithubWorkflowDispatchInputType, GithubWorkflowDispatchInputValue,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, PushPullRequestFilter, ScalarResolution, SourceSpan,
-    Spanned, TriggerConfiguration, YamlMappingEntry, YamlNode,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MergeGroupFilter, PushPullRequestFilter, ScalarResolution,
+    SourceSpan, Spanned, TriggerConfiguration, YamlMappingEntry, YamlNode,
 };
 
 use super::{CompileContext, CompiledEvent, CompiledWorkflowDispatch, WorkflowNotSelectedReason};
@@ -63,6 +63,10 @@ pub(super) fn validate_configuration(
                     trigger_span.clone(),
                 );
             }
+            None
+        }
+        TriggerConfiguration::MergeGroup(filter) => {
+            validate_merge_group_filter(filter, trigger_span, context);
             None
         }
         TriggerConfiguration::WorkflowDispatch(Some(configuration)) => {
@@ -155,16 +159,25 @@ fn merge_group_matches(
         );
         return TriggerSelection::Rejected;
     }
-    if !matches!(configuration, TriggerConfiguration::Empty) {
-        context.semantic(
-            "github.compile.unsupported_merge_group_configuration",
-            "this compiler version accepts merge_group only without event configuration",
-            trigger_span.clone(),
-        );
-        return TriggerSelection::Rejected;
-    }
     match action {
-        "checks_requested" => TriggerSelection::Selected(None),
+        "checks_requested" => {
+            let selected = match configuration {
+                TriggerConfiguration::Empty => true,
+                TriggerConfiguration::MergeGroup(filter) => {
+                    !filter.types_configured()
+                        || filter
+                            .types()
+                            .iter()
+                            .any(|configured| configured.value() == action)
+                }
+                _ => false,
+            };
+            if selected {
+                TriggerSelection::Selected(None)
+            } else {
+                TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
+            }
+        }
         "destroyed" => {
             TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
         }
@@ -175,6 +188,35 @@ fn merge_group_matches(
                 trigger_span.clone(),
             );
             TriggerSelection::Rejected
+        }
+    }
+}
+
+fn validate_merge_group_filter(
+    filter: &MergeGroupFilter,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) {
+    if filter.types_configured() && filter.types().is_empty() {
+        context.semantic(
+            "github.compile.empty_event_filter",
+            "`on.merge_group.types` must contain at least one activity type",
+            trigger_span.clone(),
+        );
+    }
+    for activity in filter.types() {
+        if activity.value().is_empty() || activity.value().len() > MAX_CANDIDATE_BYTES {
+            context.semantic(
+                "github.compile.invalid_merge_group_type",
+                "`on.merge_group.types` values must contain at most 4096 bytes",
+                activity.span().clone(),
+            );
+        } else if activity.value() != "checks_requested" {
+            context.semantic(
+                "github.compile.unsupported_merge_group_type",
+                "GitHub Actions currently supports only the `checks_requested` merge_group type",
+                activity.span().clone(),
+            );
         }
     }
 }
@@ -567,6 +609,29 @@ fn workflow_dispatch_matches(
         contract: contract.clone(),
         inputs,
     }))
+}
+
+pub(super) fn compile_preselected_workflow_dispatch(
+    contract: &GithubWorkflowDispatchContract,
+    metadata: Option<&GithubEventMetadataV1>,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> Option<CompiledWorkflowDispatch> {
+    if metadata.is_none() && !contract.is_empty() {
+        context.semantic(
+            "github.compile.workflow_dispatch_input_evidence_required",
+            "configured workflow_dispatch inputs require durable dispatch payload evidence during recompilation",
+            trigger_span.clone(),
+        );
+        return None;
+    }
+    match workflow_dispatch_matches(Some(contract), metadata, trigger_span, context) {
+        TriggerSelection::Selected(Some(workflow_dispatch)) => Some(workflow_dispatch),
+        TriggerSelection::Selected(None)
+        | TriggerSelection::RequiresChangedFiles
+        | TriggerSelection::NotSelected(_)
+        | TriggerSelection::Rejected => None,
+    }
 }
 
 fn resolve_workflow_dispatch_inputs(

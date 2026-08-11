@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreError, ImmutableBlobStore, MediaType};
+use automata_ci_blob::{
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, ImmutableBlobStore, MediaType,
+};
 use automata_ci_core::{
     CompiledBooleanTemplate, CompiledExpressionTemplate, CompiledValueTemplate,
     ExpressionInstruction, ExpressionLiteral, ExpressionSegment, LogicalJobKind,
@@ -16,10 +18,12 @@ use automata_ci_expression_github::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ObjectKey, ProviderDeliveryId, WorkflowAdmissionIdempotency,
-    WorkflowAdmissionValueError, WorkflowConcurrency,
+    AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
+    AuthenticatedWorkflowDispatchSource,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    ProviderDeliveryId, ResolveAuthenticatedWorkflowDispatchSource,
+    WorkflowAdmissionIdempotency, WorkflowAdmissionValueError, WorkflowConcurrency,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -28,16 +32,21 @@ use thiserror::Error;
 use crate::{
     AdmissionClock, AdmissionIdGenerator, GITHUB_WORKFLOW_MEDIA_TYPE,
     JOB_RUNTIME_CONTEXT_MEDIA_TYPE, NoopWorkflowAdmissionObserver, Sha256AdmissionIdGenerator,
-    SystemAdmissionClock, WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
-    WorkflowAdmissionFailure, WorkflowAdmissionObservation, WorkflowAdmissionObserver,
-    WorkflowAdmissionRequest, WorkflowAdmissionResult, WorkflowAdmissionStage,
-    WorkflowAdmissionStageOutcome, WorkflowPlanVerificationError, WorkflowPlanVerifier,
+    SystemAdmissionClock, WORKFLOW_PLAN_MEDIA_TYPE, WorkflowAdmissionFailure,
+    WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionRequest,
+    WorkflowAdmissionResult, WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
+    WorkflowDispatchAuthorization, WorkflowPlanVerificationError, WorkflowPlanVerifier,
     github_activation::context_to_github_value,
+    github_dispatch::{
+        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, GithubWorkflowDispatchEvidenceV1,
+    },
 };
 
 const REQUEST_DIGEST_DOMAIN_V4: &[u8] = b"automata.workflow-admission.request.v4\0";
 const AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5: &[u8] =
     b"automata.workflow-admission.request.v5\0";
+const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6: &[u8] =
+    b"automata.workflow-admission.request.v6.control-plane-dispatch\0";
 const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
     b"automata.workflow-admission.provider-delivery.v2\0";
 const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
@@ -57,6 +66,12 @@ const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
     "workflow_ref",
     "workflow_sha",
 ];
+
+enum AdmissionAuthority {
+    ProviderNeutral,
+    AuthenticatedGithub(AuthenticatedGithubDeliveryClaim),
+    AuthenticatedWorkflowDispatch(WorkflowDispatchAuthorization),
+}
 
 /// Blob-first, provider-pluggable logical workflow admission service.
 #[derive(Clone)]
@@ -127,7 +142,8 @@ impl WorkflowAdmissionService {
         &self,
         request: WorkflowAdmissionRequest,
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_delivery(request, None).await
+        self.admit_with_authority(request, AdmissionAuthority::ProviderNeutral)
+            .await
     }
 
     /// Publishes and admits one workflow selected from an authenticated GitHub
@@ -149,17 +165,75 @@ impl WorkflowAdmissionService {
         request: WorkflowAdmissionRequest,
         current_claim: AuthenticatedGithubDeliveryClaim,
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_delivery(request, Some(current_claim)).await
+        self.admit_with_authority(
+            request,
+            AdmissionAuthority::AuthenticatedGithub(current_claim),
+        )
+        .await
     }
 
-    async fn admit_with_delivery(
+    /// Publishes and admits one authenticated Automata control-plane manual
+    /// dispatch with exact repository/workflow/ref identity.
+    ///
+    /// This boundary does not represent a GitHub webhook. The durable adapter
+    /// reauthorizes the current human session for `runs:dispatch` and retains
+    /// exact digest and audit evidence for replay.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when evidence, exact target identity, current authority,
+    /// immutable publication, or durable replay does not agree.
+    pub async fn admit_authenticated_workflow_dispatch(
         &self,
         request: WorkflowAdmissionRequest,
-        current_claim: Option<AuthenticatedGithubDeliveryClaim>,
+        authorization: WorkflowDispatchAuthorization,
+    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
+        self.admit_with_authority(
+            request,
+            AdmissionAuthority::AuthenticatedWorkflowDispatch(authorization),
+        )
+        .await
+    }
+
+    pub(crate) async fn resolve_authenticated_workflow_dispatch_source(
+        &self,
+        request: ResolveAuthenticatedWorkflowDispatchSource,
+    ) -> Result<Option<(AuthenticatedWorkflowDispatchSource, Bytes)>, WorkflowAdmissionError> {
+        let Some(source) = self
+            .repository
+            .resolve_authenticated_workflow_dispatch_source(request)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if source.source().media_type() != GITHUB_WORKFLOW_MEDIA_TYPE {
+            return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
+        }
+        let descriptor = BlobDescriptor::new(
+            BlobKey::new(source.source().object_key().as_str().to_owned())
+                .map_err(|_| WorkflowAdmissionError::WorkflowDispatchEvidence)?,
+            source.source().digest(),
+            source.source().encoded_size(),
+            MediaType::new(source.source().media_type().to_owned())
+                .map_err(|_| WorkflowAdmissionError::WorkflowDispatchEvidence)?,
+        );
+        let bytes = self
+            .blobs
+            .get_verified(&descriptor, source.source().encoded_size())
+            .await
+            .map_err(WorkflowAdmissionError::Blob)?
+            .into_bytes();
+        Ok(Some((source, bytes)))
+    }
+
+    async fn admit_with_authority(
+        &self,
+        request: WorkflowAdmissionRequest,
+        authority: AdmissionAuthority,
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
         let started = Instant::now();
         let jobs = request.plan().jobs().len();
-        let result = self.admit_inner(request, current_claim).await;
+        let result = self.admit_inner(request, authority).await;
         let outcome = match &result {
             Ok(value) if value.receipt().is_replay() => WorkflowAdmissionObservation::Replay,
             Ok(_) => WorkflowAdmissionObservation::New { jobs },
@@ -173,9 +247,13 @@ impl WorkflowAdmissionService {
     async fn admit_inner(
         &self,
         request: WorkflowAdmissionRequest,
-        current_claim: Option<AuthenticatedGithubDeliveryClaim>,
+        authority: AdmissionAuthority,
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        let delivery_id = current_claim.map(|claim| claim.claim().delivery_id());
+        let delivery_id = match &authority {
+            AdmissionAuthority::AuthenticatedGithub(claim) => Some(claim.claim().delivery_id()),
+            AdmissionAuthority::ProviderNeutral
+            | AdmissionAuthority::AuthenticatedWorkflowDispatch(_) => None,
+        };
         let (
             source_blob,
             event_blob,
@@ -186,6 +264,7 @@ impl WorkflowAdmissionService {
             snapshot_id,
             durable_idempotency,
             run_id,
+            dispatch_claim,
         ) = self.observe_sync_stage(WorkflowAdmissionStage::Prepare, || {
             if delivery_id.is_some()
                 && (request.repository().provider() != "github"
@@ -203,7 +282,7 @@ impl WorkflowAdmissionService {
             )?;
             let event_blob = prepare_event_blob(
                 "workflow-event",
-                WORKFLOW_EVENT_MEDIA_TYPE,
+                request.event_media_type(),
                 request.event().clone(),
             )?;
             let plan_bytes = Bytes::from(
@@ -230,6 +309,49 @@ impl WorkflowAdmissionService {
                 .snapshot_id(workflow_id, source_blob.metadata.digest());
             let durable_idempotency = namespace_idempotency(&request)?;
             let run_id = self.ids.run_id(request.tenant(), &durable_idempotency);
+            let dispatch_claim = match &authority {
+                AdmissionAuthority::AuthenticatedWorkflowDispatch(authorization) => {
+                    if request.event_media_type()
+                        != AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
+                    {
+                        return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
+                    }
+                    let evidence = GithubWorkflowDispatchEvidenceV1::decode(request.event())
+                        .map_err(|_| WorkflowAdmissionError::WorkflowDispatchEvidence)?;
+                    if !evidence.matches_admission(&request)
+                        || !evidence.authority_matches(authorization)
+                        || evidence.repository_id() != repository_id
+                        || evidence.workflow_id() != workflow_id
+                    {
+                        return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
+                    }
+                    let operation_id = match request.idempotency() {
+                        WorkflowAdmissionIdempotency::Operation(operation_id) => *operation_id,
+                        WorkflowAdmissionIdempotency::ProviderDelivery(_) => {
+                            return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
+                        }
+                    };
+                    Some(AuthenticatedWorkflowDispatchClaim::new(
+                        authorization.actor().clone(),
+                        repository_id,
+                        workflow_id,
+                        request.workflow_path(),
+                        request.git_ref(),
+                        operation_id,
+                        event_blob.metadata.digest(),
+                        base_context_blob.metadata.digest(),
+                    )?)
+                }
+                AdmissionAuthority::ProviderNeutral
+                | AdmissionAuthority::AuthenticatedGithub(_) => {
+                    if request.event_media_type()
+                        == AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE
+                    {
+                        return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
+                    }
+                    None
+                }
+            };
             Ok((
                 source_blob,
                 event_blob,
@@ -240,6 +362,7 @@ impl WorkflowAdmissionService {
                 snapshot_id,
                 durable_idempotency,
                 run_id,
+                dispatch_claim,
             ))
         })?;
 
@@ -253,6 +376,7 @@ impl WorkflowAdmissionService {
             let request_digest = canonical_request_digest(
                 &request,
                 delivery_id,
+                dispatch_claim.as_ref(),
                 &source_blob,
                 &event_blob,
                 &plan_blob,
@@ -294,8 +418,8 @@ impl WorkflowAdmissionService {
         publication?;
 
         let commit_started = Instant::now();
-        let receipt = match current_claim {
-            Some(current_claim) => {
+        let receipt = match authority {
+            AdmissionAuthority::AuthenticatedGithub(current_claim) => {
                 let observed_at = self.clock.now();
                 // The provider path binds run creation to the same immediate
                 // trusted observation that the Store validates against the
@@ -321,7 +445,34 @@ impl WorkflowAdmissionService {
                     .admit_authenticated_github_delivery(command, current_claim, observed_at)
                     .await
             }
-            None => self.repository.admit_logical_workflow(command).await,
+            AdmissionAuthority::AuthenticatedWorkflowDispatch(_) => {
+                let observed_at = self.clock.now();
+                let command = build_command(
+                    &request,
+                    &*self.ids,
+                    observed_at,
+                    repository_id,
+                    workflow_id,
+                    snapshot_id,
+                    command.idempotency().clone(),
+                    run_id,
+                    command.request_digest(),
+                    &source_blob,
+                    &event_blob,
+                    &plan_blob,
+                    &base_context_blob,
+                    command.concurrency().cloned(),
+                )?;
+                self.repository
+                    .admit_authenticated_workflow_dispatch(
+                        command,
+                        dispatch_claim.ok_or(WorkflowAdmissionError::WorkflowDispatchEvidence)?,
+                    )
+                    .await
+            }
+            AdmissionAuthority::ProviderNeutral => {
+                self.repository.admit_logical_workflow(command).await
+            }
         };
         self.observe_stage(
             WorkflowAdmissionStage::Commit,
@@ -865,9 +1016,11 @@ fn namespace_idempotency(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Every immutable descriptor and authority mode is domain-bound explicitly.
 fn canonical_request_digest(
     request: &WorkflowAdmissionRequest,
     delivery_id: Option<ProviderDeliveryId>,
+    dispatch_claim: Option<&AuthenticatedWorkflowDispatchClaim>,
     source: &PreparedBlob,
     event: &PreparedBlob,
     plan: &PreparedBlob,
@@ -875,7 +1028,9 @@ fn canonical_request_digest(
     concurrency: Option<&WorkflowConcurrency>,
 ) -> Sha256Digest {
     let mut digest = Sha256::new();
-    digest.update(if delivery_id.is_some() {
+    digest.update(if dispatch_claim.is_some() {
+        AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6
+    } else if delivery_id.is_some() {
         AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5
     } else {
         REQUEST_DIGEST_DOMAIN_V4
@@ -921,6 +1076,27 @@ fn canonical_request_digest(
     }
     if let Some(delivery_id) = delivery_id {
         digest_field(&mut digest, delivery_id.as_uuid().as_bytes());
+    }
+    if let Some(claim) = dispatch_claim {
+        let actor = claim.actor();
+        for value in [
+            actor.tenant_id().as_str(),
+            actor.principal_id().as_str(),
+            actor.session_id().as_str(),
+            claim.workflow_path(),
+            claim.git_ref(),
+        ] {
+            digest_field(&mut digest, value.as_bytes());
+        }
+        digest_field(
+            &mut digest,
+            &actor.authorization_revision().value().to_be_bytes(),
+        );
+        digest_field(&mut digest, claim.repository_id().as_uuid().as_bytes());
+        digest_field(&mut digest, claim.workflow_id().as_uuid().as_bytes());
+        digest_field(&mut digest, claim.operation_id().as_uuid().as_bytes());
+        digest_field(&mut digest, claim.event_digest().as_bytes());
+        digest_field(&mut digest, claim.base_context_digest().as_bytes());
     }
     Sha256Digest::from_bytes(digest.finalize().into())
 }
@@ -984,6 +1160,9 @@ pub enum WorkflowAdmissionError {
     /// Workflow-level concurrency could not be resolved from admission-safe context.
     #[error("workflow concurrency could not be resolved at admission")]
     ConcurrencyEvaluation,
+    /// Canonical manual-dispatch evidence did not match the authenticated target.
+    #[error("authenticated workflow dispatch evidence did not match admission")]
+    WorkflowDispatchEvidence,
     /// A server-derived identity or invariant was internally inconsistent.
     #[error("internal workflow admission invariant failed")]
     Internal,
@@ -998,6 +1177,7 @@ const fn observe_failure(error: &WorkflowAdmissionError) -> WorkflowAdmissionFai
         | WorkflowAdmissionError::LogicalValue(_)
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::ConcurrencyEvaluation
+        | WorkflowAdmissionError::WorkflowDispatchEvidence
         | WorkflowAdmissionError::Internal => WorkflowAdmissionFailure::InvalidState,
     }
 }

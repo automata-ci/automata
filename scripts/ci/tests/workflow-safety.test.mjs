@@ -292,12 +292,12 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 
   assert.match(
-    rustTests,
-    /cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked/,
+    source("scripts/ci/run-rust-coverage.sh"),
+    /run_command cargo test \\\n    --workspace \\\n    --exclude automata-ci-ui-renderer \\\n    --all-targets \\\n    --all-features \\\n    --locked/,
   );
   assert.match(
     rustTests,
-    /cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
+    /CARGO_TARGET_DIR=target\/llvm-cov-target \\\n            cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
   );
   assert.match(
     rendererTests,
@@ -313,6 +313,7 @@ test("CI executes documentation and committed script contract suites", () => {
   assert.match(shellContracts, /deploy\/observability\/inventory\/\*\.sh/);
   assert.match(shellContracts, /inventory-scratch\.test\.sh/);
   assert.match(shellContracts, /release-handoff\.test\.py/);
+  assert.match(shellContracts, /rust-coverage\.test\.py/);
   assert.match(
     dependencyContracts,
     /scripts\/ui\/tests\/rquickjs-macro-diagnostics\.test\.sh/,
@@ -330,6 +331,77 @@ test("CI executes documentation and committed script contract suites", () => {
     source("scripts/ci/verify-product-targets.sh"),
     /scripts\/ci\/verify-documentation\.py/,
   );
+});
+
+test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
+  const ci = source(".github/workflows/ci.yml");
+  const rustTests = section(ci, "\n  rust_tests:", "\n  renderer_tests:");
+  const runner = source("scripts/ci/run-rust-coverage.sh");
+  const policy = JSON.parse(source("scripts/ci/rust-coverage-policy.json"));
+
+  assert.match(rustTests, /cargo install cargo-llvm-cov --version 0\.8\.7 --locked/);
+  assert.match(
+    rustTests,
+    /^[ \t]*\.\/scripts\/ci\/run-rust-coverage\.sh target\/coverage\/rust ordinary[ \t]*$/m,
+  );
+  assert.deepEqual(
+    rustTests
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.includes("run-rust-coverage.sh")),
+    ["./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary"],
+  );
+  assert.match(rustTests, /name: rust-coverage-ordinary/);
+  assert.match(
+    rustTests,
+    /- name: Upload service-aware Rust coverage report\n        if: \$\{\{ always\(\) && hashFiles\('target\/coverage\/rust\/manifest\.json'\) != '' \}\}/,
+  );
+  assert.match(rustTests, /target\/coverage\/rust\/manifest\.json/);
+  assert.doesNotMatch(rustTests, /fail-under-(?:lines|regions|functions)/);
+  const expectedLanes = [
+    "ordinary",
+    "postgres",
+    "s3",
+    "podman",
+    "github-live",
+    "node-live",
+  ];
+  assert.deepEqual(Object.keys(policy.lanes), expectedLanes);
+  const runnerLanes = runner.match(/known_lanes=\(([^)]*)\)/);
+  assert.ok(runnerLanes, "coverage runner must declare its executable lanes");
+  assert.deepEqual(runnerLanes[1].trim().split(/\s+/), expectedLanes);
+  assert.ok(policy.ordinary_guard.line_percent_floor > 0);
+  assert.ok(policy.lanes.postgres.source_prefixes.length > 0);
+  assert.match(runner, /cargo llvm-cov show-env[\s\\]+--sh/);
+  assert.match(
+    runner,
+    /export CARGO_TARGET_DIR="\$repository_root\/target\/llvm-cov-target"/,
+  );
+  assert.ok(
+    runner.indexOf("export CARGO_TARGET_DIR=") <
+      runner.indexOf("cargo llvm-cov show-env"),
+    "coverage target isolation must be active before cargo-llvm-cov selects paths",
+  );
+  assert.match(runner, /--remap-path-prefix/);
+  assert.equal(
+    [...runner.matchAll(/cargo llvm-cov report \\\n  --remap-path-prefix/g)].length,
+    2,
+    "both report formats must preserve production-source filtering under remapping",
+  );
+  assert.match(runner, /cargo llvm-cov clean --workspace/);
+  assert.match(runner, /flock --exclusive --nonblock/);
+  assert.equal(
+    [...runner.matchAll(/fingerprint-workspace\.py/g)].length,
+    2,
+    "coverage must fingerprint the complete workspace before and after collection",
+  );
+  assert.match(runner, /--lcov "\$coverage_stage\/coverage\.lcov"/);
+  assert.ok(
+    runner.indexOf("cargo llvm-cov show-env") <
+      runner.indexOf("cargo llvm-cov clean --workspace"),
+    "coverage environment must select the instrumented target before cleaning it",
+  );
+  assert.match(runner, /--lane "\$lane"/);
 });
 
 test("frontend CI retains the production-source coverage gate", () => {
@@ -399,6 +471,10 @@ test("Pages and profile publication isolate concurrency and environments", () =>
   assert.match(
     pages,
     /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/,
+  );
+  assert.match(
+    pages,
+    /- name: Upload screenshot review artifact\n        if: \$\{\{ always\(\) && hashFiles\('ui\/dist\/preview\/screenshots\/\*\.png'\) != '' \}\}/,
   );
   assert.match(
     profile,

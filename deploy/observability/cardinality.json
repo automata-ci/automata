@@ -1510,6 +1510,7 @@
               "name": "outcome",
               "values": [
                 "admitted",
+                "drain_aborted",
                 "http2_closed",
                 "http2_error",
                 "lifetime_expired",
@@ -1518,7 +1519,7 @@
               ]
             }
           ],
-          "maximum_series": 6,
+          "maximum_series": 7,
           "name": "automata_ci_control_plane_runner_transport_connection_events_total",
           "type": "counter"
         },

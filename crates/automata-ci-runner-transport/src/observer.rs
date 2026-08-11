@@ -52,6 +52,9 @@ pub enum RunnerTransportConnectionEvent {
     Http2Error,
     /// Listener shutdown ended the connection.
     Shutdown,
+    /// The listener drain deadline forcibly aborted a still-running connection
+    /// task; this does not classify its TLS or HTTP/2 state.
+    DrainAborted,
     /// The fixed connection lifetime ended the connection.
     LifetimeExpired,
 }

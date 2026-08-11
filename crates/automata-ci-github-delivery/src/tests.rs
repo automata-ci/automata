@@ -647,9 +647,9 @@ fn push_body_with_visibility(
     ))
 }
 
-fn pull_request_body() -> Bytes {
+fn pull_request_body(action: &str, merged: bool) -> Bytes {
     Bytes::from(format!(
-        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"{action}","number":7,"pull_request":{{"number":7,"merged":{merged},"merge_commit_sha":"{AFTER_COMMIT}","head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -1554,11 +1554,18 @@ async fn generic_ingress_persists_typed_event_coordinates_without_legacy_aliasin
             "refs/heads/main",
         ),
         (
-            pull_request_body(),
+            pull_request_body("opened", false),
             "pull_request",
             "delivery-pr-v1",
             GithubAuthenticatedEventKind::PullRequest,
             "refs/pull/7/merge",
+        ),
+        (
+            pull_request_body("closed", true),
+            "pull_request",
+            "delivery-merged-pr-v1",
+            GithubAuthenticatedEventKind::PullRequest,
+            "refs/heads/main",
         ),
         (
             merge_group_body(),

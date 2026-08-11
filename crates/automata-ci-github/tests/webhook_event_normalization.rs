@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 const SECRET: &[u8] = b"independent synthetic webhook secret";
 const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const HEAD_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
+const MERGE_SHA: &str = "76543210fedcba9876543210fedcba9876543210";
 const GROUP_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
 #[test]
@@ -37,6 +38,7 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
     };
     assert_eq!(event.action(), GithubPullRequestAction::Opened);
     assert_eq!(event.action().as_str(), "opened");
+    assert!(!event.merged());
     assert_eq!(event.number().get(), 7);
     assert_eq!(event.repository().owner_id().get(), 11);
     assert_eq!(
@@ -51,8 +53,28 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
     );
     assert_eq!(event.head_revision().as_str(), HEAD_SHA);
     assert_eq!(event.base_revision().as_str(), BASE_SHA);
+    assert_eq!(event.merge_revision().as_str(), MERGE_SHA);
     assert_eq!(event.head_ref(), "feature/topic");
     assert_eq!(event.base_ref(), "main");
+    assert_eq!(event.git_ref(), "refs/pull/7/merge");
+}
+
+#[test]
+fn merged_pull_request_uses_the_target_branch_workflow_ref() {
+    let mut payload = pull_request_payload();
+    payload["action"] = json!("closed");
+    payload["pull_request"]["merged"] = json!(true);
+
+    let event = normalize_payload(&payload, "pull_request").expect("merged pull request");
+    let VerifiedGithubWebhook::PullRequest(event) = event else {
+        panic!("expected pull-request evidence");
+    };
+    assert!(event.merged());
+    assert_eq!(event.action(), GithubPullRequestAction::Closed);
+    assert_eq!(event.git_ref(), "refs/heads/main");
+
+    payload["action"] = json!("opened");
+    assert_invalid_pull_request(&payload);
 }
 
 #[test]
@@ -157,6 +179,7 @@ fn pull_request_identities_revisions_and_refs_must_be_coherent() {
             "/pull_request/head/sha",
             json!(HEAD_SHA.to_ascii_uppercase()),
         ),
+        ("/pull_request/merge_commit_sha", json!("0".repeat(40))),
         ("/pull_request/base/sha", json!("0".repeat(40))),
         ("/pull_request/head/ref", json!("feature//topic")),
         ("/pull_request/base/ref", json!("bad..branch")),
@@ -182,6 +205,17 @@ fn pull_request_identities_revisions_and_refs_must_be_coherent() {
         &missing_installation,
         "pull_request",
         GithubWebhookError::MalformedPayload,
+    );
+
+    let mut missing_merge_revision = pull_request_payload();
+    missing_merge_revision["pull_request"]
+        .as_object_mut()
+        .expect("pull request object")
+        .remove("merge_commit_sha");
+    assert_payload_error(
+        &missing_merge_revision,
+        "pull_request",
+        GithubWebhookError::InvalidPayload,
     );
 }
 
@@ -228,6 +262,7 @@ fn normalized_debug_redacts_authenticated_and_selector_values() {
         "feature/topic",
         HEAD_SHA,
         BASE_SHA,
+        MERGE_SHA,
     ] {
         assert!(!debug.contains(marker), "leaked marker: {marker}");
     }
@@ -293,6 +328,8 @@ fn pull_request_payload() -> Value {
         "number": 7,
         "pull_request": {
             "number": 7,
+            "merged": false,
+            "merge_commit_sha": MERGE_SHA,
             "head": {
                 "ref": "feature/topic",
                 "sha": HEAD_SHA,

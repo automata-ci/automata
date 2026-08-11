@@ -739,6 +739,7 @@ impl ControlSemanticMetrics {
             "http2_closed",
             "http2_error",
             "shutdown",
+            "drain_aborted",
             "lifetime_expired",
         ] {
             let _ = self
@@ -1555,6 +1556,7 @@ impl RunnerTransportObserver for ControlPlaneMetrics {
             RunnerTransportConnectionEvent::Http2Closed => "http2_closed",
             RunnerTransportConnectionEvent::Http2Error => "http2_error",
             RunnerTransportConnectionEvent::Shutdown => "shutdown",
+            RunnerTransportConnectionEvent::DrainAborted => "drain_aborted",
             RunnerTransportConnectionEvent::LifetimeExpired => "lifetime_expired",
         };
         self.semantics

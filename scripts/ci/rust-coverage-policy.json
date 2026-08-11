@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "cargo_llvm_cov_version": "0.8.7",
+  "llvm_coverage_export_version": "3.1.0",
+  "report_scope": {
+    "description": "Compiled production source in the ordinary Rust workspace set",
+    "ignore_filename_regex": "(/automata-ci-ui-renderer/|/generated/|generated_assets\\.rs$|generated_contract\\.rs$)",
+    "exclusions": [
+      {
+        "name": "cargo-default-nonproduction-source",
+        "description": "cargo-llvm-cov test, example, and benchmark source filtering"
+      },
+      {
+        "name": "ui-renderer",
+        "description": "The separately executed resource-heavy renderer package and generated assets"
+      },
+      {
+        "name": "generated-rust",
+        "description": "Generated protobuf, contract, and embedded-asset Rust"
+      }
+    ]
+  },
+  "lanes": {
+    "ordinary": {
+      "description": "Non-ignored tests for the ordinary Rust workspace set without external services",
+      "service_requirements": [],
+      "source_prefixes": []
+    },
+    "postgres": {
+      "description": "Ignored PostgreSQL integration tests",
+      "service_requirements": [
+        "PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"
+      ],
+      "source_prefixes": [
+        "crates/automata-ci-auth-postgres/src/",
+        "crates/automata-ci-results-github/src/cache_postgres.rs",
+        "crates/automata-ci-results-github/src/postgres.rs",
+        "crates/automata-ci-runner-auth-postgres/src/",
+        "crates/automata-ci-secret-postgres/src/",
+        "crates/automata-ci-store/src/postgres.rs",
+        "crates/automata-ci-store/src/postgres/"
+      ]
+    },
+    "s3": {
+      "description": "Composite ignored S3/RustFS, PostgreSQL-backed results, and public GitHub action tests",
+      "service_requirements": [
+        "PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL",
+        "S3-compatible service via AUTOMATA_TEST_S3_*",
+        "Public GitHub network access"
+      ],
+      "source_prefixes": []
+    },
+    "podman": {
+      "description": "Ignored rootless Podman integration tests",
+      "service_requirements": [
+        "Configured rootless Podman, helper binaries, state roots, and test images"
+      ],
+      "source_prefixes": []
+    },
+    "github-live": {
+      "description": "Ignored public GitHub compatibility tests",
+      "service_requirements": [
+        "Public GitHub network access"
+      ],
+      "source_prefixes": []
+    },
+    "node-live": {
+      "description": "Ignored official Actions client compatibility tests",
+      "service_requirements": [
+        "Official artifact and cache client modules via AUTOMATA_TEST_ACTIONS_*_MODULE"
+      ],
+      "source_prefixes": []
+    }
+  },
+  "ignored_test_inventory": {
+    "directory_bundles": {
+      "postgres": [
+        "crates/automata-ci-auth-postgres/tests/",
+        "crates/automata-ci-runner-auth-postgres/tests/",
+        "crates/automata-ci-secret-postgres/tests/",
+        "crates/automata-ci-store/tests/"
+      ]
+    },
+    "source_bundles": {
+      "postgres": [
+        "crates/automata-ci-results-github/tests/postgres_artifacts.rs",
+        "crates/automata-ci-results-github/tests/postgres_cache.rs",
+        "crates/automata-ci/tests/github_provider_end_to_end_matrix.rs"
+      ],
+      "s3": [
+        "crates/automata-ci-action-github/tests/live_checkout_pipeline.rs",
+        "crates/automata-ci-action/tests/live_github_rustfs.rs",
+        "crates/automata-ci-blob-s3/tests/rustfs_contract.rs",
+        "crates/automata-ci-results-github/tests/cache_rustfs.rs",
+        "crates/automata-ci-results-github/tests/rustfs_results.rs",
+        "crates/automata-ci-workflow-service/tests/live_admission.rs"
+      ],
+      "podman": [
+        "crates/automata-ci-runner/src/podman_probe/mod.rs",
+        "crates/automata-ci-sandbox-podman/tests/live_rootless.rs"
+      ],
+      "github-live": [
+        "crates/automata-ci-github/tests/live_repository_snapshot.rs"
+      ],
+      "node-live": [
+        "crates/automata-ci-results-github/tests/cache_http.rs",
+        "crates/automata-ci-results-github/tests/http_compatibility.rs"
+      ]
+    },
+    "intentionally_unexecuted_sources": [
+      "crates/automata-ci-runner/src/product/metrics.rs",
+      "crates/automata-ci/tests/metrics_schema.rs"
+    ],
+    "intentionally_unexecuted_reason": "Developer-only schema print helpers"
+  },
+  "ordinary_guard": {
+    "line_percent_floor": 82.0,
+    "minimum_measured_lines": 172000,
+    "reviewed_baseline": {
+      "covered_lines": 145319,
+      "measured_lines": 175150,
+      "line_percent": 82.96831287467884,
+      "report_date": "2026-08-11"
+    }
+  }
+}

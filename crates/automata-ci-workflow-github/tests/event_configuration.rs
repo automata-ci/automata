@@ -159,6 +159,21 @@ fn merge_group_requires_exact_authenticated_metadata() {
     );
     assert!(selected.is_accepted(), "{:#?}", selected.diagnostics());
 
+    let configured = "on:\n  merge_group:\n    types: [checks_requested]\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let configured_selected = compile(
+        configured,
+        "merge_group",
+        Some(GithubEventMetadataV1::merge_group(
+            "checks_requested",
+            "refs/heads/main",
+        )),
+    );
+    assert!(
+        configured_selected.is_accepted(),
+        "{:#?}",
+        configured_selected.diagnostics()
+    );
+
     assert_not_selected(
         &compile(
             source,
@@ -169,6 +184,29 @@ fn merge_group_requires_exact_authenticated_metadata() {
             )),
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
+    );
+    assert_not_selected(
+        &compile(
+            configured,
+            "merge_group",
+            Some(GithubEventMetadataV1::merge_group(
+                "destroyed",
+                "refs/heads/main",
+            )),
+        ),
+        WorkflowNotSelectedReason::EventFiltersNotMatched,
+    );
+    let unsupported_type = "on:\n  merge_group:\n    types: [destroyed]\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    assert_rejected_with(
+        &compile(
+            unsupported_type,
+            "merge_group",
+            Some(GithubEventMetadataV1::merge_group(
+                "checks_requested",
+                "refs/heads/main",
+            )),
+        ),
+        "github.compile.unsupported_merge_group_type",
     );
     assert_rejected_with(
         &compile(source, "merge_group", None),

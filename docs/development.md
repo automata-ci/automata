@@ -122,23 +122,81 @@ Rust report uses the pinned toolchain's LLVM tools and a reviewed
 ```console
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --version 0.8.7 --locked
-install -d -m 0755 coverage
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-  cargo llvm-cov --workspace --exclude automata-ci-ui-renderer \
-  --all-targets --all-features --locked --jobs 2 --no-fail-fast \
-  --ignore-filename-regex='(/automata-ci-ui-renderer/|/generated/|generated_assets\.rs$|generated_contract\.rs$)' \
-  --json --summary-only --output-path coverage/rust-summary.json
-cargo llvm-cov report \
-  --ignore-filename-regex='(/automata-ci-ui-renderer/|/generated/|generated_assets\.rs$|generated_contract\.rs$)' \
-  --lcov --output-path coverage/rust.lcov
+  ./scripts/ci/run-rust-coverage.sh coverage/rust-ordinary ordinary
 ```
 
-The generated protobuf module and renderer-generated Rust are excluded from the
-report, not from compilation or tests. Keep renderer coverage separate, just as
-CI keeps its resource-heavy build separate. Ignored tests that require external
-services also need their named service lanes before their execution contributes
-coverage. Review per-file and per-crate gaps before setting a threshold; ratchet
-from a reproducible baseline instead of choosing an arbitrary percentage.
+The command writes `summary.json`, `coverage.lcov`, and `manifest.json`. The
+output directory must be inside the repository and ignored by Git, as the
+documented `coverage/` and `target/` locations are. The
+manifest names requested and not-requested test bundles plus each requested
+bundle's service requirements, so an ordinary report cannot be mistaken for
+service-complete workspace coverage. CI retains these files as the
+`rust-coverage-ordinary` artifact. It also binds the report to Git HEAD and a
+reproducible SHA-256 content digest of every tracked or unignored workspace
+path, and records SHA-256 hashes for both report formats. A separately named
+metadata-sensitive state token detects an edit that restores the original
+bytes during collection; it is provenance for that run, not a reproducible
+content identity. The checker requires the JSON and LCOV source sets and
+per-file line totals to agree exactly. It also validates each LCOV `DA` record's
+syntax and line-number uniqueness. LLVM region accounting means the number of
+`DA` records, and the subset with a nonzero execution count, need not equal
+`LF` or `LH`; those declared totals remain cross-checked against the JSON
+export instead. The detailed LCOV bytes are integrity-bound by their recorded
+hash and the runner's locked, staged publication rather than being derivable
+from the summary JSON.
+
+Instrumented artifacts live under `target/llvm-cov-target`, isolated from
+ordinary Cargo fingerprints. Allow disk space for a separate all-feature
+workspace build; the runner cleans that coverage target before collection so
+stale instrumentation cannot enter a report. A nonblocking lock prevents two
+cooperating Linux/util-linux coverage runners from sharing that fixed target;
+it does not lock source files against editors. Reports are staged, the workspace
+fingerprint is checked again after collection, and the manifest is published
+last as the completion marker; a concurrent source edit leaves no final
+artifact.
+
+The ordinary regression guard is deliberately narrower than a raw workspace
+percentage. After the policy's renderer and generated-source exclusions, the
+reviewed report measured 64.36% of in-scope compiled production lines because
+53,999 PostgreSQL-owned adapter lines had no service profiles. The committed
+policy inventories those global exclusions and assigns the exact PostgreSQL
+paths to that service bundle; the remaining ordinary-owned source measured
+82.97%, with an 82% floor and 0.97 percentage points of headroom. The guard also
+requires at least 172,000 measured lines—more than 98% of that reviewed
+denominator—so a broad exclusion cannot make the percentage pass. S3, Podman,
+and live-client source stays in
+ordinary scope where deterministic tests cover it; their external test bundles
+supplement that evidence.
+
+Run a service test bundle when all of that bundle's prerequisites are available:
+
+```console
+./scripts/ci/run-rust-coverage.sh coverage/rust-postgres postgres
+./scripts/ci/run-rust-coverage.sh coverage/rust-s3 s3
+./scripts/ci/run-rust-coverage.sh coverage/rust-podman podman
+./scripts/ci/run-rust-coverage.sh coverage/rust-github-live github-live
+./scripts/ci/run-rust-coverage.sh coverage/rust-node-live node-live
+```
+
+Each bundle fails closed when its documented environment is absent. To merge
+profiles on a host that has several prerequisites, name all bundles in one
+invocation, for example `ordinary postgres`. Merged and service-only reports
+are report-only: service hits cannot be used to satisfy the ordinary baseline.
+Run `ordinary` alone to enforce the regression guard. PostgreSQL CI remains a
+separate behavior gate; its normal test results are not silently attributed to
+the ordinary coverage artifact.
+
+These names are test bundles, not isolated service dimensions. In particular,
+the `s3` bundle also needs PostgreSQL and public GitHub access; those
+prerequisites can contribute partial profiles without executing the complete
+`postgres` or `github-live` bundles. The manifest records that distinction.
+
+The generated protobuf module and renderer-generated Rust are excluded from
+the report, not from compilation or tests. Renderer tests remain in their
+separate resource-heavy CI job; this workflow makes no renderer coverage
+claim. Review per-file and per-crate gaps and ratchet the committed policy only
+from a reproducible ordinary-bundle report.
 
 ## Runner capability admission
 

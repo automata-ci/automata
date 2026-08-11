@@ -1,4 +1,4 @@
-//! Verified GitHub push acceptance into Automata's durable provider inbox.
+//! Verified GitHub event acceptance into Automata's durable provider inbox.
 //!
 //! This boundary authenticates and normalizes an exact webhook request before
 //! it performs any write. It then persists the authenticated raw JSON in the
@@ -21,7 +21,9 @@
 //! complete [`ProviderDeliveryIdentity`]. Numeric provider IDs are encoded as unsigned
 //! big-endian 64-bit values and the UUID uses its canonical 16 bytes. This
 //! encoding makes header or routing drift a durable replay conflict instead
-//! of silently aliasing changed evidence.
+//! of silently aliasing changed evidence. Version-one generic events use a
+//! separate digest domain and media type while retaining the same ordered
+//! fields, so legacy push rows are never reinterpreted.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -874,8 +876,8 @@ fn authenticated_event_coordinates(
         }
         VerifiedGithubWebhook::PullRequest(pull_request) => (
             GithubAuthenticatedEventKind::PullRequest,
-            format!("refs/pull/{}/merge", pull_request.number()),
-            pull_request.head_revision().as_str(),
+            pull_request.git_ref().to_owned(),
+            pull_request.merge_revision().as_str(),
         ),
         VerifiedGithubWebhook::MergeGroup(merge_group) => (
             GithubAuthenticatedEventKind::MergeGroup,

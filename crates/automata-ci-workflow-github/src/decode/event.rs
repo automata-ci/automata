@@ -1,6 +1,6 @@
 use crate::{
-    EventName, EventTrigger, PushPullRequestFilter, Spanned, TriggerConfiguration, TriggerSet,
-    YamlNode,
+    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, Spanned,
+    TriggerConfiguration, TriggerSet, YamlNode,
 };
 
 use super::{DecodeContext, field_name, sequence_text};
@@ -20,7 +20,6 @@ const OTHER_GITHUB_EVENTS: &[&str] = &[
     "issue_comment",
     "issues",
     "label",
-    "merge_group",
     "milestone",
     "page_build",
     "public",
@@ -131,6 +130,12 @@ fn event_with_configuration(
                 true,
                 context,
             )),
+            EventName::MergeGroup if empty => {
+                TriggerConfiguration::MergeGroup(MergeGroupFilter::empty())
+            }
+            EventName::MergeGroup => {
+                TriggerConfiguration::MergeGroup(merge_group_configuration(configuration, context))
+            }
             EventName::WorkflowDispatch if empty => TriggerConfiguration::WorkflowDispatch(None),
             EventName::WorkflowDispatch => {
                 TriggerConfiguration::WorkflowDispatch(Some(configuration.clone()))
@@ -170,6 +175,7 @@ fn parse_event_name(name: &Spanned<String>, context: &mut DecodeContext<'_>) -> 
     match name.value.as_str() {
         "push" => EventName::Push,
         "pull_request" => EventName::PullRequest,
+        "merge_group" => EventName::MergeGroup,
         "workflow_dispatch" => EventName::WorkflowDispatch,
         "schedule" => EventName::Schedule,
         "workflow_call" => EventName::WorkflowCall,
@@ -187,6 +193,44 @@ fn parse_event_name(name: &Spanned<String>, context: &mut DecodeContext<'_>) -> 
             }
         }
     }
+}
+
+fn merge_group_configuration(node: &YamlNode, context: &mut DecodeContext<'_>) -> MergeGroupFilter {
+    const PATH: &str = "on.merge_group";
+    let Some(entries) = context.expect_mapping(node, PATH) else {
+        return MergeGroupFilter::empty();
+    };
+    let mut filter = MergeGroupFilter::empty();
+    for entry in entries {
+        if context.is_exhausted() {
+            break;
+        }
+        let name = field_name(entry);
+        let entry_path = match name {
+            Some(name) => context.child_path(PATH, name, &entry.key.span),
+            None => None,
+        };
+        if name.is_some() && entry_path.is_none() {
+            break;
+        }
+        match name {
+            Some("types") if filter.types.is_none() => {
+                filter.types = Some(filter_values(
+                    &entry.value,
+                    entry_path.as_deref(),
+                    PATH,
+                    context,
+                ));
+            }
+            Some("types") => {}
+            _ => {
+                if let Some(extension) = context.preserve_unknown(PATH, entry) {
+                    filter.extensions.push(extension);
+                }
+            }
+        }
+    }
+    filter
 }
 
 fn filter_configuration(

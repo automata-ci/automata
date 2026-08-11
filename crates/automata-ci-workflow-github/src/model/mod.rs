@@ -13,8 +13,8 @@ pub use container::{
     JobService, JobServices,
 };
 pub use event::{
-    EventName, EventTrigger, PushPullRequestFilter, TriggerConfiguration, TriggerSet,
-    WorkflowTriggers,
+    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, TriggerConfiguration,
+    TriggerSet, WorkflowTriggers,
 };
 pub use job::{
     DetailedJobEnvironment, Job, JobEnvironment, JobId, JobOutputs, Needs, ReusableWorkflowCall,

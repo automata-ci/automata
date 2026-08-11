@@ -11,29 +11,54 @@ pub(crate) fn parse_artifact_declarations(
     limits: CommandFileLimits,
 ) -> Result<ArtifactDeclarationCommandFile, CommandFileError> {
     let mut declarations = Vec::new();
-    for (index, raw) in text.split('\n').enumerate() {
-        let line_number = index.saturating_add(1);
-        if line_number > limits.maximum_records() {
-            return Err(CommandFileError::TooManyRecords {
-                kind: CommandFileKind::Artifacts,
-                maximum: limits.maximum_records(),
-            });
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    let mut line_number = 0_usize;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\r' | b'\n') {
+            line_number = line_number.saturating_add(1);
+            parse_artifact_line(&text[start..index], line_number, limits, &mut declarations)?;
+            if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                index += 1;
+            }
+            start = index + 1;
         }
-        if raw.len() > limits.maximum_line_bytes() {
-            return Err(CommandFileError::LineTooLong {
-                kind: CommandFileKind::Artifacts,
-                maximum: limits.maximum_line_bytes(),
-            });
-        }
-        let declaration = raw.trim();
-        if declaration.is_empty() || declaration.starts_with('#') {
-            continue;
-        }
-        let parsed = parse_declaration(declaration)
-            .ok_or(CommandFileError::InvalidArtifactDeclaration { line: line_number })?;
-        declarations.push(parsed);
+        index += 1;
+    }
+    if start < text.len() {
+        line_number = line_number.saturating_add(1);
+        parse_artifact_line(&text[start..], line_number, limits, &mut declarations)?;
     }
     Ok(ArtifactDeclarationCommandFile { declarations })
+}
+
+fn parse_artifact_line(
+    raw: &str,
+    line_number: usize,
+    limits: CommandFileLimits,
+    declarations: &mut Vec<ArtifactDeclaration>,
+) -> Result<(), CommandFileError> {
+    if line_number > limits.maximum_records() {
+        return Err(CommandFileError::TooManyRecords {
+            kind: CommandFileKind::Artifacts,
+            maximum: limits.maximum_records(),
+        });
+    }
+    if raw.len() > limits.maximum_line_bytes() {
+        return Err(CommandFileError::LineTooLong {
+            kind: CommandFileKind::Artifacts,
+            maximum: limits.maximum_line_bytes(),
+        });
+    }
+    let declaration = raw.trim();
+    if declaration.is_empty() || declaration.starts_with('#') {
+        return Ok(());
+    }
+    let parsed = parse_declaration(declaration)
+        .ok_or(CommandFileError::InvalidArtifactDeclaration { line: line_number })?;
+    declarations.push(parsed);
+    Ok(())
 }
 
 fn parse_declaration(value: &str) -> Option<ArtifactDeclaration> {

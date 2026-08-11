@@ -81,6 +81,7 @@ jobs:
           ./scripts/ci/tests/container-context.test.sh
           ./scripts/ci/tests/install.test.sh
           python3 scripts/ci/tests/release-handoff.test.py
+          python3 scripts/ci/tests/rust-coverage.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
 
       - name: Verify Prometheus metrics contract
@@ -116,9 +117,9 @@ jobs:
           crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
 
   rust_tests:
-    name: Rust workspace tests
+    name: Rust workspace tests and ordinary coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -133,12 +134,30 @@ jobs:
       - name: Prepare job scratch directory
         run: install -d -m 0700 -- "$TMPDIR"
 
-      - name: Test Rust workspace
+      - name: Install pinned Rust coverage tooling
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.8.7 --locked
+
+      - name: Test Rust workspace and enforce ordinary coverage
         run: |
           trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
           df -h -- "$GITHUB_WORKSPACE"
-          cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked
-          cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
+          ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary
+          CARGO_TARGET_DIR=target/llvm-cov-target \
+            cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
+
+      - name: Upload service-aware Rust coverage report
+        if: ${{ always() && hashFiles('target/coverage/rust/manifest.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-ordinary
+          path: |
+            target/coverage/rust/coverage.lcov
+            target/coverage/rust/manifest.json
+            target/coverage/rust/summary.json
+          if-no-files-found: error
+          retention-days: 14
 
   renderer_tests:
     name: Rust renderer tests

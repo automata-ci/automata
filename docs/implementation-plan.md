@@ -43,12 +43,12 @@ does not by itself close the end-to-end gate.
   profile before JobIR admission, including dynamically evaluated selections.
 - [x] Expose immutable positive numeric run and attempt identities without
   replacing internal UUIDs.
-- [ ] Compose authenticated `pull_request` and `merge_group` event evidence
-  through the product webhook route; normalization currently stops at the
-  component boundary.
-- [ ] Finish the `concurrency.queue` implementation and its PostgreSQL tests,
-  then keep it explicitly outside GitHub compatibility or place it behind a
-  distinct non-compatibility mode.
+- [x] Compose authenticated `pull_request` and `merge_group` event evidence
+  through the product webhook route, durable replay, workflow selection, and
+  admission using the exact normalized revision and ref.
+- [x] Implement ordered `concurrency.queue: max` coordination with PostgreSQL
+  FIFO-promotion and stale-running-slot recovery tests. Keep it explicitly
+  outside GitHub compatibility as an Automata extension.
 - [ ] Pass the unchanged public bootstrap workflow through admission,
   orchestration, runner execution, Results, and Check Runs.
 - [ ] Pass differential fixtures for actions, command files, matrices,
@@ -91,10 +91,10 @@ workflow does not satisfy the gate.
 
 ### G2: broader Actions runtime
 
-Complete JavaScript and composite pre/main/post behavior, job and service
-containers, container actions, matrices, status functions, fail-fast,
-max-parallel, reusable workflows, artifacts, cache management, cancellation,
-summaries, and annotations.
+Complete the remaining JavaScript and composite post-time template
+re-evaluation, job and service containers, container actions, matrices, status
+functions, fail-fast, max-parallel, reusable workflows, artifacts, cache
+management, cancellation, summaries, and annotations.
 
 Gate: Automata's CI consumes its own artifacts and caches and matches GitHub at
 the same commit.

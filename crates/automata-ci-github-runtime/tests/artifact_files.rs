@@ -52,7 +52,7 @@ fn declaration_grammar_matches_the_reviewed_upstream_delta() {
     let sha384 = "b".repeat(96);
     let sha512 = "c".repeat(128);
     let source = format!(
-        "  # ignored\n\nOCI://registry.example/app:v1@sha256:{upper}\nregistry.example/b@sha384:{sha384}\nregistry.example/c@sha512:{sha512}\nfile://dist/app\nrelative/path\n"
+        "  # ignored\r\n\rOCI://registry.example/app:v1@sha256:{upper}\nregistry.example/b@sha384:{sha384}\r\nregistry.example/c@sha512:{sha512}\nFiLe://dist/app\nrelative/path\n"
     );
     let declarations = decode(source.as_bytes());
     assert_eq!(declarations.declarations().len(), 5);
@@ -81,6 +81,8 @@ fn malformed_explicit_oci_equals_and_unsupported_schemes_fail_without_leaking_da
     let decoder = GithubCommandFileDecoder::default();
     for source in [
         "oci://registry.example/app@sha256:abc",
+        "oci://registry.example/app@SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "oci://registry.example/app@sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "name=registry.example/app@sha256:abc",
         "https://example.invalid/artifact",
     ] {
@@ -101,6 +103,12 @@ fn malformed_explicit_oci_equals_and_unsupported_schemes_fail_without_leaking_da
     let implicit_wrong_length = decode(b"registry.example/app@sha256:abc");
     assert!(matches!(
         implicit_wrong_length.declarations(),
+        [ArtifactDeclaration::File(_)]
+    ));
+    let implicit_upper_algorithm =
+        decode(b"registry.example/app@SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert!(matches!(
+        implicit_upper_algorithm.declarations(),
         [ArtifactDeclaration::File(_)]
     ));
 }

@@ -552,10 +552,37 @@ impl GithubJobExecutor {
             .and_then(|seconds| deadline(started_at, seconds));
         let mut status = GithubStatus::Success;
         let mut conclusion = JobConclusion::Success;
-        let mut posts = Vec::<RegisteredPost>::new();
+        let mut posts = PostRegistry::default();
         let mut action_budget = ActionExecutionBudget::new();
+        let preloaded_actions = self
+            .run_pre_job_actions(
+                &request,
+                &event_context,
+                endpoint.as_ref(),
+                &paths,
+                &services,
+                &mut commands,
+                &records,
+                &mut status,
+                &mut conclusion,
+                &mut action_budget,
+                &mut posts,
+                &mut attachments,
+                &mut masker,
+                &events,
+                &cancellation,
+                job_deadline,
+            )
+            .await?;
+        let main_suppressed = preloaded_actions.main_suppressed;
+        let mut preloaded_actions = preloaded_actions.actions;
+        let executable_steps = if main_suppressed {
+            &[]
+        } else {
+            request.job().job().steps()
+        };
 
-        for (index, step) in request.job().job().steps().iter().enumerate() {
+        for (index, step) in executable_steps.iter().enumerate() {
             if cancellation.is_cancelled() {
                 conclusion = JobConclusion::Cancelled;
                 status = GithubStatus::Cancelled;
@@ -770,6 +797,7 @@ impl GithubJobExecutor {
                                 &events,
                                 &cancellation,
                                 continue_on_error,
+                                &mut preloaded_actions,
                             )
                             .await;
                         cancellation_dominant(outcome, &cancellation)?
@@ -1006,6 +1034,1009 @@ impl GithubJobExecutor {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_action_occurrence<'a>(
+        &'a self,
+        request: &'a HydratedExecutionRequest<'_>,
+        endpoint: &'a dyn ExecutionEndpoint,
+        paths: &'a AttemptPaths,
+        reference: ActionReference,
+        call_path: ActionCallPath,
+        preferred_action_slot: Option<u32>,
+        budget: &'a mut ActionExecutionBudget,
+        planner: &'a mut ActionGraphPlanner,
+        actions: &'a mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
+        cancellation: &'a ExecutionCancellation,
+    ) -> Pin<Box<dyn Future<Output = Result<ActionLifecycleFlags, ActionLoadError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let key = action_reference_key(&reference);
+            if !planner.enter(key.clone()) {
+                return Err(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Metadata,
+                ));
+            }
+            let result = async {
+                let loaded = self
+                    .load_action_for_graph(
+                        request,
+                        endpoint,
+                        paths,
+                        &reference,
+                        preferred_action_slot,
+                        budget,
+                        planner,
+                        cancellation,
+                    )
+                    .await?;
+                let child_actions = match loaded.definition.execution() {
+                    PreparedActionExecution::Javascript(_) => Vec::new(),
+                    PreparedActionExecution::Composite(composite) => composite
+                        .steps()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, step)| match step {
+                            PreparedCompositeStep::Uses(step)
+                                if !matches!(step.reference(), ActionReference::Local { .. }) =>
+                            {
+                                Some((index, step.reference().clone()))
+                            }
+                            PreparedCompositeStep::Run(_) | PreparedCompositeStep::Uses(_) => None,
+                        })
+                        .collect::<Vec<_>>(),
+                };
+                let mut lifecycle = ActionLifecycleFlags::from_definition(&loaded.definition);
+                for (child_index, child_reference) in child_actions {
+                    let child_path = call_path.child(child_index).map_err(|_| {
+                        ActionLoadError::Preparation(ActionPreparationErrorKind::Metadata)
+                    })?;
+                    let child_lifecycle = self
+                        .prepare_action_occurrence(
+                            request,
+                            endpoint,
+                            paths,
+                            child_reference,
+                            child_path,
+                            None,
+                            budget,
+                            planner,
+                            actions,
+                            cancellation,
+                        )
+                        .await?;
+                    lifecycle.include(child_lifecycle);
+                }
+                if actions
+                    .insert(
+                        call_path,
+                        PreloadedActionOccurrence {
+                            loaded: Box::new(loaded),
+                            reference: reference.clone(),
+                            lifecycle: JavascriptPrePostState::default(),
+                            flags: lifecycle,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(ActionLoadError::Preparation(
+                        ActionPreparationErrorKind::Metadata,
+                    ));
+                }
+                Ok(lifecycle)
+            }
+            .await;
+            planner.leave();
+            result
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn load_action_for_graph(
+        &self,
+        request: &ExecutionRequest,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        reference: &ActionReference,
+        preferred_action_slot: Option<u32>,
+        budget: &mut ActionExecutionBudget,
+        planner: &mut ActionGraphPlanner,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<LoadedAction, ActionLoadError> {
+        let ActionReference::Repository { .. } = reference else {
+            return self
+                .load_action(
+                    request,
+                    endpoint,
+                    paths,
+                    reference,
+                    preferred_action_slot,
+                    budget,
+                    cancellation,
+                )
+                .await;
+        };
+        let key = action_reference_key(reference);
+        let action = if let Some(action) = planner.materials.get(&key) {
+            action.clone()
+        } else {
+            let action = self
+                .ports
+                .actions
+                .prepare(ActionPreparationRequest::new(reference))
+                .await
+                .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
+            planner.materials.insert(key, action.clone());
+            action
+        };
+        let slot = preferred_action_slot
+            .map_or_else(|| budget.action_slot(), Ok)
+            .map_err(ActionLoadError::Executor)?;
+        let action_paths = self
+            .prepare_action_content(
+                endpoint,
+                paths,
+                request.lease().attempt_id(),
+                slot,
+                &action,
+                cancellation,
+            )
+            .map_err(ActionLoadError::Executor)?;
+        Ok(LoadedAction {
+            definition: action.definition().clone(),
+            paths: action_paths,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn run_pre_job_actions(
+        &self,
+        request: &HydratedExecutionRequest<'_>,
+        event: &GithubValue,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        services: &ServiceContainerBindings,
+        commands: &mut JobCommandState,
+        records: &[MutableStepResult],
+        status: &mut GithubStatus,
+        conclusion: &mut JobConclusion,
+        budget: &mut ActionExecutionBudget,
+        posts: &mut PostRegistry,
+        attachments: &mut ExecutionAttachments,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &ExecutionCancellation,
+        job_deadline: Option<UnixMillis>,
+    ) -> Result<PreloadedJobActions, ExecutorAdapterError> {
+        let mut preloaded = BTreeMap::new();
+        let mut planner = ActionGraphPlanner::default();
+        for (index, step) in request.job().job().steps().iter().enumerate() {
+            if cancellation.is_cancelled() {
+                *status = GithubStatus::Cancelled;
+                *conclusion = JobConclusion::Cancelled;
+                break;
+            }
+            let SemanticStep::Action { reference, .. } = step.kind() else {
+                continue;
+            };
+            if matches!(reference, ActionReference::Local { .. }) {
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| invalid_job())?;
+            let call_path = ActionCallPath::top(index);
+            let prepared = self
+                .prepare_action_occurrence(
+                    request,
+                    endpoint,
+                    paths,
+                    reference.clone(),
+                    call_path,
+                    Some(index),
+                    budget,
+                    &mut planner,
+                    &mut preloaded,
+                    cancellation,
+                )
+                .await;
+            match prepared {
+                Ok(_) => {}
+                Err(ActionLoadError::Preparation(kind)) => {
+                    if emit_system_while_active(
+                        &format!("Action preparation failed ({kind:?})"),
+                        masker,
+                        events,
+                        cancellation,
+                    )?
+                    .is_none()
+                    {
+                        *status = GithubStatus::Cancelled;
+                        *conclusion = JobConclusion::Cancelled;
+                    } else {
+                        *status = GithubStatus::Failure;
+                        *conclusion = JobConclusion::Failure;
+                    }
+                    return Ok(PreloadedJobActions::failed(preloaded));
+                }
+                Err(ActionLoadError::Executor(error)) => match error.kind() {
+                    ExecutorAdapterErrorKind::Cancelled => {
+                        *status = GithubStatus::Cancelled;
+                        *conclusion = JobConclusion::Cancelled;
+                        return Ok(PreloadedJobActions::failed(preloaded));
+                    }
+                    ExecutorAdapterErrorKind::TimedOut => {
+                        *conclusion = JobConclusion::TimedOut;
+                        return Ok(PreloadedJobActions::failed(preloaded));
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
+
+        for (index, step) in request.job().job().steps().iter().enumerate() {
+            if cancellation.is_cancelled() {
+                *status = GithubStatus::Cancelled;
+                *conclusion = JobConclusion::Cancelled;
+                break;
+            }
+            let SemanticStep::Action { reference, inputs } = step.kind() else {
+                continue;
+            };
+            let index = u32::try_from(index).map_err(|_| invalid_job())?;
+            let call_path = ActionCallPath::top(index);
+            let Some(occurrence) = preloaded.get(&call_path) else {
+                continue;
+            };
+            if !occurrence.flags.has_pre {
+                continue;
+            }
+            let loaded = (*occurrence.loaded).clone();
+            let flags = occurrence.flags;
+            let result = match loaded.definition.execution() {
+                PreparedActionExecution::Javascript(javascript) => {
+                    let result = self.run_pre_job_javascript(
+                        request,
+                        event,
+                        endpoint,
+                        paths,
+                        step,
+                        index,
+                        reference,
+                        inputs,
+                        &loaded.definition,
+                        javascript,
+                        &loaded.paths,
+                        services,
+                        commands,
+                        records,
+                        *status,
+                        budget,
+                        posts,
+                        attachments,
+                        masker,
+                        events,
+                        cancellation,
+                        job_deadline,
+                    )?;
+                    preloaded
+                        .get_mut(&call_path)
+                        .ok_or_else(invalid_job)?
+                        .lifecycle = result.lifecycle;
+                    result
+                }
+                PreparedActionExecution::Composite(_) => {
+                    if flags.has_post {
+                        posts.reserve(index);
+                    }
+                    let context = cancellation_dominant(
+                        self.context(
+                            request,
+                            event,
+                            commands,
+                            records,
+                            Some(services),
+                            *status,
+                            Some(step.id().as_str()),
+                            GithubExecutionPhase::ActionPre,
+                        ),
+                        cancellation,
+                    )?;
+                    for secret in context.secret_masks() {
+                        cancellation_dominant(
+                            masker.register(secret.expose_secret()),
+                            cancellation,
+                        )?;
+                    }
+                    let builder = EnvironmentBuilder::new(
+                        &self.expressions,
+                        self.ports.secrets.as_ref(),
+                        request.environment().default_environment(),
+                    );
+                    let mut supplied = BTreeMap::new();
+                    for (name, source) in inputs {
+                        let value = cancellation_dominant(
+                            builder.resolve_source_value(source, context.expression(), masker),
+                            cancellation,
+                        )?;
+                        cancellation_dominant(
+                            budget.charge_derived(value.expose().len()),
+                            cancellation,
+                        )?;
+                        supplied.insert(name.clone(), value);
+                    }
+                    let continue_on_error = cancellation_dominant(
+                        self.resolve_runtime_boolean(
+                            step.continue_on_error(),
+                            context.expression(),
+                        ),
+                        cancellation,
+                    )?;
+                    let timeout_seconds = cancellation_dominant(
+                        self.resolve_runtime_timeout(step.timeout(), context.expression()),
+                        cancellation,
+                    )?;
+                    let timeout = cancellation_dominant(
+                        self.step_timeout(timeout_seconds, job_deadline),
+                        cancellation,
+                    )?;
+                    let mut result = self.run_preloaded_action_pre(
+                        request,
+                        event,
+                        endpoint,
+                        paths,
+                        step,
+                        index,
+                        &call_path,
+                        &supplied,
+                        &[],
+                        step.id().as_str().to_owned(),
+                        context.expression(),
+                        *status,
+                        services,
+                        commands,
+                        records,
+                        budget,
+                        &mut preloaded,
+                        posts,
+                        attachments,
+                        masker,
+                        events,
+                        cancellation,
+                        ActionDeadline::new(timeout),
+                        continue_on_error,
+                    )?;
+                    result.continue_on_error = continue_on_error;
+                    result
+                }
+            };
+            if let Some(outcome) = result.outcome {
+                let mapped = map_continue(outcome.conclusion(), result.continue_on_error);
+                if outcome == CommandOutcome::Cancelled {
+                    *status = GithubStatus::Cancelled;
+                    *conclusion = JobConclusion::Cancelled;
+                    return Ok(PreloadedJobActions::terminal(preloaded));
+                } else if outcome == CommandOutcome::TimedOut && mapped != JobConclusion::Success {
+                    *conclusion = JobConclusion::TimedOut;
+                    return Ok(PreloadedJobActions::terminal(preloaded));
+                } else if mapped != JobConclusion::Success && mapped != JobConclusion::Skipped {
+                    *status = status_for(mapped);
+                    *conclusion = mapped;
+                }
+            }
+        }
+        Ok(PreloadedJobActions::ready(preloaded))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_pre_job_javascript(
+        &self,
+        request: &HydratedExecutionRequest<'_>,
+        event: &GithubValue,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        step: &automata_ci_core::StepIr,
+        index: u32,
+        reference: &ActionReference,
+        supplied_inputs: &BTreeMap<String, ValueSource>,
+        definition: &PreparedActionDefinition,
+        javascript: &crate::PreparedJavascriptAction,
+        action_paths: &ActionPaths,
+        services: &ServiceContainerBindings,
+        commands: &mut JobCommandState,
+        records: &[MutableStepResult],
+        status: GithubStatus,
+        budget: &mut ActionExecutionBudget,
+        posts: &mut PostRegistry,
+        attachments: &mut ExecutionAttachments,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &ExecutionCancellation,
+        job_deadline: Option<UnixMillis>,
+    ) -> Result<PreJobActionResult, ExecutorAdapterError> {
+        let Some(pre) = javascript.pre() else {
+            return Ok(PreJobActionResult::default());
+        };
+        let context = cancellation_dominant(
+            self.context(
+                request,
+                event,
+                commands,
+                records,
+                Some(services),
+                status,
+                Some(step.id().as_str()),
+                GithubExecutionPhase::ActionPre,
+            ),
+            cancellation,
+        )?;
+        if !cancellation_dominant(
+            self.expressions
+                .evaluate_condition(javascript.pre_condition(), context.expression())
+                .map_err(|_| invalid_job()),
+            cancellation,
+        )? {
+            return Ok(PreJobActionResult::skipped());
+        }
+        for secret in context.secret_masks() {
+            cancellation_dominant(masker.register(secret.expose_secret()), cancellation)?;
+        }
+        let builder = EnvironmentBuilder::new(
+            &self.expressions,
+            self.ports.secrets.as_ref(),
+            request.environment().default_environment(),
+        );
+        let mut supplied = BTreeMap::new();
+        for (name, source) in supplied_inputs {
+            let value = cancellation_dominant(
+                builder.resolve_source_value(source, context.expression(), masker),
+                cancellation,
+            )?;
+            cancellation_dominant(budget.charge_derived(value.expose().len()), cancellation)?;
+            supplied.insert(name.clone(), value);
+        }
+        let inputs = cancellation_dominant(
+            builder.resolve_action_inputs(definition, &supplied, context.expression()),
+            cancellation,
+        )?;
+        for (_, value) in inputs.values() {
+            cancellation_dominant(budget.charge_derived(value.expose().len()), cancellation)?;
+        }
+        let identity = ActionIdentity::new(
+            step.id().as_str().to_owned(),
+            reference.clone(),
+            action_paths.directory.clone(),
+        );
+        let continue_on_error = cancellation_dominant(
+            self.resolve_runtime_boolean(step.continue_on_error(), context.expression()),
+            cancellation,
+        )?;
+        let timeout_seconds = cancellation_dominant(
+            self.resolve_runtime_timeout(step.timeout(), context.expression()),
+            cancellation,
+        )?;
+        let timeout = cancellation_dominant(
+            self.step_timeout(timeout_seconds, job_deadline),
+            cancellation,
+        )?;
+        let call_path = ActionCallPath::top(index);
+        let invocation =
+            cancellation_dominant(call_path.invocation_id(step.id().as_str()), cancellation)?;
+        let input_environment = cancellation_dominant(inputs.environment(), cancellation)?;
+        let post_registered = javascript.post().is_some();
+        if post_registered {
+            posts.register(
+                call_path,
+                RegisteredPost {
+                    top_step_index: index,
+                    top_step_id: step.id().as_str().to_owned(),
+                    runtime_step_id: step.id().as_str().to_owned(),
+                    invocation: invocation.clone(),
+                    javascript: javascript.clone(),
+                    paths: action_paths.clone(),
+                    identity: identity.clone(),
+                    inputs: inputs.values().to_vec(),
+                    action_environment: Vec::new(),
+                    input_environment: input_environment.clone(),
+                    phase: cancellation_dominant(phase_ordinal(index, 3), cancellation)?,
+                    timeout,
+                    continue_on_error,
+                },
+            )?;
+        }
+        let Some(node) = self.ports.toolchain.node(javascript.runtime()).cloned() else {
+            if emit_system_while_active(
+                "Action runtime is unavailable",
+                masker,
+                events,
+                cancellation,
+            )?
+            .is_none()
+            {
+                return Ok(PreJobActionResult::cancelled());
+            }
+            return Ok(PreJobActionResult {
+                outcome: Some(CommandOutcome::Failure),
+                lifecycle: JavascriptPrePostState {
+                    pre_completed: true,
+                    post_registered,
+                },
+                continue_on_error,
+            });
+        };
+        let environment = cancellation_dominant(
+            self.action_phase_environment(
+                request,
+                step,
+                &context,
+                commands,
+                &[],
+                &input_environment,
+                action_paths,
+                &identity,
+                Vec::new(),
+                masker,
+            ),
+            cancellation,
+        )?;
+        let execution = PhaseExecution {
+            step_id: step.id().as_str(),
+            report_step_id: step.id().as_str(),
+            phase: cancellation_dominant(phase_ordinal(index, 1), cancellation)?,
+            scope: StepPhase::ActionPre(invocation),
+            program: node,
+            arguments: vec![
+                cancellation_dominant(action_paths.entry(pre), cancellation)?
+                    .as_str()
+                    .to_owned(),
+            ],
+            working_directory: paths.workspace.clone(),
+            environment,
+            timeout,
+        };
+        let outcome = self.run_phase(
+            endpoint,
+            paths,
+            request.lease().attempt_id(),
+            execution,
+            commands,
+            attachments,
+            masker,
+            events,
+            cancellation,
+        )?;
+        Ok(PreJobActionResult {
+            outcome: Some(outcome),
+            lifecycle: JavascriptPrePostState {
+                pre_completed: true,
+                post_registered,
+            },
+            continue_on_error,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_preloaded_action_pre(
+        &self,
+        request: &HydratedExecutionRequest<'_>,
+        event: &GithubValue,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        top_step: &automata_ci_core::StepIr,
+        top_index: u32,
+        call_path: &ActionCallPath,
+        supplied_inputs: &BTreeMap<String, ResolvedEnvironmentValue>,
+        action_environment: &[(String, ResolvedEnvironmentValue)],
+        runtime_step_id: String,
+        condition_expression: &dyn GithubEvaluationContext,
+        status: GithubStatus,
+        services: &ServiceContainerBindings,
+        commands: &mut JobCommandState,
+        records: &[MutableStepResult],
+        budget: &mut ActionExecutionBudget,
+        preloaded: &mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
+        posts: &mut PostRegistry,
+        attachments: &mut ExecutionAttachments,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &ExecutionCancellation,
+        deadline: ActionDeadline,
+        continue_on_error: bool,
+    ) -> Result<PreJobActionResult, ExecutorAdapterError> {
+        let occurrence = preloaded.get(call_path).ok_or_else(invalid_job)?;
+        if !occurrence.flags.has_pre {
+            return Ok(PreJobActionResult::default());
+        }
+        let loaded = (*occurrence.loaded).clone();
+        let reference = occurrence.reference.clone();
+        match loaded.definition.execution() {
+            PreparedActionExecution::Javascript(javascript) => {
+                let Some(pre) = javascript.pre() else {
+                    return Ok(PreJobActionResult::default());
+                };
+                if !cancellation_dominant(
+                    self.expressions
+                        .evaluate_condition(javascript.pre_condition(), condition_expression)
+                        .map_err(|_| invalid_job()),
+                    cancellation,
+                )? {
+                    preloaded
+                        .get_mut(call_path)
+                        .ok_or_else(invalid_job)?
+                        .lifecycle = JavascriptPrePostState {
+                        pre_completed: true,
+                        post_registered: false,
+                    };
+                    return Ok(PreJobActionResult::skipped());
+                }
+                let builder = EnvironmentBuilder::new(
+                    &self.expressions,
+                    self.ports.secrets.as_ref(),
+                    request.environment().default_environment(),
+                );
+                let inputs = cancellation_dominant(
+                    builder.resolve_action_inputs(
+                        &loaded.definition,
+                        supplied_inputs,
+                        condition_expression,
+                    ),
+                    cancellation,
+                )?;
+                for (_, value) in inputs.values() {
+                    cancellation_dominant(
+                        budget.charge_derived(value.expose().len()),
+                        cancellation,
+                    )?;
+                }
+                let identity =
+                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
+                let invocation = cancellation_dominant(
+                    call_path.invocation_id(top_step.id().as_str()),
+                    cancellation,
+                )?;
+                let input_environment = cancellation_dominant(inputs.environment(), cancellation)?;
+                let Some(timeout) = deadline.remaining() else {
+                    return Ok(PreJobActionResult {
+                        outcome: Some(CommandOutcome::TimedOut),
+                        lifecycle: JavascriptPrePostState {
+                            pre_completed: true,
+                            post_registered: false,
+                        },
+                        continue_on_error,
+                    });
+                };
+                let post_registered = javascript.post().is_some();
+                if post_registered {
+                    posts.register(
+                        call_path.clone(),
+                        RegisteredPost {
+                            top_step_index: top_index,
+                            top_step_id: top_step.id().as_str().to_owned(),
+                            runtime_step_id: identity.runtime_step_id.clone(),
+                            invocation: invocation.clone(),
+                            javascript: javascript.as_ref().clone(),
+                            paths: loaded.paths.clone(),
+                            identity: identity.clone(),
+                            inputs: inputs.values().to_vec(),
+                            action_environment: action_environment.to_vec(),
+                            input_environment: input_environment.clone(),
+                            phase: cancellation_dominant(
+                                action_phase(budget, call_path.is_top(), top_index, 3),
+                                cancellation,
+                            )?,
+                            timeout: deadline.timeout,
+                            continue_on_error,
+                        },
+                    )?;
+                }
+                preloaded
+                    .get_mut(call_path)
+                    .ok_or_else(invalid_job)?
+                    .lifecycle = JavascriptPrePostState {
+                    pre_completed: true,
+                    post_registered,
+                };
+                let Some(node) = self.ports.toolchain.node(javascript.runtime()).cloned() else {
+                    if emit_system_while_active(
+                        "Action runtime is unavailable",
+                        masker,
+                        events,
+                        cancellation,
+                    )?
+                    .is_none()
+                    {
+                        return Ok(PreJobActionResult::cancelled());
+                    }
+                    return Ok(PreJobActionResult {
+                        outcome: Some(CommandOutcome::Failure),
+                        lifecycle: JavascriptPrePostState {
+                            pre_completed: true,
+                            post_registered,
+                        },
+                        continue_on_error,
+                    });
+                };
+                let context = cancellation_dominant(
+                    self.context(
+                        request,
+                        event,
+                        commands,
+                        records,
+                        Some(services),
+                        status,
+                        Some(top_step.id().as_str()),
+                        GithubExecutionPhase::ActionPre,
+                    ),
+                    cancellation,
+                )?;
+                for secret in context.secret_masks() {
+                    cancellation_dominant(masker.register(secret.expose_secret()), cancellation)?;
+                }
+                let environment = cancellation_dominant(
+                    self.action_phase_environment(
+                        request,
+                        top_step,
+                        &context,
+                        commands,
+                        action_environment,
+                        &input_environment,
+                        &loaded.paths,
+                        &identity,
+                        Vec::new(),
+                        masker,
+                    ),
+                    cancellation,
+                )?;
+                let execution = PhaseExecution {
+                    step_id: &identity.runtime_step_id,
+                    report_step_id: top_step.id().as_str(),
+                    phase: cancellation_dominant(
+                        action_phase(budget, call_path.is_top(), top_index, 1),
+                        cancellation,
+                    )?,
+                    scope: StepPhase::ActionPre(invocation),
+                    program: node,
+                    arguments: vec![
+                        cancellation_dominant(loaded.paths.entry(pre), cancellation)?
+                            .as_str()
+                            .to_owned(),
+                    ],
+                    working_directory: paths.workspace.clone(),
+                    environment,
+                    timeout,
+                };
+                let outcome = self.run_phase(
+                    endpoint,
+                    paths,
+                    request.lease().attempt_id(),
+                    execution,
+                    commands,
+                    attachments,
+                    masker,
+                    events,
+                    cancellation,
+                )?;
+                Ok(PreJobActionResult {
+                    outcome: Some(outcome),
+                    lifecycle: JavascriptPrePostState {
+                        pre_completed: true,
+                        post_registered,
+                    },
+                    continue_on_error,
+                })
+            }
+            PreparedActionExecution::Composite(composite) => {
+                let builder = EnvironmentBuilder::new(
+                    &self.expressions,
+                    self.ports.secrets.as_ref(),
+                    request.environment().default_environment(),
+                );
+                let inputs = cancellation_dominant(
+                    builder.resolve_action_inputs(
+                        &loaded.definition,
+                        supplied_inputs,
+                        condition_expression,
+                    ),
+                    cancellation,
+                )?;
+                for (_, value) in inputs.values() {
+                    cancellation_dominant(
+                        budget.charge_derived(value.expose().len()),
+                        cancellation,
+                    )?;
+                }
+                let identity =
+                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
+                self.run_preloaded_composite_pre(
+                    request,
+                    event,
+                    endpoint,
+                    paths,
+                    top_step,
+                    top_index,
+                    call_path,
+                    composite,
+                    &identity,
+                    &inputs,
+                    action_environment,
+                    status,
+                    services,
+                    commands,
+                    records,
+                    budget,
+                    preloaded,
+                    posts,
+                    attachments,
+                    masker,
+                    events,
+                    cancellation,
+                    deadline,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_preloaded_composite_pre(
+        &self,
+        request: &HydratedExecutionRequest<'_>,
+        event: &GithubValue,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        top_step: &automata_ci_core::StepIr,
+        top_index: u32,
+        call_path: &ActionCallPath,
+        composite: &PreparedCompositeAction,
+        identity: &ActionIdentity,
+        inputs: &ResolvedActionInputs,
+        action_environment: &[(String, ResolvedEnvironmentValue)],
+        initial_status: GithubStatus,
+        services: &ServiceContainerBindings,
+        commands: &mut JobCommandState,
+        records: &[MutableStepResult],
+        budget: &mut ActionExecutionBudget,
+        preloaded: &mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
+        posts: &mut PostRegistry,
+        attachments: &mut ExecutionAttachments,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &ExecutionCancellation,
+        deadline: ActionDeadline,
+    ) -> Result<PreJobActionResult, ExecutorAdapterError> {
+        let builder = EnvironmentBuilder::new(
+            &self.expressions,
+            self.ports.secrets.as_ref(),
+            request.environment().default_environment(),
+        );
+        let mut status = initial_status;
+        let mut aggregate = None;
+        let no_children = Vec::<CompositeChildResult>::new();
+        for (child_index, child) in composite.steps().iter().enumerate() {
+            let PreparedCompositeStep::Uses(step) = child else {
+                continue;
+            };
+            let child_path = cancellation_dominant(call_path.child(child_index), cancellation)?;
+            let Some(child_occurrence) = preloaded.get(&child_path) else {
+                if matches!(step.reference(), ActionReference::Local { .. }) {
+                    continue;
+                }
+                return Err(invalid_job());
+            };
+            if !child_occurrence.flags.has_pre {
+                continue;
+            }
+            let base = cancellation_dominant(
+                self.context(
+                    request,
+                    event,
+                    commands,
+                    records,
+                    Some(services),
+                    status,
+                    Some(top_step.id().as_str()),
+                    GithubExecutionPhase::ActionPre,
+                ),
+                cancellation,
+            )?;
+            for secret in base.secret_masks() {
+                cancellation_dominant(masker.register(secret.expose_secret()), cancellation)?;
+            }
+            let steps =
+                cancellation_dominant(composite_steps_value(&no_children, commands), cancellation)?;
+            let parent_expression = cancellation_dominant(
+                action_expression_context(
+                    base.expression(),
+                    inputs.values(),
+                    Some(steps),
+                    identity,
+                    action_environment,
+                    status,
+                ),
+                cancellation,
+            )?;
+            let child_environment = cancellation_dominant(
+                Self::resolve_composite_values(
+                    &builder,
+                    step.environment(),
+                    &parent_expression,
+                    budget,
+                ),
+                cancellation,
+            )?;
+            let mut child_action_environment = action_environment.to_vec();
+            child_action_environment.extend(child_environment);
+            let child_expression = cancellation_dominant(
+                action_expression_context(
+                    base.expression(),
+                    inputs.values(),
+                    Some(composite_steps_value(&no_children, commands)?),
+                    identity,
+                    &child_action_environment,
+                    status,
+                ),
+                cancellation,
+            )?;
+            let supplied = cancellation_dominant(
+                Self::resolve_composite_value_map(
+                    &builder,
+                    step.inputs(),
+                    &child_expression,
+                    budget,
+                ),
+                cancellation,
+            )?;
+            let continue_on_error = cancellation_dominant(
+                self.resolve_prepared_boolean(
+                    step.metadata().continue_on_error(),
+                    &child_expression,
+                ),
+                cancellation,
+            )?;
+            let result = self.run_preloaded_action_pre(
+                request,
+                event,
+                endpoint,
+                paths,
+                top_step,
+                top_index,
+                &child_path,
+                &supplied,
+                &child_action_environment,
+                composite_runtime_step_id(&child_path),
+                &child_expression,
+                status,
+                services,
+                commands,
+                records,
+                budget,
+                preloaded,
+                posts,
+                attachments,
+                masker,
+                events,
+                cancellation,
+                deadline,
+                continue_on_error,
+            )?;
+            let Some(outcome) = result.outcome else {
+                continue;
+            };
+            if outcome == CommandOutcome::Cancelled {
+                return Ok(result);
+            }
+            let mapped = map_continue(outcome.conclusion(), result.continue_on_error);
+            if mapped != JobConclusion::Success && mapped != JobConclusion::Skipped {
+                status = status_for(mapped);
+                aggregate = Some(outcome);
+            }
+            if outcome == CommandOutcome::TimedOut && mapped != JobConclusion::Success {
+                return Ok(result);
+            }
+        }
+        Ok(PreJobActionResult {
+            outcome: aggregate,
+            lifecycle: JavascriptPrePostState::default(),
+            continue_on_error: false,
+        })
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_action_step(
         &self,
@@ -1024,12 +2055,13 @@ impl GithubJobExecutor {
         records: &[MutableStepResult],
         status: GithubStatus,
         action_budget: &mut ActionExecutionBudget,
-        posts: &mut Vec<RegisteredPost>,
+        posts: &mut PostRegistry,
         attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         continue_on_error: bool,
+        preloaded_actions: &mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
     ) -> Result<CommandOutcome, ExecutorAdapterError> {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
@@ -1079,6 +2111,9 @@ impl GithubJobExecutor {
                 cancellation,
                 ActionDeadline::new(timeout),
                 continue_on_error,
+                ActionCallPath::top(index),
+                false,
+                preloaded_actions,
             )
             .await;
         if cancellation.is_cancelled() {
@@ -1107,13 +2142,16 @@ impl GithubJobExecutor {
         commands: &'a mut JobCommandState,
         records: &'a [MutableStepResult],
         budget: &'a mut ActionExecutionBudget,
-        posts: &'a mut Vec<RegisteredPost>,
+        posts: &'a mut PostRegistry,
         attachments: &'a mut ExecutionAttachments,
         masker: &'a mut SecretMasker,
         events: &'a Arc<dyn ExecutionEvents>,
         cancellation: &'a ExecutionCancellation,
         deadline: ActionDeadline,
         post_failure_continued: bool,
+        call_path: ActionCallPath,
+        jit_allowed: bool,
+        preloaded_actions: &'a mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
     ) -> Pin<Box<dyn Future<Output = Result<CommandOutcome, ExecutorAdapterError>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -1138,17 +2176,30 @@ impl GithubJobExecutor {
                 return Ok(CommandOutcome::Failure);
             }
             let result = async {
-                let loaded_result = self
-                    .load_action(
-                        request,
-                        endpoint,
-                        paths,
-                        &reference,
-                        preferred_action_slot,
-                        budget,
-                        cancellation,
-                    )
-                    .await;
+                let (loaded_result, lifecycle) = match preloaded_actions.remove(&call_path) {
+                    Some(PreloadedActionOccurrence {
+                        loaded, lifecycle, ..
+                    }) => (Ok(*loaded), lifecycle),
+                    None if jit_allowed || matches!(reference, ActionReference::Local { .. }) => (
+                        self.load_action(
+                            request,
+                            endpoint,
+                            paths,
+                            &reference,
+                            preferred_action_slot,
+                            budget,
+                            cancellation,
+                        )
+                        .await,
+                        JavascriptPrePostState::default(),
+                    ),
+                    None => (
+                        Err(ActionLoadError::Preparation(
+                            ActionPreparationErrorKind::Metadata,
+                        )),
+                        JavascriptPrePostState::default(),
+                    ),
+                };
                 if cancellation.is_cancelled() {
                     return Ok(CommandOutcome::Cancelled);
                 }
@@ -1213,37 +2264,62 @@ impl GithubJobExecutor {
                 let identity =
                     ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
                 let invocation = cancellation_dominant(
-                    budget.invocation_id(top_step.id().as_str(), top_index),
+                    call_path.invocation_id(top_step.id().as_str()),
                     cancellation,
                 )?;
                 match loaded.definition.execution() {
-                    PreparedActionExecution::Javascript(javascript) => self.run_javascript_action(
-                        request,
-                        event,
-                        endpoint,
-                        paths,
-                        top_step,
-                        top_index,
-                        javascript,
-                        &loaded.paths,
-                        &identity,
-                        &inputs,
-                        &action_environment,
-                        invocation,
-                        preferred_action_slot.is_some(),
-                        status,
-                        services,
-                        commands,
-                        records,
-                        budget,
-                        posts,
-                        attachments,
-                        masker,
-                        events,
-                        cancellation,
-                        deadline,
-                        post_failure_continued,
-                    ),
+                    PreparedActionExecution::Javascript(javascript) => {
+                        let pre_completed = if !lifecycle.pre_completed
+                            && javascript.pre().is_some()
+                            && matches!(&identity.reference, ActionReference::Local { .. })
+                        {
+                            if emit_system_while_active(
+                                "Pre entrypoints are unsupported for local actions",
+                                masker,
+                                events,
+                                cancellation,
+                            )?
+                            .is_none()
+                            {
+                                return Ok(CommandOutcome::Cancelled);
+                            }
+                            true
+                        } else {
+                            lifecycle.pre_completed
+                        };
+                        self.run_javascript_action(
+                            request,
+                            event,
+                            endpoint,
+                            paths,
+                            top_step,
+                            top_index,
+                            javascript,
+                            &loaded.paths,
+                            &identity,
+                            &inputs,
+                            &action_environment,
+                            invocation,
+                            preferred_action_slot.is_some(),
+                            status,
+                            services,
+                            commands,
+                            records,
+                            budget,
+                            posts,
+                            attachments,
+                            masker,
+                            events,
+                            cancellation,
+                            deadline,
+                            post_failure_continued,
+                            &call_path,
+                            JavascriptPrePostState {
+                                pre_completed,
+                                post_registered: lifecycle.post_registered,
+                            },
+                        )
+                    }
                     PreparedActionExecution::Composite(composite) => {
                         self.run_composite_action(
                             request,
@@ -1271,6 +2347,10 @@ impl GithubJobExecutor {
                             cancellation,
                             deadline,
                             post_failure_continued,
+                            &call_path,
+                            jit_allowed
+                                || matches!(&identity.reference, ActionReference::Local { .. }),
+                            preloaded_actions,
                         )
                         .await
                     }
@@ -1462,13 +2542,15 @@ impl GithubJobExecutor {
         commands: &mut JobCommandState,
         records: &[MutableStepResult],
         budget: &mut ActionExecutionBudget,
-        posts: &mut Vec<RegisteredPost>,
+        posts: &mut PostRegistry,
         attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         deadline: ActionDeadline,
         post_failure_continued: bool,
+        call_path: &ActionCallPath,
+        lifecycle: JavascriptPrePostState,
     ) -> Result<CommandOutcome, ExecutorAdapterError> {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
@@ -1487,35 +2569,44 @@ impl GithubJobExecutor {
             return Ok(CommandOutcome::Failure);
         };
         let input_environment = cancellation_dominant(inputs.environment(), cancellation)?;
-        let post_phase = cancellation_dominant(
-            javascript
-                .post()
-                .map(|_| action_phase(budget, top_level, top_index, 3))
-                .transpose(),
-            cancellation,
-        )?;
+        let post_phase = if lifecycle.post_registered {
+            None
+        } else {
+            cancellation_dominant(
+                javascript
+                    .post()
+                    .map(|_| action_phase(budget, top_level, top_index, 3))
+                    .transpose(),
+                cancellation,
+            )?
+        };
         if let Some(post_phase) = post_phase {
             if cancellation.is_cancelled() {
                 return Ok(CommandOutcome::Cancelled);
             }
-            posts.push(RegisteredPost {
-                top_step_index: top_index,
-                top_step_id: top_step.id().as_str().to_owned(),
-                runtime_step_id: identity.runtime_step_id.clone(),
-                invocation: invocation.clone(),
-                javascript: javascript.clone(),
-                paths: action_paths.clone(),
-                identity: identity.clone(),
-                inputs: inputs.values().to_vec(),
-                action_environment: action_environment.to_vec(),
-                input_environment: input_environment.clone(),
-                phase: post_phase,
-                timeout: deadline.timeout,
-                continue_on_error: post_failure_continued,
-            });
+            posts.register(
+                call_path.clone(),
+                RegisteredPost {
+                    top_step_index: top_index,
+                    top_step_id: top_step.id().as_str().to_owned(),
+                    runtime_step_id: identity.runtime_step_id.clone(),
+                    invocation: invocation.clone(),
+                    javascript: javascript.clone(),
+                    paths: action_paths.clone(),
+                    identity: identity.clone(),
+                    inputs: inputs.values().to_vec(),
+                    action_environment: action_environment.to_vec(),
+                    input_environment: input_environment.clone(),
+                    phase: post_phase,
+                    timeout: deadline.timeout,
+                    continue_on_error: post_failure_continued,
+                },
+            )?;
         }
 
-        if let Some(pre) = javascript.pre() {
+        if !lifecycle.pre_completed
+            && let Some(pre) = javascript.pre()
+        {
             let context = cancellation_dominant(
                 self.context(
                     request,
@@ -1571,7 +2662,7 @@ impl GithubJobExecutor {
                         action_phase(budget, top_level, top_index, 1),
                         cancellation,
                     )?,
-                    scope: StepPhase::ActionMain(invocation.clone()),
+                    scope: StepPhase::ActionPre(invocation.clone()),
                     program: node.clone(),
                     arguments: vec![
                         cancellation_dominant(action_paths.entry(pre), cancellation)?
@@ -1721,13 +2812,16 @@ impl GithubJobExecutor {
         commands: &mut JobCommandState,
         records: &[MutableStepResult],
         budget: &mut ActionExecutionBudget,
-        posts: &mut Vec<RegisteredPost>,
+        posts: &mut PostRegistry,
         attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         deadline: ActionDeadline,
         post_failure_continued: bool,
+        call_path: &ActionCallPath,
+        jit_allowed: bool,
+        preloaded_actions: &mut BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
     ) -> Result<CommandOutcome, ExecutorAdapterError> {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
@@ -1742,15 +2836,17 @@ impl GithubJobExecutor {
         let mut status = initial_status;
         let mut aggregate = CommandOutcome::Success;
 
-        for child in composite.steps() {
+        for (child_index, child) in composite.steps().iter().enumerate() {
             if cancellation.is_cancelled() {
                 return Ok(CommandOutcome::Cancelled);
             }
             if deadline.remaining().is_none() {
                 return Ok(CommandOutcome::TimedOut);
             }
+            let child_call_path =
+                cancellation_dominant(call_path.child(child_index), cancellation)?;
             let ordinal = cancellation_dominant(budget.composite_step(), cancellation)?;
-            let runtime_step_id = composite_runtime_step_id(ordinal);
+            let runtime_step_id = composite_runtime_step_id(&child_call_path);
             let metadata = match child {
                 PreparedCompositeStep::Run(step) => step.metadata(),
                 PreparedCompositeStep::Uses(step) => step.metadata(),
@@ -1970,6 +3066,9 @@ impl GithubJobExecutor {
                         cancellation,
                         deadline,
                         post_failure_continued || continue_on_error,
+                        child_call_path,
+                        jit_allowed,
+                        preloaded_actions,
                     )
                     .await?
                 }
@@ -2256,7 +3355,7 @@ impl GithubJobExecutor {
         services: &ServiceContainerBindings,
         commands: &mut JobCommandState,
         records: &mut [MutableStepResult],
-        posts: &mut Vec<RegisteredPost>,
+        posts: &mut PostRegistry,
         status: &mut GithubStatus,
         conclusion: &mut JobConclusion,
         attachments: &mut ExecutionAttachments,
@@ -2269,12 +3368,7 @@ impl GithubJobExecutor {
                 posts.clear();
                 break;
             }
-            let post = posts
-                .pop()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal));
-            let Some(post) = reconcile_post_operation(post, cancellation, status, conclusion)?
-            else {
-                posts.clear();
+            let Some(post) = posts.pop_last() else {
                 break;
             };
             let Some(context) = reconcile_post_operation(
@@ -3010,25 +4104,10 @@ impl GithubJobExecutor {
         );
         let Some(()) = reconcile_cancelled_operation(initialized, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
-        };
-        let mut environment = execution.environment;
-        environment = add_command_file_environment(&environment, &command_paths)?;
-        let argv = ExecutionArgv::new(execution.program, execution.arguments)
-            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let command = ExecutionCommand::new(
-            self.ports.operation_ids.operation_id(
-                attempt_id,
-                OperationPurpose::ExecutePhase,
-                execution.phase,
-            ),
-            argv,
-            execution.working_directory,
-            environment,
-            execution.timeout,
-            self.config.maximum_output_bytes(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let output = endpoint
+        }
+        let environment = add_command_file_environment(&execution.environment, &command_paths)?;
+        let command = self.build_phase_command(attempt_id, &execution, environment)?;
+        let output = match endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error);
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
@@ -3092,6 +4171,29 @@ impl GithubJobExecutor {
         )?;
         *commands = applied.into_next_state();
         Ok(CommandOutcome::from_termination(output.termination()))
+    }
+
+    fn build_phase_command(
+        &self,
+        attempt_id: AttemptId,
+        execution: &PhaseExecution,
+        environment: automata_ci_execution::ExecutionEnvironment,
+    ) -> Result<ExecutionCommand, ExecutorAdapterError> {
+        let argv = ExecutionArgv::new(execution.program.clone(), execution.arguments.clone())
+            .map_err(|_| invalid_job())?;
+        ExecutionCommand::new(
+            self.ports.operation_ids.operation_id(
+                attempt_id,
+                OperationPurpose::ExecutePhase,
+                execution.phase,
+            ),
+            argv,
+            execution.working_directory.clone(),
+            environment,
+            execution.timeout,
+            self.config.maximum_output_bytes(),
+        )
+        .map_err(|_| invalid_job())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3249,14 +4351,63 @@ impl GithubJobExecutor {
                     .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
             );
         }
-        let commands = decoded_step_commands(parsed)?;
+        let [environment, output, path, state, summary] = parsed
+            .try_into()
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        let ParsedCommandFile::Environment(environment) = environment else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        let ParsedCommandFile::Output(output) = output else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        let ParsedCommandFile::Path(path) = path else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        let ParsedCommandFile::State(state) = state else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        let ParsedCommandFile::StepSummary(summary) = summary else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        let commands = CompletedStepCommands::new(environment, output, path, state, summary);
+        let artifacts = self.read_artifact_declarations(
+            endpoint,
+            attempt_id,
+            phase,
+            &paths.artifacts,
+            cancellation,
+        )?;
+        Ok(DecodedCommandFiles {
+            commands,
+            artifacts,
+        })
+    }
+
+    fn read_artifact_declarations(
+        &self,
+        endpoint: &dyn ExecutionEndpoint,
+        attempt_id: AttemptId,
+        phase: u32,
+        path: &TargetPath,
+        cancellation: &dyn ExecutorCancellation,
+    ) -> Result<ArtifactDeclarationCommandFile, ExecutorAdapterError> {
         let request = CopyFromRequest::new(
             self.ports.operation_ids.operation_id(
                 attempt_id,
                 OperationPurpose::ReadArtifactsFile,
                 phase,
             ),
-            paths.artifacts.clone(),
+            path.clone(),
             MAX_ARTIFACT_DECLARATION_FILE_BYTES,
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
@@ -3281,10 +4432,7 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::Internal,
             ));
         };
-        Ok(DecodedCommandFiles {
-            commands,
-            artifacts,
-        })
+        Ok(artifacts)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3903,9 +5051,233 @@ struct RegisteredPost {
     continue_on_error: bool,
 }
 
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct ActionCallPath(Vec<u32>);
+
+impl ActionCallPath {
+    fn top(index: u32) -> Self {
+        Self(vec![index])
+    }
+
+    fn child(&self, index: usize) -> Result<Self, ExecutorAdapterError> {
+        if self.0.len() >= MAX_ACTION_NESTING_DEPTH {
+            return Err(resource_exhausted());
+        }
+        let mut path = self.0.clone();
+        path.push(u32::try_from(index).map_err(|_| resource_exhausted())?);
+        Ok(Self(path))
+    }
+
+    fn top_index(&self) -> u32 {
+        self.0[0]
+    }
+
+    fn is_top(&self) -> bool {
+        self.0.len() == 1
+    }
+
+    fn invocation_id(&self, top_step_id: &str) -> Result<ActionInvocationId, ExecutorAdapterError> {
+        let value = if self.0.len() == 1 {
+            format!("{top_step_id}-{}", self.0[0])
+        } else {
+            let suffix = self
+                .0
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("-");
+            format!("composite-action-{suffix}")
+        };
+        ActionInvocationId::new(value).map_err(|_| invalid_job())
+    }
+}
+
+#[derive(Default)]
+struct PostRegistry {
+    registration_order: Vec<u32>,
+    top_level: BTreeMap<u32, BTreeMap<ActionCallPath, RegisteredPost>>,
+}
+
+impl PostRegistry {
+    fn reserve(&mut self, top_index: u32) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.top_level.entry(top_index) {
+            self.registration_order.push(top_index);
+            entry.insert(BTreeMap::new());
+        }
+    }
+
+    fn register(
+        &mut self,
+        path: ActionCallPath,
+        post: RegisteredPost,
+    ) -> Result<(), ExecutorAdapterError> {
+        let top_index = path.top_index();
+        self.reserve(top_index);
+        let posts = self.top_level.get_mut(&top_index).ok_or_else(invalid_job)?;
+        if posts.insert(path, post).is_some() {
+            return Err(invalid_job());
+        }
+        Ok(())
+    }
+
+    fn pop_last(&mut self) -> Option<RegisteredPost> {
+        while let Some(top_index) = self.registration_order.last().copied() {
+            let posts = self.top_level.get_mut(&top_index)?;
+            if let Some((_, post)) = posts.pop_last() {
+                if posts.is_empty() {
+                    self.top_level.remove(&top_index);
+                    let removed = self.registration_order.pop();
+                    debug_assert_eq!(removed, Some(top_index));
+                }
+                return Some(post);
+            }
+            self.top_level.remove(&top_index);
+            let removed = self.registration_order.pop();
+            debug_assert_eq!(removed, Some(top_index));
+        }
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.registration_order.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.registration_order.clear();
+        self.top_level.clear();
+    }
+}
+
+#[derive(Clone)]
 struct LoadedAction {
     definition: PreparedActionDefinition,
     paths: ActionPaths,
+}
+
+struct PreloadedActionOccurrence {
+    loaded: Box<LoadedAction>,
+    reference: ActionReference,
+    lifecycle: JavascriptPrePostState,
+    flags: ActionLifecycleFlags,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ActionLifecycleFlags {
+    has_pre: bool,
+    has_post: bool,
+}
+
+impl ActionLifecycleFlags {
+    fn from_definition(definition: &PreparedActionDefinition) -> Self {
+        match definition.execution() {
+            PreparedActionExecution::Javascript(javascript) => Self {
+                has_pre: javascript.pre().is_some(),
+                has_post: javascript.post().is_some(),
+            },
+            PreparedActionExecution::Composite(composite) => Self {
+                has_pre: false,
+                has_post: composite.steps().iter().any(|step| {
+                    matches!(
+                        step,
+                        PreparedCompositeStep::Uses(step)
+                            if matches!(step.reference(), ActionReference::Local { .. })
+                    )
+                }),
+            },
+        }
+    }
+
+    fn include(&mut self, child: Self) {
+        self.has_pre |= child.has_pre;
+        self.has_post |= child.has_post;
+    }
+}
+
+#[derive(Default)]
+struct ActionGraphPlanner {
+    active: Vec<String>,
+    occurrences: u32,
+    materials: BTreeMap<String, PreparedAction>,
+}
+
+impl ActionGraphPlanner {
+    fn enter(&mut self, key: String) -> bool {
+        if self.active.len() >= MAX_ACTION_NESTING_DEPTH
+            || self.occurrences >= MAX_ACTION_INVOCATIONS
+            || self.active.iter().any(|active| active == &key)
+        {
+            return false;
+        }
+        self.occurrences += 1;
+        self.active.push(key);
+        true
+    }
+
+    fn leave(&mut self) {
+        let _ = self.active.pop();
+    }
+}
+
+struct PreloadedJobActions {
+    actions: BTreeMap<ActionCallPath, PreloadedActionOccurrence>,
+    main_suppressed: bool,
+}
+
+impl PreloadedJobActions {
+    const fn ready(actions: BTreeMap<ActionCallPath, PreloadedActionOccurrence>) -> Self {
+        Self {
+            actions,
+            main_suppressed: false,
+        }
+    }
+
+    const fn failed(actions: BTreeMap<ActionCallPath, PreloadedActionOccurrence>) -> Self {
+        Self::terminal(actions)
+    }
+
+    const fn terminal(actions: BTreeMap<ActionCallPath, PreloadedActionOccurrence>) -> Self {
+        Self {
+            actions,
+            main_suppressed: true,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreJobActionResult {
+    outcome: Option<CommandOutcome>,
+    lifecycle: JavascriptPrePostState,
+    continue_on_error: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct JavascriptPrePostState {
+    pre_completed: bool,
+    post_registered: bool,
+}
+
+impl PreJobActionResult {
+    const fn cancelled() -> Self {
+        Self {
+            outcome: Some(CommandOutcome::Cancelled),
+            lifecycle: JavascriptPrePostState {
+                pre_completed: true,
+                post_registered: false,
+            },
+            continue_on_error: false,
+        }
+    }
+
+    const fn skipped() -> Self {
+        Self {
+            outcome: None,
+            lifecycle: JavascriptPrePostState {
+                pre_completed: true,
+                post_registered: false,
+            },
+            continue_on_error: false,
+        }
+    }
 }
 
 enum ActionLoadError {
@@ -3993,19 +5365,6 @@ impl ActionExecutionBudget {
 
     fn leave(&mut self) {
         let _ = self.active.pop();
-    }
-
-    fn invocation_id(
-        &self,
-        top_step_id: &str,
-        top_index: u32,
-    ) -> Result<ActionInvocationId, ExecutorAdapterError> {
-        let value = if self.active.len() == 1 {
-            format!("{top_step_id}-{top_index}")
-        } else {
-            format!("composite-action-{}", self.invocations)
-        };
-        ActionInvocationId::new(value).map_err(|_| invalid_job())
     }
 
     fn composite_step(&mut self) -> Result<u32, ExecutorAdapterError> {
@@ -4565,8 +5924,14 @@ fn composite_shell(value: &str) -> Result<ResolvedShell, ExecutorAdapterError> {
     }
 }
 
-fn composite_runtime_step_id(ordinal: u32) -> String {
-    format!("__automata_composite_{ordinal}")
+fn composite_runtime_step_id(call_path: &ActionCallPath) -> String {
+    let suffix = call_path
+        .0
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("__automata_composite_{suffix}")
 }
 
 fn composite_operation_ordinal(ordinal: u32) -> Result<u32, ExecutorAdapterError> {

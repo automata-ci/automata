@@ -584,6 +584,8 @@ fn validated_scope_id(value: String) -> Result<String, CommandScopeIdError> {
 pub enum StepPhase {
     /// A plain workflow `run` step, with no paired post-action state.
     Run,
+    /// The pre phase of the identified action invocation.
+    ActionPre(ActionInvocationId),
     /// The main phase of the identified action invocation.
     ActionMain(ActionInvocationId),
     /// The post phase paired with the identified action invocation.
@@ -610,7 +612,7 @@ impl StepScope {
         &self.step_id
     }
 
-    /// Returns the run, action-main, or action-post phase.
+    /// Returns the run, action-pre, action-main, or action-post phase.
     #[must_use]
     pub const fn phase(&self) -> &StepPhase {
         &self.phase

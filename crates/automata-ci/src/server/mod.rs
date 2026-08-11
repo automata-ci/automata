@@ -20,6 +20,7 @@ mod secret_management;
 mod secret_mutation_recovery;
 mod state_metrics;
 mod static_registration;
+mod workflow_dispatch;
 
 use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
 

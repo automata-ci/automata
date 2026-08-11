@@ -32,7 +32,7 @@ pub struct CompileWorkflowRequest<'plan> {
 enum EventSelection {
     Unverified,
     MetadataV1(GithubEventMetadataV1),
-    Preselected,
+    Preselected(Option<GithubEventMetadataV1>),
 }
 
 impl<'plan> CompileWorkflowRequest<'plan> {
@@ -77,7 +77,27 @@ impl<'plan> CompileWorkflowRequest<'plan> {
         Self {
             source_plan,
             event,
-            selection: EventSelection::Preselected,
+            selection: EventSelection::Preselected(None),
+        }
+    }
+
+    /// Recompiles an already-selected event with its durable provider
+    /// selection evidence.
+    ///
+    /// This is the replay boundary for selector values that are intentionally
+    /// absent from the provider-neutral workflow plan. The caller must load
+    /// the metadata from immutable evidence already bound to admission, never
+    /// reconstruct it from an unauthenticated request.
+    #[must_use]
+    pub fn for_preselected_event_with_metadata_v1(
+        source_plan: &'plan GithubWorkflowSourcePlan,
+        event: WorkflowEventProvenance,
+        metadata: GithubEventMetadataV1,
+    ) -> Self {
+        Self {
+            source_plan,
+            event,
+            selection: EventSelection::Preselected(Some(metadata)),
         }
     }
 
@@ -434,10 +454,11 @@ fn compile_event(
         return CompiledEvent::Rejected;
     };
     match selection {
-        EventSelection::Preselected => compile_preselected_event(
+        EventSelection::Preselected(metadata) => compile_preselected_event(
             event,
             matches!(selected.name().value(), EventName::WorkflowDispatch),
             selected_dispatch_contract,
+            metadata.as_ref(),
             &span,
             selected.span(),
             context,
@@ -467,6 +488,7 @@ fn compile_preselected_event(
     event: WorkflowEventProvenance,
     workflow_dispatch: bool,
     dispatch_contract: Option<GithubWorkflowDispatchContract>,
+    metadata: Option<&GithubEventMetadataV1>,
     configured_span: &PlanSourceSpan,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
@@ -491,6 +513,14 @@ fn compile_preselected_event(
         }
     }
     if !workflow_dispatch {
+        if metadata.is_some() {
+            context.semantic(
+                "github.compile.preselected_event_metadata_mismatch",
+                "durable preselected metadata is not supported for this event",
+                trigger_span.clone(),
+            );
+            return CompiledEvent::Rejected;
+        }
         return CompiledEvent::Selected {
             event,
             workflow_dispatch: None,
@@ -499,20 +529,14 @@ fn compile_preselected_event(
     let Some(contract) = dispatch_contract else {
         return CompiledEvent::Rejected;
     };
-    if !contract.is_empty() {
-        context.semantic(
-            "github.compile.workflow_dispatch_input_evidence_required",
-            "configured workflow_dispatch inputs require verified dispatch payload evidence during compilation",
-            trigger_span.clone(),
-        );
+    let Some(workflow_dispatch) =
+        trigger::compile_preselected_workflow_dispatch(&contract, metadata, trigger_span, context)
+    else {
         return CompiledEvent::Rejected;
-    }
+    };
     CompiledEvent::Selected {
         event,
-        workflow_dispatch: Some(Box::new(CompiledWorkflowDispatch {
-            contract,
-            inputs: ContextValue::empty_object(),
-        })),
+        workflow_dispatch: Some(Box::new(workflow_dispatch)),
     }
 }
 
@@ -520,6 +544,7 @@ fn event_name(event: &EventName) -> &str {
     match event {
         EventName::Push => "push",
         EventName::PullRequest => "pull_request",
+        EventName::MergeGroup => "merge_group",
         EventName::WorkflowDispatch => "workflow_dispatch",
         EventName::Schedule => "schedule",
         EventName::WorkflowCall => "workflow_call",
@@ -533,6 +558,9 @@ fn reject_unsupported_trigger(
 ) {
     match configuration {
         TriggerConfiguration::Push(filter) | TriggerConfiguration::PullRequest(filter) => {
+            context.reject_extensions(filter.extensions());
+        }
+        TriggerConfiguration::MergeGroup(filter) => {
             context.reject_extensions(filter.extensions());
         }
         TriggerConfiguration::Preserved(node) => context.unsupported(

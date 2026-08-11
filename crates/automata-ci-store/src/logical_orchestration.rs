@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
+use automata_ci_auth::management::ManagementActor;
 use automata_ci_core::{
-    MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, RunId, UnixMillis, WorkflowId, WorkflowJobKey,
+    MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, UnixMillis, WorkflowId,
+    WorkflowJobKey,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -146,6 +148,287 @@ impl AdmittedLogicalWorkflowJob {
     #[must_use]
     pub fn prerequisites(&self) -> &[LogicalWorkflowJobId] {
         &self.prerequisites
+    }
+}
+
+/// Current authenticated human authority for one exact control-plane manual
+/// dispatch admission.
+///
+/// Input values are not repeated here. Their immutable event and base-context
+/// digests are bound alongside the exact repository, workflow, ref, and
+/// operation identity, while [`ManagementActor`] is reauthorized inside the
+/// admission transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedWorkflowDispatchClaim {
+    actor: ManagementActor,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    workflow_path: String,
+    git_ref: String,
+    operation_id: OperationId,
+    event_digest: Sha256Digest,
+    base_context_digest: Sha256Digest,
+}
+
+impl AuthenticatedWorkflowDispatchClaim {
+    /// Creates an exact authenticated dispatch claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil durable identities, invalid path text, or a noncanonical
+    /// full Git ref before the repository adapter observes authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        actor: ManagementActor,
+        repository_id: RepositoryId,
+        workflow_id: WorkflowId,
+        workflow_path: impl Into<String>,
+        git_ref: impl Into<String>,
+        operation_id: OperationId,
+        event_digest: Sha256Digest,
+        base_context_digest: Sha256Digest,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let workflow_path = workflow_path.into();
+        let git_ref = git_ref.into();
+        validate_text(&workflow_path, "workflow path")?;
+        validate_text(&git_ref, "Git ref")?;
+        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
+        }
+        for (value, field) in [
+            (repository_id.as_uuid(), "repository ID"),
+            (workflow_id.as_uuid(), "workflow ID"),
+            (operation_id.as_uuid(), "workflow dispatch operation ID"),
+        ] {
+            if value.is_nil() {
+                return Err(LogicalWorkflowAdmissionValueError::NilUuid(field));
+            }
+        }
+        Ok(Self {
+            actor,
+            repository_id,
+            workflow_id,
+            workflow_path,
+            git_ref,
+            operation_id,
+            event_digest,
+            base_context_digest,
+        })
+    }
+
+    /// Returns the current authenticated actor to reauthorize transactionally.
+    #[must_use]
+    pub const fn actor(&self) -> &ManagementActor {
+        &self.actor
+    }
+
+    /// Returns the exact durable repository target.
+    #[must_use]
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
+
+    /// Returns the exact durable workflow target.
+    #[must_use]
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+
+    /// Returns the exact repository-relative workflow path.
+    #[must_use]
+    pub fn workflow_path(&self) -> &str {
+        &self.workflow_path
+    }
+
+    /// Returns the exact canonical source ref.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+
+    /// Returns the caller operation identity used for exact replay.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the immutable synthetic dispatch-evidence digest.
+    #[must_use]
+    pub const fn event_digest(&self) -> Sha256Digest {
+        self.event_digest
+    }
+
+    /// Returns the immutable canonical base-context digest.
+    #[must_use]
+    pub const fn base_context_digest(&self) -> Sha256Digest {
+        self.base_context_digest
+    }
+}
+
+/// Authenticated lookup for one exact, previously signed-GitHub-admitted
+/// workflow source used by a control-plane manual dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolveAuthenticatedWorkflowDispatchSource {
+    actor: ManagementActor,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    git_ref: String,
+    commit_sha: String,
+    commit_sha_bytes: Vec<u8>,
+}
+
+impl ResolveAuthenticatedWorkflowDispatchSource {
+    /// Creates an exact source lookup bound to current human-session evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil target identities, a noncanonical full ref, or a commit SHA
+    /// other than 40 or 64 lowercase hexadecimal characters.
+    pub fn new(
+        actor: ManagementActor,
+        repository_id: RepositoryId,
+        workflow_id: WorkflowId,
+        git_ref: impl Into<String>,
+        commit_sha: impl Into<String>,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let git_ref = git_ref.into();
+        validate_text(&git_ref, "Git ref")?;
+        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
+        }
+        if repository_id.as_uuid().is_nil() || workflow_id.as_uuid().is_nil() {
+            return Err(LogicalWorkflowAdmissionValueError::NilUuid(
+                "workflow dispatch source target",
+            ));
+        }
+        let commit_sha = commit_sha.into();
+        let commit_sha_bytes = decode_commit_sha(&commit_sha)?;
+        Ok(Self {
+            actor,
+            repository_id,
+            workflow_id,
+            git_ref,
+            commit_sha,
+            commit_sha_bytes,
+        })
+    }
+
+    /// Returns current human-session evidence to reauthorize transactionally.
+    #[must_use]
+    pub const fn actor(&self) -> &ManagementActor {
+        &self.actor
+    }
+
+    /// Returns the exact durable repository target.
+    #[must_use]
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
+
+    /// Returns the exact durable workflow target.
+    #[must_use]
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+
+    /// Returns the exact full Git ref.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+
+    /// Returns the canonical lowercase commit SHA.
+    #[must_use]
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    pub(crate) fn commit_sha_bytes(&self) -> &[u8] {
+        &self.commit_sha_bytes
+    }
+}
+
+/// Exact immutable source proven by a prior authenticated GitHub admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedWorkflowDispatchSource {
+    repository: AdmissionRepository,
+    workflow_id: WorkflowId,
+    workflow_path: String,
+    git_ref: String,
+    commit_sha: String,
+    source: AdmissionObject,
+}
+
+impl AuthenticatedWorkflowDispatchSource {
+    /// Creates a proven exact dispatch source descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid workflow identity, path/ref text, or commit SHA shape.
+    pub fn new(
+        repository: AdmissionRepository,
+        workflow_id: WorkflowId,
+        workflow_path: impl Into<String>,
+        git_ref: impl Into<String>,
+        commit_sha: impl Into<String>,
+        source: AdmissionObject,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let workflow_path = workflow_path.into();
+        let git_ref = git_ref.into();
+        let commit_sha = commit_sha.into();
+        validate_text(&workflow_path, "workflow path")?;
+        validate_text(&git_ref, "Git ref")?;
+        if workflow_id.as_uuid().is_nil() {
+            return Err(LogicalWorkflowAdmissionValueError::NilUuid("workflow ID"));
+        }
+        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
+        }
+        decode_commit_sha(&commit_sha)?;
+        Ok(Self {
+            repository,
+            workflow_id,
+            workflow_path,
+            git_ref,
+            commit_sha,
+            source,
+        })
+    }
+
+    /// Returns exact durable repository coordinates.
+    #[must_use]
+    pub const fn repository(&self) -> &AdmissionRepository {
+        &self.repository
+    }
+
+    /// Returns the exact durable workflow identity.
+    #[must_use]
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+
+    /// Returns the repository-relative workflow path.
+    #[must_use]
+    pub fn workflow_path(&self) -> &str {
+        &self.workflow_path
+    }
+
+    /// Returns the exact full Git ref.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+
+    /// Returns the exact lowercase commit SHA.
+    #[must_use]
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    /// Returns the immutable workflow-source object descriptor.
+    #[must_use]
+    pub const fn source(&self) -> &AdmissionObject {
+        &self.source
     }
 }
 
@@ -570,6 +853,17 @@ impl LogicalWorkflowAdmissionReceipt {
 /// Atomic persistence boundary for current logical workflow admission.
 #[async_trait]
 pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
+    /// Resolves one exact source only when a current human session is allowed
+    /// to dispatch the repository and a prior signed GitHub admission proves
+    /// the same repository/workflow/ref/commit source descriptor.
+    async fn resolve_authenticated_workflow_dispatch_source(
+        &self,
+        _request: ResolveAuthenticatedWorkflowDispatchSource,
+    ) -> Result<Option<AuthenticatedWorkflowDispatchSource>, LogicalWorkflowAdmissionStoreError>
+    {
+        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
+
     /// Commits the run marker, root invocation, logical jobs, and dependencies,
     /// or returns the exact prior receipt for an identical request.
     ///
@@ -597,6 +891,22 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
         current_claim: AuthenticatedGithubDeliveryClaim,
         observed_at: UnixMillis,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError>;
+
+    /// Commits one manual dispatch authorized by an Automata human session, or
+    /// validates its exact immutable evidence and current authority on replay.
+    ///
+    /// Implementations must reauthorize `runs:dispatch` for the exact existing
+    /// tenant/repository inside the admission transaction. They must bind the
+    /// claim's workflow path/ref, event digest, base-context digest, operation,
+    /// and authenticated subject to the durable admission receipt and audit
+    /// evidence. This is a control-plane invocation, not a GitHub webhook.
+    async fn admit_authenticated_workflow_dispatch(
+        &self,
+        _command: AdmitLogicalWorkflowRun,
+        _claim: AuthenticatedWorkflowDispatchClaim,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
 }
 
 /// Invalid current logical-admission domain value.
@@ -676,6 +986,9 @@ pub enum LogicalWorkflowAdmissionStoreError {
     /// This deployment requires immutable authenticated provider evidence.
     #[error("logical workflow admission source is not supported by current policy")]
     UnsupportedAdmissionSource,
+    /// Current human-session authority did not authorize the exact dispatch target.
+    #[error("workflow dispatch authority was rejected")]
+    WorkflowDispatchAuthorityRejected,
 }
 
 fn validate_text(
@@ -689,6 +1002,30 @@ fn validate_text(
         return Err(LogicalWorkflowAdmissionValueError::InvalidText(field));
     }
     Ok(())
+}
+
+fn decode_commit_sha(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmissionValueError> {
+    if !matches!(value.len(), 40 | 64)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha);
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            let high = digit(pair[0]).ok_or(LogicalWorkflowAdmissionValueError::InvalidHeadSha)?;
+            let low = digit(pair[1]).ok_or(LogicalWorkflowAdmissionValueError::InvalidHeadSha)?;
+            Ok((high << 4) | low)
+        })
+        .collect()
 }
 
 fn validate_graph(

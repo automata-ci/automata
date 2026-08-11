@@ -1,0 +1,329 @@
+mod support;
+
+use std::sync::Arc;
+
+use automata_ci_core::{JobConclusion, LogChannel};
+use automata_ci_github_runtime::CommandFileKind;
+use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
+use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+
+use support::{
+    Fixture, PhaseResponse, action_step, envelope, environment_map, local_action_step,
+    prepared_node24_action_with_pre, prepared_node24_action_with_pre_condition, run_step,
+};
+
+#[tokio::test]
+async fn repository_action_pre_runs_before_every_main_job_step() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![
+            PhaseResponse::success()
+                .with_file(CommandFileKind::Environment, b"PRE_JOB=ready\n".to_vec())
+                .with_file(CommandFileKind::State, b"from_pre=yes\n".to_vec()),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+        ],
+    );
+    let request = fixture.request(envelope(vec![
+        run_step("first", "First", "true"),
+        action_step("lifecycle", "owner/lifecycle"),
+        run_step("last", "Last", "true"),
+    ]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("action lifecycle executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let phases = state
+        .commands
+        .iter()
+        .filter_map(|command| match command.argv().program().as_str() {
+            "/usr/bin/bash" => Some("run".to_owned()),
+            "/opt/node24/bin/node" => command
+                .argv()
+                .arguments()
+                .first()
+                .and_then(|path| path.rsplit('/').next())
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(phases, ["pre.js", "run", "main.js", "run", "post.js"]);
+    let first_run = state
+        .commands
+        .iter()
+        .find(|command| command.argv().program().as_str() == "/usr/bin/bash")
+        .expect("first workflow run");
+    assert_eq!(environment_map(first_run)["PRE_JOB"], "ready");
+    let post = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .nth(2)
+        .expect("post command");
+    assert_eq!(environment_map(post)["STATE_from_pre"], "yes");
+}
+
+#[tokio::test]
+async fn local_action_pre_is_skipped_with_a_sanitized_diagnostic() {
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![PhaseResponse::success(), PhaseResponse::success()],
+    );
+    fixture
+        .endpoint_state
+        .lock()
+        .expect("endpoint lock")
+        .files
+        .insert(
+            "/__w/automata/automata/actions/local/action.yml".to_owned(),
+            br"
+name: Local lifecycle
+runs:
+  using: node24
+  pre: dist/pre.js
+  main: dist/main.js
+  post: dist/post.js
+"
+            .to_vec(),
+        );
+    let request = fixture.request(envelope(vec![local_action_step(
+        "local",
+        "./actions/local",
+    )]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("local action main and post execute");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let entries = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .map(|command| {
+            command.argv().arguments()[0]
+                .rsplit('/')
+                .next()
+                .expect("entry name")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries, ["main.js", "post.js"]);
+    drop(state);
+    let diagnostics = fixture
+        .events
+        .logs()
+        .into_iter()
+        .filter(|event| event.channel() == LogChannel::System)
+        .flat_map(|event| event.payload().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        String::from_utf8(diagnostics).expect("UTF-8 diagnostics"),
+        "Pre entrypoints are unsupported for local actions\n"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_that_ran_registers_post_even_when_main_is_skipped() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![PhaseResponse::success(), PhaseResponse::success()],
+    );
+    let never = GithubConditionCompiler::default()
+        .compile_condition(Some("false"), GithubConditionPhase::Step)
+        .expect("valid false condition");
+    let request = fixture.request(envelope(vec![
+        action_step("lifecycle", "owner/lifecycle").with_condition(never),
+    ]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("skipped action lifecycle executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(result.steps()[0].conclusion(), JobConclusion::Skipped);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let entries = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .map(|command| {
+            command.argv().arguments()[0]
+                .rsplit('/')
+                .next()
+                .expect("entry name")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries, ["pre.js", "post.js"]);
+}
+
+#[tokio::test]
+async fn a_false_pre_condition_is_not_retried_inline_with_main() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre_condition("false")],
+        vec![PhaseResponse::success(), PhaseResponse::success()],
+    );
+    let request = fixture.request(envelope(vec![action_step("lifecycle", "owner/lifecycle")]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("main and post execute without a skipped pre");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let entries = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .map(|command| {
+            command.argv().arguments()[0]
+                .rsplit('/')
+                .next()
+                .expect("entry name")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(entries, ["main.js", "post.js"]);
+}
+
+#[tokio::test]
+async fn the_complete_repository_action_set_is_prepared_before_any_user_code() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![PhaseResponse::success()],
+    );
+    let never = GithubConditionCompiler::default()
+        .compile_condition(Some("false"), GithubConditionPhase::Step)
+        .expect("valid false condition");
+    let request = fixture.request(envelope(vec![
+        action_step("ready", "owner/ready"),
+        action_step("missing", "owner/missing").with_condition(never),
+    ]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("preparation failure is a terminal job result");
+
+    assert_eq!(result.conclusion(), JobConclusion::Failure);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    assert!(
+        state.commands.iter().all(|command| {
+            !matches!(
+                command.argv().program().as_str(),
+                "/opt/node24/bin/node" | "/usr/bin/bash"
+            )
+        }),
+        "neither an earlier pre nor a conditionally skipped missing action may run"
+    );
+    drop(state);
+    let diagnostics = fixture
+        .events
+        .logs()
+        .into_iter()
+        .filter(|event| event.channel() == LogChannel::System)
+        .flat_map(|event| event.payload().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        String::from_utf8(diagnostics).expect("UTF-8 diagnostics"),
+        "Action preparation failed (Resolution)\n"
+    );
+}
+
+#[tokio::test]
+async fn tokenless_pre_cancellation_suppresses_every_main_step() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![PhaseResponse::success().cancelled()],
+    );
+    let always = GithubConditionCompiler::default()
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("valid always condition");
+    let request = fixture.request(envelope(vec![
+        action_step("lifecycle", "owner/lifecycle"),
+        run_step("must-not-run", "Must not run", "true").with_condition(always),
+    ]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("pre cancellation is terminal");
+
+    assert_eq!(result.conclusion(), JobConclusion::Cancelled);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    assert_eq!(
+        state
+            .commands
+            .iter()
+            .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+            .count(),
+        1
+    );
+    assert!(
+        state
+            .commands
+            .iter()
+            .all(|command| command.argv().program().as_str() != "/usr/bin/bash")
+    );
+}
+
+#[tokio::test]
+async fn pre_outputs_cannot_escape_through_a_user_chosen_internal_looking_id() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![
+            PhaseResponse::success()
+                .with_file(CommandFileKind::Output, b"pre=private-phase\n".to_vec()),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+        ],
+    );
+    let compiler = GithubConditionCompiler::default();
+    let never = compiler
+        .compile_condition(Some("false"), GithubConditionPhase::Step)
+        .expect("valid false condition");
+    let no_pre_output = compiler
+        .compile_condition(
+            Some("steps.__automata_pre_0.outputs.pre == ''"),
+            GithubConditionPhase::Step,
+        )
+        .expect("valid output condition");
+    let request = fixture.request(envelope(vec![
+        action_step("__automata_pre_0", "owner/lifecycle").with_condition(never),
+        run_step("observe", "Observe", "true").with_condition(no_pre_output),
+    ]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("pre output remains phase-private");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(result.steps()[0].conclusion(), JobConclusion::Skipped);
+    assert_eq!(result.steps()[1].conclusion(), JobConclusion::Success);
+}

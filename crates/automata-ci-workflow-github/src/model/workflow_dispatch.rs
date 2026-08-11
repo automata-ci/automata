@@ -273,6 +273,24 @@ impl GithubWorkflowDispatchInputsV1 {
 }
 
 impl GithubWorkflowDispatchInputValue {
+    /// Returns the provider-native Boolean value, when this value is Boolean.
+    #[must_use]
+    pub const fn as_boolean(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(value) => Some(*value),
+            Self::String(_) => None,
+        }
+    }
+
+    /// Returns the provider-native string value, when this value is textual.
+    #[must_use]
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Boolean(_) => None,
+        }
+    }
+
     fn character_count(&self) -> usize {
         match self {
             Self::Boolean(value) => {

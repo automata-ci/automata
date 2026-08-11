@@ -117,11 +117,14 @@ the static site has no authenticated backend. The demo requires JavaScript,
 while the production application remains server-rendered. The same build is
 deployed at <https://automata-ci.github.io/automata/> from the default branch.
 
-The screenshot suite uses Chromium to exercise the populated and empty
-repository directory, the full run-list → run-summary → job-log path, both
-read-only repository settings views, and all five tenant access-management
-views. It captures every preview page in light and dark mode at desktop, tablet,
-and mobile sizes under `dist/preview/screenshots/`:
+The browser suite uses Chromium to exercise the populated and empty repository
+directory, the full run-list → run-summary → job-log path, both read-only
+repository settings views, and all five tenant access-management views. For
+each page in light and dark mode at desktop, tablet, and mobile sizes, it first
+asserts the requested theme and canvas, visible and non-overlapping shell
+landmarks, viewport bounds, layout stability, document overflow, and browser
+runtime health. The same matrix then writes 72 PNG review artifacts under
+`dist/preview/screenshots/`:
 
 ```sh
 npx --no-install playwright install chromium
@@ -137,10 +140,18 @@ root-relative executable/style URLs, missing assets, unexpected output, and
 other subpath-breaking output before the browser suite starts, then checks the
 exact non-empty PNG set before publication. The Pages workflow deploys this
 build from `main`; pull requests build and verify it without publishing.
-Screenshots remain local or workflow review artifacts and are not presented as
-executed-run evidence. The suite also checks native demo routing,
-keyboard focus, mobile disclosures, layout shift, document overflow, forced
-colors, reduced motion, theme persistence, and browser runtime errors.
+
+The PNGs are human-review artifacts, not automated pixel-diff baselines. This is
+intentional: committing 72 browser-rendered goldens would make routine Chromium
+and font rasterization changes noisy while obscuring meaningful regressions.
+The deterministic DOM, layout, theme, and runtime contracts are the automated
+gate; screenshots preserve broad visual review without pretending that file
+creation alone is an assertion. Each matrix case captures in its failure path,
+and the Pages workflow uploads any images produced before a failed browser run,
+so visual diagnostics remain available. They remain local or workflow artifacts
+and are not presented as executed-run evidence. The suite also checks native demo
+routing, keyboard focus, mobile disclosures, forced colors, reduced motion,
+theme persistence, and browser runtime errors.
 
 Production cleanup is scoped to `dist/client` and `dist/ssr`; it never removes
 an in-progress preview build or screenshot run. `npm run clean` remains the

@@ -40,15 +40,15 @@ use automata_ci_store::{
     LogicalMaterializationRepository, LogicalMaterializationStoreError,
     LogicalMaterializationWorkerId, LogicalWorkQuarantineKind, LogicalWorkQuarantineOutcome,
     LogicalWorkSelectionGeneration, LogicalWorkSelectionId, LogicalWorkSelectionRepository,
-    LogicalWorkSelectionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    MAX_LOGICAL_WORK_SELECTION_MILLIS, ObjectKey, PinnedWorkflowRuntimePolicy,
-    PublishLogicalJobActivation, QuarantineLogicalInstanceMaterialization,
-    QuarantineLogicalJobOrchestration, RenewLogicalActivationPreparation,
-    RenewLogicalInstanceMaterialization, RenewLogicalJobActivation,
-    RenewedLogicalActivationPreparation, RenewedLogicalInstanceMaterialization,
-    RenewedLogicalJobActivation, RepositoryId, SelectedLogicalInstanceMaterialization,
-    SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicy,
-    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
+    LogicalWorkSelectionStoreError, LogicalWorkflowInstanceId, LogicalWorkflowInvocationId,
+    LogicalWorkflowJobId, MAX_LOGICAL_WORK_SELECTION_MILLIS, ObjectKey,
+    PinnedWorkflowRuntimePolicy, PublishLogicalJobActivation,
+    QuarantineLogicalInstanceMaterialization, QuarantineLogicalJobOrchestration,
+    RenewLogicalActivationPreparation, RenewLogicalInstanceMaterialization,
+    RenewLogicalJobActivation, RenewedLogicalActivationPreparation,
+    RenewedLogicalInstanceMaterialization, RenewedLogicalJobActivation, RepositoryId,
+    SelectedLogicalInstanceMaterialization, SelectedLogicalJobOrchestration, StoreError,
+    TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
@@ -1454,19 +1454,7 @@ async fn new_harness_with(
         Bytes::from_static(br#"{"mode":"autonomous"}"#),
     )
     .await;
-    let base_context = admitted_base_context(authority_profile);
-    let base_context_bytes = automata_ci_protocol_protobuf::encode_job_runtime_context(
-        &base_context,
-        &ProtocolLimits::default(),
-    )
-    .expect("base runtime context");
-    let base_context_object = put_input(
-        &blobs.inner,
-        "admission/v2/base-runtime-context/context.pb",
-        JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
-        Bytes::from(base_context_bytes),
-    )
-    .await;
+    let base_context_object = put_base_context(&blobs.inner, authority_profile).await;
     let target = LogicalActivationPreparationTarget::new(
         TenantScope::from_authenticated_tenant_id("synthetic-tenant").expect("tenant"),
         RunId::from_uuid(Uuid::from_u128(11)),
@@ -1681,6 +1669,25 @@ fn admitted_base_context(authority_profile: JobAuthorityProfile) -> JobRuntimeCo
         JobAuthorityProfile::CredentialFree => BTreeMap::new(),
     };
     JobRuntimeContext::new_base(inputs, vars, secrets).expect("admission base context")
+}
+
+async fn put_base_context(
+    blobs: &MemoryBlobStore,
+    authority_profile: JobAuthorityProfile,
+) -> AdmissionObject {
+    let context = admitted_base_context(authority_profile);
+    let encoded = automata_ci_protocol_protobuf::encode_job_runtime_context(
+        &context,
+        &ProtocolLimits::default(),
+    )
+    .expect("base runtime context");
+    put_input(
+        blobs,
+        "admission/v2/base-runtime-context/context.pb",
+        JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+        Bytes::from(encoded),
+    )
+    .await
 }
 
 fn admission_blob_descriptor(object: &AdmissionObject) -> BlobDescriptor {
@@ -2783,6 +2790,216 @@ async fn assert_merged_runtime_context(
         !setup.outputs().contains_key("secret"),
         "unreferenced secret-derived output metadata must not expand runtime exposure"
     );
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DurableMatrixInstanceSnapshot {
+    id: LogicalWorkflowInstanceId,
+    index: u32,
+    total: u32,
+    matrix_digest: Sha256Digest,
+    job_ir_digest: Sha256Digest,
+    runtime_context_digest: Sha256Digest,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct OutputDrivenMatrixSnapshot {
+    instances: Vec<DurableMatrixInstanceSnapshot>,
+    contexts: Vec<JobRuntimeContext>,
+}
+
+async fn output_driven_matrix_snapshot() -> OutputDrivenMatrixSnapshot {
+    let harness = new_harness_with(
+        OUTPUT_DRIVEN_MATRIX_SOURCE,
+        JobAuthorityProfile::Standard,
+        vec![matrix_prerequisite_evidence(
+            OutputSensitivity::Public,
+            Some(OUTPUT_DRIVEN_MATRIX_VALUE),
+        )],
+    )
+    .await;
+    complete_preparation(&harness).await;
+    complete_activation(&harness).await;
+
+    let publications = harness.repository.publication_attempts();
+    let publication = publications.last().expect("activation publication");
+    assert!(publication.condition_matched());
+    let instances = publication
+        .instances()
+        .iter()
+        .map(|instance| DurableMatrixInstanceSnapshot {
+            id: instance.id(),
+            index: instance.matrix_index(),
+            total: instance.matrix_total(),
+            matrix_digest: instance.matrix_digest(),
+            job_ir_digest: instance.job_ir().digest(),
+            runtime_context_digest: instance.runtime_context().digest(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instances
+            .iter()
+            .map(|instance| (instance.index, instance.total))
+            .collect::<Vec<_>>(),
+        [(0, 4), (1, 4), (2, 4), (3, 4)]
+    );
+
+    let mut contexts = Vec::with_capacity(publication.instances().len());
+    for instance in publication.instances() {
+        let bytes = load_activation_blob(&harness.blobs.inner, instance.runtime_context()).await;
+        contexts.push(
+            automata_ci_protocol_protobuf::decode_job_runtime_context(
+                &bytes,
+                &ProtocolLimits::default(),
+            )
+            .expect("published runtime context"),
+        );
+    }
+    OutputDrivenMatrixSnapshot {
+        instances,
+        contexts,
+    }
+}
+
+fn assert_matrix_order_and_public_need(contexts: &[JobRuntimeContext]) {
+    let summaries = contexts
+        .iter()
+        .map(|context| {
+            let matrix = context.matrix().as_object().expect("matrix object");
+            let profile = matrix
+                .get("profile")
+                .and_then(ContextValue::as_object)
+                .expect("profile object");
+            (
+                profile
+                    .get("name")
+                    .and_then(ContextValue::as_string)
+                    .expect("profile name"),
+                matrix
+                    .get("shard")
+                    .and_then(ContextValue::as_number)
+                    .expect("matrix shard"),
+                matrix.contains_key("settings"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summaries,
+        [
+            ("stable", 1.0, true),
+            ("preview", 1.0, false),
+            ("preview", 2.0, false),
+            ("edge", 3.0, true),
+        ]
+    );
+
+    for context in contexts {
+        assert_eq!(
+            context
+                .needs()
+                .get("plan")
+                .and_then(|need| need.outputs().get("matrix"))
+                .and_then(automata_ci_core::NeedOutput::public_value),
+            Some(OUTPUT_DRIVEN_MATRIX_VALUE)
+        );
+    }
+}
+
+fn assert_composite_matrix_values(contexts: &[JobRuntimeContext]) {
+    let first_matrix = contexts[0].matrix().as_object().expect("first matrix");
+    let first_profile = first_matrix
+        .get("profile")
+        .and_then(ContextValue::as_object)
+        .expect("first profile");
+    let first_options = first_profile
+        .get("options")
+        .and_then(ContextValue::as_array)
+        .expect("first options");
+    assert_eq!(first_options[0].as_string(), Some("fast"));
+    assert_eq!(first_options[1].as_boolean(), Some(true));
+    assert_eq!(
+        first_profile
+            .get("metadata")
+            .and_then(ContextValue::as_object)
+            .and_then(|metadata| metadata.get("tier"))
+            .and_then(ContextValue::as_string),
+        Some("primary")
+    );
+    let first_settings = first_matrix
+        .get("settings")
+        .and_then(ContextValue::as_object)
+        .expect("merged include settings");
+    assert_eq!(
+        first_settings
+            .get("retry")
+            .and_then(ContextValue::as_number),
+        Some(3.0)
+    );
+    assert_eq!(
+        first_settings
+            .get("enabled")
+            .and_then(ContextValue::as_boolean),
+        Some(true)
+    );
+
+    let last_matrix = contexts[3].matrix().as_object().expect("last matrix");
+    assert!(
+        last_matrix
+            .get("profile")
+            .and_then(ContextValue::as_object)
+            .and_then(|profile| profile.get("options"))
+            .and_then(ContextValue::as_array)
+            .is_some_and(<[_]>::is_empty)
+    );
+    assert_eq!(
+        last_matrix
+            .get("settings")
+            .and_then(ContextValue::as_object)
+            .and_then(|settings| settings.get("enabled"))
+            .and_then(ContextValue::as_boolean),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn public_need_output_drives_deterministic_durable_matrix_expansion() {
+    let first = output_driven_matrix_snapshot().await;
+    let second = output_driven_matrix_snapshot().await;
+    assert_eq!(first, second);
+    assert_matrix_order_and_public_need(&first.contexts);
+    assert_composite_matrix_values(&first.contexts);
+}
+
+#[tokio::test]
+async fn invalid_or_secret_derived_matrix_outputs_quarantine_without_publication() {
+    for (sensitivity, value) in [
+        (OutputSensitivity::Public, Some("not valid JSON")),
+        (OutputSensitivity::SecretDerived, None),
+    ] {
+        let harness = new_harness_with(
+            OUTPUT_DRIVEN_MATRIX_SOURCE,
+            JobAuthorityProfile::Standard,
+            vec![matrix_prerequisite_evidence(sensitivity, value)],
+        )
+        .await;
+        complete_preparation(&harness).await;
+
+        assert_eq!(
+            harness
+                .service
+                .run_once(CancellationToken::new())
+                .await
+                .expect("invalid matrix classification"),
+            AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+        );
+        assert!(harness.repository.publication_attempts().is_empty());
+        assert_eq!(harness.repository.successful_publications(), 0);
+        assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+        assert_eq!(
+            harness.repository.quarantine_kinds().0,
+            vec![LogicalWorkQuarantineKind::PayloadEvidence]
+        );
+    }
 }
 
 #[tokio::test]

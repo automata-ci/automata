@@ -1,7 +1,10 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use automata_ci_auth::management::{ManagementActor, ManagementRevision};
+use automata_ci_auth::{
+    management::{ManagementActor, ManagementRevision},
+    time::UnixTimestamp,
+};
 use automata_ci_core::UnixMillis;
 use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -31,7 +34,7 @@ use crate::{
     SECRET_MUTATION_CONFIRMATION_TTL_MILLIS, SecretCleanupFailureKind, SecretCleanupFence,
     SecretManagementRepositoryError, SecretMutationRecoveryFence,
     SecretMutationRecoveryReconciliation, SecretMutationRecoveryRepository,
-    SecretMutationRecoveryTask, TenantScope,
+    SecretMutationRecoveryTask, StoreError, TenantScope,
 };
 
 const BUILTIN_ADAPTER_KIND: &str = "builtin_postgres";
@@ -2341,6 +2344,80 @@ struct AuthorizedActor {
 enum ActorAuthentication {
     Active(AuthorizedActor),
     Stale,
+}
+
+/// Exact actor identity retained after transactional session and permission
+/// reauthorization for a sibling control-plane mutation.
+pub(super) struct AuthorizedHumanRepositoryAction {
+    pub(super) tenant_id: String,
+    pub(super) principal_id: Uuid,
+    pub(super) session_id: Uuid,
+    pub(super) authorization_revision: i64,
+    pub(super) request_id: Option<String>,
+}
+
+/// Reauthorizes one existing human session for an exact repository-scoped
+/// permission while retaining the row locks for the caller's transaction.
+///
+/// `Ok(None)` deliberately combines stale sessions and denied permissions.
+pub(super) async fn authorize_human_repository_action(
+    transaction: &mut Transaction<'_, Postgres>,
+    actor: &ManagementActor,
+    permission: &str,
+    repository_id: Uuid,
+) -> Result<Option<AuthorizedHumanRepositoryAction>, StoreError> {
+    // Blob publication precedes logical admission. Refresh lifecycle checks
+    // from the database clock at the transactional boundary so a session that
+    // expired while immutable evidence was being published cannot authorize a
+    // dispatch with its earlier ingress timestamp.
+    let now_seconds = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sql_error)
+    .map_err(map_human_action_error)?;
+    let now_seconds = u64::try_from(now_seconds)
+        .map_err(|_| StoreError::corrupt_data("database clock is outside the auth time domain"))?;
+    let current_actor = ManagementActor::new(
+        actor.tenant_id().clone(),
+        actor.principal_id().clone(),
+        actor.session_id().clone(),
+        actor.authorization_revision(),
+        actor.request_id().cloned(),
+        UnixTimestamp::from_seconds(now_seconds),
+    );
+    let authenticated = authenticate_actor(transaction, &current_actor)
+        .await
+        .map_err(map_human_action_error)?;
+    let ActorAuthentication::Active(authorized) = authenticated else {
+        return Ok(None);
+    };
+    if !actor_has_permission(transaction, &authorized, permission, Some(repository_id))
+        .await
+        .map_err(map_human_action_error)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(AuthorizedHumanRepositoryAction {
+        tenant_id: authorized.tenant_id,
+        principal_id: authorized.principal_id,
+        session_id: authorized.session_id,
+        authorization_revision: authorized.authorization_revision,
+        request_id: actor.request_id().map(|value| value.as_str().to_owned()),
+    }))
+}
+
+fn map_human_action_error(error: SecretManagementRepositoryError) -> StoreError {
+    match error {
+        SecretManagementRepositoryError::Unavailable => StoreError::operation(error),
+        SecretManagementRepositoryError::InvalidRequest => {
+            StoreError::corrupt_data("authenticated human action carried invalid actor evidence")
+        }
+        SecretManagementRepositoryError::CorruptData => {
+            StoreError::corrupt_data("durable human authorization evidence is corrupt")
+        }
+    }
 }
 
 async fn reserved_actor_has_current_authority(
