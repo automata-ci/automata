@@ -1,9 +1,10 @@
 # Durable Windows control-plane design proposal
 
-Status: **Proposed in [issue #16](https://github.com/automata-ci/automata/issues/16)**.
-This document does not authorize credential, filesystem, service-identity, or
-public support changes. Those changes begin only after maintainers approve the
-design issue, as required by `CONTRIBUTING.md`.
+Status: **Approved in direction with corrections in the
+[issue #16 design review](https://github.com/automata-ci/automata/issues/16#issuecomment-5258916870)**.
+The corrections are applied in this document and the review's decisions are
+recorded below. The MSI signing-service decision remains open; it does not
+block adapter work.
 
 The [Windows release roadmap](windows-release-roadmap.md) tracks implementation
 and acceptance after design approval. Issue #13 owns the trusted native runner;
@@ -92,9 +93,12 @@ identity behavior, and corruption handling.
 
 The service needs explicit sources for TLS identities, database credentials,
 S3 credentials, GitHub App credentials, browser and CLI session keys, Results
-signing keys, runner CAs, and secret-encryption keyrings. Environment references
-may remain an explicit supervisor-owned source, but they are not a substitute
-for defining service installation and secret rotation. Certificate Store and
+signing keys, runner CAs, and secret-encryption keyrings. Environment
+references remain an explicit source for development and evaluation only: a
+Windows service's environment is stored beneath
+`HKLM\SYSTEM\CurrentControlSet\Services\<name>\Environment`, which
+non-administrative local users can read by default, so environment-backed
+private inputs are rejected for production services. Certificate Store and
 service-scoped DPAPI references are proposed additions.
 
 ### Secure files
@@ -135,17 +139,19 @@ replacement.
 
 | Location | Classification | Current behavior | Required decision |
 | --- | --- | --- | --- |
-| `src/cli/mod.rs` | Credential custody | Selects fixed unsupported auth/secret adapters outside Unix | Define Windows CLI adapter selection |
-| `src/cli/credential_store.rs` | Credential custody and process lock | Linux `secret-tool`, Unix file descriptors, runtime-directory lock | Define Credential Manager/DPAPI and Windows process lock |
-| `src/cli/auth.rs` | Portable transport plus custody construction | Constructs Linux Secret Service adapter | Inject a platform custody adapter |
-| `src/cli/secret.rs` | Portable secret API plus custody construction | Constructs Linux Secret Service adapter | Inject the same platform custody adapter |
-| `src/server/config.rs` | Service secret source and secure file | Environment source works; non-Unix file source returns `FileSecurity` | Define Windows service sources and secure bounded files |
-| `src/server/static_registration.rs` | Privileged secure file | Returns `UnsupportedPlatform` outside Unix | Define SID/DACL/reparse/link-count contract |
-| `src/shutdown.rs` | Service lifecycle | Ctrl-C only outside Unix | Define SCM stop and preshutdown adapter |
-| `src/server/composition.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add native Windows composition fixtures |
-| `src/server/github_oidc.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add Windows custody fixtures |
-| `src/server/github_provider*_tests.rs` | Test fixture security | Unix-only private-file setup | Separate portable parsing from native custody tests |
-| `Cargo.toml` Unix target dependencies | Platform dependency | `rustix` is Unix-only | Select reviewed Windows dependencies only after design approval |
+| `crates/automata-ci/src/cli/mod.rs` | Credential custody | Selects fixed unsupported auth/secret adapters outside Unix | Define Windows CLI adapter selection |
+| `crates/automata-ci/src/cli/credential_store.rs` | Credential custody and process lock | Linux `secret-tool`, Unix file descriptors, runtime-directory lock | Define Credential Manager/DPAPI and Windows process lock |
+| `crates/automata-ci/src/cli/auth.rs` | Portable transport plus custody construction | Constructs Linux Secret Service adapter | Inject a platform custody adapter |
+| `crates/automata-ci/src/cli/secret.rs` | Portable secret API plus custody construction | Constructs Linux Secret Service adapter | Inject the same platform custody adapter |
+| `crates/automata-ci/src/server/config.rs` | Service secret source and secure file | Environment source works; non-Unix file source returns `FileSecurity` | Define Windows service sources and secure bounded files |
+| `crates/automata-ci/src/server/static_registration.rs` | Privileged secure file | Returns `UnsupportedPlatform` outside Unix | Define SID/DACL/reparse/link-count contract |
+| `crates/automata-ci/src/shutdown.rs` | Service lifecycle | Ctrl-C only outside Unix | Define SCM stop and preshutdown adapter |
+| `crates/automata-ci/src/server/composition.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add native Windows composition fixtures |
+| `crates/automata-ci/src/server/github_oidc.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add Windows custody fixtures |
+| `crates/automata-ci/src/server/github_provider*_tests.rs` | Test fixture security | Unix-only private-file setup | Separate portable parsing from native custody tests |
+| `crates/automata-ci/Cargo.toml` Unix target dependencies | Platform dependency | `rustix` is Unix-only | Select reviewed Windows dependencies only after design approval |
+| `crates/automata-ci-metrics/src/process.rs` | Observability parity | Linux-only `/proc` snapshot source; other platforms report unavailable | Degraded process metrics accepted for the first release and documented |
+| `crates/automata-ci-service-proxy` | Container sandbox helper | Linux-only namespace-local job service proxy | Excluded with containers; no Windows work in this release |
 
 The runner journal, encrypted spool, and trusted native execution provider have
 Windows adapters under issue #13. They are dependencies of the release but do
@@ -212,20 +218,41 @@ Accepting ordinary readable files would create platform-dependent plaintext and
 path-redirection fallbacks. Unsupported custody must remain unavailable until a
 Windows adapter proves the required contract.
 
-## Decisions requested in design review
+## Design review decisions
 
-- Is Windows Server 2025 x86-64 the only initial production target?
-- Are virtual service accounts sufficient, or is gMSA required initially?
-- Which Credential Manager and DPAPI scopes satisfy CLI and service custody?
-- Is Windows Certificate Store support required in the first release?
-- Which safe dependency may expose handle, SID, DACL, reparse, and link-count
-  evidence?
-- Are environment-backed private service inputs supported in production, and
-  under which supervisor contract?
-- Must static runner registration ship in the first Windows release?
-- Which MSI technology and signing service satisfy repository supply-chain
-  policy?
-- What upgrade and schema-downgrade window is supported?
+The [issue #16 design review](https://github.com/automata-ci/automata/issues/16#issuecomment-5258916870)
+recorded these decisions:
+
+1. **Initial production target** — Windows Server 2025 x86-64 only; Windows 11
+   x86-64 is development and evaluation only.
+2. **Service accounts** — virtual service accounts (`NT SERVICE\AutomataControl`,
+   `NT SERVICE\AutomataRunner`) in the first release. gMSA is deferred and is
+   not a release gate; its main driver is integrated PostgreSQL authentication,
+   which is not committed.
+3. **Credential Manager and DPAPI scopes** — user-scoped DPAPI for CLI custody
+   and service-account-scoped DPAPI for services. The first adapter task must
+   spike the `CredWrite` blob limit (`CRED_MAX_CREDENTIAL_BLOB_SIZE`,
+   2560 bytes): the adapter either stores an indirection (a DPAPI-protected
+   file whose key lives in Credential Manager) or rejects oversized records.
+   Chunking would violate the ambiguity contract and is rejected.
+4. **Certificate Store** — not required in the first release; the mandatory
+   secure-file adapter covers TLS identity. Remains a proposed follow-up.
+5. **Safe dependency boundary** — follow the `automata-ci-sandbox-windows`
+   precedent: confine Windows APIs behind one pinned reviewed wrapper (as with
+   `processkit = "=3.2.0"`) inside a dedicated adapter crate, with first-party
+   `forbid(unsafe)` intact.
+6. **Environment-backed production inputs** — rejected for production Windows
+   services because service environment values are registry strings readable
+   by non-administrative users; development and evaluation use only.
+7. **Static registration** — ships if the secure-file adapter lands, but is
+   not a release gate; the typed fail-closed path already exists.
+8. **MSI technology and signing service** — WiX satisfies the
+   no-installer-time-downloads requirement. The signing service (Azure Trusted
+   Signing versus an HSM-backed EV certificate) **remains open** and does not
+   block adapter work.
+9. **Upgrade window** — N-1 upgrade support; schema downgrades are refused
+   before service replacement; support lifetime aligns with Windows
+   Server 2025 mainstream support.
 
 ## AI assistance
 

@@ -59,15 +59,23 @@ release artifact is published.
 
 The [durable Windows control-plane proposal](windows-control-plane-design-proposal.md)
 was filed as [issue #16](https://github.com/automata-ci/automata/issues/16).
-It is not accepted design authority until maintainers complete design review.
+The [design review](https://github.com/automata-ci/automata/issues/16#issuecomment-5258916870)
+approved its direction with corrections and recorded decisions 1–9; the MSI
+signing-service decision remains open and does not block adapter work.
 
 - [x] Open durable Windows control-plane issue #16.
 - [x] Link issue #13 as the trusted-runner prerequisite.
-- [ ] Obtain maintainer design approval for issue #16.
-- [ ] Declare Windows Server 2025 x86-64 as the production target.
-- [ ] Declare Windows 11 x86-64 as development and evaluation only.
-- [ ] Define the first release's supported and unsupported surfaces.
-- [ ] Decide whether gMSA support is required in the first release.
+- [x] Obtain maintainer design approval for issue #16.
+- [x] Declare Windows Server 2025 x86-64 as the production target.
+- [x] Declare Windows 11 x86-64 as development and evaluation only.
+- [x] Define the first release's supported and unsupported surfaces.
+- [x] Decide whether gMSA support is required in the first release.
+
+  Evidence: the issue #16 design review comment verified the boundary
+  inventory against the code, applied three corrections, and recorded the
+  target, surface, gMSA (deferred), custody-scope, dependency-boundary,
+  environment-input, static-registration, and upgrade-window decisions.
+
 - [ ] Review the plan under `CONTRIBUTING.md`.
 - [ ] Approve a threat model covering:
   - [ ] control-plane service identity;
@@ -94,12 +102,17 @@ The first audit identified these implementation owners:
 | Runner encrypted spool | `crates/automata-ci-runner-spool` | Windows adapter implemented |
 | Trusted execution | `crates/automata-ci-sandbox-windows` | Experimental provider implemented |
 | Installation and service lifecycle | release and deployment tooling | Not implemented |
+| Process metrics | `crates/automata-ci-metrics/src/process.rs` | Linux-only source; degraded metrics accepted for the first release |
+| Job service-container proxy | `crates/automata-ci-service-proxy` | Linux-only; excluded with containers |
 
 - [x] Record the initial server and custody boundary inventory.
 - [x] Inventory every remaining server-side Unix/Linux conditional.
 - [x] Map each conditional to portable core, custody, filesystem, lifecycle, or
   provider ownership.
-- [ ] Record the result in the accepted durable Windows design epic.
+- [x] Record the result in the accepted durable Windows design epic.
+
+  Evidence: the design review added the process-metrics and service-proxy
+  boundaries the first audit missed; both inventories now carry them.
 
 ## W3 — secure Windows adapter architecture
 
@@ -247,11 +260,13 @@ The first audit identified these implementation owners:
 
 ## Immediate work queue
 
-1. [ ] Obtain design review for durable Windows control-plane issue #16.
+1. [x] Obtain design review for durable Windows control-plane issue #16.
 2. [x] Complete the server-side platform-conditional inventory.
-3. [ ] Draft custody and secure-file adapter interfaces.
-4. [ ] Select the safe Windows API boundary for ACL and handle inspection.
-5. [ ] Add the fail-closed Windows server composition test fixture.
-6. [ ] Define service identities, directories, and ACL fixtures.
-7. [ ] Implement the secure filesystem adapter before enabling any
+3. [ ] Spike the Credential Manager `CredWrite` blob limit against real session
+   payloads before fixing the CLI custody interface.
+4. [ ] Draft custody and secure-file adapter interfaces.
+5. [ ] Select the safe Windows API boundary for ACL and handle inspection.
+6. [ ] Add the fail-closed Windows server composition test fixture.
+7. [ ] Define service identities, directories, and ACL fixtures.
+8. [ ] Implement the secure filesystem adapter before enabling any
    credential-bearing server path.
