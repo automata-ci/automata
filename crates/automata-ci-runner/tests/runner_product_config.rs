@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use automata_ci_core::{
-    Architecture, ContainerFeature, IsolationLevel, OperatingSystem, ResourceCapacity,
-    RunnerFeature, RunnerRequirements, SandboxFeature, Sha256Digest,
+    Architecture, ContainerFeature, OperatingSystem, ResourceCapacity, RunnerFeature,
+    RunnerRequirements, SandboxFeature, Sha256Digest,
 };
 use automata_ci_runner::product::{
     RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
