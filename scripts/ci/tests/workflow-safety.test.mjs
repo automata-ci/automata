@@ -357,6 +357,19 @@ test("distribution build overlaps validation while the final gate retains every 
   assert.doesNotMatch(distBuild, /\n    needs:/);
   assert.match(distBuild, /name: Build static Linux distribution/);
   assert.match(distBuild, /name: Upload bootstrap distribution/);
+  assert.equal(
+    (
+      distBuild.match(
+        /service-proxy-publication\.py prepare-candidate/g,
+      ) ?? []
+    ).length,
+    1,
+    "the static build must pass its candidate through the trusted publisher policy",
+  );
+  assert.match(
+    distBuild,
+    /--candidate-commit "\$GITHUB_SHA"[\s\S]+--publisher-commit "\$GITHUB_SHA"/,
+  );
   assert.match(
     dist,
     /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
