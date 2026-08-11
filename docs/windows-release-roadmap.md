@@ -25,8 +25,8 @@ release work and its acceptance evidence.
 | --- | --- | --- |
 | W0 — native development surface | Component complete | Native binaries, preview, diagnostics, and smoke tests pass |
 | W1 — trusted native runner | Experimental | Issue #13 execution and recovery evidence passes |
-| W2 — release design authority | In progress | Durable Windows epic and reviewed security contracts exist |
-| W3 — secure Windows adapters | Planned | Custody and filesystem adapters pass adversarial tests |
+| W2 — release design authority | Component complete | Issue #16 approves the scope and security contracts |
+| W3 — secure Windows adapters | In progress | Custody and filesystem adapters pass adversarial tests |
 | W4 — durable control plane | Planned | `automata server` survives restart with PostgreSQL and S3 |
 | W5 — Windows services | Planned | Separate control and runner services pass lifecycle tests |
 | W6 — installation and upgrade | Planned | Signed MSI install, upgrade, rollback, and uninstall pass |
@@ -76,16 +76,21 @@ signing-service decision remains open and does not block adapter work.
   target, surface, gMSA (deferred), custody-scope, dependency-boundary,
   environment-input, static-registration, and upgrade-window decisions.
 
-- [ ] Review the plan under `CONTRIBUTING.md`.
-- [ ] Approve a threat model covering:
-  - [ ] control-plane service identity;
-  - [ ] runner service identity;
-  - [ ] interactive CLI identity;
-  - [ ] local administrator;
-  - [ ] unprivileged local users; and
-  - [ ] trusted workflow processes.
-- [ ] Approve custody, filesystem, service lifecycle, and distribution
+- [x] Review the plan under `CONTRIBUTING.md`.
+- [x] Approve a threat model covering:
+  - [x] control-plane service identity;
+  - [x] runner service identity;
+  - [x] interactive CLI identity;
+  - [x] local administrator;
+  - [x] unprivileged local users; and
+  - [x] trusted workflow processes.
+- [x] Approve custody, filesystem, service lifecycle, and distribution
   contracts.
+
+  Evidence: issue #16 approved the direction and stated that implementation may
+  begin after its three corrections landed. Commit `95bf94e` records those
+  corrections and decisions 1–9. The signing-service choice remains open but
+  does not block adapter work.
 
 ### Initial platform-boundary inventory
 
@@ -155,10 +160,12 @@ The first audit identified these implementation owners:
 
 ### Service credential custody
 
-- [ ] Retain service-private environment references.
-- [ ] Support Windows certificate-store TLS identity references.
-- [ ] Implement service-account or machine-protected DPAPI records.
-- [ ] Decide whether integrated PostgreSQL authentication is supported.
+- [x] Reject environment-backed private inputs for production Windows services;
+  retain them for development and evaluation only.
+- [x] Defer Windows Certificate Store support from the first release.
+- [ ] Implement service-account-scoped DPAPI records.
+- [x] Defer integrated PostgreSQL authentication and gMSA from the first
+  release.
 - [ ] Prove secrets never enter service arguments, registry configuration,
   Event Log messages, diagnostics, or crash output.
 
