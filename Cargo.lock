@@ -538,6 +538,7 @@ dependencies = [
  "automata-ci-runner-journal",
  "automata-ci-runner-runtime",
  "automata-ci-runner-spool",
+ "automata-ci-sandbox-windows",
  "automata-ci-scm",
  "automata-ci-workflow-github",
  "bytes",
@@ -706,6 +707,7 @@ dependencies = [
  "automata-ci-runner-spool",
  "automata-ci-runner-transport",
  "automata-ci-sandbox-podman",
+ "automata-ci-sandbox-windows",
  "automata-ci-scm",
  "automata-ci-workflow-github",
  "axum",
@@ -882,6 +884,19 @@ dependencies = [
  "sha2 0.10.9",
  "static_assertions",
  "thiserror",
+]
+
+[[package]]
+name = "automata-ci-sandbox-windows"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-execution",
+ "processkit",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "static_assertions",
+ "tokio",
 ]
 
 [[package]]
@@ -2933,6 +2948,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3147,6 +3168,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "processkit"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13f3741b7f1bfc541ed7870138be30e44e60dca5dfbe9592697eef6a8f1da3b2"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "libc",
+ "mutants",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4136,7 +4174,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4278,6 +4316,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

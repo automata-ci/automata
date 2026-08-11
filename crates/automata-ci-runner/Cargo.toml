@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-runner"
-description = "Automata workflow runner for rootless Linux execution hosts"
+description = "Automata workflow runner for Linux and trusted native Windows hosts"
 publish.workspace = true
 readme = "README.md"
 keywords = ["ci", "github-actions", "self-hosted", "runner", "automation"]
@@ -38,6 +38,7 @@ automata-ci-runner-runtime.workspace = true
 automata-ci-runner-spool.workspace = true
 automata-ci-runner-transport.workspace = true
 automata-ci-sandbox-podman.workspace = true
+automata-ci-sandbox-windows.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-workflow-github.workspace = true
 axum.workspace = true

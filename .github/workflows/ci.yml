@@ -310,7 +310,7 @@ jobs:
           cargo test -p automata-ci --test github_provider_end_to_end_matrix --all-features --locked -- --ignored --test-threads=1
 
   windows:
-    name: Windows preview and passive diagnostics
+    name: Windows native runner
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -342,6 +342,16 @@ jobs:
       - name: Check Windows source binaries
         run: cargo check --locked --bin automata --bin automata-runner
 
+      - name: Lint Windows native provider and executor
+        run: >-
+          cargo clippy
+          --locked
+          -p automata-ci-sandbox-windows
+          -p automata-ci-job-executor-github
+          --all-targets
+          --
+          -D warnings
+
       - name: Test fail-closed Windows operator commands
         run: cargo test -p automata-ci --locked --test unsupported_operator
 
@@ -353,7 +363,50 @@ jobs:
           --test doctor
           --test doctor_cli
 
-      - name: Smoke test preview and passive diagnostics
+      - name: Test Windows durable state and secure inputs
+        shell: pwsh
+        run: |
+          cargo test --locked `
+            -p automata-ci-runner-journal `
+            -p automata-ci-runner-spool `
+            --lib
+          cargo test --locked `
+            -p automata-ci-runner-journal `
+            --test fault_recovery
+          cargo test --locked `
+            -p automata-ci-runner-spool `
+            --test fault_recovery
+          cargo test --locked `
+            -p automata-ci-runner `
+            --lib `
+            windows_tests
+          cargo test --locked `
+            -p automata-ci-runner `
+            --lib `
+            product::profile_admission::tests::native_windows_admission_recovers_crash_repeats_and_survives_provider_reopen `
+            -- `
+            --exact `
+            --nocapture
+          cargo test --locked `
+            -p automata-ci-runner `
+            --test runner_product_config_windows
+          cargo test --locked `
+            -p automata-ci-runner `
+            --test product_context `
+            admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation `
+            -- `
+            --exact
+
+      - name: Test Windows native provider and shell execution
+        shell: pwsh
+        run: |
+          cargo test --locked -p automata-ci-sandbox-windows
+          cargo test --locked `
+            -p automata-ci-job-executor-github `
+            --test windows_run_steps
+          cargo test --locked -p automata-ci-job-executor-github --test windows_native_e2e native_provider_runs_powershell_then_cmd_with_command_file_propagation -- --nocapture
+
+      - name: Smoke test Windows preview and passive diagnostics
         shell: pwsh
         run: |
           cargo build --locked --bin automata --bin automata-runner
@@ -410,7 +463,7 @@ jobs:
               throw "unexpected repositories status: $($repositories.StatusCode)"
             }
 
-            & $automata --server-url $origin admin status
+            & $automata admin --server-url $origin status
             if ($LASTEXITCODE -ne 0) {
               throw 'admin status failed against the Windows preview'
             }

@@ -10,7 +10,7 @@ const PATH_SENTINEL: &str = "WINDOWS_PATH_SENTINEL.txt";
 fn authentication_commands_fail_before_using_operator_input() {
     for operation in ["login", "status", "logout"] {
         assert_unsupported(
-            &["--server-url", SERVER_SENTINEL, "auth", operation],
+            &["auth", "--server-url", SERVER_SENTINEL, operation],
             "CLI authentication is not supported on this platform",
         );
     }
@@ -20,17 +20,17 @@ fn authentication_commands_fail_before_using_operator_input() {
 fn secret_commands_fail_before_using_operator_input() {
     for arguments in [
         vec![
+            "secret",
             "--server-url",
             SERVER_SENTINEL,
-            "secret",
             "list",
             "--scope",
             "repo:owner/repository",
         ],
         vec![
+            "secret",
             "--server-url",
             SERVER_SENTINEL,
-            "secret",
             "create",
             SECRET_SENTINEL,
             "--scope",
@@ -39,9 +39,9 @@ fn secret_commands_fail_before_using_operator_input() {
             PATH_SENTINEL,
         ],
         vec![
+            "secret",
             "--server-url",
             SERVER_SENTINEL,
-            "secret",
             "delete",
             SECRET_SENTINEL,
             "--scope",
@@ -49,16 +49,16 @@ fn secret_commands_fail_before_using_operator_input() {
             "--yes",
         ],
         vec![
+            "secret",
             "--server-url",
             SERVER_SENTINEL,
-            "secret",
             "provider",
             "status",
         ],
         vec![
+            "secret",
             "--server-url",
             SERVER_SENTINEL,
-            "secret",
             "provider",
             "activate",
         ],

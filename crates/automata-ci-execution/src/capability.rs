@@ -27,10 +27,17 @@ pub enum SandboxCapability {
     NetworkDisabled,
     /// Enforces an isolated network that permits provider-controlled egress.
     PrivateEgress,
+    /// Runs a trusted workload on the host network without network isolation.
+    HostNetwork,
     /// Launches workloads with a read-only root filesystem.
     ReadOnlyRootFilesystem,
     /// Launches workloads with a writable root filesystem.
     WritableRootFilesystem,
+    /// Runs a trusted workload against the host filesystem without root isolation.
+    HostFilesystem,
+    /// Runs a trusted workload as the provider process host identity without
+    /// token, credential, or privilege attenuation.
+    HostIdentity,
     /// Supplies an administrative identity confined to the sandbox boundary.
     Administrator,
     /// Isolates sandbox identities with a user namespace or equivalent.

@@ -29,7 +29,9 @@ pub use error::{
     ActionPreparationError, ActionPreparationErrorKind, ExecutorAdapterError, PortError,
     PortErrorKind,
 };
-pub use executor::{GithubJobExecutor, GithubJobExecutorPorts};
+pub use executor::{
+    GithubJobExecutor, GithubJobExecutorPorts, WindowsScriptShell, windows_script_arguments,
+};
 pub use port::{
     ActionPreparationPort, ActionPreparationRequest, ContextEnvironmentVariable,
     DeterministicOperationIds, ExecutionClock, ExecutionOperationIds, GithubContextPort,

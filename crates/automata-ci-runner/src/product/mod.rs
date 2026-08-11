@@ -17,8 +17,8 @@ pub use composition::{
 pub use config::{
     ClientTlsSources, ExecutorProductConfig, GithubProductConfig, MetricsProductConfig,
     ObjectStoreProductConfig, PodmanProductConfig, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
-    RunnerProductConfig, RunnerProductConfigError, SpoolProtectionConfig, StateRoots,
-    ToolchainConfig,
+    RunnerProductConfig, RunnerProductConfigError, RunnerProviderConfig, SpoolProtectionConfig,
+    StateRoots, ToolchainConfig, WindowsNativeProductConfig,
 };
 pub use context::StandardGithubContext;
 pub use files::{SecretSource, SecureInputError};

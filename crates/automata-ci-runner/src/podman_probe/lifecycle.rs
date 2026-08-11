@@ -351,6 +351,12 @@ impl<'a> ProbeResources<'a> {
         let expected_internal = match self.plan.network_policy() {
             automata_ci_execution::NetworkPolicy::Disabled => "true",
             automata_ci_execution::NetworkPolicy::PrivateEgress => "false",
+            automata_ci_execution::NetworkPolicy::Host => {
+                return Err(ProbeFailure::degraded(
+                    ProbeReasonCode::ActiveProbeCommandFailed,
+                    "Podman cannot probe a host-network native profile".to_owned(),
+                ));
+            }
         };
         if canonical_podman_identifier(ResourceKind::Network, identifier).is_none()
             || internal != expected_internal

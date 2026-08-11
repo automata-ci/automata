@@ -7,7 +7,9 @@ use automata_ci_core::{
     ActionReference, AttemptId, EnvironmentProfile, JobConclusion, JobContentReference,
     JobIrEnvelope, JobRuntimeContext, Lease, OperationId, UnixMillis,
 };
-use automata_ci_execution::{SandboxEnvironment, ServiceContainerBindings, TargetPath};
+use automata_ci_execution::{
+    SandboxEnvironment, ServiceContainerBindings, TargetPath, TargetPlatform,
+};
 use automata_ci_expression_github::{GithubEvaluationContext, GithubStatus, GithubValue};
 use automata_ci_github_runtime::JobCommandState;
 use automata_ci_protocol::JobRuntimeAuthorities;
@@ -516,22 +518,28 @@ pub trait SandboxEnvironmentCatalog: fmt::Debug + Send + Sync {
     fn select(&self, profile: &EnvironmentProfile) -> Option<SandboxEnvironment>;
 }
 
-/// Provides target paths baked into one attested runner environment.
+/// Provides target paths baked into one platform-specific runner environment.
 pub trait GithubToolchain: fmt::Debug + Send + Sync {
-    /// Returns the exact Bash executable.
-    fn bash(&self) -> &TargetPath;
-    /// Returns the exact POSIX `sh` executable.
-    fn sh(&self) -> &TargetPath;
+    /// Returns the target platform shared by every configured executable.
+    fn platform(&self) -> TargetPlatform;
+    /// Returns the exact Bash executable, when available.
+    fn bash(&self) -> Option<&TargetPath>;
+    /// Returns the exact POSIX `sh` executable, when available.
+    fn sh(&self) -> Option<&TargetPath>;
     /// Returns the configured Python executable, when the environment provides one.
     fn python(&self) -> Option<&TargetPath>;
     /// Returns the configured PowerShell Core executable, when the environment provides one.
     fn pwsh(&self) -> Option<&TargetPath>;
-    /// Returns the exact directory creation utility.
-    fn install(&self) -> &TargetPath;
-    /// Returns the exact archive extraction utility.
-    fn tar(&self) -> &TargetPath;
-    /// Returns the exact SHA-256 regular-file hashing utility.
-    fn sha256sum(&self) -> &TargetPath;
+    /// Returns the configured Windows PowerShell executable, when available.
+    fn powershell(&self) -> Option<&TargetPath>;
+    /// Returns the configured Windows command interpreter, when available.
+    fn cmd(&self) -> Option<&TargetPath>;
+    /// Returns the exact POSIX directory creation utility, when available.
+    fn install(&self) -> Option<&TargetPath>;
+    /// Returns the exact POSIX archive extraction utility, when available.
+    fn tar(&self) -> Option<&TargetPath>;
+    /// Returns the exact POSIX SHA-256 regular-file hashing utility, when available.
+    fn sha256sum(&self) -> Option<&TargetPath>;
     /// Returns the exact executable for a metadata-selected Node runtime.
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath>;
 }
