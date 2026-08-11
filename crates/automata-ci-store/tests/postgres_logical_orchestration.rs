@@ -105,11 +105,7 @@ async fn prepare_job(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             claimed.descriptor().clone(),
             claimed.claim().clone(),
-            object_with_media(
-                format!("preparation/{namespace}/base.pb"),
-                31,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            claimed.descriptor().base_context().clone(),
             object_with_media(
                 format!("preparation/{namespace}/needs.pb"),
                 32,
@@ -256,7 +252,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -276,9 +272,14 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .actor(command.actor().unwrap_or_default())
-    .build()?)
+    );
+    if let Some(actor) = command.actor() {
+        builder = builder.actor(actor);
+    }
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 fn fixture(
@@ -363,6 +364,11 @@ fn fixture_at(
         admitted_at,
     )
     .actor("sample-actor")
+    .base_context(object_with_media(
+        format!("logical/{namespace}/base-context.pb"),
+        4,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("logical admission fixture")
 }
@@ -372,6 +378,7 @@ async fn assert_logical_admission_shape(
     snapshot_id: WorkflowSnapshotId,
     run_id: RunId,
     root_id: LogicalWorkflowInvocationId,
+    base_context: &AdmissionObject,
 ) -> TestResult {
     let run_shape: (i32, i32, String) = sqlx::query_as(
         "SELECT admission_epoch, plan_schema, status FROM workflow_runs WHERE id = $1",
@@ -401,6 +408,27 @@ async fn assert_logical_admission_shape(
     assert_eq!(marker.0, root_id.as_uuid());
     assert_eq!((marker.1, marker.2), (1, vec![41; 32]));
     assert_eq!((marker.3.as_str(), marker.4), ("pending", 1));
+
+    let marker_context: (Vec<u8>, String, i64, String, i16) = sqlx::query_as(
+        r"
+        SELECT base_context_digest, base_context_object_key, base_context_size_bytes,
+               base_context_media_type, base_context_schema
+        FROM workflow_plan_v2_runs WHERE run_id = $1
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        marker_context,
+        (
+            base_context.digest().as_bytes().to_vec(),
+            base_context.object_key().as_str().to_owned(),
+            i64::try_from(base_context.encoded_size())?,
+            base_context.media_type().to_owned(),
+            2,
+        )
+    );
 
     let invocation: (i16, String, Vec<u8>) = sqlx::query_as(
         r"
@@ -504,7 +532,30 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
         assert_eq!(first.run_id(), replay.run_id());
         assert_eq!(first.root_invocation_id(), replay.root_invocation_id());
         assert_eq!(first.run_number(), 1);
-        assert_logical_admission_shape(&database, first.snapshot_id(), run_id, root_id).await?;
+        assert_logical_admission_shape(
+            &database,
+            first.snapshot_id(),
+            run_id,
+            root_id,
+            command
+                .base_context()
+                .expect("current admission base context"),
+        )
+        .await?;
+        let tamper = sqlx::query(
+            "UPDATE workflow_plan_v2_runs SET base_context_digest = $2 WHERE run_id = $1",
+        )
+        .bind(run_id.as_uuid())
+        .bind(vec![0x55_u8; 32])
+        .execute(database.pool())
+        .await
+        .expect_err("admission base context must be immutable");
+        assert_eq!(
+            tamper
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("workflow_plan_v2_runs_base_context_immutable"),
+        );
         assert_no_concrete_jobs(&database, run_id).await?;
         let subject_evidence_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM github_workflow_run_subject_evidence WHERE run_id = $1",

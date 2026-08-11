@@ -74,6 +74,18 @@ fn admission_object_with_media(key: String, digest: u8, media_type: &str) -> Adm
     .expect("admission object")
 }
 
+fn runtime_context_object(key: String, digest: u8) -> AdmissionObject {
+    admission_object_with_media(
+        key,
+        digest,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    )
+}
+
+fn admission_base_context(namespace: u128) -> AdmissionObject {
+    runtime_context_object(format!("activation/{namespace}/base-context.pb"), 4)
+}
+
 async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> TestResult<Fixture> {
     let tenant_scope = TenantScope::from_authenticated_tenant_id(tenant)?;
     let connection = ProviderConnectionId::from_uuid(Uuid::from_u128(namespace + 20))?;
@@ -162,6 +174,7 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         vec![first, second],
         UnixMillis::new(database_now_ms(database).await?),
     )
+    .base_context(admission_base_context(namespace))
     .build()
     .expect("logical workflow fixture");
     Ok(Fixture {
@@ -270,7 +283,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -290,8 +303,11 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
@@ -384,16 +400,8 @@ async fn prepare_job(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             claimed.descriptor().clone(),
             claimed.claim().clone(),
-            admission_object_with_media(
-                format!("preparation/{namespace}/base.pb"),
-                31,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
-            admission_object_with_media(
-                format!("preparation/{namespace}/needs.pb"),
-                32,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            claimed.descriptor().base_context().clone(),
+            runtime_context_object(format!("preparation/{namespace}/needs.pb"), 32),
             UnixMillis::new(database_now_ms(database).await?),
         )?)
         .await?)

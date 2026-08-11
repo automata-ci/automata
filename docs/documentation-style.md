@@ -1,83 +1,133 @@
 # Documentation style
 
-Automata documentation is written for the person trying to decide, install,
-operate, or change the project—not for the implementation itself.
+Write for someone who is deciding whether to use Automata, trying it for the
+first time, operating it under pressure, or changing the code. Give that reader
+the fact or action they need before implementation detail.
 
-## Reader journey
+## Choose the page type
 
-Every user-facing page should answer these questions in order when they apply:
+Keep one main purpose per page:
 
-1. What is this page or product for?
-2. Is the feature available now, and what are its limits?
-3. What do I need before I start?
-4. What is the shortest safe path to a useful result?
-5. How do I verify that result?
-6. Where do I go next or troubleshoot a failure?
+- A tutorial gets a new reader to a working result.
+- A how-to guide solves a specific operational problem.
+- A reference page records exact commands, fields, states, and limits.
+- An explanation page describes design and trade-offs.
 
-Architecture and rationale belong after the usable path, or in a linked design
-document.
+A page may link to another type. It should not turn a short procedure into an
+architecture essay or make a reference table carry a tutorial.
 
-## Writing rules
+## State capability precisely
 
-- Lead with a concrete outcome in plain language.
-- Distinguish implemented behavior, active integration, and future design.
-- Use one canonical setup path before listing alternatives.
-- Put prerequisites immediately before the commands that need them.
-- Make command blocks copyable and include a verification step.
-- Explain destructive, privileged, network-exposed, or credential-bearing
-  commands before showing them.
-- Prefer short sections and descriptive link text over a large table of
-  contents.
-- Use relative links for repository documentation and verify them after moves.
-  Package READMEs rendered outside the repository use absolute GitHub links.
-- Keep reference detail near the owning component; link to it from overview
-  pages instead of duplicating it.
-- Never describe parsing or accepting a workflow as compatibility. Compatibility
-  requires the evidence defined in the compatibility contract.
+Use these labels when a status needs to be explicit:
 
-Use `Automata`, `automata`, and `automata-runner` consistently: the first is the
-project, and the latter two are executable names. The public crates.io packages
-are `automata-ci` and `automata-ci-runner`; internal Cargo packages use
-`automata-ci-*`, with the corresponding Rust crate identifiers written as
-`automata_ci_*`. Never present a package name as the command a user should run.
+| Label | Meaning |
+| --- | --- |
+| Available | Reachable through the documented product path and covered by the stated tests. |
+| Component complete | Implemented and tested at its boundary, but not yet proven in the full composition. |
+| Experimental | Reachable, but its interface or operating requirements may still change. |
+| Planned | Accepted design or roadmap work that is not implemented. |
+| Unsupported | Rejected, ignored only where the contract says so, or not implemented. |
+| Published | An exact version is visible in the named public registry. |
 
-Use “GitHub Actions workflow” for source YAML and “run,” “job,” “attempt,” and
-“step” for their distinct runtime concepts.
+Do not turn parsing, a unit test, a migration, or an internal API into a product
+claim. Prefer evidence in this order:
 
-Installation pages must state whether a distribution surface is published,
-name its supported platform, verify the installed identity, and provide the
-source fallback. Release documentation must distinguish “automation is ready”
-from “a release exists”; a copyable command must not imply an unpublished
-artifact is currently downloadable.
+1. a documented command against the complete composition;
+2. an end-to-end or acceptance test;
+3. a boundary or component test;
+4. implementation and schema inspection;
+5. a plan or design document.
 
-## README references
+Name the weaker evidence when it is all that exists. Planned package names,
+release workflows, and deployment manifests do not prove publication or
+availability.
 
-The public README structure draws on recurring patterns from mature developer
-tools and self-hosted systems:
+## Organize around the reader
 
-- [Dagger](https://github.com/dagger/dagger) leads with the user outcome and
-  explains its value through a few memorable product qualities.
-- [uv](https://github.com/astral-sh/uv) moves cleanly from a one-line definition
-  to highlights, installation, and concrete examples.
-- [LocalStack](https://github.com/localstack/localstack) pairs installation with
-  a quick start and visible verification output.
-- [K3s](https://github.com/k3s-io/k3s) clearly names its audience, packaging
-  model, tradeoffs, and common points of confusion.
-- [`just`](https://github.com/casey/just) demonstrates the core interaction
-  before expanding into its full feature reference.
-- [`act`](https://github.com/nektos/act) explains both why someone would use the
-  tool and how the execution model works.
-- [Woodpecker](https://github.com/woodpecker-ci/woodpecker) and
-  [Grafana](https://github.com/grafana/grafana) keep the repository README as a
-  concise gateway to focused documentation.
-- [GitHub Actions Runner](https://github.com/actions/runner) defines the product
-  boundary in one sentence and sends setup readers directly to the supported
-  guide.
-- [Actions Runner Controller](https://github.com/actions/actions-runner-controller)
-  uses prerequisite-driven setup and ends with an explicit verification step.
-- [ripgrep](https://github.com/BurntSushi/ripgrep) states defaults, platforms,
-  scope, and nearby alternatives in its opening paragraph.
+When relevant, answer these questions in order:
 
-These projects are references for information hierarchy and reader experience.
-Automata's wording, claims, security constraints, and commands remain grounded
-in this repository.
+1. What will this page help me do?
+2. Does it work now, and what are the limits?
+3. What do I need before starting?
+4. What is the shortest safe procedure?
+5. How do I verify the result?
+6. How do I recover from likely failures?
+7. What should I read next?
+
+Put prerequisites beside the first step that needs them. Explain credentials,
+network exposure, privilege, and destructive effects before the command that
+introduces them.
+
+## Write like a maintainer
+
+- Lead with a fact, outcome, or action.
+- Use plain verbs and concrete nouns.
+- Keep paragraphs focused on one idea.
+- Prefer a short example over a second abstract explanation.
+- Say who owns an action or decision. Avoid vague phrases such as “it is
+  recommended” or “some users may find.”
+- Remove scene-setting, recaps, and claims that a fact is important when the
+  consequence already shows why it matters.
+- Avoid promotional adjectives and canned contrasts such as “not just X, but
+  Y.”
+- Do not force ideas into groups of three or give every section the same
+  rhythm.
+- Use “currently” only with a dated or verifiable state. Replace it with the
+  actual limit where possible.
+- Keep contract words such as `exact`, `bounded`, and `durable` where they name
+  a real invariant. Remove them when they merely add emphasis.
+
+There is no punctuation ban and no automated “AI detector” gate. Review for
+specific writing habits: inflated significance, vague attribution, repetitive
+qualifiers, unnecessary summaries, fake quotations, and prose that describes
+the document instead of the software.
+
+## Write procedures that can be trusted
+
+- Present one supported path before alternatives.
+- Make command blocks copyable.
+- Use placeholders that cannot be mistaken for real credentials or domains.
+- Follow a state-changing command with an observable verification step.
+- Give expected output only when it is stable and useful for diagnosis.
+- State the supported platform and required permissions.
+- Put rollback or cleanup beside risky operations.
+- Never make an unpublished installer, crate, image, or URL look available.
+
+## Keep one owner for each fact
+
+Overview pages summarize and link. The component or operator guide owns exact
+configuration, limits, and recovery steps. The compatibility page owns support
+claims. The implementation plan owns unfinished acceptance gates. The release
+guide owns publication procedure.
+
+When a capability changes, update the owning page first, then search for short
+summaries elsewhere. Avoid copying large status blocks between the root README,
+architecture, compatibility, and implementation plan.
+
+## Use product names consistently
+
+- `Automata` is the project.
+- `automata` and `automata-runner` are commands.
+- `automata-ci` and `automata-ci-runner` are planned crates.io package names.
+- Workspace packages use `automata-ci-*`; Rust crate identifiers use
+  `automata_ci_*`.
+- `automata-ci-service-proxy` is an internal helper image, not a product image.
+- A GitHub Actions workflow contains runs, jobs, attempts, and steps; do not use
+  those runtime terms interchangeably.
+
+Package READMEs rendered outside GitHub should use absolute links back to this
+repository. Other repository documentation should use relative links.
+
+## Review checklist
+
+Before merging a documentation change, check that:
+
+- every availability claim matches code, tests, and public registries;
+- planned work is visibly separate from working behavior;
+- copied commands use real flags and have a verification step;
+- security boundaries and failure behavior are stated before operational
+  detail;
+- links and anchors resolve;
+- repeated status text has one authoritative owner;
+- the page can be skimmed without reading introductory filler;
+- the prose does not show the habits listed above.

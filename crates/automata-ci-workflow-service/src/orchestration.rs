@@ -39,7 +39,7 @@ use crate::{
 };
 
 const ACTIVATION_INPUT_DIGEST_DOMAIN: &[u8] =
-    b"automata.workflow-service.logical-activation-input.v3\0";
+    b"automata.workflow-service.logical-activation-input.v5\0";
 const JOB_ID_DOMAIN: &[u8] = b"automata.workflow-service.logical-job-id.v1\0";
 const MAX_EXACT_GITHUB_INTEGER: u64 = 9_007_199_254_740_992;
 
@@ -103,10 +103,11 @@ impl LogicalJobOrchestrationTarget {
 /// Store-authenticated descriptors and metadata prepared before a claim.
 ///
 /// The two context objects are canonical protobuf-encoded
-/// [`JobRuntimeContext`] v2 snapshots. In this phase `base_context` is the
-/// explicit empty root-invocation authority; `prerequisite_context` carries
-/// direct `needs` results and sensitivity-classified outputs. Every unused
-/// field must have the canonical empty shape and is checked after loading.
+/// [`JobRuntimeContext`] v2 snapshots. `base_context` carries admission-bound
+/// inputs, repository variables, and opaque secret locators;
+/// `prerequisite_context` carries direct `needs` results and
+/// sensitivity-classified outputs. Every unused field has a canonical empty
+/// shape and is checked after loading.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreparedLogicalJobActivation {
     target: LogicalJobOrchestrationTarget,
@@ -274,9 +275,6 @@ impl PreparedLogicalJobActivation {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum LogicalActivationPreparationError {
-    /// The target does not exist or its prerequisites are not terminal.
-    #[error("logical activation preparation target is absent or not ready")]
-    InvalidTarget,
     /// Store-authenticated preparation evidence violates an invariant.
     #[error("logical activation preparation state is corrupt")]
     Corrupt,
@@ -354,6 +352,7 @@ fn hash_execution(hasher: &mut Sha256, execution: &LogicalActivationExecutionCon
         }
         None => hasher.update([0]),
     }
+    hasher.update(execution.run_id_alias().get().to_be_bytes());
     hasher.update(execution.run_number().to_be_bytes());
     hasher.update(execution.run_attempt().to_be_bytes());
 }
@@ -427,15 +426,30 @@ mod preparation_context_tests {
     }
 
     #[test]
-    fn split_context_rejects_nonempty_root_inputs_and_secret_derived_plaintext() {
+    fn split_context_accepts_admission_fields_and_rejects_instance_fields_or_plaintext() {
         let empty_base = context(ContextValue::empty_object(), BTreeMap::new());
         let mut input_values = BTreeMap::new();
-        input_values.insert("invented".to_owned(), ContextValue::string("value"));
-        let invented_base = context(
+        input_values.insert("target".to_owned(), ContextValue::string("linux"));
+        let admitted_base = context(
             ContextValue::object(input_values).expect("inputs"),
             BTreeMap::new(),
         );
-        assert!(validate_split_contexts(&invented_base, &empty_base).is_err());
+        assert!(validate_split_contexts(&admitted_base, &empty_base).is_ok());
+
+        let instance_base = JobRuntimeContext::new(
+            ContextValue::empty_object(),
+            ContextValue::empty_object(),
+            ContextValue::object(BTreeMap::from([(
+                "target".to_owned(),
+                ContextValue::string("linux"),
+            )]))
+            .expect("matrix"),
+            automata_ci_core::StrategyContext::new(true, 0, 1, 1).expect("strategy"),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("instance context");
+        assert!(validate_split_contexts(&instance_base, &empty_base).is_err());
 
         let mut outputs = BTreeMap::new();
         outputs.insert(
@@ -762,6 +776,7 @@ impl GithubLogicalJobOrchestrationService {
             event_reference,
             runtime_reference,
         )
+        .with_run_id_alias(prepared.execution().run_id_alias())
         .with_run_number(prepared.execution().run_number())
         .with_run_attempt(prepared.execution().run_attempt());
         if let Some(actor) = prepared.execution().actor() {
@@ -997,11 +1012,8 @@ fn validate_split_contexts(
     base: &JobRuntimeContext,
     prerequisites: &JobRuntimeContext,
 ) -> Result<(), GithubLogicalJobOrchestrationError> {
-    let base_shape = base.inputs().as_object().is_some_and(BTreeMap::is_empty)
-        && base.vars().as_object().is_some_and(BTreeMap::is_empty)
-        && base.matrix().as_object().is_some_and(BTreeMap::is_empty)
+    let base_shape = base.matrix().as_object().is_some_and(BTreeMap::is_empty)
         && base.needs().is_empty()
-        && base.secrets().is_empty()
         && is_base_strategy(base.strategy());
     let prerequisite_shape = prerequisites
         .inputs()
@@ -1062,6 +1074,10 @@ fn github_activation_context(
         (
             "repository".to_owned(),
             GithubValue::string(repository.as_str()),
+        ),
+        (
+            "run_id".to_owned(),
+            exact_github_integer(execution.run_id_alias().get())?,
         ),
         (
             "run_attempt".to_owned(),

@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, fmt, str::FromStr as _, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
+use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
     GithubCheckName, GithubProviderManifestRevision, GithubRepositoryName,
     GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
@@ -23,7 +24,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 256 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 1;
+const CONFIG_SCHEMA: u16 = 2;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -373,6 +374,7 @@ pub struct GithubProviderRepositoryConfig {
     repository_id: ProviderRepositoryId,
     repository_owner_id: ProviderRepositoryOwnerId,
     repository_name: GithubRepositoryName,
+    cache_repository: CacheRepositoryMetadata,
     visibility: ProviderRepositoryVisibility,
     manifest_revision: GithubProviderManifestRevision,
     policy_revision: GithubServerServiceRevision,
@@ -399,6 +401,9 @@ impl GithubProviderRepositoryConfig {
             .map_err(|_| GithubProviderConfigError)?;
         let repository_name =
             GithubRepositoryName::new(raw.repository).map_err(|_| GithubProviderConfigError)?;
+        let cache_repository =
+            CacheRepositoryMetadata::new(repository_name.as_str(), raw.default_branch)
+                .map_err(|_| GithubProviderConfigError)?;
         let visibility = match raw.visibility {
             RawVisibility::Public => ProviderRepositoryVisibility::Public,
             RawVisibility::Private => ProviderRepositoryVisibility::Private,
@@ -449,6 +454,7 @@ impl GithubProviderRepositoryConfig {
             repository_id,
             repository_owner_id,
             repository_name,
+            cache_repository,
             visibility,
             manifest_revision,
             policy_revision,
@@ -501,6 +507,12 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn repository_name(&self) -> &GithubRepositoryName {
         &self.repository_name
+    }
+
+    /// Returns server-owned cache metadata for this repository.
+    #[must_use]
+    pub const fn cache_repository(&self) -> &CacheRepositoryMetadata {
+        &self.cache_repository
     }
 
     /// Returns the exact authenticated visibility expected from signed payloads.
@@ -569,6 +581,7 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
             .field("repository_id", &self.repository_id)
             .field("repository_owner_id", &self.repository_owner_id)
             .field("repository_name", &"[redacted]")
+            .field("cache_repository", &"[configured]")
             .field("visibility", &self.visibility)
             .field("manifest_revision", &self.manifest_revision)
             .field("policy_revision", &self.policy_revision)
@@ -699,6 +712,7 @@ struct RawRepository {
     repository_id: u64,
     repository_owner_id: u64,
     repository: String,
+    default_branch: String,
     visibility: RawVisibility,
     manifest_revision: u64,
     policy_revision: u64,

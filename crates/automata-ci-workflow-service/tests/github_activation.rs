@@ -293,6 +293,44 @@ fn durable_implicit_success_guard_and_explicit_status_functions_use_need_status(
 }
 
 #[test]
+fn dynamic_needs_index_is_bounded_to_the_declared_runtime_context() {
+    let plan = job(
+        &["build"],
+        Some(condition(
+            "${{ needs[inputs.dependency].outputs.ready == 'yes' }}",
+            vec![ExpressionContext::Inputs, ExpressionContext::Needs],
+        )),
+        None,
+    );
+    let needs = BTreeMap::from([(
+        "build".to_owned(),
+        NeedContext::new(
+            JobConclusion::Success,
+            BTreeMap::from([("ready".to_owned(), public_output("yes"))]),
+        )
+        .expect("need"),
+    )]);
+
+    let selected = activate(
+        &plan,
+        &inputs(&[("dependency", ContextValue::string("build"))]),
+        &needs,
+        ActivationStatus::Success,
+    )
+    .expect("dynamic direct need");
+    assert!(selected.condition_matched());
+
+    let absent = activate(
+        &plan,
+        &inputs(&[("dependency", ContextValue::string("undeclared"))]),
+        &needs,
+        ActivationStatus::Success,
+    )
+    .expect("missing dynamic need follows GitHub null semantics");
+    assert!(!absent.condition_matched());
+}
+
+#[test]
 fn from_json_need_output_drives_insertion_stable_dynamic_matrix() {
     let source = "${{ fromJSON(needs.plan.outputs.matrix) }}";
     let strategy = WorkflowStrategyTemplate::new(

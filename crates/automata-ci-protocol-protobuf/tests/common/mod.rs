@@ -13,8 +13,9 @@ use automata_ci_core::{
     ResourceCapacity, RunId, RunValueTemplates, RunnerCapabilities, RunnerFeature, RunnerGroup,
     RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
     RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxCapabilities, SandboxFeature,
-    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StepResult, TransportProtocol,
-    UnixMillis, ValueSource, ValueTemplate, VolumeMount, WorkflowId,
+    SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel,
+    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, UnixMillis, ValueSource,
+    ValueTemplate, VolumeMount, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
@@ -604,7 +605,13 @@ fn job_result(attempt: AttemptId) -> JobResult {
             JobConclusion::Success,
             UnixMillis::new(1_700_000_001_000),
             UnixMillis::new(1_700_000_010_000),
-        ),
+        )
+        .with_summary_markdown("## Build\nCompleted with a continued warning.\n")
+        .with_annotations(vec![StepAnnotation::new(
+            StepAnnotationLevel::Warning,
+            "synthetic warning",
+            vec![StepAnnotationProperty::new("file", "src/lib.rs")],
+        )]),
         StepResult::new(
             StepId::new("repo_action").expect("valid step ID"),
             JobConclusion::Success,

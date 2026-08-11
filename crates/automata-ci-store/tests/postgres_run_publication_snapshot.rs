@@ -606,7 +606,7 @@ async fn load_attempt_safety(
 fn readable_attempt_safety(requested: &str, classified_at: i64) -> DurableAttemptSafety {
     DurableAttemptSafety {
         secret_exposure: "readable_secret".to_owned(),
-        raw_log_disposition: "suppress_user_output".to_owned(),
+        raw_log_disposition: "persist".to_owned(),
         requested_visibility: requested.to_owned(),
         effective_visibility: "private".to_owned(),
         reason: if requested == "private" {
@@ -615,7 +615,7 @@ fn readable_attempt_safety(requested: &str, classified_at: i64) -> DurableAttemp
             "secret_exposure"
         }
         .to_owned(),
-        schema: 1,
+        schema: 2,
         classified_at,
     }
 }

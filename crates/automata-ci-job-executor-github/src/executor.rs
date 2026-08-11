@@ -12,9 +12,11 @@ use std::{
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
     ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext, OutputSensitivity,
-    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep, ShellTemplate,
-    StepResult, UnixMillis, ValueSource, ValueTemplate,
+    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
+    MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
+    MAX_STEP_ATTACHMENT_TEXT_BYTES, OutputSensitivity, RuntimeBoolean, RuntimePositiveInteger,
+    RuntimeTimeoutTemplate, SemanticStep, ShellTemplate, StepAnnotation, StepAnnotationLevel,
+    StepAnnotationProperty, StepResult, UnixMillis, ValueSource, ValueTemplate,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -30,11 +32,13 @@ use automata_ci_expression_github::{
     GithubObject, GithubStatus, GithubValue,
 };
 use automata_ci_github_runtime::{
-    ActionInvocationId, CommandFileDecoder, CommandFileKind, CommandFilePlatform,
-    CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
-    GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState, ParsedCommandFile,
-    PathCommandFile, StateCommandFile, StepId as RuntimeStepId, StepPhase, StepScope,
-    StepSummaryCommandFile, WorkflowCommandLimits, WorkflowCommandPolicy,
+    ActionInvocationId, ArtifactDeclaration, ArtifactDeclarationCommandFile, ArtifactSubject,
+    ArtifactSubjectCommandFile, ArtifactSubjectKind, CommandFileDecoder, CommandFileKind,
+    CommandFilePlatform, CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
+    GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState,
+    MAX_ARTIFACT_DECLARATION_FILE_BYTES, MAX_ARTIFACT_SUBJECTS, ParsedCommandFile, PathCommandFile,
+    PhaseApplicationError, PhaseApplicationNotice, StateCommandFile, StepId as RuntimeStepId,
+    StepPhase, StepScope, StepSummaryCommandFile, WorkflowCommandLimits, WorkflowCommandPolicy,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::{DecodeError, decode_job_runtime_context};
@@ -73,6 +77,10 @@ const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
+const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\nif [ ! -f \"$1\" ]; then exit 44; fi\nvalue=$(\"$0\" < \"$1\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
+const ARTIFACT_HASH_OUTPUT_BYTES: usize = 128;
+const ARTIFACT_HASH_TIMEOUT: Duration = Duration::from_mins(5);
+const ARTIFACTS_LIST_ENVIRONMENT: &str = "GITHUB_ARTIFACTS_LIST";
 const COMMAND_FILE_KINDS: [CommandFileKind; 5] = [
     CommandFileKind::Environment,
     CommandFileKind::Output,
@@ -451,6 +459,7 @@ impl GithubJobExecutor {
         };
         let mut commands = JobCommandState::new(CommandFilePlatform::Unix);
         let mut records = Vec::<MutableStepResult>::new();
+        let mut attachments = ExecutionAttachments::default();
         let event = self
             .ports
             .content
@@ -713,6 +722,7 @@ impl GithubJobExecutor {
                         let phase = cancellation_dominant(phase_ordinal(index, 0), &cancellation)?;
                         let execution = PhaseExecution {
                             step_id: step.id().as_str(),
+                            report_step_id: step.id().as_str(),
                             phase,
                             scope: StepPhase::Run,
                             program,
@@ -728,6 +738,7 @@ impl GithubJobExecutor {
                                 attempt_id,
                                 execution,
                                 &mut commands,
+                                &mut attachments,
                                 &mut masker,
                                 &events,
                                 &cancellation,
@@ -754,6 +765,7 @@ impl GithubJobExecutor {
                                 status,
                                 &mut action_budget,
                                 &mut posts,
+                                &mut attachments,
                                 &mut masker,
                                 &events,
                                 &cancellation,
@@ -817,6 +829,7 @@ impl GithubJobExecutor {
             &mut posts,
             &mut status,
             &mut conclusion,
+            &mut attachments,
             &mut masker,
             &events,
             &cleanup,
@@ -940,7 +953,10 @@ impl GithubJobExecutor {
         let completed_at = self.ports.clock.now();
         let steps = records
             .into_iter()
-            .map(|record| record.into_result(completed_at))
+            .map(|record| {
+                let attached = attachments.take(record.step_id.as_str());
+                record.into_result(completed_at, attached)
+            })
             .collect::<Vec<_>>();
         if reconcile_execution_cancellation(&cancellation, &mut status, &mut conclusion) {
             outputs.clear();
@@ -1009,6 +1025,7 @@ impl GithubJobExecutor {
         status: GithubStatus,
         action_budget: &mut ActionExecutionBudget,
         posts: &mut Vec<RegisteredPost>,
+        attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
@@ -1056,6 +1073,7 @@ impl GithubJobExecutor {
                 records,
                 action_budget,
                 posts,
+                attachments,
                 masker,
                 events,
                 cancellation,
@@ -1090,6 +1108,7 @@ impl GithubJobExecutor {
         records: &'a [MutableStepResult],
         budget: &'a mut ActionExecutionBudget,
         posts: &'a mut Vec<RegisteredPost>,
+        attachments: &'a mut ExecutionAttachments,
         masker: &'a mut SecretMasker,
         events: &'a Arc<dyn ExecutionEvents>,
         cancellation: &'a ExecutionCancellation,
@@ -1218,6 +1237,7 @@ impl GithubJobExecutor {
                         records,
                         budget,
                         posts,
+                        attachments,
                         masker,
                         events,
                         cancellation,
@@ -1245,6 +1265,7 @@ impl GithubJobExecutor {
                             records,
                             budget,
                             posts,
+                            attachments,
                             masker,
                             events,
                             cancellation,
@@ -1442,6 +1463,7 @@ impl GithubJobExecutor {
         records: &[MutableStepResult],
         budget: &mut ActionExecutionBudget,
         posts: &mut Vec<RegisteredPost>,
+        attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
@@ -1544,6 +1566,7 @@ impl GithubJobExecutor {
                 )?;
                 let execution = PhaseExecution {
                     step_id: &identity.runtime_step_id,
+                    report_step_id: top_step.id().as_str(),
                     phase: cancellation_dominant(
                         action_phase(budget, top_level, top_index, 1),
                         cancellation,
@@ -1565,6 +1588,7 @@ impl GithubJobExecutor {
                     request.lease().attempt_id(),
                     execution,
                     commands,
+                    attachments,
                     masker,
                     events,
                     cancellation,
@@ -1611,6 +1635,7 @@ impl GithubJobExecutor {
         )?;
         let execution = PhaseExecution {
             step_id: &identity.runtime_step_id,
+            report_step_id: top_step.id().as_str(),
             phase: cancellation_dominant(
                 action_phase(budget, top_level, top_index, 2),
                 cancellation,
@@ -1632,6 +1657,7 @@ impl GithubJobExecutor {
             request.lease().attempt_id(),
             execution,
             commands,
+            attachments,
             masker,
             events,
             cancellation,
@@ -1696,6 +1722,7 @@ impl GithubJobExecutor {
         records: &[MutableStepResult],
         budget: &mut ActionExecutionBudget,
         posts: &mut Vec<RegisteredPost>,
+        attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
@@ -1888,6 +1915,7 @@ impl GithubJobExecutor {
                     };
                     let execution = PhaseExecution {
                         step_id: &runtime_step_id,
+                        report_step_id: top_step.id().as_str(),
                         phase: cancellation_dominant(budget.phase(), cancellation)?,
                         scope: StepPhase::Run,
                         program,
@@ -1902,6 +1930,7 @@ impl GithubJobExecutor {
                         request.lease().attempt_id(),
                         execution,
                         commands,
+                        attachments,
                         masker,
                         events,
                         cancellation,
@@ -1935,6 +1964,7 @@ impl GithubJobExecutor {
                         records,
                         budget,
                         posts,
+                        attachments,
                         masker,
                         events,
                         cancellation,
@@ -2229,6 +2259,7 @@ impl GithubJobExecutor {
         posts: &mut Vec<RegisteredPost>,
         status: &mut GithubStatus,
         conclusion: &mut JobConclusion,
+        attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &CleanupCancellation<'_>,
@@ -2385,6 +2416,7 @@ impl GithubJobExecutor {
             };
             let execution = PhaseExecution {
                 step_id: &post.runtime_step_id,
+                report_step_id: &post.top_step_id,
                 phase: post.phase,
                 scope: StepPhase::ActionPost(post.invocation),
                 program: node,
@@ -2404,6 +2436,7 @@ impl GithubJobExecutor {
                     request.lease().attempt_id(),
                     execution,
                     commands,
+                    attachments,
                     masker,
                     events,
                     cancellation,
@@ -2621,9 +2654,7 @@ impl GithubJobExecutor {
             if value.is_empty() {
                 continue;
             }
-            let output = if masker.job_secret_exposure()
-                == automata_ci_core::JobSecretExposure::ReadableSecret
-                || definition.sensitivity() == OutputSensitivity::SecretDerived
+            let output = if definition.sensitivity() == OutputSensitivity::SecretDerived
                 || masker.contains_secret(&value)?
             {
                 JobResultOutput::secret_derived()
@@ -2959,6 +2990,7 @@ impl GithubJobExecutor {
         attempt_id: AttemptId,
         execution: PhaseExecution,
         commands: &mut JobCommandState,
+        attachments: &mut ExecutionAttachments,
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
@@ -2966,12 +2998,14 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
         }
+        let artifact_hash_timeout = execution.timeout.min(ARTIFACT_HASH_TIMEOUT);
         let command_paths = paths.command_files(execution.phase)?;
         if let Err(error) = self.initialize_command_files(
             endpoint,
             attempt_id,
             execution.phase,
             &command_paths,
+            commands,
             cancellation,
         ) {
             if cancellation.is_cancelled() {
@@ -3041,18 +3075,34 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
         }
+        let artifacts = self.resolve_artifact_subjects(
+            endpoint,
+            attempt_id,
+            execution.phase,
+            &paths.workspace,
+            &completed.artifacts,
+            artifact_hash_timeout,
+            cancellation,
+        )?;
+        let completed_commands = completed.commands.with_artifacts(artifacts);
         let runtime_step_id = RuntimeStepId::new(execution.step_id)
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
         let scope = StepScope::new(runtime_step_id, execution.scope);
         let applied = self
             .completed_steps
-            .apply_completed_step(commands, &scope, &completed)
-            .map(automata_ci_github_runtime::PhaseApplication::into_next_state)
-            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::ResourceExhausted));
-        let Some(next) = reconcile_cancelled_operation(applied, cancellation)? else {
+            .apply_completed_step(commands, &scope, &completed_commands)
+            .map_err(map_phase_application_error);
+        let Some(applied) = reconcile_cancelled_operation(applied, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
-        *commands = next;
+        attachments.record_phase(
+            execution.report_step_id,
+            applied.summary().markdown(),
+            &completed.annotations,
+            applied.notices(),
+            masker,
+        )?;
+        *commands = applied.into_next_state();
         Ok(CommandOutcome::from_termination(output.termination()))
     }
 
@@ -3067,7 +3117,7 @@ impl GithubJobExecutor {
         masker: &mut SecretMasker,
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
-    ) -> Result<CompletedStepCommands, ExecutorAdapterError> {
+    ) -> Result<CollectedPhase, ExecutorAdapterError> {
         let completed =
             self.read_command_files(endpoint, attempt_id, phase, paths, cancellation)?;
         if cancellation.is_cancelled() {
@@ -3088,16 +3138,26 @@ impl GithubJobExecutor {
             ));
         }
         let mut legacy = Vec::new();
-        let processed = process_output(parsed, masker, events, &mut legacy, &|| {
-            cancellation.is_cancelled()
-        });
+        let mut annotations = Vec::new();
+        let processed = process_output(
+            parsed,
+            masker,
+            events,
+            &mut legacy,
+            &mut annotations,
+            &|| cancellation.is_cancelled(),
+        );
         if cancellation.is_cancelled() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::Cancelled,
             ));
         }
         processed?;
-        Ok(completed.with_legacy_mutations(&legacy))
+        Ok(CollectedPhase {
+            commands: completed.commands.with_legacy_mutations(&legacy),
+            artifacts: completed.artifacts,
+            annotations,
+        })
     }
 
     fn initialize_command_files(
@@ -3106,6 +3166,7 @@ impl GithubJobExecutor {
         attempt_id: AttemptId,
         phase: u32,
         paths: &CommandFilePaths,
+        commands: &JobCommandState,
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<(), ExecutorAdapterError> {
         for (index, (_, path)) in paths.values.iter().enumerate() {
@@ -3128,6 +3189,27 @@ impl GithubJobExecutor {
                 cancellation,
             )?;
         }
+        self.copy_bytes(
+            endpoint,
+            attempt_id,
+            OperationPurpose::InitializeArtifactsFile,
+            phase,
+            &paths.artifacts,
+            &[],
+            cancellation,
+        )?;
+        let artifact_list = commands
+            .artifact_list_json()
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        self.copy_bytes(
+            endpoint,
+            attempt_id,
+            OperationPurpose::InitializeArtifactsList,
+            phase,
+            &paths.artifacts_list,
+            &artifact_list,
+            cancellation,
+        )?;
         Ok(())
     }
 
@@ -3138,7 +3220,7 @@ impl GithubJobExecutor {
         phase: u32,
         paths: &CommandFilePaths,
         cancellation: &dyn ExecutorCancellation,
-    ) -> Result<CompletedStepCommands, ExecutorAdapterError> {
+    ) -> Result<DecodedCommandFiles, ExecutorAdapterError> {
         let mut parsed = Vec::with_capacity(COMMAND_FILE_KINDS.len());
         for (index, (kind, path)) in paths.values.iter().enumerate() {
             if cancellation.is_cancelled() {
@@ -3207,13 +3289,165 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::Internal,
             ));
         };
-        Ok(CompletedStepCommands::new(
-            environment,
-            output,
-            path,
-            state,
-            summary,
-        ))
+        let commands = CompletedStepCommands::new(environment, output, path, state, summary);
+        let request = CopyFromRequest::new(
+            self.ports.operation_ids.operation_id(
+                attempt_id,
+                OperationPurpose::ReadArtifactsFile,
+                phase,
+            ),
+            paths.artifacts.clone(),
+            MAX_ARTIFACT_DECLARATION_FILE_BYTES,
+        )
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        let bytes = endpoint
+            .copy_from(&request, &CancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        if cancellation.is_cancelled() {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Cancelled,
+            ));
+        }
+        let ParsedCommandFile::Artifacts(artifacts) = self
+            .command_files
+            .decode(
+                CommandFileKind::Artifacts,
+                &bytes,
+                CommandFilePlatform::Unix,
+            )
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?
+        else {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Internal,
+            ));
+        };
+        Ok(DecodedCommandFiles {
+            commands,
+            artifacts,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_artifact_subjects(
+        &self,
+        endpoint: &dyn ExecutionEndpoint,
+        attempt_id: AttemptId,
+        phase: u32,
+        workspace: &TargetPath,
+        declarations: &ArtifactDeclarationCommandFile,
+        timeout: Duration,
+        cancellation: &dyn ExecutorCancellation,
+    ) -> Result<ArtifactSubjectCommandFile, ExecutorAdapterError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        let mut file_subjects = BTreeMap::<String, ArtifactSubject>::new();
+        let mut subjects = Vec::with_capacity(declarations.declarations().len());
+        for declaration in declarations.declarations() {
+            if cancellation.is_cancelled() {
+                return Err(cancelled());
+            }
+            match declaration {
+                ArtifactDeclaration::Oci(subject) => subjects.push(subject.clone()),
+                ArtifactDeclaration::File(file) => {
+                    if let Some(subject) = file_subjects.get(file.path()) {
+                        subjects.push(subject.clone());
+                        continue;
+                    }
+                    if file_subjects.len() >= MAX_ARTIFACT_SUBJECTS {
+                        return Err(resource_exhausted());
+                    }
+                    let file_index =
+                        u32::try_from(file_subjects.len()).map_err(|_| resource_exhausted())?;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(ExecutorAdapterError::new(
+                            ExecutorAdapterErrorKind::TimedOut,
+                        ));
+                    }
+                    let digest = self.hash_artifact_file(
+                        endpoint,
+                        attempt_id,
+                        phase,
+                        file_index,
+                        workspace,
+                        file.path(),
+                        remaining,
+                        cancellation,
+                    )?;
+                    let name = artifact_file_name(file.path())?;
+                    let subject = ArtifactSubject::new(
+                        name,
+                        format!("sha256:{digest}"),
+                        ArtifactSubjectKind::File,
+                    )
+                    .map_err(|_| invalid_job())?;
+                    file_subjects.insert(file.path().to_owned(), subject.clone());
+                    subjects.push(subject);
+                }
+            }
+        }
+        Ok(ArtifactSubjectCommandFile::new(subjects))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn hash_artifact_file(
+        &self,
+        endpoint: &dyn ExecutionEndpoint,
+        attempt_id: AttemptId,
+        phase: u32,
+        file_index: u32,
+        workspace: &TargetPath,
+        declared_path: &str,
+        timeout: Duration,
+        cancellation: &dyn ExecutorCancellation,
+    ) -> Result<String, ExecutorAdapterError> {
+        let argv = ExecutionArgv::new(
+            self.ports.toolchain.sh().clone(),
+            vec![
+                "-c".to_owned(),
+                ARTIFACT_HASH_SCRIPT.to_owned(),
+                self.ports.toolchain.sha256sum().as_str().to_owned(),
+                declared_path.to_owned(),
+            ],
+        )
+        .map_err(|_| invalid_job())?;
+        let command = ExecutionCommand::new(
+            self.ports
+                .operation_ids
+                .artifact_hash_operation_id(attempt_id, phase, file_index),
+            argv,
+            workspace.clone(),
+            automata_ci_execution::ExecutionEnvironment::empty(),
+            timeout,
+            ARTIFACT_HASH_OUTPUT_BYTES,
+        )
+        .map_err(|_| invalid_job())?;
+        let output = endpoint
+            .exec(&command, &CancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        if cancellation.is_cancelled() || output.termination() == ExecutionTermination::Cancelled {
+            return Err(cancelled());
+        }
+        match output.termination() {
+            ExecutionTermination::Exited(0) => {}
+            ExecutionTermination::TimedOut => {
+                return Err(ExecutorAdapterError::new(
+                    ExecutorAdapterErrorKind::TimedOut,
+                ));
+            }
+            ExecutionTermination::Exited(_)
+            | ExecutionTermination::Signalled
+            | ExecutionTermination::Cancelled => return Err(invalid_job()),
+        }
+        if output.was_truncated() || !output.stderr().is_empty() {
+            return Err(resource_exhausted());
+        }
+        let digest = std::str::from_utf8(output.stdout()).map_err(|_| invalid_job())?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid_job());
+        }
+        Ok(digest.to_ascii_lowercase())
     }
 
     fn step_timeout(
@@ -3488,6 +3722,7 @@ impl Cancellation for CancellationBridge<'_> {
 
 struct PhaseExecution<'a> {
     step_id: &'a str,
+    report_step_id: &'a str,
     phase: u32,
     scope: StepPhase,
     program: TargetPath,
@@ -3495,6 +3730,146 @@ struct PhaseExecution<'a> {
     working_directory: TargetPath,
     environment: automata_ci_execution::ExecutionEnvironment,
     timeout: Duration,
+}
+
+struct CollectedPhase {
+    commands: CompletedStepCommands,
+    artifacts: ArtifactDeclarationCommandFile,
+    annotations: Vec<automata_ci_github_runtime::Annotation>,
+}
+
+struct DecodedCommandFiles {
+    commands: CompletedStepCommands,
+    artifacts: ArtifactDeclarationCommandFile,
+}
+
+#[derive(Default)]
+struct ExecutionAttachments {
+    by_step: BTreeMap<String, RetainedStepAttachments>,
+    annotation_count: usize,
+    aggregate_bytes: usize,
+}
+
+impl ExecutionAttachments {
+    fn record_phase(
+        &mut self,
+        step_id: &str,
+        summary: &str,
+        annotations: &[automata_ci_github_runtime::Annotation],
+        notices: &[PhaseApplicationNotice],
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        let summary = masked_attachment_text(summary, masker)?;
+        let retained = self.by_step.entry(step_id.to_owned()).or_default();
+        if !summary.is_empty() {
+            if retained.summary.len().saturating_add(summary.len()) > MAX_STEP_ATTACHMENT_TEXT_BYTES
+            {
+                return Err(resource_exhausted());
+            }
+            charge_attachment_bytes(&mut self.aggregate_bytes, summary.len())?;
+            retained.summary.push_str(&summary);
+        }
+
+        for annotation in annotations {
+            let properties = annotation
+                .properties()
+                .iter()
+                .filter_map(|property| {
+                    canonical_annotation_property(property.name()).map(|name| (name, property))
+                })
+                .map(|(name, property)| {
+                    let value = masked_attachment_text(property.value(), masker)?;
+                    charge_attachment_bytes(&mut self.aggregate_bytes, name.len())?;
+                    charge_attachment_bytes(&mut self.aggregate_bytes, value.len())?;
+                    Ok(StepAnnotationProperty::new(name, value))
+                })
+                .collect::<Result<Vec<_>, ExecutorAdapterError>>()?;
+            if properties.len() > MAX_STEP_ANNOTATION_PROPERTIES {
+                return Err(resource_exhausted());
+            }
+            let message = masked_attachment_text(annotation.message(), masker)?;
+            charge_attachment_bytes(&mut self.aggregate_bytes, message.len())?;
+            self.annotation_count = self
+                .annotation_count
+                .checked_add(1)
+                .filter(|count| *count <= MAX_JOB_RESULT_ANNOTATIONS)
+                .ok_or_else(resource_exhausted)?;
+            retained.annotations.push(StepAnnotation::new(
+                match annotation.level() {
+                    automata_ci_github_runtime::AnnotationLevel::Error => {
+                        StepAnnotationLevel::Error
+                    }
+                    automata_ci_github_runtime::AnnotationLevel::Warning => {
+                        StepAnnotationLevel::Warning
+                    }
+                    automata_ci_github_runtime::AnnotationLevel::Notice => {
+                        StepAnnotationLevel::Notice
+                    }
+                },
+                message,
+                properties,
+            ));
+        }
+
+        for notice in notices {
+            let message = match notice {
+                PhaseApplicationNotice::BlockedNodeOptions => {
+                    "NODE_OPTIONS from a command file was ignored"
+                }
+                PhaseApplicationNotice::StateIgnoredForRunStep => {
+                    "GITHUB_STATE from a run step was ignored"
+                }
+            };
+            charge_attachment_bytes(&mut self.aggregate_bytes, message.len())?;
+            self.annotation_count = self
+                .annotation_count
+                .checked_add(1)
+                .filter(|count| *count <= MAX_JOB_RESULT_ANNOTATIONS)
+                .ok_or_else(resource_exhausted)?;
+            retained.annotations.push(StepAnnotation::new(
+                StepAnnotationLevel::Notice,
+                message,
+                Vec::new(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, step_id: &str) -> RetainedStepAttachments {
+        self.by_step.remove(step_id).unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+struct RetainedStepAttachments {
+    summary: String,
+    annotations: Vec<StepAnnotation>,
+}
+
+fn masked_attachment_text(
+    value: &str,
+    masker: &mut SecretMasker,
+) -> Result<String, ExecutorAdapterError> {
+    let value = String::from_utf8(masker.mask(value.as_bytes())?)
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+    if value.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+        return Err(resource_exhausted());
+    }
+    Ok(value)
+}
+
+fn charge_attachment_bytes(total: &mut usize, bytes: usize) -> Result<(), ExecutorAdapterError> {
+    *total = total
+        .checked_add(bytes)
+        .filter(|total| *total <= MAX_JOB_RESULT_ATTACHMENT_BYTES)
+        .ok_or_else(resource_exhausted)?;
+    Ok(())
+}
+
+fn canonical_annotation_property(name: &str) -> Option<&'static str> {
+    ["title", "file", "line", "endLine", "col", "endColumn"]
+        .into_iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3800,14 +4175,24 @@ impl MutableStepResult {
         GithubStepSnapshot::new(self.step_id.as_str(), self.outcome, self.conclusion)
     }
 
-    fn into_result(self, job_completed_at: UnixMillis) -> StepResult {
-        StepResult::new(
+    fn into_result(
+        self,
+        job_completed_at: UnixMillis,
+        attachments: RetainedStepAttachments,
+    ) -> StepResult {
+        let result = StepResult::new(
             self.step_id,
             self.outcome,
             self.conclusion,
             self.started_at,
             self.completed_at.min(job_completed_at),
         )
+        .with_annotations(attachments.annotations);
+        if attachments.summary.is_empty() {
+            result
+        } else {
+            result.with_summary_markdown(attachments.summary)
+        }
     }
 }
 
@@ -3858,7 +4243,11 @@ impl AttemptPaths {
                 child(&self.commands, &format!("phase-{phase}-{name}")).map(|path| (kind, path))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(CommandFilePaths { values })
+        Ok(CommandFilePaths {
+            values,
+            artifacts: child(&self.commands, &format!("phase-{phase}-artifacts"))?,
+            artifacts_list: child(&self.commands, &format!("phase-{phase}-artifacts-list"))?,
+        })
     }
 
     fn action(&self, index: u32, subpath: &str) -> Result<ActionPaths, ExecutorAdapterError> {
@@ -3904,6 +4293,8 @@ impl ActionPaths {
 
 struct CommandFilePaths {
     values: Vec<(CommandFileKind, TargetPath)>,
+    artifacts: TargetPath,
+    artifacts_list: TargetPath,
 }
 
 fn add_command_file_environment(
@@ -3915,6 +4306,21 @@ fn add_command_file_environment(
         values.retain(|variable| variable.name().as_str() != kind.environment_variable());
         values.push(automata_ci_execution::EnvironmentVariable::new(
             automata_ci_execution::EnvironmentName::new(kind.environment_variable())
+                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?,
+            automata_ci_execution::EnvironmentValue::new(path.as_str())
+                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?,
+        ));
+    }
+    for (name, path) in [
+        (
+            CommandFileKind::Artifacts.environment_variable(),
+            &paths.artifacts,
+        ),
+        (ARTIFACTS_LIST_ENVIRONMENT, &paths.artifacts_list),
+    ] {
+        values.retain(|variable| variable.name().as_str() != name);
+        values.push(automata_ci_execution::EnvironmentVariable::new(
+            automata_ci_execution::EnvironmentName::new(name)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?,
             automata_ci_execution::EnvironmentValue::new(path.as_str())
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?,
@@ -4461,11 +4867,34 @@ fn valid_toolchain(toolchain: &dyn GithubToolchain) -> bool {
         toolchain.sh(),
         toolchain.install(),
         toolchain.tar(),
+        toolchain.sha256sum(),
     ]
     .into_iter()
     .all(tool_path)
         && toolchain.python().is_none_or(tool_path)
         && toolchain.pwsh().is_none_or(tool_path)
+}
+
+fn artifact_file_name(path: &str) -> Result<String, ExecutorAdapterError> {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(invalid_job)
+}
+
+const fn map_phase_application_error(error: PhaseApplicationError) -> ExecutorAdapterError {
+    match error {
+        PhaseApplicationError::ArtifactConflict => invalid_job(),
+        PhaseApplicationError::TooManyEnvironmentEntries { .. }
+        | PhaseApplicationError::TooManyPathEntries { .. }
+        | PhaseApplicationError::TooManySteps { .. }
+        | PhaseApplicationError::TooManyActionStates { .. }
+        | PhaseApplicationError::TooManyArtifactSubjects { .. }
+        | PhaseApplicationError::ArtifactListTooLarge { .. }
+        | PhaseApplicationError::AggregateTooLarge { .. } => resource_exhausted(),
+    }
 }
 
 fn phase_ordinal(step: u32, phase: u32) -> Result<u32, ExecutorAdapterError> {
@@ -4592,16 +5021,20 @@ fn map_job_result_validation_error(error: &JobResultValidationError) -> Executor
     match error {
         JobResultValidationError::OutputValueTooLarge { .. }
         | JobResultValidationError::OutputValuesTooLarge { .. }
-        | JobResultValidationError::TooManyOutputs { .. } => resource_exhausted(),
+        | JobResultValidationError::TooManyOutputs { .. }
+        | JobResultValidationError::StepAttachmentTextTooLarge { .. }
+        | JobResultValidationError::StepAttachmentsTooLarge { .. }
+        | JobResultValidationError::TooManyStepAnnotations { .. }
+        | JobResultValidationError::TooManyStepAnnotationProperties { .. } => resource_exhausted(),
         JobResultValidationError::InvalidOutputName
         | JobResultValidationError::EmptyPublicOutputValue
         | JobResultValidationError::MissingPublicOutputValue
         | JobResultValidationError::SecretDerivedOutputCarriesValue => invalid_job(),
         JobResultValidationError::UnsupportedSchema { .. }
-        | JobResultValidationError::PublicOutputFromReadableSecret
         | JobResultValidationError::StepCompletedBeforeStart(_)
         | JobResultValidationError::StepCompletedAfterJob(_)
-        | JobResultValidationError::DuplicateStepId(_) => {
+        | JobResultValidationError::DuplicateStepId(_)
+        | JobResultValidationError::InvalidStepAnnotationProperty => {
             ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal)
         }
     }

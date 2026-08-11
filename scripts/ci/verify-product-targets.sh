@@ -126,9 +126,9 @@ if runner_package["description"] != (
     )
     raise SystemExit(1)
 
-# Remote registries and Pages are intentionally not queried from ordinary CI.
-# Keep this conservative until a reviewed post-publication change can point to
-# externally verified artifacts without making a pre-publication commit lie.
+# Remote registries are intentionally not queried from ordinary CI. Keep the
+# release state conservative until a reviewed post-publication change can point
+# to externally verified artifacts without making a pre-publication commit lie.
 publication_state = "unpublished"
 if publication_state != "unpublished":
     print(
@@ -137,28 +137,49 @@ if publication_state != "unpublished":
     )
     raise SystemExit(1)
 
+for package_readme in sorted((repository_root / "crates").glob("*/README.md")):
+    text = package_readme.read_text(encoding="utf-8")
+    if re.search(r"https://docs\.rs/automata-ci(?:[-/]|\b)", text):
+        print(
+            f"error: {package_readme.relative_to(repository_root)} links to unpublished docs.rs API documentation",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
 documentation = {
     relative_path: (repository_root / relative_path).read_text(encoding="utf-8")
     for relative_path in ("README.md", "docs/getting-started.md")
 }
 for relative_path, text in documentation.items():
-    if text.count("No public release has been published yet") != 1:
+    if len(re.findall(r"No public release has been published\b", text)) != 1:
         print(
-            f"error: {relative_path} must state the exact unpublished release status once",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-    if text.count("### Future release channels") != 1:
-        print(
-            f"error: {relative_path} must keep future distribution channels conditional",
+            f"error: {relative_path} must state the unpublished release status once",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
 readme = documentation["README.md"]
 getting_started = documentation["docs/getting-started.md"]
-if "the hosted UI preview is not\n> deployed" not in readme:
-    print("error: README.md must state that the hosted UI preview is not deployed", file=sys.stderr)
+pages_url = "https://automata-ci.github.io/automata/"
+for relative_path, text in documentation.items():
+    if pages_url not in text:
+        print(
+            f"error: {relative_path} must link to the hosted UI demo",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    demo_boundary = text[text.index(pages_url) : text.index(pages_url) + 600]
+    if re.search(r"(?is)(?:cannot|does not).{0,80}(?:execute|run)\s+workflows", demo_boundary) is None:
+        print(
+            f"error: {relative_path} must state that the hosted UI demo cannot execute workflows",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+if "## Future release channels" not in getting_started:
+    print(
+        "error: docs/getting-started.md must keep future distribution channels conditional",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 if "cargo run --locked --bin automata -- preview" not in readme:
     print("error: README.md must retain the local source preview command", file=sys.stderr)
@@ -173,7 +194,6 @@ for package_path in ("crates/automata-ci", "crates/automata-ci-runner"):
         raise SystemExit(1)
 
 launch_ahead_patterns = {
-    "hosted Pages URL": r"https?://automata-ci\.github\.io(?:/|\b)",
     "release version assignment": r"(?m)^\s*AUTOMATA_VERSION\s*=",
     "workspace release version": rf"(?<![0-9.]){re.escape(version)}(?![0-9.])",
     "tagged raw installer URL": r"raw\.githubusercontent\.com/automata-ci/automata/[^\s\"`]+/scripts/install\.sh",
@@ -224,4 +244,5 @@ print("product binaries and package license payloads verified")
 
 python3 "$repo_root/scripts/ci/publish-crates.py" --list-publishable >/dev/null
 python3 "$repo_root/scripts/ci/tests/publish-crates.test.py"
+python3 "$repo_root/scripts/ci/verify-documentation.py"
 "$repo_root/scripts/dev/create-integration-snapshot.test.sh"

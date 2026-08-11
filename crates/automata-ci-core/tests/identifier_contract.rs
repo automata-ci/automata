@@ -1,4 +1,4 @@
-use automata_ci_core::{AttemptNumber, FencingToken, IdentifierError, RunId};
+use automata_ci_core::{AttemptNumber, FencingToken, IdentifierError, RunId, RunIdAlias};
 use uuid::Uuid;
 
 #[test]
@@ -17,6 +17,11 @@ fn typed_ids_have_stable_json_string_encoding() {
 
 #[test]
 fn numeric_identifiers_reject_zero_and_fencing_does_not_wrap() {
+    assert_eq!(RunIdAlias::new(0), Err(IdentifierError::ZeroRunIdAlias),);
+    assert_eq!(
+        RunIdAlias::new(RunIdAlias::MAX + 1),
+        Err(IdentifierError::RunIdAliasOutOfRange),
+    );
     assert_eq!(
         AttemptNumber::new(0),
         Err(IdentifierError::ZeroAttemptNumber),
@@ -32,6 +37,27 @@ fn numeric_identifiers_reject_zero_and_fencing_does_not_wrap() {
             .checked_next(),
         Err(IdentifierError::FencingTokenExhausted),
     );
+}
+
+#[test]
+fn run_id_alias_round_trips_its_exact_numeric_contract() {
+    let alias = RunIdAlias::new(RunIdAlias::MAX).expect("maximum run alias");
+    assert_eq!(alias.get(), RunIdAlias::MAX);
+    assert_eq!(alias.to_string(), RunIdAlias::MAX.to_string());
+    assert_eq!(
+        serde_json::to_string(&alias).expect("serialize run alias"),
+        alias.to_string(),
+    );
+    assert_eq!(
+        serde_json::from_str::<RunIdAlias>(&alias.to_string()).expect("deserialize run alias"),
+        alias,
+    );
+    for invalid in ["0".to_owned(), (RunIdAlias::MAX + 1).to_string()] {
+        assert!(
+            serde_json::from_str::<RunIdAlias>(&invalid).is_err(),
+            "accepted invalid run alias {invalid}",
+        );
+    }
 }
 
 #[test]

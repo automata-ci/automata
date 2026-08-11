@@ -729,6 +729,7 @@ fn build_toolchain(
         configured.sh().clone(),
         configured.install().clone(),
         configured.tar().clone(),
+        configured.sha256sum().clone(),
     )?;
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;

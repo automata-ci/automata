@@ -582,11 +582,24 @@ impl NeedContext {
 /// A non-secret locator for a separately authorized secret value.
 ///
 /// Binding and version identifiers must not themselves be bearer credentials.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "UncheckedSecretBinding")]
 pub struct SecretBinding {
     binding_id: String,
     version_id: Option<String>,
+}
+
+impl fmt::Debug for SecretBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretBinding")
+            .field("binding_id", &"[REDACTED]")
+            .field(
+                "version_id",
+                &self.version_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -735,6 +748,50 @@ impl<'de> Deserialize<'de> for JobRuntimeContext {
 }
 
 impl JobRuntimeContext {
+    /// Creates the provider-neutral base context admitted before job expansion.
+    ///
+    /// Inputs and variables are canonical public expression objects. Secret
+    /// entries are opaque locators for separately authorized values. Matrix,
+    /// strategy expansion, and prerequisite results are intentionally empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeContextError`] for invalid object shapes, names,
+    /// bindings, or aggregate resource-limit violations.
+    pub fn new_base(
+        inputs: ContextValue,
+        vars: ContextValue,
+        secrets: BTreeMap<String, SecretBinding>,
+    ) -> Result<Self, RuntimeContextError> {
+        Self::new(
+            inputs,
+            vars,
+            ContextValue::empty_object(),
+            StrategyContext::new(true, 0, 1, 1)?,
+            BTreeMap::new(),
+            secrets,
+        )
+    }
+
+    /// Creates the canonical empty admission base context.
+    #[must_use]
+    pub fn empty_base() -> Self {
+        Self {
+            schema_version: JOB_RUNTIME_CONTEXT_SCHEMA_VERSION,
+            inputs: ContextValue::empty_object(),
+            vars: ContextValue::empty_object(),
+            matrix: ContextValue::empty_object(),
+            strategy: StrategyContext {
+                fail_fast: true,
+                job_index: 0,
+                job_total: 1,
+                max_parallel: 1,
+            },
+            needs: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+        }
+    }
+
     /// Creates and validates the runtime contexts for one job instance.
     ///
     /// `inputs`, `vars`, and `matrix` must be canonical object values, including

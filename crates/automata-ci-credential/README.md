@@ -8,9 +8,6 @@ provider's root credential.
 Provider adapters such as `automata-ci-credential-github` implement the broker
 used by runner execution layers.
 
-Automata is pre-1.0 and not production-ready. This is an internal security
-boundary, and its Rust API may change between releases.
-
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-credential)
+- API documentation: run `cargo doc -p automata-ci-credential --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

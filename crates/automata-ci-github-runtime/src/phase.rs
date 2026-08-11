@@ -2,9 +2,9 @@ use std::fmt::Debug;
 
 use crate::model::{ActionState, SensitiveText, StepOutputState};
 use crate::{
-    CommandFilePlatform, CompletedStepCommands, JobCommandState, NameValueCommand,
-    PhaseApplication, PhaseApplicationError, PhaseApplicationLimits, PhaseApplicationNotice,
-    StepPhase, StepScope,
+    CommandFilePlatform, CompletedStepCommands, JobCommandState, MAX_ARTIFACT_LIST_BYTES,
+    MAX_ARTIFACT_SUBJECTS, NameValueCommand, PhaseApplication, PhaseApplicationError,
+    PhaseApplicationLimits, PhaseApplicationNotice, StepPhase, StepScope,
 };
 
 /// Object-safe pure port for committing command effects after step completion.
@@ -124,6 +124,27 @@ impl CompletedStepApplicator for GithubCompletedStepApplicator {
             }
         }
 
+        for subject in commands.artifacts().subjects() {
+            if let Some(existing) = next
+                .artifact_subjects
+                .iter()
+                .find(|existing| existing.name() == subject.name())
+            {
+                if existing.digest() != subject.digest() {
+                    return Err(PhaseApplicationError::ArtifactConflict);
+                }
+                continue;
+            }
+            if next.artifact_subjects.len() >= MAX_ARTIFACT_SUBJECTS {
+                return Err(PhaseApplicationError::TooManyArtifactSubjects {
+                    maximum: MAX_ARTIFACT_SUBJECTS,
+                });
+            }
+            next.artifact_subjects.push(subject.clone());
+        }
+        next.artifact_subjects
+            .sort_by(|left, right| left.name().cmp(right.name()));
+
         validate_derived_state(&next, self.limits)?;
         Ok(PhaseApplication {
             next_state: next,
@@ -181,6 +202,18 @@ fn validate_derived_state(
         });
     }
 
+    let artifact_list =
+        state
+            .artifact_list_json()
+            .map_err(|_| PhaseApplicationError::ArtifactListTooLarge {
+                maximum: MAX_ARTIFACT_LIST_BYTES,
+            })?;
+    if artifact_list.len() > MAX_ARTIFACT_LIST_BYTES {
+        return Err(PhaseApplicationError::ArtifactListTooLarge {
+            maximum: MAX_ARTIFACT_LIST_BYTES,
+        });
+    }
+
     let aggregate = state_aggregate_bytes(state).unwrap_or(usize::MAX);
     if aggregate > limits.maximum_aggregate_bytes() {
         return Err(PhaseApplicationError::AggregateTooLarge {
@@ -209,6 +242,10 @@ fn state_aggregate_bytes(state: &JobCommandState) -> Option<usize> {
         for value in &action_state.values {
             total = add_name_value_bytes(total, value)?;
         }
+    }
+    for subject in &state.artifact_subjects {
+        total = total.checked_add(subject.name().len())?;
+        total = total.checked_add(subject.digest().len())?;
     }
     Some(total)
 }

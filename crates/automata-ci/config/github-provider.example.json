@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "app": {
     "id": 123456,
     "client_id": "Iv1.example-automata-app",
@@ -19,6 +19,7 @@
       "repository_id": 34567890,
       "repository_owner_id": 45678901,
       "repository": "automata-ci/automata",
+      "default_branch": "main",
       "visibility": "public",
       "manifest_revision": 1,
       "policy_revision": 1,
@@ -60,6 +61,7 @@
       "repository_id": 56789012,
       "repository_owner_id": 45678901,
       "repository": "automata-ci/private-service",
+      "default_branch": "main",
       "visibility": "private",
       "manifest_revision": 1,
       "policy_revision": 1,

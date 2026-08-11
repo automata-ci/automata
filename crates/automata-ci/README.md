@@ -164,6 +164,20 @@ automata server \
 Plain HTTP object-store endpoints anywhere other than literal loopback are
 rejected even when the development option is present.
 
+## Results, artifacts, and cache
+
+The dedicated Results listener serves the implemented artifact protocol used
+by `actions/upload-artifact` v7.0.1 and CacheService v2 used by `actions/cache`
+5.0.5. Eligible jobs receive short-lived authority bound to their run, job,
+attempt, and fence; no runner-wide Results credential exists.
+
+Cache lookup checks the current ref first and then the server-owned default
+branch read-only. Entries expire after seven inactive days and a repository has
+a 10 GiB LRU quota. Artifact deletion, cache management, physical object
+collection, and BuildKit cache compatibility are not implemented. See the
+[`automata-ci-results-github` reference](../automata-ci-results-github/README.md)
+for the tested protocol slices.
+
 ## Results development mode
 
 A job sandbox cannot reach a host-loopback Results listener. Local end-to-end
@@ -200,7 +214,7 @@ remains a separate gate.
 
 ## Static runner bootstrap
 
-The v0.1 server has no automated runner enrollment API. Operators can supply
+The server has no automated runner enrollment API yet. Operators can supply
 one absolute, privileged fleet document with
 `--static-runner-registration-file`; it is applied after migrations and before
 readiness, and exact replay is idempotent. Use the repository's
@@ -275,8 +289,10 @@ policy; secret bytes do not belong in the manifest. File sources must be
 owner-only regular files and cannot be symlinks.
 
 Each repository entry binds one existing tenant to stable numeric GitHub App
-installation, repository, and owner IDs, an exact `owner/name`, and a unique
-non-nil connection UUID. Revisions are positive and non-regressing. The entry's
+installation, repository, and owner IDs, an exact `owner/name`, its canonical
+`default_branch` name, and a unique non-nil connection UUID. The default branch
+is server-owned cache metadata and is never taken from a job or action request.
+Revisions are positive and non-regressing. The entry's
 `policy_revision` must equal every nested authority revision, and authority
 UUIDs are globally unique. A `public` repository must set
 `private_repository_source_read` to `null`; a `private` repository must provide
@@ -314,11 +330,16 @@ authenticated, or public audiences for dashboard metadata, logs, and artifacts.
 Public access is read-only. Runs snapshot all three choices at admission, and
 direct log/artifact reads do not depend on dashboard visibility.
 
-Publication is capped by immutable output-safety evidence. If user code can
-read a managed secret, raw stdout/stderr is suppressed before persistent
-ingestion and logs/artifacts remain private even when the repository requests
-public output. Dashboard metadata keeps its requested audience. Secretless and
-capability-only attempts may use configured public log/artifact publication.
+Publication is capped by immutable output-safety evidence. The runner redacts
+registered credential values before persisting stdout/stderr. If user code can
+read a managed secret, logs and artifacts remain private even when the
+repository requests public output. Dashboard metadata keeps its requested
+audience. Secretless and capability-only attempts may use configured public
+log/artifact publication.
+
+Terminal outputs are classified independently. Explicitly public values are
+retained; secret-derived values and values containing registered credentials
+persist only a marker.
 
 ## Managed-secret status
 

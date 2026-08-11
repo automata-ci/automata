@@ -8,9 +8,6 @@ builds.
 This crate is a build dependency only; it provides no command or runtime
 service.
 
-Automata is pre-1.0 and not production-ready. This helper follows the product's
-release process and has no standalone compatibility guarantee.
-
 - [Development documentation](https://github.com/automata-ci/automata/blob/main/docs/development.md)
-- [API documentation](https://docs.rs/automata-ci-build-support)
+- API documentation: run `cargo doc -p automata-ci-build-support --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

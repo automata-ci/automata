@@ -8,9 +8,6 @@ frames, provider credentials, or job payload bytes.
 `automata-ci-runner-runtime` uses the journal together with
 `automata-ci-runner-spool` to reconcile interrupted work.
 
-Automata is pre-1.0 and not production-ready. This is an internal durability
-layer; its Rust API and local format may change between releases.
-
 - [Runner documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-runner-journal)
+- API documentation: run `cargo doc -p automata-ci-runner-journal --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

@@ -2550,6 +2550,11 @@ async fn rejected_durable_log_authority_fails_before_blob_or_sql_commit() {
 async fn lease_log_and_terminal_ingress_replay_exact_acknowledgements_once() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
+    *harness
+        .transactions
+        .log_secret_exposure
+        .lock()
+        .expect("log exposure lock") = SecretExposureClass::ReadableSecret;
     let attempt_id = AttemptId::new();
     let guard = LeaseGuard::new(LeaseId::new(), FencingToken::new(1).expect("fencing token"));
     let slot = RunnerSlotOrdinal::new(1).expect("slot");

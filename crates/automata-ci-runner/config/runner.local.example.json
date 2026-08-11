@@ -99,6 +99,7 @@
       "pwsh": null,
       "install": "/usr/bin/install",
       "tar": "/usr/bin/tar",
+      "sha256sum": "/usr/bin/sha256sum",
       "node24": "/opt/automata/externals/node24/bin/node"
     }
   },

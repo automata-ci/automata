@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use automata_ci_core::{WorkflowPlan, WorkflowPlanVersion};
+use automata_ci_core::{JobRuntimeContext, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_store::{
     LogicalWorkflowAdmissionReceipt, MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES,
     TenantScope, WorkflowAdmissionIdempotency,
@@ -95,6 +95,7 @@ pub struct WorkflowAdmissionRequest {
     source: Bytes,
     event: Bytes,
     plan: WorkflowPlan,
+    base_context: JobRuntimeContext,
     idempotency: WorkflowAdmissionIdempotency,
     commit_sha: String,
     git_ref: String,
@@ -113,6 +114,7 @@ pub struct WorkflowAdmissionRequestBuilder {
 
 impl WorkflowAdmissionRequest {
     /// Starts a builder. Context fields must be supplied before [`build`](WorkflowAdmissionRequestBuilder::build).
+    #[allow(clippy::too_many_arguments)] // Every immutable admission input is explicit at the boundary.
     #[must_use]
     pub fn builder(
         tenant: TenantScope,
@@ -121,6 +123,7 @@ impl WorkflowAdmissionRequest {
         source: Bytes,
         event: Bytes,
         plan: WorkflowPlan,
+        base_context: JobRuntimeContext,
         idempotency: WorkflowAdmissionIdempotency,
     ) -> WorkflowAdmissionRequestBuilder {
         WorkflowAdmissionRequestBuilder {
@@ -131,6 +134,7 @@ impl WorkflowAdmissionRequest {
                 source,
                 event,
                 plan,
+                base_context,
                 idempotency,
                 commit_sha: String::new(),
                 git_ref: String::new(),
@@ -177,6 +181,14 @@ impl WorkflowAdmissionRequest {
     /// Returns the validated plan that must match exact-source recompilation.
     pub const fn plan(&self) -> &WorkflowPlan {
         &self.plan
+    }
+
+    /// Returns the versioned base runtime context admitted for every root job.
+    ///
+    /// Secret entries are opaque authorization locators, never secret values.
+    #[must_use]
+    pub const fn base_context(&self) -> &JobRuntimeContext {
+        &self.base_context
     }
 
     #[must_use]
@@ -319,6 +331,7 @@ impl WorkflowAdmissionRequestBuilder {
             .plan
             .validate()
             .map_err(|_| WorkflowAdmissionRequestError::InvalidPlan)?;
+        validate_base_context(&request.base_context)?;
         validate_commit_sha(&request.commit_sha)?;
         if request
             .git_ref
@@ -370,6 +383,9 @@ pub enum WorkflowAdmissionRequestError {
     /// The supplied workflow plan fails its domain validation.
     #[error("compiled workflow plan is invalid")]
     InvalidPlan,
+    /// The supplied base context was not a canonical root-level snapshot.
+    #[error("base runtime context must contain only inputs, variables, and opaque secret bindings")]
+    InvalidBaseContext,
     /// The source commit is not a supported canonical hexadecimal identifier.
     #[error("commit SHA must be 40 or 64 lowercase hexadecimal characters")]
     InvalidCommitSha,
@@ -449,6 +465,26 @@ fn validate_plan_provenance(
         .collect::<BTreeSet<_>>();
     if unique_keys.len() != plan.jobs().len() {
         return Err(WorkflowAdmissionRequestError::InvalidPlan);
+    }
+    Ok(())
+}
+
+fn validate_base_context(context: &JobRuntimeContext) -> Result<(), WorkflowAdmissionRequestError> {
+    context
+        .validate()
+        .map_err(|_| WorkflowAdmissionRequestError::InvalidBaseContext)?;
+    let strategy = context.strategy();
+    let base_shape = context
+        .matrix()
+        .as_object()
+        .is_some_and(std::collections::BTreeMap::is_empty)
+        && context.needs().is_empty()
+        && strategy.fail_fast()
+        && strategy.job_index() == 0
+        && strategy.job_total() == 1
+        && strategy.max_parallel() == 1;
+    if !base_shape {
+        return Err(WorkflowAdmissionRequestError::InvalidBaseContext);
     }
     Ok(())
 }

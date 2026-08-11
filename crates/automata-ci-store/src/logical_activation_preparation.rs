@@ -31,11 +31,11 @@ pub const LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE: &str = "application/j
 /// Maximum duration of one preparation claim.
 pub const MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
-const DESCRIPTOR_DOMAIN: &[u8] = b"automata.store.logical-activation-preparation.v3\0";
+const DESCRIPTOR_DOMAIN: &[u8] = b"automata.store.logical-activation-preparation.v5\0";
 const PREREQUISITES_DOMAIN: &[u8] =
     b"automata.store.logical-activation-preparation-prerequisites.v1\0";
 const ACTIVATION_INPUT_DIGEST_DOMAIN: &[u8] =
-    b"automata.workflow-service.logical-activation-input.v3\0";
+    b"automata.workflow-service.logical-activation-input.v5\0";
 
 /// Exact tenant-scoped logical job selected for activation preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,8 +125,8 @@ impl LogicalActivationPreparationWorkspace {
 /// Current base-context authority supported by this preparation phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalActivationBaseContextKind {
-    /// Root invocation with canonical empty inputs, variables, and secrets.
-    RootEmpty,
+    /// Canonical `JobRuntimeContext` v2 object admitted with the root invocation.
+    AdmissionV2,
 }
 
 /// Full transitive prerequisite status bound to activation functions.
@@ -374,6 +374,7 @@ pub struct LogicalActivationPreparationDescriptor {
     plan: AdmissionObject,
     event: AdmissionObject,
     base_context_kind: LogicalActivationBaseContextKind,
+    base_context: AdmissionObject,
     workspace: LogicalActivationPreparationWorkspace,
     prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
     prerequisites_digest: Sha256Digest,
@@ -401,6 +402,7 @@ impl LogicalActivationPreparationDescriptor {
         plan: AdmissionObject,
         event: AdmissionObject,
         base_context_kind: LogicalActivationBaseContextKind,
+        base_context: AdmissionObject,
         mut prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
         durable_ready_at: UnixMillis,
     ) -> Result<Self, LogicalActivationPreparationValueError> {
@@ -439,6 +441,7 @@ impl LogicalActivationPreparationDescriptor {
             .map_err(|_| LogicalActivationPreparationValueError::InvalidRuntimePolicy)?;
         if plan.media_type() != LOGICAL_ACTIVATION_PREPARATION_PLAN_MEDIA_TYPE
             || event.media_type() != LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE
+            || base_context.media_type() != LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
         {
             return Err(LogicalActivationPreparationValueError::InvalidObject);
         }
@@ -474,6 +477,7 @@ impl LogicalActivationPreparationDescriptor {
             &plan,
             &event,
             base_context_kind,
+            &base_context,
             &workspace,
             prerequisites_digest,
             status,
@@ -490,6 +494,7 @@ impl LogicalActivationPreparationDescriptor {
             plan,
             event,
             base_context_kind,
+            base_context,
             workspace,
             prerequisites,
             prerequisites_digest,
@@ -557,6 +562,12 @@ impl LogicalActivationPreparationDescriptor {
     #[must_use]
     pub const fn base_context_kind(&self) -> LogicalActivationBaseContextKind {
         self.base_context_kind
+    }
+
+    /// Returns the exact admission-time base runtime-context descriptor.
+    #[must_use]
+    pub const fn base_context(&self) -> &AdmissionObject {
+        &self.base_context
     }
 
     /// Returns the exact trusted workspace-policy output.
@@ -982,7 +993,8 @@ impl BindLogicalActivationPreparation {
         {
             return Err(LogicalActivationPreparationValueError::ClaimDescriptorMismatch);
         }
-        if base_context.media_type() != LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
+        if &base_context != descriptor.base_context()
+            || base_context.media_type() != LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
             || prerequisite_context.media_type() != LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
             || base_context.object_key() == prerequisite_context.object_key()
         {
@@ -1016,7 +1028,7 @@ impl BindLogicalActivationPreparation {
         &self.claim
     }
 
-    /// Returns the canonical empty root base-context object.
+    /// Returns the exact admission-bound base-context object.
     #[must_use]
     pub const fn base_context(&self) -> &AdmissionObject {
         &self.base_context
@@ -1318,6 +1330,7 @@ fn descriptor_digest(
     plan: &AdmissionObject,
     event: &AdmissionObject,
     base_context_kind: LogicalActivationBaseContextKind,
+    base_context: &AdmissionObject,
     workspace: &LogicalActivationPreparationWorkspace,
     prerequisites_digest: Sha256Digest,
     status: LogicalActivationAggregateStatus,
@@ -1339,6 +1352,7 @@ fn descriptor_digest(
     hasher.update(WORKFLOW_PLAN_SCHEMA.to_be_bytes());
     hash_admission_object(&mut hasher, b"event", event);
     hasher.update([base_context_kind_code(base_context_kind)]);
+    hash_admission_object(&mut hasher, b"base-context", base_context);
     hash_text(&mut hasher, workspace.as_str());
     hasher.update(prerequisites_digest.as_bytes());
     hasher.update([status_code(status)]);
@@ -1390,6 +1404,7 @@ fn hash_execution(hasher: &mut Sha256, execution: &LogicalActivationExecutionCon
         }
         None => hasher.update([0]),
     }
+    hasher.update(execution.run_id_alias().get().to_be_bytes());
     hasher.update(execution.run_number().to_be_bytes());
     hasher.update(execution.run_attempt().to_be_bytes());
 }
@@ -1460,7 +1475,7 @@ const fn status_code(value: LogicalActivationAggregateStatus) -> u8 {
 
 const fn base_context_kind_code(value: LogicalActivationBaseContextKind) -> u8 {
     match value {
-        LogicalActivationBaseContextKind::RootEmpty => 1,
+        LogicalActivationBaseContextKind::AdmissionV2 => 2,
     }
 }
 

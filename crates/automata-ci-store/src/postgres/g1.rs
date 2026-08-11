@@ -2700,7 +2700,7 @@ fn decode_runner_log_safety(
             | "missing_policy"
             | "unsupported_policy_schema"
             | "administrative_restriction"
-    ) || schema != 1
+    ) || !matches!(schema, 1 | 2)
     {
         return Err(StoreError::corrupt_data(
             "invalid runner log output-safety snapshot",
@@ -2717,21 +2717,41 @@ fn decode_runner_log_safety(
         reason,
         schema,
     };
-    if !matches!(
-        (safety.secret_exposure, safety.raw_log_disposition),
-        (
-            SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
-            RawLogDisposition::Persist
-        ) | (
-            SecretExposureClass::ReadableSecret,
-            RawLogDisposition::SuppressUserOutput
-        )
-    ) {
+    if !runner_log_safety_is_consistent(&safety) {
         return Err(StoreError::corrupt_data(
             "inconsistent runner log output-safety snapshot",
         ));
     }
     Ok(safety)
+}
+
+fn runner_log_safety_is_consistent(safety: &DurableRunnerLogSafety) -> bool {
+    let raw_policy_is_consistent = match safety.schema {
+        1 => matches!(
+            (safety.secret_exposure, safety.raw_log_disposition),
+            (
+                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
+                RawLogDisposition::Persist
+            ) | (
+                SecretExposureClass::ReadableSecret,
+                RawLogDisposition::SuppressUserOutput
+            )
+        ),
+        2 => safety.raw_log_disposition == RawLogDisposition::Persist,
+        _ => false,
+    };
+    raw_policy_is_consistent
+        && matches!(
+            (
+                safety.requested_visibility.as_str(),
+                safety.effective_visibility.as_str(),
+            ),
+            ("private", "private")
+                | ("authenticated", "private" | "authenticated")
+                | ("public", "private" | "authenticated" | "public")
+        )
+        && (safety.secret_exposure != SecretExposureClass::ReadableSecret
+            || safety.effective_visibility == "private")
 }
 
 async fn lock_runner_log_position(

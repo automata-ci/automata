@@ -562,6 +562,10 @@ mod tests {
 
     const SESSION: &str = "v1~key-1~AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+    // `CLOEXEC` closes an inherited lock descriptor at exec, not at fork. Keep
+    // this module's subprocess tests from transiently extending the lock test's
+    // open-file-description custody while the child is waiting to exec.
+    static PROCESS_SPAWN_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn errors_and_debug_never_contain_credentials() {
@@ -628,6 +632,7 @@ mod tests {
 
     #[test]
     fn per_origin_lock_is_private_exclusive_and_reacquirable() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.blocking_lock();
         let root = std::env::temp_dir().join(format!(
             "automata-auth-lock-{}-{}",
             std::process::id(),
@@ -649,6 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn secret_tool_subprocess_uses_exact_unique_attributes_and_readback() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.lock().await;
         let root = test_directory("secret-tool-roundtrip");
         let state = root.join("state");
         std::fs::write(&state, b"0").unwrap();
@@ -722,6 +728,7 @@ esac
 
     #[tokio::test]
     async fn secret_tool_failure_is_never_misreported_as_missing() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.lock().await;
         let root = test_directory("secret-tool-failure");
         let program = write_test_program(&root, "#!/bin/sh\nexit 1\n");
         let store = SecretServiceCredentialStore::with_program(program, Duration::from_secs(1));
@@ -735,6 +742,7 @@ esac
 
     #[tokio::test]
     async fn secret_tool_deadline_kills_and_reaps_a_stuck_operation() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.lock().await;
         let root = test_directory("secret-tool-timeout");
         let program = write_test_program(&root, "#!/bin/sh\nwhile :; do :; done\n");
         let store = SecretServiceCredentialStore::with_program(program, Duration::from_millis(20));

@@ -1,63 +1,67 @@
-# Automata GitHub Actions-compatible workload OIDC foundation
+# Workload OIDC protocol
 
-This crate implements the isolated protocol and cryptographic foundation needed
-by actions that request an OIDC token through `@actions/core`:
+`automata-ci-oidc-github` implements the protocol and cryptography needed by an
+action that requests an OIDC token through `@actions/core`.
 
-- bearer-authenticated `GET /oidc/token?api-version=2.0` requests;
-- optional caller-selected `audience` values;
-- an Automata-owned issuer, RS256 ID tokens, discovery metadata, and JWKS;
-- bounded, redacted request credentials and exact unexpired mint replay; and
-- an injected repository port that must atomically authorize the current
-workload before reserving an issuance.
+> [!IMPORTANT]
+> Workload OIDC is not advertised to runners and is unsupported end to end.
+> This crate has component coverage; the remaining product gates are listed
+> below.
 
-Private request bearers have an independent maximum lifetime of 24 hours so a
-bounded long-running job is not tied to its short renewable lease. Their exact
-key ID and validity interval must be durably pinned before publication; retry
-uses the retained named key to reproduce identical protected bytes. Every mint
-still revalidates live authority, and each returned ID token remains capped at
-one hour.
+The implemented boundary provides:
 
-RS256 rotation is a required two-phase operation because discovery and JWKS
-responses are publicly cacheable for 300 seconds. First, load and publish the
-new public JWK alongside the old key on every serving instance while the old
-key remains active. Do not activate the new private key until that publication
-has been continuously available for at least the full 300-second cache
-horizon; a verifier may otherwise retain an old-only JWKS through activation.
+- bearer-authenticated `GET /oidc/token?api-version=2.0`;
+- an optional caller-selected audience;
+- an Automata issuer, RS256 ID tokens, discovery metadata, and JWKS;
+- bounded credentials and exact replay of an unexpired mint; and
+- a repository port that authorizes the workload and reserves an issuance
+  atomically.
 
-Second, make the new key active only for newly reserved issuances. Keep the old
-private signing key loaded for exact durable replay and keep its public JWK
-published until all three retirement horizons have closed: every request-
-bearer interval that can replay an old-key issuance has expired, every ID token
-signed by the old key has expired, and 300 seconds have elapsed since the last
-possible old-key signing. Remove the old key only after the latest of those
-horizons. The request-bearer and ID-token ceilings are independent (24 hours
-and one hour respectively), so a single 300-second delay is not a safe
-retirement policy.
+The caller cannot choose its subject or identity claims. The repository returns
+them only after checking an opaque authority ID. A production repository must
+recheck job permission, attempt lifecycle and fence, repository binding, event
+trust, and authority expiry in the same transaction that reserves or replays a
+mint.
 
-Provider discovery receives one explicit bounded supported-claim universe.
-Minting fails closed if durable authority returns an additional claim that was
-not configured and advertised; the foundation does not hardcode mutable
-provider claim policy.
+## Credential lifetimes
 
-Durable key history is also permanent. Each request-bearer or ID-token-signing
-key ID is bound to its canonical key-material fingerprint; its retention
-deadline may only advance and its row cannot be deleted. Expiry ends the
-requirement to keep that key loaded, but the key ID can never be rebound to
-different material.
+The private request bearer may live for at most 24 hours so a long-running job
+is not tied to one short renewable lease. Its key ID and validity interval are
+stored before publication. Every mint still revalidates live authority, and an
+ID token lives for at most one hour.
 
-The caller never supplies a subject or identity claim. The repository returns
-those values only after checking the authenticated opaque authority ID. A
-production repository must recheck current job permission, execution lifecycle,
-attempt fence, repository binding, and event trust in the same transaction that
-reserves or replays an issuance. It must also cap the token at the durable
-authority deadline. The in-memory adapter exists for protocol tests and local
-composition only.
+The configured supported-claim universe is explicit. Minting fails if durable
+authority returns a claim that was not configured and advertised. The crate
+does not invent a default audience, subject format, event policy, or claim set.
 
-Product composition supplies the durable authority and issuance repositories,
-an optional fail-closed runner-control issuer, and `/oidc/token` on the
-non-human Results listener. Workload OIDC nevertheless remains unsupported and
-unadvertised to runners until the external TLS boundary, homogeneous
-multi-replica/key fleet, and bounded authority/issuance retention policy are
-release-ready. This foundation does not invent a default audience, subject
-format, event-trust policy, or repository claim set; all remain explicit,
-authenticated repository data.
+## Rotate signing keys
+
+Discovery and JWKS responses may be cached for 300 seconds, so rotation has two
+phases:
+
+1. Publish the new public JWK on every instance while the old key remains
+   active. Wait at least 300 continuous seconds.
+2. Make the new private key active for new issuances. Retain the old private
+   key for replay and its public JWK for verification.
+
+Retire the old key only after every request bearer that could replay an old-key
+issuance has expired, every old-key ID token has expired, and another 300
+seconds has passed since the last possible old-key signature. The 24-hour
+bearer limit and one-hour token limit are separate; a single cache delay is not
+enough.
+
+Key IDs have permanent identity. Durable history binds each ID to one canonical
+key-material fingerprint and permits only a later retention deadline. Expiry
+ends the need to load the key, but the ID can never be rebound to different
+material.
+
+## Product status
+
+The control plane composes the authority and issuance repositories, an optional
+fail-closed control issuer, and `/oidc/token` on the non-human Results listener.
+The in-memory repository exists for protocol tests only.
+
+Runner inventory intentionally omits OIDC until the deployment proves external
+TLS, consistent keys across all serving replicas, and bounded retention for
+authority and issuance history. Until then, an entitled job remains ineligible
+instead of receiving a partial OIDC environment.

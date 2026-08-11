@@ -13,8 +13,10 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{
-    GithubRepositoryVisibility, GithubStoredPushError, GithubWebhookBodyDigest,
-    StoredAuthenticatedGithubPush, VerifiedGithubPush, rehydrate_stored_authenticated_github_push,
+    GithubRepositoryVisibility, GithubStoredPushError, GithubStoredWebhookError,
+    GithubWebhookBodyDigest, StoredAuthenticatedGithubPush, StoredAuthenticatedGithubWebhookV1,
+    VerifiedGithubPush, VerifiedGithubWebhook, rehydrate_stored_authenticated_github_push,
+    rehydrate_stored_authenticated_github_webhook_v1,
 };
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySource,
@@ -343,26 +345,193 @@ impl GithubDeliveryWorkflowRequest<'_> {
         result: Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError>,
         accept_same_lineage_renewal: bool,
     ) -> GithubDeliveryWorkflowProcessorCompletion {
-        let operation = self.lease.lock_operation().await;
-        let latest = match self.lease.require_live_at(self.clock.now()) {
-            Ok(latest) => latest,
-            Err(error) => {
-                drop(operation);
-                return GithubDeliveryWorkflowProcessorCompletion::interrupted(
-                    processor_lease_error(error),
-                );
-            }
-        };
-        if latest != self.snapshot
-            && !(accept_same_lineage_renewal && self.snapshot.has_same_live_lineage(latest))
-        {
-            drop(operation);
-            return GithubDeliveryWorkflowProcessorCompletion::interrupted(
-                GithubDeliveryWorkflowProcessorError::ClaimLost,
-            );
-        }
-        GithubDeliveryWorkflowProcessorCompletion::locked(result, operation)
+        finish_workflow_processing(
+            self.lease,
+            self.clock,
+            self.snapshot,
+            result,
+            accept_same_lineage_renewal,
+        )
+        .await
     }
+}
+
+/// Borrowed exact evidence for processing one authenticated non-push event.
+///
+/// The stable push request remains [`GithubDeliveryWorkflowRequest`]. This
+/// separate boundary prevents existing push processors from silently treating
+/// pull-request or merge-group evidence as a push.
+pub struct GithubDeliveryEventWorkflowRequest<'a> {
+    delivery_id: ProviderDeliveryId,
+    accepted_at: UnixMillis,
+    identity: &'a ProviderDeliveryIdentity,
+    request_digest: Sha256Digest,
+    raw_event: &'a AdmissionObject,
+    event: &'a VerifiedGithubWebhook,
+    repository_source: &'a RepositorySource,
+    workflow_path: &'a str,
+    workflow_source: &'a [u8],
+    evidence: &'a ManifestPinnedGithubDeliveryEvidence,
+    snapshot: GithubDeliveryClaimSnapshot,
+    lease: &'a GithubDeliveryClaimLease,
+    clock: &'a dyn GithubDeliveryClock,
+}
+
+impl GithubDeliveryEventWorkflowRequest<'_> {
+    /// Returns the internal immutable provider-inbox row identity.
+    #[must_use]
+    pub const fn delivery_id(&self) -> ProviderDeliveryId {
+        self.delivery_id
+    }
+
+    /// Returns the immutable provider-inbox acceptance observation.
+    #[must_use]
+    pub const fn accepted_at(&self) -> UnixMillis {
+        self.accepted_at
+    }
+
+    /// Returns the exact durable provider routing identity.
+    #[must_use]
+    pub const fn identity(&self) -> &ProviderDeliveryIdentity {
+        self.identity
+    }
+
+    /// Returns the ingress digest over the authenticated request evidence.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
+    }
+
+    /// Returns the immutable raw-event object descriptor.
+    #[must_use]
+    pub const fn raw_event(&self) -> &AdmissionObject {
+        self.raw_event
+    }
+
+    /// Returns the strictly rehydrated authenticated event.
+    #[must_use]
+    pub const fn event(&self) -> &VerifiedGithubWebhook {
+        self.event
+    }
+
+    /// Returns the exact-revision repository archive containing this path.
+    #[must_use]
+    pub const fn repository_source(&self) -> &RepositorySource {
+        self.repository_source
+    }
+
+    /// Returns the canonical repository-relative workflow path.
+    #[must_use]
+    pub const fn workflow_path(&self) -> &str {
+        self.workflow_path
+    }
+
+    /// Returns the exact workflow bytes discovered in the verified archive.
+    #[must_use]
+    pub const fn workflow_source(&self) -> &[u8] {
+        self.workflow_source
+    }
+
+    /// Returns the immutable manifest and authenticated-event evidence.
+    #[must_use]
+    pub const fn manifest_pinned_evidence(&self) -> &ManifestPinnedGithubDeliveryEvidence {
+        self.evidence
+    }
+
+    /// Returns the exact live delivery consumer snapshot observed immediately
+    /// before this workflow processor invocation.
+    #[must_use]
+    pub const fn claim_snapshot(&self) -> GithubDeliveryClaimSnapshot {
+        self.snapshot
+    }
+
+    pub(crate) const fn lease(&self) -> &GithubDeliveryClaimLease {
+        self.lease
+    }
+
+    pub(crate) const fn clock(&self) -> &dyn GithubDeliveryClock {
+        self.clock
+    }
+
+    /// Transfers one completed processor result together with the exact live
+    /// lease-operation guard that validated it.
+    pub async fn finish(
+        self,
+        result: Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError>,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        self.finish_with_lineage_policy(result, false).await
+    }
+
+    pub(crate) async fn finish_same_lineage(
+        self,
+        result: Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError>,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        self.finish_with_lineage_policy(result, true).await
+    }
+
+    async fn finish_with_lineage_policy(
+        self,
+        result: Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError>,
+        accept_same_lineage_renewal: bool,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        finish_workflow_processing(
+            self.lease,
+            self.clock,
+            self.snapshot,
+            result,
+            accept_same_lineage_renewal,
+        )
+        .await
+    }
+}
+
+impl fmt::Debug for GithubDeliveryEventWorkflowRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubDeliveryEventWorkflowRequest")
+            .field("accepted_at", &self.accepted_at)
+            .field("identity", &"[redacted]")
+            .field("request_digest", &self.request_digest)
+            .field("raw_event", &self.raw_event)
+            .field("event", &self.event)
+            .field("repository_source", &"[redacted]")
+            .field("repository_source_digest", &self.repository_source.digest())
+            .field("repository_source_bytes", &self.repository_source.size())
+            .field("workflow_path", &"[redacted]")
+            .field("workflow_source", &"[redacted]")
+            .field("workflow_source_bytes", &self.workflow_source.len())
+            .field("manifest_pinned_evidence", &"[redacted]")
+            .field("snapshot", &self.snapshot)
+            .finish()
+    }
+}
+
+async fn finish_workflow_processing(
+    lease: &GithubDeliveryClaimLease,
+    clock: &dyn GithubDeliveryClock,
+    snapshot: GithubDeliveryClaimSnapshot,
+    result: Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError>,
+    accept_same_lineage_renewal: bool,
+) -> GithubDeliveryWorkflowProcessorCompletion {
+    let operation = lease.lock_operation().await;
+    let latest = match lease.require_live_at(clock.now()) {
+        Ok(latest) => latest,
+        Err(error) => {
+            drop(operation);
+            return GithubDeliveryWorkflowProcessorCompletion::interrupted(processor_lease_error(
+                error,
+            ));
+        }
+    };
+    if latest != snapshot
+        && !(accept_same_lineage_renewal && snapshot.has_same_live_lineage(latest))
+    {
+        drop(operation);
+        return GithubDeliveryWorkflowProcessorCompletion::interrupted(
+            GithubDeliveryWorkflowProcessorError::ClaimLost,
+        );
+    }
+    GithubDeliveryWorkflowProcessorCompletion::locked(result, operation)
 }
 
 enum GithubDeliveryWorkflowProcessorCompletionState {
@@ -448,6 +617,19 @@ pub trait GithubDeliveryWorkflowProcessor: fmt::Debug + Send + Sync {
         &self,
         request: GithubDeliveryWorkflowRequest<'_>,
     ) -> GithubDeliveryWorkflowProcessorCompletion;
+
+    /// Processes one version-one authenticated pull-request or merge-group
+    /// event. Existing push-only processors fail closed until they opt in.
+    async fn process_authenticated_event_v1_workflow(
+        &self,
+        request: GithubDeliveryEventWorkflowRequest<'_>,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        request
+            .finish(Err(GithubDeliveryWorkflowProcessorError::Prerequisite(
+                GithubDeliveryWorkerPrerequisite::WorkflowAdmission,
+            )))
+            .await
+    }
 }
 
 /// Durable state reached by one worker call.
@@ -755,7 +937,7 @@ impl fmt::Debug for GithubDeliveryClaimLease {
 }
 
 pub(crate) struct PreparedGithubDelivery {
-    push: VerifiedGithubPush,
+    event: VerifiedGithubWebhook,
     evidence: ManifestPinnedGithubDeliveryEvidence,
 }
 
@@ -764,11 +946,28 @@ impl PreparedGithubDelivery {
         push: VerifiedGithubPush,
         evidence: ManifestPinnedGithubDeliveryEvidence,
     ) -> Self {
-        Self { push, evidence }
+        Self {
+            event: VerifiedGithubWebhook::Push(push),
+            evidence,
+        }
     }
 
-    pub(crate) const fn push(&self) -> &VerifiedGithubPush {
-        &self.push
+    pub(crate) const fn from_authenticated_event_v1(
+        event: VerifiedGithubWebhook,
+        evidence: ManifestPinnedGithubDeliveryEvidence,
+    ) -> Self {
+        Self { event, evidence }
+    }
+
+    pub(crate) const fn event(&self) -> &VerifiedGithubWebhook {
+        &self.event
+    }
+
+    pub(crate) const fn deleted(&self) -> bool {
+        match &self.event {
+            VerifiedGithubWebhook::Push(push) => push.deleted(),
+            _ => false,
+        }
     }
 
     pub(crate) const fn evidence(&self) -> &ManifestPinnedGithubDeliveryEvidence {
@@ -864,7 +1063,7 @@ impl GithubDeliveryWorker {
                 };
                 return Ok(outcome);
             };
-            if prepared.push().deleted() {
+            if prepared.deleted() {
                 return self.finish_deleted(&lease).await;
             }
             self.process_prepared_leased(&lease, prepared.as_ref(), source_authority)
@@ -998,16 +1197,18 @@ impl GithubDeliveryWorker {
         prepared: &PreparedGithubDelivery,
         authority: GithubDeliverySourceAuthority<'_>,
     ) -> Result<RepositorySource, ProcessingFailure> {
-        let push = prepared.push();
         let manifest = prepared.evidence().manifest();
         let Ok(repository) = RepositoryId::new(claimed.identity().repository_identity()) else {
             return Err(ProcessingFailure::reject(
                 "github.delivery.invalid_repository",
             ));
         };
-        let Ok(revision) = ExactRevision::new(push.after_commit_sha()) else {
+        let revision_value = source_revision(prepared.event()).ok_or_else(|| {
+            ProcessingFailure::reject("github.delivery.unsupported_source_repository")
+        })?;
+        let Ok(revision) = ExactRevision::new(revision_value) else {
             return Err(ProcessingFailure::reject(
-                "github.delivery.invalid_after_revision",
+                "github.delivery.invalid_source_revision",
             ));
         };
         let request = match (claimed.identity().repository_visibility(), authority) {
@@ -1067,7 +1268,7 @@ impl GithubDeliveryWorker {
         source: &RepositorySource,
         private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
-        let push = prepared.push();
+        let event = prepared.event();
         let evidence = prepared.evidence();
         let workflows = discover_repository_workflows(
             source.bytes(),
@@ -1091,23 +1292,60 @@ impl GithubDeliveryWorker {
                     let snapshot = lease
                         .require_live_at(self.clock.now())
                         .map_err(WorkerInterruption::Worker)?;
-                    let request = GithubDeliveryWorkflowRequest {
-                        delivery_id: claimed.receipt().id(),
-                        accepted_at: claimed.receipt().accepted_at(),
-                        identity: claimed.identity(),
-                        request_digest: claimed.request_digest(),
-                        raw_event: claimed.raw_event(),
-                        push,
-                        repository_source: source,
-                        workflow_path: &path,
-                        workflow_source: &workflow_source,
-                        evidence,
-                        snapshot,
-                        lease,
-                        clock: self.clock.as_ref(),
-                        private_credentials,
+                    let completion = match (event, evidence.authenticated_event_v1()) {
+                        (VerifiedGithubWebhook::Push(push), None) => {
+                            self.workflow_processor
+                                .process_workflow(GithubDeliveryWorkflowRequest {
+                                    delivery_id: claimed.receipt().id(),
+                                    accepted_at: claimed.receipt().accepted_at(),
+                                    identity: claimed.identity(),
+                                    request_digest: claimed.request_digest(),
+                                    raw_event: claimed.raw_event(),
+                                    push,
+                                    repository_source: source,
+                                    workflow_path: &path,
+                                    workflow_source: &workflow_source,
+                                    evidence,
+                                    snapshot,
+                                    lease,
+                                    clock: self.clock.as_ref(),
+                                    private_credentials,
+                                })
+                                .await
+                        }
+                        (
+                            VerifiedGithubWebhook::Push(_)
+                            | VerifiedGithubWebhook::PullRequest(_)
+                            | VerifiedGithubWebhook::MergeGroup(_),
+                            Some(_),
+                        ) => {
+                            self.workflow_processor
+                                .process_authenticated_event_v1_workflow(
+                                    GithubDeliveryEventWorkflowRequest {
+                                        delivery_id: claimed.receipt().id(),
+                                        accepted_at: claimed.receipt().accepted_at(),
+                                        identity: claimed.identity(),
+                                        request_digest: claimed.request_digest(),
+                                        raw_event: claimed.raw_event(),
+                                        event,
+                                        repository_source: source,
+                                        workflow_path: &path,
+                                        workflow_source: &workflow_source,
+                                        evidence,
+                                        snapshot,
+                                        lease,
+                                        clock: self.clock.as_ref(),
+                                    },
+                                )
+                                .await
+                        }
+                        _ => {
+                            return Err(ProcessingFailure::reject(
+                                "github.delivery.unsupported_authenticated_event",
+                            )
+                            .into());
+                        }
                     };
-                    let completion = self.workflow_processor.process_workflow(request).await;
                     let (result, operation) = match completion.into_parts() {
                         Ok(parts) => parts,
                         Err(GithubDeliveryWorkflowProcessorError::ClaimLost) => continue,
@@ -1187,7 +1425,12 @@ impl GithubDeliveryWorker {
             ));
         }
         let raw_event = claimed.raw_event();
-        if raw_event.media_type() != crate::GITHUB_PUSH_EVENT_MEDIA_TYPE
+        let expected_media_type = if evidence.authenticated_event_v1().is_some() {
+            crate::GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        } else {
+            crate::GITHUB_PUSH_EVENT_MEDIA_TYPE
+        };
+        if raw_event.media_type() != expected_media_type
             || raw_event.encoded_size() > evidence.manifest().limits().webhook_max_body_bytes()
         {
             return Err(ProcessingFailure::reject(
@@ -1204,6 +1447,42 @@ impl GithubDeliveryWorker {
             .into_bytes();
         let (owner, name) = github_repository_components(claimed.identity().repository_identity())
             .ok_or_else(|| ProcessingFailure::reject("github.raw_event.invalid_identity"))?;
+        let visibility = match claimed.identity().repository_visibility() {
+            ProviderRepositoryVisibility::Public => GithubRepositoryVisibility::Public,
+            ProviderRepositoryVisibility::Private => GithubRepositoryVisibility::Private,
+        };
+        if let Some(authenticated_event) = evidence.authenticated_event_v1() {
+            let stored = StoredAuthenticatedGithubWebhookV1::from_durable_coordinates(
+                raw_body,
+                GithubWebhookBodyDigest::from_bytes(*raw_event.digest().as_bytes()),
+                raw_event.encoded_size(),
+                raw_event.media_type(),
+                authenticated_event.kind().as_str(),
+                claimed.identity().delivery_id(),
+                claimed.identity().installation_id().get(),
+                claimed.identity().repository_id().get(),
+                evidence.repository_owner_id().get(),
+                visibility,
+                owner,
+                name,
+            );
+            let event = rehydrate_stored_authenticated_github_webhook_v1(stored)
+                .map_err(stored_event_failure)?;
+            let coordinates = crate::authenticated_event_coordinates(&event)
+                .map_err(|_| ProcessingFailure::reject("github.subject_evidence.mismatch"))?;
+            if coordinates.event != *authenticated_event
+                || coordinates.head_sha != evidence.check_head_sha()
+                || !valid_authenticated_event_policy(&event, evidence.manifest())
+            {
+                return Err(ProcessingFailure::reject(
+                    "github.subject_evidence.mismatch",
+                ));
+            }
+            return Ok(PreparedGithubDelivery::from_authenticated_event_v1(
+                event, evidence,
+            ));
+        }
+
         let stored = StoredAuthenticatedGithubPush::from_durable_coordinates(
             raw_body,
             GithubWebhookBodyDigest::from_bytes(*raw_event.digest().as_bytes()),
@@ -1213,10 +1492,7 @@ impl GithubDeliveryWorker {
             claimed.identity().installation_id().get(),
             claimed.identity().repository_id().get(),
             evidence.repository_owner_id().get(),
-            match claimed.identity().repository_visibility() {
-                ProviderRepositoryVisibility::Public => GithubRepositoryVisibility::Public,
-                ProviderRepositoryVisibility::Private => GithubRepositoryVisibility::Private,
-            },
+            visibility,
             owner,
             name,
         );
@@ -1227,9 +1503,7 @@ impl GithubDeliveryWorker {
         if check_head != evidence.check_head_sha()
             || push.event_name() != evidence.manifest().event_name()
             || push.git_ref().full() != evidence.manifest().git_ref()
-            || u64::try_from(push.commit_count()).unwrap_or(u64::MAX)
-                > evidence.manifest().limits().push_webhook_max_commits()
-            || !valid_path_filter_commit_evidence(&push, evidence.manifest())
+            || !valid_authenticated_push_policy(&push, evidence.manifest())
         {
             return Err(ProcessingFailure::reject(
                 "github.subject_evidence.mismatch",
@@ -1514,6 +1788,21 @@ fn processor_failure(
     }
 }
 
+fn source_revision(event: &VerifiedGithubWebhook) -> Option<&str> {
+    match event {
+        VerifiedGithubWebhook::Push(push) if !push.deleted() => Some(push.after_commit_sha()),
+        VerifiedGithubWebhook::PullRequest(pull_request)
+            if pull_request.head_repository() == pull_request.repository() =>
+        {
+            Some(pull_request.head_revision().as_str())
+        }
+        VerifiedGithubWebhook::MergeGroup(merge_group) => {
+            Some(merge_group.head_revision().as_str())
+        }
+        _ => None,
+    }
+}
+
 fn archive_limits(manifest: &GithubProviderManifest) -> Result<ArchiveLimits, ProcessingFailure> {
     ArchiveLimits::new(manifest.limits().archive_max_compressed_bytes())
         .map_err(|_| ProcessingFailure::reject("github.provider_manifest.unsupported_policy"))
@@ -1596,6 +1885,26 @@ fn valid_path_filter_commit_evidence(
     }
 }
 
+fn valid_authenticated_push_policy(
+    push: &VerifiedGithubPush,
+    manifest: &GithubProviderManifest,
+) -> bool {
+    u64::try_from(push.commit_count()).unwrap_or(u64::MAX)
+        <= manifest.limits().push_webhook_max_commits()
+        && valid_path_filter_commit_evidence(push, manifest)
+}
+
+fn valid_authenticated_event_policy(
+    event: &VerifiedGithubWebhook,
+    manifest: &GithubProviderManifest,
+) -> bool {
+    match event {
+        VerifiedGithubWebhook::Push(push) => valid_authenticated_push_policy(push, manifest),
+        VerifiedGithubWebhook::PullRequest(_) | VerifiedGithubWebhook::MergeGroup(_) => true,
+        _ => false,
+    }
+}
+
 fn subject_evidence_failure(error: &GithubSubjectEvidenceStoreError) -> ProcessingFailure {
     match error {
         GithubSubjectEvidenceStoreError::Operation(_) => ProcessingFailure::retry(
@@ -1642,6 +1951,10 @@ const fn raw_object_failure(
 
 const fn stored_push_failure(_error: GithubStoredPushError) -> ProcessingFailure {
     ProcessingFailure::reject("github.raw_event.invalid_push")
+}
+
+const fn stored_event_failure(_error: GithubStoredWebhookError) -> ProcessingFailure {
+    ProcessingFailure::reject("github.raw_event.invalid_event")
 }
 
 fn github_repository_components(repository: &str) -> Option<(&str, &str)> {

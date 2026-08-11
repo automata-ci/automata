@@ -17,7 +17,7 @@ use crate::{
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     LogicalWorkflowInvocationId, RecordGithubWorkflowRunSubjectEvidence, RepositoryId, StoreError,
     ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
 };
 
 #[derive(Clone, Copy)]
@@ -100,12 +100,34 @@ async fn admit_logical_workflow_transaction(
     resolve_workflow(&mut transaction, &command).await?;
     resolve_snapshot(&mut transaction, &command).await?;
     let run_number = allocate_run_number(&mut transaction, command.workflow_id()).await?;
+    if let Some(concurrency) = command.concurrency() {
+        super::admission::lock_concurrency_group(
+            &mut transaction,
+            command.repository().id(),
+            command.admitted_at(),
+            concurrency,
+        )
+        .await
+        .map_err(map_concurrency_error)?;
+    }
     insert_run(&mut transaction, &command, run_number, &publication).await?;
     insert_logical_run_and_invocation(&mut transaction, &command).await?;
     finalize_receipt(&mut transaction, &command).await?;
     record_new_subject_evidence(&mut transaction, &command, subject_evidence).await?;
     insert_logical_jobs(&mut transaction, &command).await?;
     seal_logical_graph(&mut transaction, &command).await?;
+    if let Some(concurrency) = command.concurrency() {
+        super::admission::assign_concurrency_slot(
+            &mut transaction,
+            store.runner_payload_encryption.as_ref(),
+            command.repository().id(),
+            command.run_id(),
+            command.admitted_at(),
+            concurrency,
+        )
+        .await
+        .map_err(map_concurrency_error)?;
+    }
     transaction.commit().await.map_err(operation_error)?;
 
     Ok(LogicalWorkflowAdmissionReceipt::new(
@@ -117,6 +139,21 @@ async fn admit_logical_workflow_transaction(
         run_number,
         false,
     ))
+}
+
+fn map_concurrency_error(error: WorkflowAdmissionStoreError) -> LogicalWorkflowAdmissionStoreError {
+    match error {
+        WorkflowAdmissionStoreError::Store(error) => error.into(),
+        WorkflowAdmissionStoreError::ConcurrencyQueueFull => {
+            LogicalWorkflowAdmissionStoreError::ConcurrencyQueueFull
+        }
+        WorkflowAdmissionStoreError::IdempotencyConflict
+        | WorkflowAdmissionStoreError::IdentityConflict(_)
+        | WorkflowAdmissionStoreError::RunNumberExhausted => StoreError::corrupt_data(
+            "logical concurrency admission returned an unrelated legacy error",
+        )
+        .into(),
+    }
 }
 
 async fn record_new_subject_evidence(
@@ -236,6 +273,9 @@ async fn replay_receipt(
                run.publication_safety_reason, run.publication_safety_schema,
                marker.root_invocation_id, marker.orchestration_schema,
                marker.admission_digest,
+               marker.base_context_digest, marker.base_context_object_key,
+               marker.base_context_size_bytes, marker.base_context_media_type,
+               marker.base_context_schema,
                marker.admitted_at_ms AS marker_admitted_at_ms,
                invocation.id AS invocation_id
         FROM workflow_admission_receipts AS receipt
@@ -310,6 +350,21 @@ async fn replay_receipt(
     let admission_digest = row
         .try_get::<Option<Vec<u8>>, _>("admission_digest")
         .map_err(operation_error)?;
+    let base_context_digest = row
+        .try_get::<Option<Vec<u8>>, _>("base_context_digest")
+        .map_err(operation_error)?;
+    let base_context_object_key = row
+        .try_get::<Option<String>, _>("base_context_object_key")
+        .map_err(operation_error)?;
+    let base_context_size = row
+        .try_get::<Option<i64>, _>("base_context_size_bytes")
+        .map_err(operation_error)?;
+    let base_context_media_type = row
+        .try_get::<Option<String>, _>("base_context_media_type")
+        .map_err(operation_error)?;
+    let base_context_schema = row
+        .try_get::<Option<i16>, _>("base_context_schema")
+        .map_err(operation_error)?;
     let committed_at = row
         .try_get::<Option<i64>, _>("committed_at_ms")
         .map_err(operation_error)?;
@@ -359,6 +414,24 @@ async fn replay_receipt(
         );
     };
 
+    let base_context_exact = match command.base_context() {
+        Some(context) => {
+            base_context_digest.as_deref() == Some(context.digest().as_bytes().as_slice())
+                && base_context_object_key.as_deref() == Some(context.object_key().as_str())
+                && base_context_size.and_then(|size| u64::try_from(size).ok())
+                    == Some(context.encoded_size())
+                && base_context_media_type.as_deref() == Some(context.media_type())
+                && base_context_schema == Some(2)
+        }
+        None => {
+            base_context_digest.is_none()
+                && base_context_object_key.is_none()
+                && base_context_size.is_none()
+                && base_context_media_type.is_none()
+                && base_context_schema.is_none()
+        }
+    };
+
     if repository_id != command.repository().id().as_uuid()
         || run_repository_id != repository_id
         || run_id != command.run_id().as_uuid()
@@ -370,6 +443,7 @@ async fn replay_receipt(
         || plan_schema != i32::from(WORKFLOW_PLAN_SCHEMA)
         || orchestration_schema != i16::try_from(LOGICAL_ORCHESTRATION_SCHEMA).unwrap_or(i16::MAX)
         || admission_digest.as_slice() != command.request_digest().as_bytes()
+        || !base_context_exact
         || run_created_at < 0
         || committed_at != run_created_at
         || marker_admitted_at != run_created_at
@@ -603,7 +677,8 @@ async fn insert_run(
             id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
             event_name, event_object_key, head_sha, status, workflow_name,
             git_ref, actor, display_title, commit_subject,
-            created_at_ms, updated_at_ms,
+            created_at_ms, updated_at_ms, concurrency_group_key,
+            concurrency_queue_policy,
             admission_epoch, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
             publication_policy_revision, requested_dashboard_visibility,
@@ -612,9 +687,9 @@ async fn insert_run(
             publication_safety_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
-            $11,$12,$13,$14,$15,$15,
-            $16,$17,$18,$19,$20,$21,$22,$23,$24,
-            $25,$26,$26,$27,$28,'repository_policy',1
+            $11,$12,$13,$14,$15,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,
+            $27,$28,$28,$29,$30,'repository_policy',1
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -635,6 +710,16 @@ async fn insert_run(
     .bind(command.display_title())
     .bind(command.commit_subject())
     .bind(command.admitted_at().get())
+    .bind(
+        command
+            .concurrency()
+            .map(crate::WorkflowConcurrency::normalized_key),
+    )
+    .bind(
+        command
+            .concurrency()
+            .map(|concurrency| super::admission::queue_policy_name(concurrency.queue_policy())),
+    )
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(event.digest().as_bytes().as_slice())
     .bind(size_i64(event)?)
@@ -663,12 +748,15 @@ async fn insert_logical_run_and_invocation(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let base_context = command.base_context();
     sqlx::query(
         r"
         INSERT INTO workflow_plan_v2_runs (
             run_id, root_invocation_id, orchestration_schema,
-            admission_digest, state, revision, admitted_at_ms, updated_at_ms
-        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5)
+            admission_digest, state, revision, admitted_at_ms, updated_at_ms,
+            base_context_digest, base_context_object_key,
+            base_context_size_bytes, base_context_media_type, base_context_schema
+        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5,$6,$7,$8,$9,$10)
         ",
     )
     .bind(command.run_id().as_uuid())
@@ -680,6 +768,13 @@ async fn insert_logical_run_and_invocation(
     )
     .bind(command.request_digest().as_bytes().as_slice())
     .bind(command.admitted_at().get())
+    .bind(base_context.map(|context| context.digest().as_bytes().to_vec()))
+    .bind(base_context.map(|context| context.object_key().as_str()))
+    .bind(base_context.map(size_i64).transpose()?)
+    .bind(base_context.map(AdmissionObject::media_type))
+    .bind(base_context.map(|_| {
+        i16::try_from(automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)
+    }))
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

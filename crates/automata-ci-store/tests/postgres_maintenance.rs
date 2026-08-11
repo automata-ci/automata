@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use common::{
     TestDatabase, TestResult, run_with_database, runner_capability_document, seed_control_plane,
+    seed_control_plane_with_concurrency,
 };
 
 const LIVE_LEASE_MILLIS: i64 = 120_000;
@@ -144,7 +145,8 @@ async fn concurrent_maintenance_requeues_unstarted_and_loses_started_work_once()
 async fn blocked_failure_propagation_completes_run_and_promotes_pending_concurrency() -> TestResult
 {
     run_with_database(|database| async move {
-        let seed = seed_control_plane(database.pool(), 1).await?;
+        let seed =
+            seed_control_plane_with_concurrency(database.pool(), 1, "dogfood", "single").await?;
         let verify_job = seed.job_id;
         let frontend_job = insert_job(&database, seed.run_id, "frontend").await?;
         let dist_job = insert_job(&database, seed.run_id, "dist").await?;
@@ -208,9 +210,9 @@ async fn blocked_failure_propagation_completes_run_and_promotes_pending_concurre
             .await?;
         assert_eq!(reconciliation.status(), WorkflowRunStatus::Completed);
 
-        let slots: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        let running: Option<Uuid> = sqlx::query_scalar(
             r"
-            SELECT running_run_id, pending_run_id
+            SELECT running_run_id
             FROM concurrency_groups
             WHERE repository_id = $1 AND normalized_key = 'dogfood'
             ",
@@ -218,7 +220,18 @@ async fn blocked_failure_propagation_completes_run_and_promotes_pending_concurre
         .bind(seed.repository_id)
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(slots, (Some(pending_run.as_uuid()), None));
+        let pending_count: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)
+            FROM concurrency_group_pending_runs
+            WHERE repository_id = $1 AND normalized_key = 'dogfood'
+            ",
+        )
+        .bind(seed.repository_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(running, Some(pending_run.as_uuid()));
+        assert_eq!(pending_count, 0);
         assert!(
             database
                 .store()
@@ -786,19 +799,15 @@ async fn insert_pending_concurrency_run(
     .bind(seed.repository_id)
     .execute(database.pool())
     .await?;
-    sqlx::query("UPDATE workflow_runs SET concurrency_group_key = 'dogfood' WHERE id = $1")
-        .bind(seed.run_id.as_uuid())
-        .execute(database.pool())
-        .await?;
     sqlx::query(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-            concurrency_group_key
+            concurrency_group_key, concurrency_queue_policy
         )
         SELECT $1, repository_id, workflow_id, snapshot_id, 2, event_name,
-               event_object_key, head_sha, 'queued', 70, 70, 'dogfood'
+               event_object_key, head_sha, 'queued', 70, 70, 'dogfood', 'single'
         FROM workflow_runs WHERE id = $2
         ",
     )
@@ -811,12 +820,22 @@ async fn insert_pending_concurrency_run(
     sqlx::query(
         r"
         UPDATE concurrency_groups
-        SET running_run_id = $2, pending_run_id = $3
+        SET running_run_id = $2
         WHERE repository_id = $1 AND normalized_key = 'dogfood'
         ",
     )
     .bind(seed.repository_id)
     .bind(seed.run_id.as_uuid())
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO concurrency_group_pending_runs (
+            repository_id, normalized_key, run_id, enqueued_at_ms
+        ) VALUES ($1, 'dogfood', $2, 70)
+        ",
+    )
+    .bind(seed.repository_id)
     .bind(pending.as_uuid())
     .execute(database.pool())
     .await?;

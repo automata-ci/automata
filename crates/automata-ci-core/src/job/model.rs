@@ -10,7 +10,7 @@ use super::{
     RuntimePositiveInteger, SemanticStep, StepIr, ValueTemplate,
 };
 use crate::{
-    JobId, OutputSensitivity, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunnerFeature,
+    JobId, OutputSensitivity, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunIdAlias, RunnerFeature,
     RunnerRequirements, Sha256Digest, WorkflowId,
 };
 
@@ -105,6 +105,7 @@ pub struct JobExecutionContext {
     git_ref: String,
     workspace: String,
     actor: Option<String>,
+    run_id_alias: Option<RunIdAlias>,
     run_number: Option<u64>,
     run_attempt: Option<u32>,
     event: JobContentReference,
@@ -126,6 +127,7 @@ impl JobExecutionContext {
             git_ref: git_ref.into(),
             workspace: workspace.into(),
             actor: None,
+            run_id_alias: None,
             run_number: None,
             run_attempt: None,
             event,
@@ -137,6 +139,13 @@ impl JobExecutionContext {
     #[must_use]
     pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
         self.actor = Some(actor.into());
+        self
+    }
+
+    /// Attaches the stable positive numeric alias for the internal run ID.
+    #[must_use]
+    pub const fn with_run_id_alias(mut self, run_id_alias: RunIdAlias) -> Self {
+        self.run_id_alias = Some(run_id_alias);
         self
     }
 
@@ -176,6 +185,12 @@ impl JobExecutionContext {
     #[must_use]
     pub fn actor(&self) -> Option<&str> {
         self.actor.as_deref()
+    }
+
+    /// Returns the stable provider-compatible run alias when present.
+    #[must_use]
+    pub const fn run_id_alias(&self) -> Option<RunIdAlias> {
+        self.run_id_alias
     }
 
     /// Returns the provider run number without inventing one when absent.

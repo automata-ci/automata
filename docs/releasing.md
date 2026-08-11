@@ -183,8 +183,8 @@ boundary:
 3. Update `images/github-hosted-ubuntu-24.04-x64/profile-manifest.json`, its
    hashes in the adjacent `profile-lock.json`, and
    `crates/automata-ci-runner/config/runner.local.example.json` to that digest;
-   merge the reviewed lock change. v0.1 has no composed control-plane profile
-   catalog file, so image promotion alone does not enable hosted-label
+   merge the reviewed lock change. The control plane does not yet load a
+   profile catalog, so image promotion alone does not enable hosted-label
    scheduling; add and review that product configuration before activation.
 4. Make `ghcr.io/automata-ci/automata-ubuntu-24.04-x64` public.
 5. Dispatch `promote-locked` from the default branch, paste the locked digest,

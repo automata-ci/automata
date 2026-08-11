@@ -1,6 +1,7 @@
 mod support;
 
 use std::{
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{
@@ -11,7 +12,10 @@ use std::{
 };
 
 use automata_ci_blob::MemoryBlobStore;
-use automata_ci_core::UnixMillis;
+use automata_ci_core::{
+    ContextValue, JobRuntimeContext, QueuePolicy, SecretBinding, StrategyContext, UnixMillis,
+    WorkflowEventProvenance,
+};
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
@@ -21,8 +25,14 @@ use automata_ci_store::{
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionFailure,
     WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionRequest,
-    WorkflowAdmissionService, WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
+    WorkflowAdmissionRequestError, WorkflowAdmissionService, WorkflowAdmissionStage,
+    WorkflowAdmissionStageOutcome,
 };
+use automata_ci_workflow_github::{
+    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
+    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+};
+use bytes::Bytes;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -38,6 +48,7 @@ async fn human_projection_is_bound_into_the_logical_admission() {
         original.source().clone(),
         original.event().clone(),
         original.plan().clone(),
+        original.base_context().clone(),
         original.idempotency().clone(),
     )
     .commit_sha(original.commit_sha())
@@ -63,7 +74,52 @@ async fn human_projection_is_bound_into_the_logical_admission() {
         Some("Carry exact admission metadata")
     );
     assert_eq!(command.run_attempt(), 7);
+    let concurrency = command.concurrency().expect("workflow concurrency");
+    assert_eq!(concurrency.display_key(), "ci-CI-refs/heads/main");
+    assert_eq!(concurrency.normalized_key(), "ci-ci-refs/heads/main");
+    assert!(concurrency.cancel_in_progress());
+    assert_eq!(concurrency.queue_policy(), QueuePolicy::Single);
     assert_eq!(repository.take_delivery_id(), None);
+}
+
+#[tokio::test]
+async fn admission_resolves_max_queue_concurrency_from_safe_context() {
+    let repository = Arc::new(ControllableRepository::default());
+    service(repository.clone())
+        .admit(concurrency_request(
+            "logical-max-queue",
+            "queue-${{ github.ref }}-${{ vars.channel }}",
+        ))
+        .await
+        .expect("max-queue admission");
+
+    let command = repository.take_command();
+    let concurrency = command.concurrency().expect("workflow concurrency");
+    assert_eq!(
+        concurrency.display_key(),
+        "queue-refs/heads/main-stable"
+    );
+    assert_eq!(concurrency.normalized_key(), "queue-refs/heads/main-stable");
+    assert!(concurrency.cancel_in_progress());
+    assert_eq!(concurrency.queue_policy(), QueuePolicy::Max);
+}
+
+#[tokio::test]
+async fn admission_rejects_late_bound_concurrency_before_store_commit() {
+    let repository = Arc::new(ControllableRepository::default());
+    let error = service(repository.clone())
+        .admit(concurrency_request(
+            "logical-late-concurrency",
+            "queue-${{ github.run_number }}",
+        ))
+        .await
+        .expect_err("late-bound run identity must fail closed");
+
+    assert!(matches!(
+        error,
+        WorkflowAdmissionError::ConcurrencyEvaluation
+    ));
+    assert!(repository.command.lock().expect("command lock").is_none());
 }
 
 #[tokio::test]
@@ -87,6 +143,90 @@ async fn authenticated_delivery_uses_the_distinct_store_path_and_digest() {
     let provider_digest = provider_repository.take_command().request_digest();
     assert_eq!(provider_repository.take_delivery_id(), Some(delivery_id));
     assert_ne!(provider_digest, local_digest);
+}
+
+#[tokio::test]
+async fn base_context_metadata_and_request_digest_bind_every_admitted_value() {
+    let original = support::operation_request("logical-base-context");
+    let first_base = JobRuntimeContext::new_base(
+        context_object([("target", ContextValue::string("base-input-sentinel"))]),
+        context_object([("channel", ContextValue::string("base-var-sentinel"))]),
+        BTreeMap::from([(
+            "DEPLOY_TOKEN".to_owned(),
+            SecretBinding::new("base-binding-sentinel")
+                .expect("binding")
+                .with_version_id("base-version-sentinel")
+                .expect("version"),
+        )]),
+    )
+    .expect("base context");
+    let second_base = JobRuntimeContext::new_base(
+        context_object([("target", ContextValue::string("changed-input"))]),
+        context_object([("channel", ContextValue::string("base-var-sentinel"))]),
+        BTreeMap::from([(
+            "DEPLOY_TOKEN".to_owned(),
+            SecretBinding::new("base-binding-sentinel")
+                .expect("binding")
+                .with_version_id("base-version-sentinel")
+                .expect("version"),
+        )]),
+    )
+    .expect("changed base context");
+    let first_request = rebuild_with_base(&original, first_base);
+    let second_request = rebuild_with_base(&original, second_base);
+    let debug = format!("{first_request:?}");
+    for redacted in [
+        "base-input-sentinel",
+        "base-var-sentinel",
+        "base-binding-sentinel",
+        "base-version-sentinel",
+    ] {
+        assert!(
+            !debug.contains(redacted),
+            "request Debug exposed {redacted}"
+        );
+    }
+
+    let first_repository = Arc::new(ControllableRepository::default());
+    service(first_repository.clone())
+        .admit(first_request)
+        .await
+        .expect("first admission");
+    let first = first_repository.take_command();
+    let second_repository = Arc::new(ControllableRepository::default());
+    service(second_repository.clone())
+        .admit(second_request)
+        .await
+        .expect("second admission");
+    let second = second_repository.take_command();
+
+    let first_context = first.base_context().expect("first base descriptor");
+    let second_context = second.base_context().expect("second base descriptor");
+    assert_eq!(
+        first_context.media_type(),
+        automata_ci_workflow_service::JOB_RUNTIME_CONTEXT_MEDIA_TYPE
+    );
+    assert_ne!(first_context.digest(), second_context.digest());
+    assert_ne!(first.request_digest(), second.request_digest());
+}
+
+#[test]
+fn admission_rejects_instance_context_as_a_base_context() {
+    let original = support::operation_request("logical-invalid-base-context");
+    let instance_context = JobRuntimeContext::new(
+        ContextValue::empty_object(),
+        ContextValue::empty_object(),
+        context_object([("target", ContextValue::string("linux"))]),
+        StrategyContext::new(true, 0, 1, 1).expect("strategy"),
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .expect("instance context");
+
+    assert!(matches!(
+        try_rebuild_with_base(&original, instance_context),
+        Err(WorkflowAdmissionRequestError::InvalidBaseContext)
+    ));
 }
 
 #[tokio::test]
@@ -204,6 +344,110 @@ fn service(repository: Arc<ControllableRepository>) -> WorkflowAdmissionService 
         repository,
         Arc::new(GithubWorkflowPlanVerifier::new()),
     )
+}
+
+fn concurrency_request(tenant: &str, group: &str) -> WorkflowAdmissionRequest {
+    let source = format!(
+        r#"name: Queue contract
+on: workflow_dispatch
+concurrency:
+  group: {group}
+  cancel-in-progress: ${{{{ github.ref == 'refs/heads/main' }}}}
+  queue: max
+jobs:
+  verify:
+    runs-on: linux
+    steps:
+      - run: echo synthetic
+"#
+    );
+    let provenance = SourceProvenance::new(
+        SourceId::new(".github/workflows/queue.yml"),
+        SourceOrigin::Repository {
+            repository: Arc::from(support::REPOSITORY),
+            revision: Arc::from(support::REVISION),
+            path: Arc::from(".github/workflows/queue.yml"),
+        },
+    );
+    let parsed = GithubWorkflowFrontend::default()
+        .parse(ParseWorkflowRequest::new(provenance, &source));
+    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        parsed.plan().expect("parsed plan"),
+        WorkflowEventProvenance::new("github", "workflow_dispatch")
+            .with_delivery_id(support::DELIVERY)
+            .with_commit_sha(support::REVISION)
+            .with_git_ref(support::GIT_REF),
+    ));
+    assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
+    let base_context = JobRuntimeContext::new_base(
+        ContextValue::empty_object(),
+        context_object([("channel", ContextValue::string("stable"))]),
+        BTreeMap::new(),
+    )
+    .expect("base context");
+    WorkflowAdmissionRequest::builder(
+        automata_ci_store::TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
+        automata_ci_workflow_service::AdmissionRepositoryCoordinates::new(
+            "github",
+            "repository-queue",
+            "synthetic",
+            "queue",
+        )
+        .expect("repository"),
+        ".github/workflows/queue.yml",
+        Bytes::from(source),
+        Bytes::from_static(b"{}"),
+        compiled.into_parts().0.expect("compiled plan"),
+        base_context,
+        WorkflowAdmissionIdempotency::operation(automata_ci_core::OperationId::new()),
+    )
+    .commit_sha(support::REVISION)
+    .git_ref(support::GIT_REF)
+    .workflow_name("Queue contract")
+    .actor("synthetic-actor")
+    .run_attempt(1)
+    .build()
+    .expect("admission request")
+}
+
+fn context_object(entries: impl IntoIterator<Item = (&'static str, ContextValue)>) -> ContextValue {
+    ContextValue::object(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("context object")
+}
+
+fn rebuild_with_base(
+    original: &WorkflowAdmissionRequest,
+    base_context: JobRuntimeContext,
+) -> WorkflowAdmissionRequest {
+    try_rebuild_with_base(original, base_context).expect("rebuilt request")
+}
+
+fn try_rebuild_with_base(
+    original: &WorkflowAdmissionRequest,
+    base_context: JobRuntimeContext,
+) -> Result<WorkflowAdmissionRequest, WorkflowAdmissionRequestError> {
+    WorkflowAdmissionRequest::builder(
+        original.tenant().clone(),
+        original.repository().clone(),
+        original.workflow_path(),
+        original.source().clone(),
+        original.event().clone(),
+        original.plan().clone(),
+        base_context,
+        original.idempotency().clone(),
+    )
+    .commit_sha(original.commit_sha())
+    .git_ref(original.git_ref())
+    .workflow_name(original.workflow_name())
+    .actor(original.actor().expect("fixture actor"))
+    .run_attempt(original.run_attempt().expect("fixture attempt"))
+    .build()
 }
 
 #[derive(Debug, Default)]

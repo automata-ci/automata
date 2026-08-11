@@ -512,6 +512,8 @@ dependencies = [
 name = "automata-ci-github-runtime"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "static_assertions",
  "thiserror",
 ]

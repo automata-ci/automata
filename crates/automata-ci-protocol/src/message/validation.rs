@@ -442,6 +442,26 @@ fn validate_job_result(
     }
     for step in result.steps() {
         validate_nonempty_text("step-result ID", step.step_id().as_str(), limits)?;
+        if let Some(summary) = step.summary_markdown() {
+            validate_text("step summary", summary, limits)?;
+        }
+        validate_collection(
+            "step annotations",
+            step.annotations().len(),
+            limits.max_collection_items(),
+        )?;
+        for annotation in step.annotations() {
+            validate_text("step annotation message", annotation.message(), limits)?;
+            validate_collection(
+                "step annotation properties",
+                annotation.properties().len(),
+                limits.max_collection_items(),
+            )?;
+            for property in annotation.properties() {
+                validate_nonempty_text("step annotation property name", property.name(), limits)?;
+                validate_text("step annotation property value", property.value(), limits)?;
+            }
+        }
     }
     Ok(())
 }

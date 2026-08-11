@@ -3,7 +3,8 @@ mod common;
 use automata_ci_core::{
     Architecture, AttemptId, IsolationLevel, JobConclusion, JobIrVersion, JobLifecycle, JobResult,
     JobSecretExposure, OperatingSystem, OperationId, RunnerCapabilities, RunnerId, RunnerPlatform,
-    RunnerSessionId, SandboxCapabilities, UnixMillis,
+    RunnerSessionId, SandboxCapabilities, StepAnnotation, StepAnnotationLevel, StepId, StepResult,
+    UnixMillis,
 };
 use automata_ci_protocol::{
     ErrorMessage, HandshakeErrorCode, HandshakeRejected, JobResultMessage, LeaseDisposition,
@@ -211,6 +212,41 @@ fn every_job_secret_exposure_variant_round_trips() {
                 exposure,
                 UnixMillis::new(10),
             ),
+        )));
+    }
+}
+
+#[test]
+fn every_step_annotation_level_round_trips() {
+    for level in [
+        StepAnnotationLevel::Error,
+        StepAnnotationLevel::Warning,
+        StepAnnotationLevel::Notice,
+    ] {
+        let result = JobResult::new(
+            AttemptId::new(),
+            JobConclusion::Success,
+            JobSecretExposure::Secretless,
+            UnixMillis::new(20),
+        )
+        .with_steps(vec![
+            StepResult::new(
+                StepId::new("build").expect("valid step ID"),
+                JobConclusion::Success,
+                JobConclusion::Success,
+                UnixMillis::new(10),
+                UnixMillis::new(20),
+            )
+            .with_annotations(vec![StepAnnotation::new(
+                level,
+                "diagnostic",
+                Vec::new(),
+            )]),
+        ]);
+        roundtrip_runner(&RunnerToServer::JobResult(JobResultMessage::new(
+            common::request_header(107),
+            common::guard(),
+            result,
         )));
     }
 }

@@ -76,6 +76,58 @@ uuid_id!(/// Idempotency key for a mutating operation.
 uuid_id!(/// Identifies a durable stream of log frames.
     LogStreamId);
 
+/// Stable positive numeric alias for a workflow run.
+///
+/// [`RunId`] remains the internal identity. This compact alias exists for
+/// provider-compatible surfaces that require an exactly representable
+/// positive integer instead of a UUID.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct RunIdAlias(NonZeroU64);
+
+impl RunIdAlias {
+    /// Largest integer that every IEEE-754 binary64 consumer represents
+    /// exactly and that the durable allocator may issue.
+    pub const MAX: u64 = 9_007_199_254_740_991;
+
+    /// Creates a valid positive run alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentifierError::ZeroRunIdAlias`] for zero and
+    /// [`IdentifierError::RunIdAliasOutOfRange`] above [`Self::MAX`].
+    pub fn new(value: u64) -> Result<Self, IdentifierError> {
+        if value > Self::MAX {
+            return Err(IdentifierError::RunIdAliasOutOfRange);
+        }
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(IdentifierError::ZeroRunIdAlias)
+    }
+
+    /// Returns the positive numeric alias.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for RunIdAlias {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunIdAlias {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// One-based attempt number as presented to workflow semantics.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -156,6 +208,12 @@ impl<'de> Deserialize<'de> for FencingToken {
 /// Validation errors for compact numeric identifiers.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum IdentifierError {
+    /// A compact run alias violated its positive representation.
+    #[error("run ID aliases are positive and cannot be zero")]
+    ZeroRunIdAlias,
+    /// A compact run alias exceeded the exact provider integer range.
+    #[error("run ID aliases must fit the exact provider integer range")]
+    RunIdAliasOutOfRange,
     /// An attempt number violated its one-based representation.
     #[error("attempt numbers are one-based and cannot be zero")]
     ZeroAttemptNumber,

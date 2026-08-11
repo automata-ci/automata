@@ -9,16 +9,17 @@ workflow and job models.
 the runner consumes its compiled GitHub expression program through a separate
 runtime.
 
-Automata is pre-1.0 and not production-ready. GitHub Actions compatibility is
-incomplete, and this internal frontend's Rust API may change between releases.
-
-The current logical plan represents bounded matrices, dependencies,
-conditions, outputs, and deployment-environment syntax. The composed v0.1
-product still supports only the subset listed in the
+The logical plan represents bounded matrices, dependencies, conditions,
+outputs, and deployment-environment syntax. The product supports only the
+subset listed in the
 [compatibility matrix](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md);
-unsupported runtime
-semantics fail during compilation or admission instead of being silently
-dropped.
+unsupported runtime semantics fail during compilation or admission instead of
+being silently dropped.
+
+The source model also contains an Automata-only `concurrency.queue` extension.
+It is under active implementation, has no GitHub counterpart, and is not part
+of the supported compatibility surface. Standard workflows should use GitHub's
+`group` and `cancel-in-progress` fields.
 
 ## Updating the repository CI fixture
 
@@ -35,5 +36,5 @@ compiler and service tests deliberately expose unsupported end-to-end features;
 do not regenerate or weaken them to hide a compatibility failure.
 
 - [Compatibility documentation](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md)
-- [API documentation](https://docs.rs/automata-ci-workflow-github)
+- API documentation: run `cargo doc -p automata-ci-workflow-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

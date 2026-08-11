@@ -30,13 +30,11 @@ no managed secret values to jobs, and external providers remain uncomposed and
 unadvertised.
 
 Publication safety is independent of provider selection. When user code can
-read a secret, its raw stdout/stderr must be suppressed and its logs and
-artifacts are capped at private even if repository settings request public
-output. Secretless and capability-only work may retain the configured audience.
-
-Automata is pre-1.0 and not production-ready. This is an internal security
-boundary, and its Rust API may change between releases.
+read a secret, registered values are masked from stdout/stderr and its complete
+logs and artifacts are capped at private even if repository settings request
+public output. Secretless and capability-only work may retain the configured
+audience.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-secret)
+- API documentation: run `cargo doc -p automata-ci-secret --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

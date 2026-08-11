@@ -9,13 +9,14 @@ mod trigger;
 use std::fmt::Debug;
 
 use automata_ci_core::{
-    Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, WorkflowEventProvenance,
-    WorkflowPlan, WorkflowSourceProvenance,
+    ContextValue, Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan,
+    WorkflowEventProvenance, WorkflowPlan, WorkflowSourceProvenance,
 };
 
 use crate::{
     Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, GithubEventMetadataV1,
-    GithubWorkflowSourcePlan, PreservedField, SourceOrigin, SourceSpan, TriggerConfiguration,
+    GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField, SourceOrigin,
+    SourceSpan, TriggerConfiguration,
 };
 
 /// Borrowed request to select and compile one GitHub event invocation.
@@ -128,6 +129,8 @@ pub struct CompilationReport {
     plan: Option<WorkflowPlan>,
     diagnostics: Vec<Diagnostic>,
     disposition: CompilationDisposition,
+    workflow_dispatch_contract: Option<GithubWorkflowDispatchContract>,
+    workflow_dispatch_inputs: Option<ContextValue>,
 }
 
 impl CompilationReport {
@@ -147,6 +150,22 @@ impl CompilationReport {
     #[must_use]
     pub const fn disposition(&self) -> CompilationDisposition {
         self.disposition
+    }
+
+    /// Returns the validated manual-dispatch source contract for an accepted invocation.
+    #[must_use]
+    pub const fn workflow_dispatch_contract(&self) -> Option<&GithubWorkflowDispatchContract> {
+        self.workflow_dispatch_contract.as_ref()
+    }
+
+    /// Returns the canonical `inputs` object for an accepted manual-dispatch invocation.
+    ///
+    /// This value is suitable for later admission-context hydration. It is
+    /// available only when the compiler validated bounded provider evidence
+    /// against the exact selected source contract.
+    #[must_use]
+    pub const fn workflow_dispatch_inputs(&self) -> Option<&ContextValue> {
+        self.workflow_dispatch_inputs.as_ref()
     }
 
     /// Returns whether event selection and provider-neutral compilation succeeded.
@@ -233,10 +252,19 @@ pub(super) struct CompileContext<'plan> {
 
 #[derive(Debug)]
 pub(super) enum CompiledEvent {
-    Selected(WorkflowEventProvenance),
+    Selected {
+        event: WorkflowEventProvenance,
+        workflow_dispatch: Option<Box<CompiledWorkflowDispatch>>,
+    },
     RequiresChangedFiles,
     NotSelected(WorkflowNotSelectedReason),
     Rejected,
+}
+
+#[derive(Debug)]
+pub(super) struct CompiledWorkflowDispatch {
+    pub(super) contract: GithubWorkflowDispatchContract,
+    pub(super) inputs: ContextValue,
 }
 
 impl CompileContext<'_> {
@@ -381,48 +409,43 @@ fn compile_event(
         return CompiledEvent::Rejected;
     };
 
-    for trigger in triggers.events() {
+    let selected_index = triggers
+        .events()
+        .iter()
+        .position(|trigger| event_name(trigger.name().value()) == event.name());
+    let mut selected_dispatch_contract = None;
+    for (index, trigger) in triggers.events().iter().enumerate() {
         reject_unsupported_trigger(trigger.configuration(), context);
-        trigger::validate_configuration(
+        let dispatch_contract = trigger::validate_configuration(
             trigger.name().value(),
             trigger.configuration(),
             trigger.span(),
             context,
         );
+        if Some(index) == selected_index {
+            selected_dispatch_contract = dispatch_contract;
+        }
     }
-    let selected = triggers
-        .events()
-        .iter()
-        .find(|trigger| event_name(trigger.name().value()) == event.name());
-    let Some(selected) = selected else {
+    let Some(selected_index) = selected_index else {
         return CompiledEvent::NotSelected(WorkflowNotSelectedReason::EventNotConfigured);
     };
+    let selected = &triggers.events()[selected_index];
     let Some(span) = context.span(selected.span()) else {
         return CompiledEvent::Rejected;
     };
     match selection {
-        EventSelection::Preselected => match event.configured_trigger_span() {
-            Some(configured) if configured == &span => CompiledEvent::Selected(event),
-            Some(_) => {
-                context.semantic(
-                    "github.compile.preselected_trigger_mismatch",
-                    "preselected event trigger span does not identify this source's configured event",
-                    selected.span().clone(),
-                );
-                CompiledEvent::Rejected
-            }
-            None => {
-                context.semantic(
-                    "github.compile.preselected_trigger_required",
-                    "preselected event recompilation requires a configured trigger span",
-                    selected.span().clone(),
-                );
-                CompiledEvent::Rejected
-            }
-        },
+        EventSelection::Preselected => compile_preselected_event(
+            event,
+            matches!(selected.name().value(), EventName::WorkflowDispatch),
+            selected_dispatch_contract,
+            &span,
+            selected.span(),
+            context,
+        ),
         EventSelection::MetadataV1(metadata) => trigger::event_matches(
             &event,
             selected.configuration(),
+            selected_dispatch_contract.as_ref(),
             Some(metadata),
             selected.span(),
             context,
@@ -431,11 +454,65 @@ fn compile_event(
         EventSelection::Unverified => trigger::event_matches(
             &event,
             selected.configuration(),
+            selected_dispatch_contract.as_ref(),
             None,
             selected.span(),
             context,
         )
         .with_event(event, span),
+    }
+}
+
+fn compile_preselected_event(
+    event: WorkflowEventProvenance,
+    workflow_dispatch: bool,
+    dispatch_contract: Option<GithubWorkflowDispatchContract>,
+    configured_span: &PlanSourceSpan,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> CompiledEvent {
+    match event.configured_trigger_span() {
+        Some(configured) if configured == configured_span => {}
+        Some(_) => {
+            context.semantic(
+                "github.compile.preselected_trigger_mismatch",
+                "preselected event trigger span does not identify this source's configured event",
+                trigger_span.clone(),
+            );
+            return CompiledEvent::Rejected;
+        }
+        None => {
+            context.semantic(
+                "github.compile.preselected_trigger_required",
+                "preselected event recompilation requires a configured trigger span",
+                trigger_span.clone(),
+            );
+            return CompiledEvent::Rejected;
+        }
+    }
+    if !workflow_dispatch {
+        return CompiledEvent::Selected {
+            event,
+            workflow_dispatch: None,
+        };
+    }
+    let Some(contract) = dispatch_contract else {
+        return CompiledEvent::Rejected;
+    };
+    if !contract.is_empty() {
+        context.semantic(
+            "github.compile.workflow_dispatch_input_evidence_required",
+            "configured workflow_dispatch inputs require verified dispatch payload evidence during compilation",
+            trigger_span.clone(),
+        );
+        return CompiledEvent::Rejected;
+    }
+    CompiledEvent::Selected {
+        event,
+        workflow_dispatch: Some(Box::new(CompiledWorkflowDispatch {
+            contract,
+            inputs: ContextValue::empty_object(),
+        })),
     }
 }
 

@@ -1984,7 +1984,6 @@ where
     let mut expanded = original.clone();
     let include_entries = matrix.include.iter().map(Vec::len).sum::<usize>();
     work.charge_product(original.len(), include_entries)?;
-    work.charge_product(original.len(), include_entries)?;
     for patch in matrix.include {
         let mut applied = false;
         for (source, current) in original.iter().zip(expanded.iter_mut()) {

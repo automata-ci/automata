@@ -157,8 +157,11 @@ impl LogicalActivationEvaluator for GithubLogicalActivationEvaluator {
         }
         let named = BTreeMap::from([
             ("github".to_owned(), self.github.value().clone()),
-            ("inputs".to_owned(), github_value(context.inputs())?),
-            ("vars".to_owned(), github_value(context.vars())?),
+            (
+                "inputs".to_owned(),
+                context_to_github_value(context.inputs())?,
+            ),
+            ("vars".to_owned(), context_to_github_value(context.vars())?),
             ("needs".to_owned(), needs_value(context.needs())?),
         ]);
         let status = github_status(context.status());
@@ -203,7 +206,7 @@ impl GithubActivationSession {
         }
         let mut named = self.named.clone();
         if let Some(matrix) = context.matrix() {
-            named.insert("matrix".to_owned(), github_value(matrix)?);
+            named.insert("matrix".to_owned(), context_to_github_value(matrix)?);
         }
         if let Some(strategy) = context.strategy() {
             named.insert("strategy".to_owned(), strategy_value(strategy)?);
@@ -480,7 +483,9 @@ fn strategy_value(
     ])
 }
 
-fn github_value(value: &ContextValue) -> Result<GithubValue, GithubActivationEvaluationError> {
+pub(crate) fn context_to_github_value(
+    value: &ContextValue,
+) -> Result<GithubValue, GithubActivationEvaluationError> {
     Ok(match value {
         ContextValue::Null => GithubValue::Null,
         ContextValue::Boolean { value } => GithubValue::Boolean(*value),
@@ -489,14 +494,16 @@ fn github_value(value: &ContextValue) -> Result<GithubValue, GithubActivationEva
         ContextValue::Array { values } => GithubValue::array(
             values
                 .iter()
-                .map(github_value)
+                .map(context_to_github_value)
                 .collect::<Result<Vec<_>, _>>()?,
         )
         .map_err(GithubActivationEvaluationError::Value)?,
         ContextValue::Object { values } => object(
             values
                 .iter()
-                .map(|(key, value)| github_value(value).map(|value| (key.clone(), value)))
+                .map(|(key, value)| {
+                    context_to_github_value(value).map(|value| (key.clone(), value))
+                })
                 .collect::<Result<Vec<_>, GithubActivationEvaluationError>>()?,
         )?,
     })

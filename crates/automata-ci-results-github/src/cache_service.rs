@@ -12,11 +12,11 @@ use thiserror::Error;
 use crate::cache_port::CacheRepositoryPort;
 use crate::{
     CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
-    CacheKey, CachePermission, CacheRepositoryError, CacheRepositoryErrorKind, CacheVersion,
-    CommitCacheBlocks, CompleteCacheBlock, CompleteCacheFinalization, CreateCacheEntry,
-    CreatedCacheEntry, ExecutionAuthority, FinalizedCacheEntry, LookupCacheEntry,
-    PrepareCacheFinalization, ReserveCacheBlock, ResolveCacheDownload, ResultsClock,
-    ResultsIdGenerator,
+    CacheKey, CachePermission, CacheRepositoryError, CacheRepositoryErrorKind,
+    CacheRepositoryMetadata, CacheVersion, CommitCacheBlocks, CompleteCacheBlock,
+    CompleteCacheFinalization, CreateCacheEntry, CreatedCacheEntry, ExecutionAuthority,
+    FinalizedCacheEntry, LookupCacheEntry, PrepareCacheFinalization, ReserveCacheBlock,
+    ResolveCacheDownload, ResultsClock, ResultsIdGenerator,
 };
 
 const CACHE_BLOCK_MEDIA_TYPE: &str = "application/octet-stream";
@@ -427,7 +427,7 @@ impl CacheService {
             .map_err(map_repository_error)
     }
 
-    /// Resolves a cache using current-ref exact/prefix ordering.
+    /// Resolves a cache using ordered scope, exact, and prefix precedence.
     ///
     /// # Errors
     ///
@@ -549,20 +549,23 @@ impl fmt::Debug for CacheService {
     }
 }
 
-/// Derives the only phase-one scope from verified current `JobIR` evidence.
+/// Derives ordered current- and default-branch scopes from trusted evidence.
 ///
 /// `push` and `pull_request` runs receive read/write permission. Other events
 /// remain read-only because the current immutable evidence does not prove a
-/// safe writer for default-branch or externally initiated execution.
+/// safe writer for externally initiated execution. A distinct default branch
+/// comes only from server-owned repository metadata and is always read-only.
 ///
 /// # Errors
 ///
-/// Rejects non-GitHub providers or invalid repository/ref values.
-pub fn derive_current_cache_authority(
+/// Rejects non-GitHub providers, invalid repository/ref values, or metadata
+/// for a different repository.
+pub fn derive_cache_authority(
     provider: &str,
     repository: &str,
     git_ref: &str,
     event_name: &str,
+    repository_metadata: Option<&CacheRepositoryMetadata>,
 ) -> Result<CacheAuthority, CacheServiceError> {
     if provider != "github" {
         return Err(CacheServiceError::new(
@@ -576,8 +579,24 @@ pub fn derive_current_cache_authority(
     } else {
         CachePermission::Read
     };
-    let scope = CacheAccessScope::new(git_ref, permission).map_err(|_| invalid())?;
-    CacheAuthority::new(repository, vec![scope]).map_err(|_| invalid())
+    let current_scope = CacheAccessScope::new(git_ref, permission).map_err(|_| invalid())?;
+    let current =
+        CacheAuthority::new(repository, vec![current_scope.clone()]).map_err(|_| invalid())?;
+    let mut scopes = vec![current_scope];
+    if let Some(metadata) = repository_metadata {
+        if metadata.repository() != current.repository() {
+            return Err(CacheServiceError::new(
+                CacheServiceErrorKind::PermissionDenied,
+            ));
+        }
+        if metadata.default_branch_ref() != git_ref {
+            scopes.push(
+                CacheAccessScope::new(metadata.default_branch_ref(), CachePermission::Read)
+                    .map_err(|_| invalid())?,
+            );
+        }
+    }
+    CacheAuthority::new(current.repository(), scopes).map_err(|_| invalid())
 }
 
 fn is_pull_request_merge_ref(git_ref: &str) -> bool {

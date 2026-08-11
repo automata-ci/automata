@@ -944,7 +944,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
         .bind(public_job)
         .execute(database.pool())
         .await
-        .expect_err("readable-secret attempts can never publish raw logs");
+        .expect_err("readable-secret attempt resources remain private");
         assert_constraint(&unsafe_attempt, "job_attempts_exposure_safety");
 
         let attempt = Uuid::new_v4();

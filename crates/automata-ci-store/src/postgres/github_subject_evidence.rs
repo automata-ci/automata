@@ -5,11 +5,12 @@ use uuid::Uuid;
 
 use crate::{
     AcceptManifestPinnedGithubDelivery, AdmissionObject, AuthenticatedGithubDeliveryClaim,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
@@ -250,11 +251,17 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
           AND workflow.path = manifest.workflow_path
           AND snapshot.source_digest = $11
           AND run.event_name = $12
-          AND run.event_name = manifest.event_name
+          AND run.event_name = COALESCE(
+              evidence.authenticated_event_name,
+              manifest.event_name
+          )
           AND run.event_digest = $13
           AND run.event_digest = inbox.raw_event_digest
           AND run.git_ref = $14
-          AND run.git_ref = manifest.git_ref
+          AND run.git_ref = COALESCE(
+              evidence.authenticated_event_git_ref,
+              manifest.git_ref
+          )
           AND run.admission_epoch = 4
           AND run.plan_schema = 2
           AND run.plan_schema = invocation.plan_schema
@@ -545,11 +552,17 @@ async fn link_exact_check_to_run(
           AND run.workflow_id = $7
           AND run.snapshot_id = $8
           AND run.head_sha = subject.head_sha
-          AND run.event_name = manifest.event_name
+          AND run.event_name = COALESCE(
+              evidence.authenticated_event_name,
+              manifest.event_name
+          )
           AND run.event_name = $9
           AND run.event_digest = inbox.raw_event_digest
           AND run.event_digest = $10
-          AND run.git_ref = manifest.git_ref
+          AND run.git_ref = COALESCE(
+              evidence.authenticated_event_git_ref,
+              manifest.git_ref
+          )
           AND run.git_ref = $11
           AND run.admission_epoch = 4
           AND run.plan_schema = 2
@@ -801,6 +814,10 @@ async fn insert_delivery_evidence(
         .private_source_authority
         .as_ref()
         .map(|selector| selector.policy_revision().as_i64());
+    let authenticated_event = request.authenticated_event_v1();
+    let authenticated_event_version = authenticated_event.map(|_| 1_i16);
+    let authenticated_event_name = authenticated_event.map(|event| event.kind().as_str());
+    let authenticated_event_git_ref = authenticated_event.map(GithubAuthenticatedEventV1::git_ref);
     let result = sqlx::query(
         r"
         INSERT INTO github_provider_delivery_evidence (
@@ -811,6 +828,8 @@ async fn insert_delivery_evidence(
             provider_manifest_revision, provider_manifest_digest,
             authenticated_webhook_verifier_fingerprint_sha256,
             authenticated_webhook_verifier_revision,
+            authenticated_event_envelope_version,
+            authenticated_event_name, authenticated_event_git_ref,
             checks_authority_id, checks_authority_identity_digest,
             checks_authority_app_configuration_revision,
             checks_authority_policy_revision,
@@ -821,7 +840,7 @@ async fn insert_delivery_evidence(
             github_check_subject_id, github_check_head_sha
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-            $16,$17,$18,$19,$20,$21,$22,$23
+            $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
         )
         ",
     )
@@ -844,6 +863,9 @@ async fn insert_delivery_evidence(
             .as_slice(),
     )
     .bind(request.authenticated_webhook_verifier_revision().as_i64())
+    .bind(authenticated_event_version)
+    .bind(authenticated_event_name)
+    .bind(authenticated_event_git_ref)
     .bind(pin.checks_authority.authority_id().as_uuid())
     .bind(pin.checks_authority.identity_digest().as_bytes().as_slice())
     .bind(pin.checks_authority.app_configuration_revision().as_i64())
@@ -913,21 +935,40 @@ fn evidence_from_request(
     request: &AcceptManifestPinnedGithubDelivery,
     pin: &CurrentManifestPin,
 ) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
-    ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-        ProviderDeliveryId::from_uuid(delivery_id)
-            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        request.repository_owner_id(),
-        pin.manifest.clone(),
-        request.authenticated_webhook_verifier_fingerprint(),
-        request.authenticated_webhook_verifier_revision(),
-        pin.checks_authority.clone(),
-        pin.private_source_authority.clone(),
-        GithubCheckSubjectId::from_uuid(subject_id)
-            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        request.head_sha(),
-        request.delivery().accepted_at(),
-    )
-    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+    let delivery_id = ProviderDeliveryId::from_uuid(delivery_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let result = match request.authenticated_event_v1() {
+        Some(event) => {
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+                delivery_id,
+                request.repository_owner_id(),
+                pin.manifest.clone(),
+                request.authenticated_webhook_verifier_fingerprint(),
+                request.authenticated_webhook_verifier_revision(),
+                pin.checks_authority.clone(),
+                pin.private_source_authority.clone(),
+                subject_id,
+                request.head_sha(),
+                event.clone(),
+                request.delivery().accepted_at(),
+            )
+        }
+        None => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            delivery_id,
+            request.repository_owner_id(),
+            pin.manifest.clone(),
+            request.authenticated_webhook_verifier_fingerprint(),
+            request.authenticated_webhook_verifier_revision(),
+            pin.checks_authority.clone(),
+            pin.private_source_authority.clone(),
+            subject_id,
+            request.head_sha(),
+            request.delivery().accepted_at(),
+        ),
+    };
+    result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
 async fn load_acceptance_by_replay_key(
@@ -1008,6 +1049,7 @@ fn acceptance_matches(
         && durable.receipt.accepted_at() == request.delivery().accepted_at()
         && durable.receipt.repository_owner_id() == request.repository_owner_id()
         && durable.receipt.evidence().check_head_sha() == request.head_sha()
+        && durable.receipt.evidence().authenticated_event_v1() == request.authenticated_event_v1()
         && durable
             .receipt
             .evidence()
@@ -1071,22 +1113,56 @@ fn decode_delivery_evidence(
     )
     .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let accepted_at: i64 = row.try_get("accepted_at_ms").map_err(operation_error)?;
-    ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-        ProviderDeliveryId::from_uuid(delivery_id)
-            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        ProviderRepositoryOwnerId::new(positive_u64(owner_id)?)
-            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        manifest,
-        authenticated_verifier_fingerprint,
-        authenticated_verifier_revision,
-        checks_authority,
-        private_source_authority,
-        GithubCheckSubjectId::from_uuid(subject_id)
-            .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        head_sha,
-        UnixMillis::new(accepted_at),
-    )
-    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+    let delivery_id = ProviderDeliveryId::from_uuid(delivery_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let owner_id = ProviderRepositoryOwnerId::new(positive_u64(owner_id)?)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let version: Option<i16> = row
+        .try_get("authenticated_event_envelope_version")
+        .map_err(operation_error)?;
+    let event_name: Option<String> = row
+        .try_get("authenticated_event_name")
+        .map_err(operation_error)?;
+    let git_ref: Option<String> = row
+        .try_get("authenticated_event_git_ref")
+        .map_err(operation_error)?;
+    let result = match (version, event_name, git_ref) {
+        (None, None, None) => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            delivery_id,
+            owner_id,
+            manifest,
+            authenticated_verifier_fingerprint,
+            authenticated_verifier_revision,
+            checks_authority,
+            private_source_authority,
+            subject_id,
+            head_sha,
+            UnixMillis::new(accepted_at),
+        ),
+        (Some(1), Some(event_name), Some(git_ref)) => {
+            let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
+                .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
+            let event = GithubAuthenticatedEventV1::new(kind, git_ref)
+                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+                delivery_id,
+                owner_id,
+                manifest,
+                authenticated_verifier_fingerprint,
+                authenticated_verifier_revision,
+                checks_authority,
+                private_source_authority,
+                subject_id,
+                head_sha,
+                event,
+                UnixMillis::new(accepted_at),
+            )
+        }
+        _ => return Err(GithubSubjectEvidenceStoreError::CorruptData),
+    };
+    result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
 async fn load_run_evidence<'e, E>(
@@ -1580,6 +1656,8 @@ const EVIDENCE_SELECT: &str = r"
         inbox.raw_event_object_key, inbox.raw_event_size_bytes,
         inbox.raw_event_media_type, inbox.accepted_at_ms,
         evidence.github_repository_owner_id,
+        evidence.authenticated_event_envelope_version,
+        evidence.authenticated_event_name, evidence.authenticated_event_git_ref,
         evidence.authenticated_webhook_verifier_fingerprint_sha256,
         evidence.authenticated_webhook_verifier_revision,
         evidence.checks_authority_id,

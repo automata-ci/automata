@@ -326,6 +326,10 @@ test("CI executes documentation and committed script contract suites", () => {
     source("scripts/ci/verify-product-targets.sh"),
     /publish-crates\.py" --list-publishable/,
   );
+  assert.match(
+    source("scripts/ci/verify-product-targets.sh"),
+    /scripts\/ci\/verify-documentation\.py/,
+  );
 });
 
 test("frontend CI retains the production-source coverage gate", () => {

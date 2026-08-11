@@ -417,6 +417,9 @@ struct Fixture {
     router: axum::Router,
     token: String,
     read_only_token: String,
+    fallback_token: String,
+    wrong_ref_token: String,
+    wrong_repository_token: String,
 }
 
 fn fixture() -> Fixture {
@@ -441,6 +444,26 @@ fn fixture_with_limits(limits: GithubCacheHttpLimits) -> Fixture {
         Arc::new(NoopResultsObserver),
         limits,
     )
+}
+
+fn issue_cache_token(
+    authority: &HmacResultsAuthority,
+    execution: ExecutionAuthority,
+    repository: &str,
+    scopes: &[(&str, CachePermission)],
+) -> String {
+    let scopes = scopes
+        .iter()
+        .map(|(cache_ref, permission)| {
+            CacheAccessScope::new(*cache_ref, *permission).expect("cache scope")
+        })
+        .collect();
+    let cache = CacheAuthority::new(repository, scopes).expect("cache authority");
+    authority
+        .issue(execution, cache, 600)
+        .expect("token")
+        .expose_secret()
+        .to_owned()
 }
 
 fn fixture_with_url_observer_and_limits(
@@ -493,26 +516,39 @@ fn fixture_with_url_observer_and_limits(
         AttemptId::new(),
         FencingToken::new(9).expect("fence"),
     );
-    let writable = CacheAuthority::new(
+    let token = issue_cache_token(
+        authority.as_ref(),
+        execution,
         "owner/repository",
-        vec![CacheAccessScope::new("refs/heads/main", CachePermission::ReadWrite).expect("scope")],
-    )
-    .expect("cache authority");
-    let read_only = CacheAuthority::new(
+        &[("refs/heads/main", CachePermission::ReadWrite)],
+    );
+    let read_only_token = issue_cache_token(
+        authority.as_ref(),
+        execution,
         "owner/repository",
-        vec![CacheAccessScope::new("refs/heads/main", CachePermission::Read).expect("scope")],
-    )
-    .expect("cache authority");
-    let token = authority
-        .issue(execution, writable, 600)
-        .expect("token")
-        .expose_secret()
-        .to_owned();
-    let read_only_token = authority
-        .issue(execution, read_only, 600)
-        .expect("read-only token")
-        .expose_secret()
-        .to_owned();
+        &[("refs/heads/main", CachePermission::Read)],
+    );
+    let fallback_token = issue_cache_token(
+        authority.as_ref(),
+        execution,
+        "owner/repository",
+        &[
+            ("refs/heads/feature", CachePermission::ReadWrite),
+            ("refs/heads/main", CachePermission::Read),
+        ],
+    );
+    let wrong_ref_token = issue_cache_token(
+        authority.as_ref(),
+        execution,
+        "owner/repository",
+        &[("refs/heads/feature", CachePermission::ReadWrite)],
+    );
+    let wrong_repository_token = issue_cache_token(
+        authority.as_ref(),
+        execution,
+        "sibling/repository",
+        &[("refs/heads/main", CachePermission::Read)],
+    );
     let router = GithubCacheApi::new(service, authority.clone(), authority, limits)
         .with_observer(observer)
         .router();
@@ -520,6 +556,9 @@ fn fixture_with_url_observer_and_limits(
         router,
         token,
         read_only_token,
+        fallback_token,
+        wrong_ref_token,
+        wrong_repository_token,
     }
 }
 
@@ -848,6 +887,30 @@ async fn snake_case_cache_v2_round_trip_replays_races_and_supports_ranges() {
     let matched = json_body(lookup).await;
     assert_eq!(matched["ok"], true);
     assert_eq!(matched["matched_key"], "cargo-linux-v1");
+    let fallback = send_json(
+        &fixture.router,
+        &fixture.fallback_token,
+        "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL",
+        serde_json::json!({
+            "key":"missing-primary", "version":"version-1", "restore_keys":["cargo-"]
+        }),
+    )
+    .await;
+    assert_eq!(fallback.status(), StatusCode::OK);
+    assert_eq!(json_body(fallback).await["matched_key"], "cargo-linux-v1");
+    for token in [&fixture.wrong_ref_token, &fixture.wrong_repository_token] {
+        let denied = send_json(
+            &fixture.router,
+            token,
+            "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL",
+            serde_json::json!({
+                "key":"cargo-linux-v1", "version":"version-1", "restore_keys":[]
+            }),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::OK);
+        assert_eq!(json_body(denied).await["ok"], false);
+    }
     let download_url = Url::parse(
         matched["signed_download_url"]
             .as_str()

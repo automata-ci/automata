@@ -6,8 +6,8 @@ use automata_ci_core::{
     AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobConclusion, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionGrant,
     JobPermissionRequest, JobRuntimeContext, JobSource, Lease, LeaseId, NeedContext, NeedOutput,
-    OutputSensitivity, PermissionLevel, RunId, RunnerRequirements, SecretBinding, Sha256Digest,
-    StrategyContext, UnixMillis, WorkflowId,
+    OutputSensitivity, PermissionLevel, RunId, RunIdAlias, RunnerRequirements, SecretBinding,
+    Sha256Digest, StrategyContext, UnixMillis, WorkflowId,
 };
 use automata_ci_execution::{
     ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
@@ -62,6 +62,7 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
         "/__automata/attempts/fixture/event.json"
     );
     assert_eq!(environment["GITHUB_ACTOR"], "local-bootstrap");
+    assert_eq!(environment["GITHUB_RUN_ID"], "42");
     assert_eq!(environment["GITHUB_RUN_ATTEMPT"], "1");
     assert!(!environment.contains_key("GITHUB_RUN_NUMBER"));
 
@@ -91,6 +92,10 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     assert_eq!(
         github.get("workflow_ref").and_then(GithubValue::as_str),
         Some("automata-ci/automata/.github/workflows/ci.yml@refs/heads/main")
+    );
+    assert_eq!(
+        github.get("run_id").and_then(GithubValue::as_str),
+        Some("42")
     );
     assert!(github.get("run_number").is_none());
 }
@@ -748,6 +753,7 @@ impl ContextFixture {
                 ),
             )
             .with_actor("local-bootstrap")
+            .with_run_id_alias(RunIdAlias::new(42).expect("run ID alias"))
             .with_run_attempt(1),
             JobIr::new(
                 JobId::new(),

@@ -25,8 +25,5 @@ composes repository-scoped management with this adapter and supervises
 ambiguous-mutation recovery and built-in cleanup. It does not deliver managed
 secret values to jobs; external providers remain uncomposed and unadvertised.
 
-Automata is pre-1.0 and not production-ready. This is an internal security
-boundary, and its Rust API may change between releases.
-
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
 - [Issues and support](https://github.com/automata-ci/automata/issues)

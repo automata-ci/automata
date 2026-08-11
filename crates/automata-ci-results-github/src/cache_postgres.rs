@@ -539,51 +539,17 @@ impl CacheRepository for PostgresCacheRepository {
         validate_cache_caller_clock(request.observed_at_seconds, database_now)?;
         let inactivity_seconds = validated_inactivity_seconds(request.inactivity_seconds)?;
         let mut selected = None;
-        for scope in request
-            .cache
-            .scopes()
-            .iter()
-            .filter(|scope| scope.permission().can_read())
-        {
+        for candidate in request.candidates() {
             selected = find_match(
                 &mut transaction,
                 repository.repository_id,
-                scope.scope(),
+                candidate.cache_ref,
                 &request.version,
-                request.key.as_str(),
-                true,
+                candidate.key,
+                candidate.exact,
                 inactivity_seconds,
             )
             .await?;
-            if selected.is_none() {
-                selected = find_match(
-                    &mut transaction,
-                    repository.repository_id,
-                    scope.scope(),
-                    &request.version,
-                    request.key.as_str(),
-                    false,
-                    inactivity_seconds,
-                )
-                .await?;
-            }
-            if selected.is_none() {
-                for restore_key in &request.restore_keys {
-                    selected = find_match(
-                        &mut transaction,
-                        repository.repository_id,
-                        scope.scope(),
-                        &request.version,
-                        restore_key.as_str(),
-                        false,
-                        inactivity_seconds,
-                    )
-                    .await?;
-                    if selected.is_some() {
-                        break;
-                    }
-                }
-            }
             if selected.is_some() {
                 break;
             }

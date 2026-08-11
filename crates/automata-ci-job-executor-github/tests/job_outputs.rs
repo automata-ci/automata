@@ -111,17 +111,17 @@ async fn output_matching_a_runtime_secret_is_persisted_only_as_a_classification_
 }
 
 #[tokio::test]
-async fn any_readable_secret_suppresses_transformed_output_plaintext() {
+async fn readable_secret_exposure_does_not_taint_an_unrelated_public_output() {
     let step = run_step("producer", "Producer", "true").with_environment(BTreeMap::from([(
         "TOKEN".to_owned(),
         ValueSource::SecretReference("test-token".to_owned()),
     )]));
-    let transformed = "sha256:transformed-value";
+    let public_value = "bundle-42";
     let fixture = Fixture::new(
         Vec::new(),
         vec![PhaseResponse::success().with_file(
             CommandFileKind::Output,
-            format!("digest={transformed}\n").into_bytes(),
+            format!("digest={public_value}\n").into_bytes(),
         )],
     );
     let job = envelope_with_output_definitions(
@@ -138,12 +138,50 @@ async fn any_readable_secret_suppresses_transformed_output_plaintext() {
 
     assert_eq!(result.secret_exposure(), JobSecretExposure::ReadableSecret);
     let output = result.outputs().get("digest").expect("classified output");
-    assert_eq!(output.sensitivity(), OutputSensitivity::SecretDerived);
-    assert_eq!(output.public_value(), None);
+    assert_eq!(output.sensitivity(), OutputSensitivity::Public);
+    assert_eq!(output.public_value(), Some(public_value));
     assert!(
-        !serde_json::to_string(&result)
+        serde_json::to_string(&result)
             .expect("serialize result")
-            .contains(transformed)
+            .contains(public_value)
+    );
+}
+
+#[tokio::test]
+async fn runtime_credentials_are_masked_without_hiding_logs_or_public_outputs() {
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![
+            PhaseResponse::success()
+                .with_stdout(format!("ordinary {CONTEXT_SECRET} diagnostic\n"))
+                .with_file(CommandFileKind::Output, b"artifact=bundle-42\n".to_vec()),
+        ],
+    );
+    let job = envelope_with_output_definitions(
+        vec![run_step("producer", "Producer", "true")],
+        vec![step_output_definition("artifact", "producer", "artifact")],
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(fixture.request(job), events, ExecutionCancellation::new())
+        .await
+        .expect("job executes");
+
+    assert_eq!(result.secret_exposure(), JobSecretExposure::ReadableSecret);
+    let output = result.outputs().get("artifact").expect("public output");
+    assert_eq!(output.sensitivity(), OutputSensitivity::Public);
+    assert_eq!(output.public_value(), Some("bundle-42"));
+
+    let logs = fixture.events.logs();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].payload(), b"ordinary *** diagnostic\n");
+    assert!(
+        !logs[0]
+            .payload()
+            .windows(CONTEXT_SECRET.len())
+            .any(|window| window == CONTEXT_SECRET.as_bytes())
     );
 }
 

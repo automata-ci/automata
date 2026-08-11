@@ -8,7 +8,9 @@ fn render_name_values(file: &ParsedCommandFile) -> String {
         ParsedCommandFile::Environment(file) => file.commands(),
         ParsedCommandFile::Output(file) => file.commands(),
         ParsedCommandFile::State(file) => file.commands(),
-        ParsedCommandFile::Path(_) | ParsedCommandFile::StepSummary(_) => {
+        ParsedCommandFile::Path(_)
+        | ParsedCommandFile::StepSummary(_)
+        | ParsedCommandFile::Artifacts(_) => {
             panic!("fixture must decode as a name/value command file")
         }
     };

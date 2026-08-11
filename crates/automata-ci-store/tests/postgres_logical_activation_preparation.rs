@@ -371,7 +371,7 @@ async fn preparation_is_dependency_ready_fenced_replayable_and_workspace_bound()
         let stale = BindLogicalActivationPreparation::new(
             winner.descriptor().clone(),
             winner.claim().clone(),
-            context_object("stale/base.pb", 50),
+            winner.descriptor().base_context().clone(),
             context_object("stale/needs.pb", 51),
             winner.claim().claimed_at(),
         )?;
@@ -444,8 +444,8 @@ async fn preparation_is_dependency_ready_fenced_replayable_and_workspace_bound()
         let changed_binding = BindLogicalActivationPreparation::new(
             takeover.descriptor().clone(),
             takeover.claim().clone(),
-            context_object("contexts/changed/base.pb", 60),
-            second_receipt.prerequisite_context().clone(),
+            takeover.descriptor().base_context().clone(),
+            context_object("contexts/changed/needs.pb", 60),
             second_receipt.bound_at(),
         )?;
         assert!(matches!(
@@ -855,6 +855,7 @@ fn prepared_materialization(
         content_reference(claimed.event()),
         activation_reference(&runtime),
     )
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
     if let Some(actor) = execution.actor() {
@@ -999,7 +1000,7 @@ async fn bind_preparation(
     let request = BindLogicalActivationPreparation::new(
         claimed.descriptor().clone(),
         claimed.claim().clone(),
-        context_object(&format!("contexts/{namespace}/base.pb"), 41),
+        claimed.descriptor().base_context().clone(),
         context_object(&format!("contexts/{namespace}/needs.pb"), 42),
         UnixMillis::new(database_now_ms(database).await?),
     )?;
@@ -1296,6 +1297,11 @@ async fn fixture_with_visibility(
         jobs,
         UnixMillis::new(configured_at),
     )
+    .base_context(object(
+        format!("preparation/{namespace}/base-context.pb"),
+        &[4; 64],
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("admission");
     let accepted = database
@@ -1363,7 +1369,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -1383,8 +1389,11 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {

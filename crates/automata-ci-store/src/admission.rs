@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use automata_ci_core::{AttemptId, JobId, OperationId, RunId, UnixMillis, WorkflowId};
+use automata_ci_core::{AttemptId, JobId, OperationId, QueuePolicy, RunId, UnixMillis, WorkflowId};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -263,6 +263,7 @@ pub struct WorkflowConcurrency {
     display_key: String,
     normalized_key: String,
     cancel_in_progress: bool,
+    queue_policy: QueuePolicy,
 }
 
 impl WorkflowConcurrency {
@@ -286,7 +287,15 @@ impl WorkflowConcurrency {
             display_key,
             normalized_key,
             cancel_in_progress,
+            queue_policy: QueuePolicy::Single,
         })
+    }
+
+    /// Selects the pending-run retention policy for this group.
+    #[must_use]
+    pub const fn with_queue_policy(mut self, queue_policy: QueuePolicy) -> Self {
+        self.queue_policy = queue_policy;
+        self
     }
 
     #[must_use]
@@ -302,6 +311,12 @@ impl WorkflowConcurrency {
     #[must_use]
     pub const fn cancel_in_progress(&self) -> bool {
         self.cancel_in_progress
+    }
+
+    /// Returns the pending-run retention policy.
+    #[must_use]
+    pub const fn queue_policy(&self) -> QueuePolicy {
+        self.queue_policy
     }
 }
 
@@ -785,6 +800,8 @@ pub enum WorkflowAdmissionStoreError {
     IdentityConflict(&'static str),
     #[error("workflow run-number sequence is exhausted")]
     RunNumberExhausted,
+    #[error("workflow concurrency pending queue reached its safety limit")]
+    ConcurrencyQueueFull,
 }
 
 fn validate_text(value: &str, field: &'static str) -> Result<(), WorkflowAdmissionValueError> {

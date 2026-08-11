@@ -9,9 +9,6 @@ The `automata` control plane uses the server adapter, while `automata-runner`
 uses the client. Reverse-proxy certificate headers are not trusted by this
 implementation.
 
-Automata is pre-1.0 and not production-ready. This is an internal transport
-layer, and its configuration and Rust API may change between releases.
-
 - [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
-- [API documentation](https://docs.rs/automata-ci-runner-transport)
+- API documentation: run `cargo doc -p automata-ci-runner-transport --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

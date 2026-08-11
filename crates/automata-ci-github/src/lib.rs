@@ -12,6 +12,7 @@ mod repository;
 mod repository_path;
 mod response;
 mod webhook;
+mod webhook_event;
 
 pub use changed_files::{
     GithubCompletePushDiff, GithubPushDiffAuthority, GithubPushDiffError,
@@ -31,10 +32,17 @@ pub use config::{
 };
 pub use endpoint::GithubHttpEndpoint;
 pub use webhook::{
+    AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
     GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubPushRef, GithubPushRefKind, GithubPushRepository,
-    GithubRepositoryVisibility, GithubStoredPushError, GithubWebhookBodyDigest, GithubWebhookError,
-    GithubWebhookEventMetadata, GithubWebhookVerifier, GithubWebhookVerifierFingerprint,
-    MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES, MAX_GITHUB_WEBHOOK_SECRET_BYTES,
-    StoredAuthenticatedGithubPush, VerifiedGithubPush, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
+    GithubRepositoryVisibility, GithubStoredPushError, GithubStoredWebhookError,
+    GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookEventMetadata, GithubWebhookVerifier,
+    GithubWebhookVerifierFingerprint, MAX_GITHUB_PUSH_COMMITS, MAX_GITHUB_WEBHOOK_BODY_BYTES,
+    MAX_GITHUB_WEBHOOK_SECRET_BYTES, StoredAuthenticatedGithubPush,
+    StoredAuthenticatedGithubWebhookV1, VerifiedGithubPush, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
     X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_push,
+    rehydrate_stored_authenticated_github_webhook_v1,
+};
+pub use webhook_event::{
+    GithubMergeGroupAction, GithubPullRequestAction, GithubWebhookRef, GithubWebhookRepository,
+    VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubWebhook,
 };

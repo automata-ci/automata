@@ -378,6 +378,8 @@ message JobExecutionContext {
   JobContentReference event = 7;
   // Required immutable execution-time context for JobIR v5.
   JobContentReference runtime_context = 8;
+  // Stable positive numeric alias for the internal UUID run identity.
+  optional uint64 run_id_alias = 9;
 }
 
 message ExpressionDialect {
@@ -791,6 +793,26 @@ message StepResult {
   JobConclusion conclusion = 3;
   sint64 started_at_unix_millis = 4;
   sint64 completed_at_unix_millis = 5;
+  optional string summary_markdown = 6;
+  repeated StepAnnotation annotations = 7;
+}
+
+enum StepAnnotationLevel {
+  STEP_ANNOTATION_LEVEL_UNSPECIFIED = 0;
+  STEP_ANNOTATION_LEVEL_ERROR = 1;
+  STEP_ANNOTATION_LEVEL_WARNING = 2;
+  STEP_ANNOTATION_LEVEL_NOTICE = 3;
+}
+
+message StepAnnotationProperty {
+  string name = 1;
+  string value = 2;
+}
+
+message StepAnnotation {
+  StepAnnotationLevel level = 1;
+  string message = 2;
+  repeated StepAnnotationProperty properties = 3;
 }
 
 enum JobSecretExposure {

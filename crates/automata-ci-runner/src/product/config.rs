@@ -479,6 +479,7 @@ pub struct ToolchainConfig {
     pwsh: Option<TargetPath>,
     install: TargetPath,
     tar: TargetPath,
+    sha256sum: TargetPath,
     node12: Option<TargetPath>,
     node16: Option<TargetPath>,
     node20: Option<TargetPath>,
@@ -520,6 +521,12 @@ impl ToolchainConfig {
     #[must_use]
     pub const fn tar(&self) -> &TargetPath {
         &self.tar
+    }
+
+    /// Returns the target path to the SHA-256 hashing utility.
+    #[must_use]
+    pub const fn sha256sum(&self) -> &TargetPath {
+        &self.sha256sum
     }
 
     /// Returns the optional target Node.js 12 executable for legacy actions.
@@ -1334,6 +1341,7 @@ struct RawToolchainConfig {
     pwsh: Option<String>,
     install: String,
     tar: String,
+    sha256sum: String,
     node12: Option<String>,
     node16: Option<String>,
     node20: Option<String>,
@@ -1352,6 +1360,7 @@ impl RawToolchainConfig {
             pwsh: self.pwsh.map(&path).transpose()?,
             install: path(self.install)?,
             tar: path(self.tar)?,
+            sha256sum: path(self.sha256sum)?,
             node12: self.node12.map(path).transpose()?,
             node16: self.node16.map(path).transpose()?,
             node20: self.node20.map(path).transpose()?,

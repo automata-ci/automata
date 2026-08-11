@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_core::{
-    Architecture, ContextValue, EnvironmentProfile, EnvironmentProfileId, JobAuthorityProfile,
-    JobContentReference, JobExecutionContext, JobId, JobIrEnvelope, JobPermissionGrant,
-    JobPermissionRequest, JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel,
-    RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SemanticStep, Sha256Digest,
-    ShellTemplate, TransportProtocol, ValueSource, ValueTemplateSegment, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowPlan,
+    Architecture, ContainerFeature, ContextValue, EnvironmentProfile, EnvironmentProfileId,
+    JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIrEnvelope,
+    JobPermissionGrant, JobPermissionRequest, JobValidationError, OperatingSystem,
+    OutputSensitivity, PermissionLevel, RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit,
+    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, ValueSource,
+    ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
@@ -233,6 +233,13 @@ fn fixed_id<T>(value: u128, constructor: impl FnOnce(Uuid) -> T) -> T {
 }
 
 fn project_envelope(source: &str) -> JobIrEnvelope {
+    project_envelope_with_profiles(source, &profiles())
+}
+
+fn project_envelope_with_profiles(
+    source: &str,
+    profiles: &GithubRunnerProfileCatalog,
+) -> JobIrEnvelope {
     let plan = plan(source);
     let activation = activate(&plan);
     let instance = &activation.instances()[0];
@@ -248,12 +255,122 @@ fn project_envelope(source: &str) -> JobIrEnvelope {
             fixed_id(32, automata_ci_core::RunId::from_uuid),
             fixed_id(33, JobId::from_uuid),
             execution(instance),
-            &profiles(),
+            profiles,
             JobAuthorityProfile::Standard,
         ))
         .expect("projection")
         .into_parts()
         .0
+}
+
+#[test]
+fn mapped_profile_preserves_multi_label_and_group_routing() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on:
+      group: trusted-builders
+      labels: [self-hosted, linux, x64, standard-profile]
+    steps: [{run: echo public}]
+";
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.test/linux-standard").expect("profile id"),
+        Sha256Digest::from_bytes([4; 32]),
+    );
+    let profiles = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "standard-profile",
+        profile.clone(),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+    )
+    .expect("profile mapping")
+    .with_container_features([ContainerFeature::DOCKER_COMPATIBLE_API])])
+    .expect("profile catalog");
+
+    let envelope = project_envelope_with_profiles(source, &profiles);
+    let requirements = envelope.job().requirements();
+    assert_eq!(requirements.environment_profile(), Some(&profile));
+    assert_eq!(
+        requirements.operating_system(),
+        Some(&OperatingSystem::Linux)
+    );
+    assert_eq!(requirements.architecture(), Some(&Architecture::X86_64));
+    assert_eq!(
+        requirements
+            .labels()
+            .iter()
+            .map(|label| label.as_str())
+            .collect::<Vec<_>>(),
+        ["linux", "self-hosted", "x64"]
+    );
+    assert_eq!(
+        requirements
+            .eligible_groups()
+            .iter()
+            .map(|group| group.as_str())
+            .collect::<Vec<_>>(),
+        ["trusted-builders"]
+    );
+    assert!(
+        requirements
+            .container_features()
+            .contains(&ContainerFeature::DOCKER_COMPATIBLE_API)
+    );
+}
+
+#[test]
+fn multiple_profile_selectors_remain_ambiguous() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, profile-alpha, profile-beta]
+    steps: [{run: echo public}]
+";
+    let profiles = GithubRunnerProfileCatalog::new(
+        [
+            ("profile-alpha", "automata.test/linux-alpha", 5),
+            ("profile-beta", "automata.test/linux-beta", 6),
+        ]
+        .map(|(selector, id, digest)| {
+            GithubRunnerProfileMapping::new(
+                selector,
+                EnvironmentProfile::new(
+                    EnvironmentProfileId::new(id).expect("profile id"),
+                    Sha256Digest::from_bytes([digest; 32]),
+                ),
+                OperatingSystem::Linux,
+                Architecture::X86_64,
+            )
+            .expect("profile mapping")
+        }),
+    )
+    .expect("profile catalog");
+    let plan = plan(source);
+    let activation = activate(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+
+    let error = GithubLogicalJobProjector::new()
+        .project(ProjectGithubLogicalJobRequest::new(
+            job,
+            instance,
+            fixed_id(34, WorkflowId::from_uuid),
+            fixed_id(35, automata_ci_core::RunId::from_uuid),
+            fixed_id(36, JobId::from_uuid),
+            execution(instance),
+            &profiles,
+            JobAuthorityProfile::Standard,
+        ))
+        .expect_err("two mapped selectors cannot choose one environment");
+    assert!(matches!(
+        error,
+        LogicalJobProjectionError::AmbiguousRunnerProfile
+    ));
 }
 
 #[test]

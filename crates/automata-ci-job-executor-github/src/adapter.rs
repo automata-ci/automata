@@ -74,6 +74,7 @@ pub struct StaticGithubToolchain {
     pwsh: Option<TargetPath>,
     install: TargetPath,
     tar: TargetPath,
+    sha256sum: TargetPath,
     nodes: Vec<(JavascriptRuntime, TargetPath)>,
 }
 
@@ -88,8 +89,9 @@ impl StaticGithubToolchain {
         sh: TargetPath,
         install: TargetPath,
         tar: TargetPath,
+        sha256sum: TargetPath,
     ) -> Result<Self, PortError> {
-        if [&bash, &sh, &install, &tar]
+        if [&bash, &sh, &install, &tar, &sha256sum]
             .into_iter()
             .any(|path| !valid_tool(path))
         {
@@ -102,6 +104,7 @@ impl StaticGithubToolchain {
             pwsh: None,
             install,
             tar,
+            sha256sum,
             nodes: Vec::new(),
         })
     }
@@ -180,6 +183,10 @@ impl GithubToolchain for StaticGithubToolchain {
         &self.tar
     }
 
+    fn sha256sum(&self) -> &TargetPath {
+        &self.sha256sum
+    }
+
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath> {
         self.nodes
             .iter()
@@ -198,6 +205,7 @@ impl fmt::Debug for StaticGithubToolchain {
             .field("pwsh", &self.pwsh)
             .field("install", &self.install)
             .field("tar", &self.tar)
+            .field("sha256sum", &self.sha256sum)
             .field(
                 "node_runtimes",
                 &self

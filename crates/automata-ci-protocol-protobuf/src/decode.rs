@@ -1093,6 +1093,13 @@ fn job_execution_context(
     if let Some(actor) = value.actor {
         context = context.with_actor(actor);
     }
+    if let Some(run_id_alias) = value.run_id_alias {
+        context = context.with_run_id_alias(core::RunIdAlias::new(run_id_alias).map_err(|_| {
+            DecodeError::InvalidValue {
+                field: "job_execution_context.run_id_alias",
+            }
+        })?);
+    }
     if let Some(run_number) = value.run_number {
         context = context.with_run_number(run_number);
     }
@@ -2053,7 +2060,7 @@ fn job_result(
     let steps = value
         .steps
         .into_iter()
-        .map(step_result)
+        .map(|step| step_result(step, limits))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(core::JobResult::new(
         core::AttemptId::from_uuid(uuid(value.attempt_id, "job_result.attempt_id")?),
@@ -2133,8 +2140,21 @@ fn job_secret_exposure(
     }
 }
 
-fn step_result(value: wire::StepResult) -> Result<core::StepResult, DecodeError> {
-    Ok(core::StepResult::new(
+fn step_result(
+    value: wire::StepResult,
+    limits: &protocol::ProtocolLimits,
+) -> Result<core::StepResult, DecodeError> {
+    check_collection(
+        value.annotations.len(),
+        limits.max_collection_items(),
+        "step_result.annotations",
+    )?;
+    let annotations = value
+        .annotations
+        .into_iter()
+        .map(|annotation| step_annotation(annotation, limits))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut result = core::StepResult::new(
         core::StepId::new(value.step_id).map_err(|_| DecodeError::InvalidValue {
             field: "step_result.step_id",
         })?,
@@ -2142,6 +2162,42 @@ fn step_result(value: wire::StepResult) -> Result<core::StepResult, DecodeError>
         job_conclusion(value.conclusion, "step_result.conclusion")?,
         core::UnixMillis::new(value.started_at_unix_millis),
         core::UnixMillis::new(value.completed_at_unix_millis),
+    )
+    .with_annotations(annotations);
+    if let Some(summary) = value.summary_markdown {
+        result = result.with_summary_markdown(summary);
+    }
+    Ok(result)
+}
+
+fn step_annotation(
+    value: wire::StepAnnotation,
+    limits: &protocol::ProtocolLimits,
+) -> Result<core::StepAnnotation, DecodeError> {
+    check_collection(
+        value.properties.len(),
+        limits.max_collection_items(),
+        "step_annotation.properties",
+    )?;
+    let level = match wire::StepAnnotationLevel::try_from(value.level) {
+        Ok(wire::StepAnnotationLevel::Error) => core::StepAnnotationLevel::Error,
+        Ok(wire::StepAnnotationLevel::Warning) => core::StepAnnotationLevel::Warning,
+        Ok(wire::StepAnnotationLevel::Notice) => core::StepAnnotationLevel::Notice,
+        Ok(wire::StepAnnotationLevel::Unspecified) | Err(_) => {
+            return Err(DecodeError::UnknownEnum {
+                field: "step_annotation.level",
+                value: value.level,
+            });
+        }
+    };
+    Ok(core::StepAnnotation::new(
+        level,
+        value.message,
+        value
+            .properties
+            .into_iter()
+            .map(|property| core::StepAnnotationProperty::new(property.name, property.value))
+            .collect(),
     ))
 }
 

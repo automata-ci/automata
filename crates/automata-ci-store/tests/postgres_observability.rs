@@ -23,8 +23,8 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    JobAttemptCounts, LeaseState, LogicalActivationPreparationStore as _,
-    LogicalActivationWorkerId, LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
+    LeaseState, LogicalActivationPreparationStore as _, LogicalActivationWorkerId,
+    LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
@@ -1482,9 +1482,4 @@ async fn insert_artifact_state(
     .execute(database.pool())
     .await?;
     Ok(())
-}
-
-#[test]
-fn all_attempt_lifecycles_are_in_the_public_closed_domain() {
-    assert_eq!(JobAttemptCounts::ALL.len(), 12);
 }

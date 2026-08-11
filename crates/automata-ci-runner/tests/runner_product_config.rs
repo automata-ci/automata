@@ -158,6 +158,7 @@ fn valid_configuration() -> String {
       "pwsh": "/usr/bin/pwsh",
       "install": "/usr/bin/install",
       "tar": "/usr/bin/tar",
+      "sha256sum": "/usr/bin/sha256sum",
       "node12": "/__e/node12/bin/node",
       "node16": "/__e/node16/bin/node",
       "node20": "/__e/node20/bin/node",

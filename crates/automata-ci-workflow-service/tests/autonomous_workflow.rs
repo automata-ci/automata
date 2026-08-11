@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    JobAuthorityProfile, RunId, RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AdmissionObject, BindLogicalActivationPreparation, ClaimNextLogicalInstanceMaterialization,
@@ -1688,6 +1688,7 @@ fn preparation_descriptor(profile: JobAuthorityProfile) -> LogicalActivationPrep
             "CI".to_owned(),
             "refs/heads/main".to_owned(),
             Some("octocat".to_owned()),
+            RunIdAlias::new(11).expect("run ID alias"),
             1,
             1,
         )
@@ -1705,7 +1706,12 @@ fn preparation_descriptor(profile: JobAuthorityProfile) -> LogicalActivationPrep
             0x22,
             LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE,
         ),
-        LogicalActivationBaseContextKind::RootEmpty,
+        LogicalActivationBaseContextKind::AdmissionV2,
+        admission_object(
+            "contexts/base.pb",
+            0x23,
+            automata_ci_store::LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+        ),
         Vec::new(),
         UnixMillis::new(10),
     )

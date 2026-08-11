@@ -1,9 +1,8 @@
-# Contributing to Automata
+# Contributing
 
-Thank you for helping improve Automata. Focused bug fixes, compatibility
-fixtures, tests, documentation, and design feedback are welcome. Automata is
-still in bootstrap development, so aligning larger changes with the current
-milestone before implementation saves contributor and reviewer time.
+Automata accepts focused bug fixes, compatibility fixtures, tests,
+documentation, and design feedback. For larger work, agree on the scope before
+implementation; the project is still working toward its first end-to-end gate.
 
 Participation in project spaces is governed by the
 [code of conduct](CODE_OF_CONDUCT.md). Report suspected vulnerabilities through
@@ -87,10 +86,10 @@ Compatibility claims require the differential evidence defined by the
 trust boundaries should remain consistent with the
 [architecture](docs/architecture.md).
 
-## AI-assisted contributions
+## AI-assisted work
 
-AI-assisted contributions are welcome. The contributor remains responsible for
-everything submitted, regardless of which tools helped produce it.
+You are responsible for every submitted change, including work produced with
+an AI tool.
 
 - Review and understand every change before submitting it. You must be able to
   explain the behavior, design choices, edge cases, and tests in your own words.
@@ -111,10 +110,9 @@ everything submitted, regardless of which tools helped produce it.
   primary sources or the repository. Never claim that a check was run when it
   was not.
 
-Unreviewed autonomous submissions, fabricated reports, and high-volume
-generated changes that shift verification work to maintainers are not
-acceptable. Disclosure of responsible AI assistance is not held against a
-contribution.
+Do not submit unreviewed generated changes, fabricated reports, or bulk output
+that leaves the verification work to maintainers. Disclosure itself does not
+count against a contribution.
 
 ## Verify the change
 

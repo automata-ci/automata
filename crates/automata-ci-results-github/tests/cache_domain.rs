@@ -1,6 +1,6 @@
 use automata_ci_results_github::{
     CacheAccessScope, CacheAuthority, CacheKey, CacheLimits, CachePermission, CacheProtocolEntryId,
-    CacheVersion, GithubCacheHttpLimits, derive_current_cache_authority,
+    CacheRepositoryMetadata, CacheVersion, GithubCacheHttpLimits, derive_cache_authority,
 };
 
 #[test]
@@ -66,16 +66,58 @@ fn repository_scope_and_protocol_values_are_bounded_and_unambiguous() {
 }
 
 #[test]
+fn server_repository_metadata_derives_one_canonical_default_branch_ref() {
+    let metadata = CacheRepositoryMetadata::new("Owner/Repository", "release/stable")
+        .expect("repository metadata");
+    assert_eq!(metadata.repository(), "owner/repository");
+    assert_eq!(metadata.default_branch_ref(), "refs/heads/release/stable");
+
+    for rejected in [
+        "",
+        "refs/heads/main",
+        "-main",
+        ".hidden",
+        "main.lock",
+        "feature..branch",
+        "feature//branch",
+        "feature@{branch",
+        "feature branch",
+        "feature~branch",
+        "feature\\branch",
+    ] {
+        assert!(
+            CacheRepositoryMetadata::new("owner/repository", rejected).is_err(),
+            "accepted noncanonical branch {rejected:?}"
+        );
+    }
+}
+
+#[test]
 fn write_authority_is_limited_to_safe_current_ref_evidence() {
+    let metadata =
+        CacheRepositoryMetadata::new("owner/repository", "main").expect("repository metadata");
     for (event, git_ref) in [
         ("push", "refs/heads/main"),
         ("push", "refs/tags/v1"),
         ("pull_request", "refs/pull/42/merge"),
     ] {
-        let authority =
-            derive_current_cache_authority("github", "owner/repository", git_ref, event)
-                .expect("safe authority");
+        let authority = derive_cache_authority(
+            "github",
+            "owner/repository",
+            git_ref,
+            event,
+            Some(&metadata),
+        )
+        .expect("safe authority");
         assert_eq!(authority.writable_scope(), Some(git_ref));
+        assert_eq!(authority.scopes()[0].scope(), git_ref);
+        if git_ref == "refs/heads/main" {
+            assert_eq!(authority.scopes().len(), 1);
+        } else {
+            assert_eq!(authority.scopes().len(), 2);
+            assert_eq!(authority.scopes()[1].scope(), "refs/heads/main");
+            assert_eq!(authority.scopes()[1].permission(), CachePermission::Read);
+        }
     }
 
     for (event, git_ref) in [
@@ -90,15 +132,39 @@ fn write_authority_is_limited_to_safe_current_ref_evidence() {
         ("pull_request", "refs/pull/42/head"),
         ("pull_request", "refs/pull/42/merge/extra"),
     ] {
-        let authority =
-            derive_current_cache_authority("github", "owner/repository", git_ref, event)
-                .expect("read-only authority");
+        let authority = derive_cache_authority(
+            "github",
+            "owner/repository",
+            git_ref,
+            event,
+            Some(&metadata),
+        )
+        .expect("read-only authority");
         assert_eq!(authority.writable_scope(), None);
         assert!(authority.can_read(git_ref));
+        assert_eq!(authority.scopes()[0].scope(), git_ref);
     }
 
     assert!(
-        derive_current_cache_authority("gitlab", "owner/repository", "refs/heads/main", "push")
-            .is_err()
+        derive_cache_authority(
+            "gitlab",
+            "owner/repository",
+            "refs/heads/main",
+            "push",
+            Some(&metadata),
+        )
+        .is_err()
+    );
+    let sibling =
+        CacheRepositoryMetadata::new("sibling/repository", "main").expect("sibling metadata");
+    assert!(
+        derive_cache_authority(
+            "github",
+            "owner/repository",
+            "refs/heads/feature",
+            "push",
+            Some(&sibling),
+        )
+        .is_err()
     );
 }

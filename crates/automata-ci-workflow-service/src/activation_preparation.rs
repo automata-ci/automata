@@ -118,12 +118,26 @@ impl StoreBackedLogicalActivationPreparationRepository {
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError> {
         let descriptor = lease.authority().descriptor().clone();
-        let Ok((base, prerequisites)) = runtime_contexts(&descriptor) else {
+        if descriptor.base_context_kind() != LogicalActivationBaseContextKind::AdmissionV2 {
+            return Ok(relational_evidence_failure());
+        }
+        let Ok(base_descriptor) = admission_blob_descriptor(descriptor.base_context()) else {
             return Ok(relational_evidence_failure());
         };
-        let Ok(base_payload) = context_payload(&descriptor, "base-context.pb", &base, &self.limits)
-        else {
+        lease.before_io(shutdown)?;
+        let base_bytes = match self
+            .blobs
+            .get_verified(&base_descriptor, descriptor.base_context().encoded_size())
+            .await
+        {
+            Ok(blob) => blob.into_bytes(),
+            Err(error) => return Ok(classify_blob_failure(error)),
+        };
+        let Ok(_base) = decode_base_context(&base_bytes, &self.limits) else {
             return Ok(payload_evidence_failure());
+        };
+        let Ok(prerequisites) = prerequisite_context(&descriptor) else {
+            return Ok(relational_evidence_failure());
         };
         let Ok(prerequisite_payload) = context_payload(
             &descriptor,
@@ -133,17 +147,11 @@ impl StoreBackedLogicalActivationPreparationRepository {
         ) else {
             return Ok(payload_evidence_failure());
         };
-        let Ok(base_object) = admission_object(base_payload.descriptor()) else {
-            return Ok(relational_evidence_failure());
-        };
+        let base_object = descriptor.base_context().clone();
         let Ok(prerequisite_object) = admission_object(prerequisite_payload.descriptor()) else {
             return Ok(relational_evidence_failure());
         };
 
-        lease.before_io(shutdown)?;
-        if let Err(error) = self.blobs.put_if_absent(base_payload).await {
-            return Ok(classify_blob_failure(error));
-        }
         lease.before_io(shutdown)?;
         if let Err(error) = self.blobs.put_if_absent(prerequisite_payload).await {
             return Ok(classify_blob_failure(error));
@@ -212,24 +220,51 @@ impl StoreBackedLogicalActivationPreparationRepository {
     }
 }
 
-fn runtime_contexts(
-    descriptor: &LogicalActivationPreparationDescriptor,
-) -> Result<(JobRuntimeContext, JobRuntimeContext), LogicalActivationPreparationError> {
-    if descriptor.base_context_kind() != LogicalActivationBaseContextKind::RootEmpty {
-        return Err(LogicalActivationPreparationError::InvalidTarget);
+fn decode_base_context(
+    bytes: &[u8],
+    limits: &ProtocolLimits,
+) -> Result<JobRuntimeContext, LogicalActivationPreparationError> {
+    let context = automata_ci_protocol_protobuf::decode_job_runtime_context(bytes, limits)
+        .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
+    let canonical = automata_ci_protocol_protobuf::encode_job_runtime_context(&context, limits)
+        .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
+    if canonical != bytes || !valid_base_context_shape(&context) {
+        return Err(LogicalActivationPreparationError::Corrupt);
     }
+    Ok(context)
+}
+
+fn valid_base_context_shape(context: &JobRuntimeContext) -> bool {
+    let strategy = context.strategy();
+    context.matrix().as_object().is_some_and(BTreeMap::is_empty)
+        && context.needs().is_empty()
+        && strategy.fail_fast()
+        && strategy.job_index() == 0
+        && strategy.job_total() == 1
+        && strategy.max_parallel() == 1
+}
+
+fn admission_blob_descriptor(
+    object: &AdmissionObject,
+) -> Result<BlobDescriptor, LogicalActivationPreparationError> {
+    let key = BlobKey::new(object.object_key().as_str().to_owned())
+        .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
+    let media_type = MediaType::new(object.media_type().to_owned())
+        .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
+    Ok(BlobDescriptor::new(
+        key,
+        object.digest(),
+        object.encoded_size(),
+        media_type,
+    ))
+}
+
+fn prerequisite_context(
+    descriptor: &LogicalActivationPreparationDescriptor,
+) -> Result<JobRuntimeContext, LogicalActivationPreparationError> {
     let strategy = StrategyContext::new(true, 0, 1, 1)
         .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
     let empty = ContextValue::empty_object();
-    let base = JobRuntimeContext::new(
-        empty.clone(),
-        empty.clone(),
-        empty.clone(),
-        strategy,
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
 
     let mut needs = BTreeMap::new();
     for prerequisite in descriptor.prerequisites() {
@@ -253,7 +288,7 @@ fn runtime_contexts(
                 .map_err(|_| LogicalActivationPreparationError::Corrupt)?,
         );
     }
-    let prerequisites = JobRuntimeContext::new(
+    JobRuntimeContext::new(
         empty.clone(),
         empty.clone(),
         empty,
@@ -261,8 +296,7 @@ fn runtime_contexts(
         needs,
         BTreeMap::new(),
     )
-    .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
-    Ok((base, prerequisites))
+    .map_err(|_| LogicalActivationPreparationError::Corrupt)
 }
 
 fn context_payload(

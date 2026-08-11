@@ -166,17 +166,15 @@ impl SecretExposureClass {
         }
     }
 
-    /// Required handling for raw user-controlled stdout and stderr.
+    /// Default handling for value-redacted user-controlled stdout and stderr.
     ///
-    /// Masking is not a confidentiality boundary: code can transform or split
-    /// a value before printing it. Raw output is therefore suppressed whenever
-    /// user code can read a secret.
+    /// The runner masks registered credential values before transmission. A
+    /// readable-secret classification still caps the complete persisted stream
+    /// at private visibility because masking cannot recognize transformed or
+    /// split values.
     #[must_use]
     pub const fn raw_log_disposition(self) -> RawLogDisposition {
-        match self {
-            Self::Secretless | Self::CapabilityOnly => RawLogDisposition::Persist,
-            Self::ReadableSecret => RawLogDisposition::SuppressUserOutput,
-        }
+        RawLogDisposition::Persist
     }
 }
 
@@ -184,8 +182,11 @@ impl SecretExposureClass {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RawLogDisposition {
-    /// Raw user-controlled standard output and error may be persisted.
+    /// Runner-redacted user-controlled standard output and error may be persisted.
     Persist,
     /// Raw user-controlled output must not enter persistent log storage.
+    ///
+    /// Retained for immutable legacy snapshots and explicit fail-closed
+    /// admission decisions.
     SuppressUserOutput,
 }

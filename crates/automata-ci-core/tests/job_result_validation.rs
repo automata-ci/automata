@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use automata_ci_core::{
     AttemptId, JobConclusion, JobResult, JobResultOutput, JobResultValidationError,
     JobSecretExposure, MAX_JOB_OUTPUT_DEFINITIONS, MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
-    OutputSensitivity, StepId, StepResult, UnixMillis,
+    OutputSensitivity, StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepId,
+    StepResult, UnixMillis,
 };
 
 fn step(id: &str, started_at: i64, completed_at: i64) -> StepResult {
@@ -27,6 +28,76 @@ fn valid_result_has_monotonic_unique_step_history() {
     .with_steps(vec![step("build", 10, 20), step("test", 20, 30)]);
 
     assert_eq!(result.validate(), Ok(()));
+}
+
+#[test]
+fn step_summaries_and_annotations_are_bounded_redacted_and_backward_compatible() {
+    let sensitive = "masked-attachment-value";
+    let attached = step("build", 10, 20)
+        .with_summary_markdown(format!("## Result\n{sensitive}\n"))
+        .with_annotations(vec![StepAnnotation::new(
+            StepAnnotationLevel::Warning,
+            sensitive,
+            vec![StepAnnotationProperty::new("file", sensitive)],
+        )]);
+    let result = JobResult::new(
+        AttemptId::new(),
+        JobConclusion::Success,
+        JobSecretExposure::Secretless,
+        UnixMillis::new(30),
+    )
+    .with_steps(vec![attached]);
+
+    result.validate().expect("bounded attachments");
+    assert_eq!(
+        result.steps()[0].summary_markdown(),
+        Some("## Result\nmasked-attachment-value\n")
+    );
+    assert_eq!(
+        result.steps()[0].annotations()[0].level(),
+        StepAnnotationLevel::Warning
+    );
+    assert!(!format!("{result:?}").contains(sensitive));
+
+    let encoded = serde_json::to_value(&result).expect("serialize attachments");
+    let decoded: JobResult = serde_json::from_value(encoded).expect("decode attachments");
+    assert_eq!(decoded, result);
+
+    let legacy = serde_json::json!({
+        "step_id": "build",
+        "outcome": "success",
+        "conclusion": "success",
+        "started_at": 10,
+        "completed_at": 20
+    });
+    let decoded: StepResult = serde_json::from_value(legacy).expect("decode legacy step");
+    assert_eq!(decoded.summary_markdown(), None);
+    assert!(decoded.annotations().is_empty());
+}
+
+#[test]
+fn malformed_annotation_properties_fail_closed() {
+    let result = JobResult::new(
+        AttemptId::new(),
+        JobConclusion::Failure,
+        JobSecretExposure::Secretless,
+        UnixMillis::new(30),
+    )
+    .with_steps(vec![step("build", 10, 20).with_annotations(vec![
+        StepAnnotation::new(
+            StepAnnotationLevel::Error,
+            "failure",
+            vec![
+                StepAnnotationProperty::new("file", "one"),
+                StepAnnotationProperty::new("FILE", "two"),
+            ],
+        ),
+    ])]);
+
+    assert_eq!(
+        result.validate(),
+        Err(JobResultValidationError::InvalidStepAnnotationProperty)
+    );
 }
 
 #[test]
@@ -211,7 +282,7 @@ fn output_names_counts_and_utf16_budget_are_validated() {
 }
 
 #[test]
-fn readable_secret_exposure_suppresses_public_terminal_values() {
+fn readable_secret_exposure_and_output_sensitivity_are_independent() {
     let public = JobResultOutput::public("derived-value").expect("bounded output");
     let result = JobResult::new(
         AttemptId::new(),
@@ -221,10 +292,7 @@ fn readable_secret_exposure_suppresses_public_terminal_values() {
     )
     .with_outputs(BTreeMap::from([("value".to_owned(), public)]));
 
-    assert_eq!(
-        result.validate(),
-        Err(JobResultValidationError::PublicOutputFromReadableSecret)
-    );
+    assert_eq!(result.validate(), Ok(()));
 
     let safe = JobResult::new(
         AttemptId::new(),

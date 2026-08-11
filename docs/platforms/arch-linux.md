@@ -1,11 +1,13 @@
 # Arch Linux runner hosts
 
-Arch Linux is Automata's initial runner-host distribution. Before starting any
-listener or opening a control-plane session, the production runner requires its
-passive nftables-module check and exact configured rootless-Podman lifecycle to
-pass. Package presence alone is not sufficient. This is a network-admission
-boundary, not proof of every static inventory field; resource and sandbox
-requirements remain operator assertions or separate per-job checks.
+This guide prepares an Arch Linux host for Automata's current rootless Podman
+runner. Before opening a control-plane session, the runner checks its nftables
+modules and performs a create/inspect/destroy lifecycle with the configured
+Podman inputs. Installing the packages alone is not enough.
+
+The lifecycle proves local network and provider admission. Resource limits,
+profile conformance, service containers, and end-to-end workflow compatibility
+have separate checks.
 
 ## Required host packages
 
@@ -561,7 +563,7 @@ network namespace; it never changes the host namespace:
 
 ## Upgrade status
 
-The v0.1 product does not expose runner draining or mutable capability
+The current product does not expose runner draining or mutable capability
 registration, so it does not support an in-place runner upgrade procedure. Do
 not treat the unimplemented administration commands as an operational drain or
 rotation mechanism.

@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    fmt,
+    fmt, future,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
@@ -24,10 +24,12 @@ use automata_ci_runner_journal::{
 };
 use automata_ci_runner_runtime::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
-    ExecutionEvents, ExecutionRequest, ExecutorError, ExecutorErrorKind, ExecutorFuture,
-    JobExecutor, RunnerRuntimeControlClient, RunnerRuntimeError, RunnerRuntimePorts,
-    RunnerSessionSupervisor, RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture,
-    RuntimeControlReply, RuntimeControlRetry, SystemRuntimeIds,
+    ExecutionCancellationReason, ExecutionEvents, ExecutionRequest, ExecutorError,
+    ExecutorErrorKind, ExecutorFuture, JobExecutor, NoopRunnerRuntimeObserver,
+    RunnerRuntimeControlClient, RunnerRuntimeError, RunnerRuntimeEvent, RunnerRuntimeObserver,
+    RunnerRuntimePorts, RunnerSessionSupervisor, RuntimeControlError, RuntimeControlErrorKind,
+    RuntimeControlFuture, RuntimeControlReply, RuntimeControlRetry, RuntimeOperationOutcome,
+    SystemRuntimeIds,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -171,8 +173,34 @@ fn invalid_control_response() -> RuntimeControlError {
     )
 }
 
+#[derive(Debug, Default)]
+struct OrphanObserver {
+    outcomes: Mutex<Vec<RuntimeOperationOutcome>>,
+}
+
+impl OrphanObserver {
+    fn outcomes(&self) -> Vec<RuntimeOperationOutcome> {
+        self.outcomes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl RunnerRuntimeObserver for OrphanObserver {
+    fn observe(&self, event: RunnerRuntimeEvent) {
+        if let RunnerRuntimeEvent::OrphanRecovery { outcome, .. } = event {
+            self.outcomes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(outcome);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum CleanupBehavior {
+    Block,
     StopThenDestroy,
     Destroy,
     UncertainDestroy,
@@ -181,6 +209,8 @@ enum CleanupBehavior {
 struct OrphanExecutor {
     behavior: CleanupBehavior,
     operations: Mutex<Vec<(ProviderOperationKind, OperationId)>>,
+    cleanup_calls: Mutex<Vec<(CleanupRequest, ExecutionCancellation)>>,
+    cleanup_started: tokio::sync::Notify,
 }
 
 impl OrphanExecutor {
@@ -188,6 +218,8 @@ impl OrphanExecutor {
         Self {
             behavior,
             operations: Mutex::new(Vec::new()),
+            cleanup_calls: Mutex::new(Vec::new()),
+            cleanup_started: tokio::sync::Notify::new(),
         }
     }
 
@@ -196,6 +228,23 @@ impl OrphanExecutor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn cleanup_calls(&self) -> Vec<(CleanupRequest, ExecutionCancellation)> {
+        self.cleanup_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn wait_until_cleanup_started(&self) {
+        loop {
+            let started = self.cleanup_started.notified();
+            if !self.cleanup_calls().is_empty() {
+                return;
+            }
+            started.await;
+        }
     }
 
     fn apply(
@@ -241,12 +290,18 @@ impl JobExecutor for OrphanExecutor {
 
     fn cleanup(
         &self,
-        _request: CleanupRequest,
+        request: CleanupRequest,
         events: Arc<dyn ExecutionEvents>,
-        _cancellation: ExecutionCancellation,
+        cancellation: ExecutionCancellation,
     ) -> CleanupFuture<'_> {
         Box::pin(async move {
+            self.cleanup_calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((request, cancellation));
+            self.cleanup_started.notify_waiters();
             match self.behavior {
+                CleanupBehavior::Block => future::pending().await,
                 CleanupBehavior::StopThenDestroy => {
                     self.apply(events.as_ref(), ProviderOperationKind::StopSandbox)?;
                     self.apply(events.as_ref(), ProviderOperationKind::DestroySandbox)
@@ -399,6 +454,24 @@ fn runtime(
     spool: Arc<automata_ci_runner_spool::FileSpool>,
     executor: Arc<dyn JobExecutor>,
 ) -> RunnerSessionSupervisor {
+    runtime_with_observer(
+        runner_id,
+        client,
+        journal,
+        spool,
+        executor,
+        Arc::new(NoopRunnerRuntimeObserver),
+    )
+}
+
+fn runtime_with_observer(
+    runner_id: RunnerId,
+    client: Arc<dyn RunnerRuntimeControlClient>,
+    journal: Arc<automata_ci_runner_journal::FileJournal>,
+    spool: Arc<automata_ci_runner_spool::FileSpool>,
+    executor: Arc<dyn JobExecutor>,
+    observer: Arc<dyn RunnerRuntimeObserver>,
+) -> RunnerSessionSupervisor {
     RunnerSessionSupervisor::new(
         support::config_with_slots_and_retry(
             runner_id,
@@ -413,8 +486,27 @@ fn runtime(
             Arc::new(support::FixedClock::new(10_000, 50)),
             Arc::new(support::ImmediateSleeper),
             Arc::new(SystemRuntimeIds),
-        ),
+        )
+        .with_observer(observer),
     )
+}
+
+fn assert_same_cleanup(actual: &CleanupRequest, expected: &CleanupRequest) {
+    assert_eq!(actual.session_id(), expected.session_id());
+    assert_eq!(actual.slot(), expected.slot());
+    assert_eq!(actual.attempt_id(), expected.attempt_id());
+    assert_eq!(actual.guard(), expected.guard());
+    assert_eq!(actual.sandbox(), expected.sandbox());
+}
+
+fn assert_released(journal: &dyn RunnerJournal) {
+    assert!(
+        journal
+            .snapshot()
+            .expect("released custody")
+            .slots()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -518,6 +610,107 @@ async fn durable_authority_and_uncertain_destroy_resume_after_reopen() {
     assert_eq!(client.hello_calls(), 2);
     assert!(journal.snapshot().expect("released").slots().is_empty());
     assert_eq!(executor.operations()[0].1, first_operation);
+}
+
+#[tokio::test]
+async fn shutdown_during_orphan_cleanup_retains_custody_and_restart_releases_once() {
+    let scratch = support::Scratch::new("orphan-cleanup-shutdown-restart");
+    let runner_id = RunnerId::new();
+    let old_session;
+    let expected_cleanup;
+    {
+        let (journal, spool) = support::durable_ports(&scratch, runner_id);
+        let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
+        old_session = fixture.session_id;
+        seed_terminal_sandbox(journal.as_ref(), spool.as_ref(), &fixture);
+        let shutdown = CancellationToken::new();
+        let client = Arc::new(OrphanControlClient::new(
+            old_session,
+            RunnerSessionId::new(),
+            AuthorityResponse::Exact(OrphanDeliveryPermissions::new(true, true, true)),
+            shutdown.clone(),
+        ));
+        let executor = Arc::new(OrphanExecutor::new(CleanupBehavior::Block));
+        let observer = Arc::new(OrphanObserver::default());
+        let supervisor = runtime_with_observer(
+            runner_id,
+            client.clone(),
+            journal.clone(),
+            spool,
+            executor.clone(),
+            observer.clone(),
+        );
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move { supervisor.run(task_shutdown).await });
+        tokio::time::timeout(
+            support::TEST_WATCHDOG,
+            executor.wait_until_cleanup_started(),
+        )
+        .await
+        .expect("cleanup entered before shutdown");
+        shutdown.cancel();
+        tokio::time::timeout(support::TEST_WATCHDOG, task)
+            .await
+            .expect("shutdown interrupts orphan cleanup")
+            .expect("orphan supervisor task joins")
+            .expect("coordinator shutdown is normalized by the supervisor");
+        assert_eq!(client.hello_calls(), 1);
+        assert_eq!(
+            observer.outcomes(),
+            vec![
+                RuntimeOperationOutcome::Success,
+                RuntimeOperationOutcome::Cancelled,
+            ]
+        );
+        let calls = executor.cleanup_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(executor.operations().is_empty());
+        assert_eq!(
+            calls[0].1.reason(),
+            Some(ExecutionCancellationReason::Shutdown)
+        );
+        expected_cleanup = calls[0].0.clone();
+        assert_eq!(expected_cleanup.session_id(), fixture.session_id);
+        assert_eq!(expected_cleanup.slot(), fixture.slot);
+        assert_eq!(expected_cleanup.attempt_id(), fixture.lease.attempt_id());
+        assert_eq!(expected_cleanup.guard(), fixture.lease.guard());
+        let snapshot = journal.snapshot().expect("shutdown-retained custody");
+        assert_eq!(snapshot.slots().len(), 1);
+        let slot = snapshot.slot(fixture.slot).expect("shutdown-retained slot");
+        assert!(slot.orphan().is_some());
+        assert_eq!(slot.sandbox(), Some(expected_cleanup.sandbox()));
+    }
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let shutdown = CancellationToken::new();
+    let client = Arc::new(OrphanControlClient::new(
+        old_session,
+        RunnerSessionId::new(),
+        AuthorityResponse::Exact(OrphanDeliveryPermissions::new(true, true, true)),
+        shutdown.clone(),
+    ));
+    let executor = Arc::new(OrphanExecutor::new(CleanupBehavior::Destroy));
+    let observer = Arc::new(OrphanObserver::default());
+    runtime_with_observer(
+        runner_id,
+        client.clone(),
+        journal.clone(),
+        spool,
+        executor.clone(),
+        observer.clone(),
+    )
+    .run(shutdown)
+    .await
+    .expect("restart retries authorized orphan cleanup");
+    assert_eq!(observer.outcomes(), vec![RuntimeOperationOutcome::Success]);
+    assert_eq!(client.hello_calls(), 2);
+    let calls = executor.cleanup_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1.reason(), None);
+    assert_same_cleanup(&calls[0].0, &expected_cleanup);
+    let operations = executor.operations();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].0, ProviderOperationKind::DestroySandbox);
+    assert_released(journal.as_ref());
 }
 
 #[tokio::test]

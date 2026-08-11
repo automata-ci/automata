@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobInstanceIdentity,
-    MAX_MATRIX_EXPANSION, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    MAX_MATRIX_EXPANSION, RunId, RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -707,6 +707,7 @@ pub struct LogicalActivationExecutionContext {
     workflow_name: String,
     git_ref: String,
     actor: Option<String>,
+    run_id_alias: RunIdAlias,
     run_number: u64,
     run_attempt: u32,
 }
@@ -727,6 +728,7 @@ impl LogicalActivationExecutionContext {
         workflow_name: String,
         git_ref: String,
         actor: Option<String>,
+        run_id_alias: RunIdAlias,
         run_number: u64,
         run_attempt: u32,
     ) -> Result<Self, LogicalActivationValueError> {
@@ -752,6 +754,7 @@ impl LogicalActivationExecutionContext {
             workflow_name,
             git_ref,
             actor,
+            run_id_alias,
             run_number,
             run_attempt,
         })
@@ -779,6 +782,12 @@ impl LogicalActivationExecutionContext {
     #[must_use]
     pub fn actor(&self) -> Option<&str> {
         self.actor.as_deref()
+    }
+
+    /// Returns the stable positive numeric alias for the internal run ID.
+    #[must_use]
+    pub const fn run_id_alias(&self) -> RunIdAlias {
+        self.run_id_alias
     }
 
     /// Returns the one-based workflow run number.

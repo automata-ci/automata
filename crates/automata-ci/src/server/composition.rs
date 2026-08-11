@@ -727,11 +727,17 @@ fn build_results(
         HmacResultsAuthority::new(&signing_key, authority_config, Arc::clone(&clock))
             .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?,
     );
+    let cache_repositories = config
+        .github_provider()
+        .into_iter()
+        .flat_map(super::GithubProviderConfig::repositories)
+        .map(|repository| repository.cache_repository().clone());
     let runtime_authority_issuer: Arc<dyn automata_ci_runner_control::RuntimeAuthorityIssuer> =
         Arc::new(
             GithubResultsRuntimeAuthorityIssuer::new(
                 Arc::clone(&authority),
                 RESULTS_RUNTIME_TOKEN_VALIDITY_SECONDS,
+                cache_repositories,
             )
             .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?,
         );

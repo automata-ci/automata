@@ -1,6 +1,6 @@
 use automata_ci_core::{
-    JobConclusion, OutputSensitivity, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
-    WorkflowOutputKey,
+    JobConclusion, OutputSensitivity, RunId, RunIdAlias, Sha256Digest, UnixMillis, WorkflowId,
+    WorkflowJobKey, WorkflowOutputKey,
 };
 use automata_ci_store::{
     AdmissionObject, BindLogicalActivationPreparation, ClaimedLogicalActivationPreparation,
@@ -82,6 +82,7 @@ fn execution() -> LogicalActivationExecutionContext {
         "Checks".to_owned(),
         "refs/heads/main".to_owned(),
         Some("octocat".to_owned()),
+        RunIdAlias::new(11).expect("run ID alias"),
         7,
         1,
     )
@@ -137,7 +138,12 @@ fn descriptor(
             22,
             LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE,
         ),
-        LogicalActivationBaseContextKind::RootEmpty,
+        LogicalActivationBaseContextKind::AdmissionV2,
+        object(
+            "contexts/base.pb",
+            23,
+            LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+        ),
         prerequisites,
         UnixMillis::new(10),
     )
@@ -206,11 +212,7 @@ fn workspace_is_descriptor_bound_and_cannot_change_under_the_same_fence() {
         LogicalWorkSelectionId::from_uuid(Uuid::from_u128(21)).expect("selection"),
     )
     .expect("fence");
-    let base = object(
-        "contexts/base.pb",
-        31,
-        LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
-    );
+    let base = first.base_context().clone();
     let needs = object(
         "contexts/needs.pb",
         32,
@@ -220,6 +222,51 @@ fn workspace_is_descriptor_bound_and_cannot_change_under_the_same_fence() {
         BindLogicalActivationPreparation::new(changed, fence, base, needs, UnixMillis::new(40),),
         Err(LogicalActivationPreparationValueError::ClaimDescriptorMismatch)
     ));
+}
+
+#[test]
+fn binding_accepts_only_the_exact_admission_base_context() {
+    let descriptor = descriptor(3, Vec::new());
+    let fence = LogicalActivationPreparationClaimFence::new_for_selection(
+        descriptor.target().clone(),
+        LogicalActivationWorkerId::from_uuid(Uuid::from_u128(20)).expect("worker"),
+        LogicalActivationPreparationGeneration::new(1).expect("generation"),
+        descriptor.descriptor_digest(),
+        UnixMillis::new(30),
+        UnixMillis::new(100),
+        LogicalWorkSelectionId::from_uuid(Uuid::from_u128(21)).expect("selection"),
+    )
+    .expect("fence");
+    let prerequisite_context = object(
+        "contexts/needs.pb",
+        32,
+        LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+    );
+    let changed_base = object(
+        "contexts/changed-base.pb",
+        33,
+        LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+    );
+
+    assert!(matches!(
+        BindLogicalActivationPreparation::new(
+            descriptor.clone(),
+            fence.clone(),
+            changed_base,
+            prerequisite_context.clone(),
+            UnixMillis::new(40),
+        ),
+        Err(LogicalActivationPreparationValueError::InvalidContextObject)
+    ));
+    let binding = BindLogicalActivationPreparation::new(
+        descriptor.clone(),
+        fence,
+        descriptor.base_context().clone(),
+        prerequisite_context,
+        UnixMillis::new(40),
+    )
+    .expect("exact admission context binding");
+    assert_eq!(binding.base_context(), descriptor.base_context());
 }
 
 #[test]

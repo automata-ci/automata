@@ -26,9 +26,6 @@ a descendant and that the boundary has both `memory.swap.max=0` and
 `memory.swap.current=0`. Missing delegation, a different cgroup layout, or a
 swappable boundary stops the owned workload and rejects the operation.
 
-Automata is pre-1.0 and not production-ready. This is an internal isolation
-adapter, and its host requirements and Rust API may change between releases.
-
 - [Runner host guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md)
-- [API documentation](https://docs.rs/automata-ci-sandbox-podman)
+- API documentation: run `cargo doc -p automata-ci-sandbox-podman --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

@@ -108,6 +108,56 @@ impl CacheAccessScope {
     }
 }
 
+/// Server-owned repository metadata used to derive default-branch cache reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheRepositoryMetadata {
+    repository: String,
+    default_branch_ref: String,
+}
+
+impl CacheRepositoryMetadata {
+    /// Creates metadata from one repository slug and provider branch name.
+    ///
+    /// The branch input is a name such as `main`, never a caller-supplied full
+    /// reference. The constructor validates it and derives the canonical
+    /// `refs/heads/...` cache scope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid repositories and branch names that are not canonical
+    /// Git branch references.
+    pub fn new(
+        repository: impl Into<String>,
+        default_branch: impl Into<String>,
+    ) -> Result<Self, CacheModelError> {
+        let repository = repository.into();
+        let repository = normalize_repository(&repository)?;
+        let default_branch = default_branch.into();
+        if !is_canonical_branch_name(&default_branch) {
+            return Err(CacheModelError::InvalidDefaultBranch);
+        }
+        let default_branch_ref = format!("refs/heads/{default_branch}");
+        CacheAccessScope::new(&default_branch_ref, CachePermission::Read)
+            .map_err(|_| CacheModelError::InvalidDefaultBranch)?;
+        Ok(Self {
+            repository,
+            default_branch_ref,
+        })
+    }
+
+    /// Returns the normalized repository slug.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Returns the canonical full default-branch reference.
+    #[must_use]
+    pub fn default_branch_ref(&self) -> &str {
+        &self.default_branch_ref
+    }
+}
+
 /// Authenticated repository and reference authority for GitHub cache operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheAuthority {
@@ -127,22 +177,8 @@ impl CacheAuthority {
         scopes: Vec<CacheAccessScope>,
     ) -> Result<Self, CacheModelError> {
         let repository = repository.into();
-        let mut components = repository.split('/');
-        let owner = components.next().unwrap_or_default();
-        let name = components.next().unwrap_or_default();
-        if repository.len() > 512
-            || owner.is_empty()
-            || name.is_empty()
-            || components.next().is_some()
-            || repository.bytes().any(|byte| {
-                !byte.is_ascii()
-                    || byte.is_ascii_control()
-                    || byte.is_ascii_whitespace()
-                    || byte == b'\\'
-            })
-            || scopes.is_empty()
-            || scopes.len() > 8
-        {
+        let repository = normalize_repository(&repository)?;
+        if scopes.is_empty() || scopes.len() > 8 {
             return Err(CacheModelError::InvalidAuthority);
         }
         let mut ordered = scopes
@@ -153,10 +189,7 @@ impl CacheAuthority {
         if ordered.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(CacheModelError::InvalidAuthority);
         }
-        Ok(Self {
-            repository: repository.to_ascii_lowercase(),
-            scopes,
-        })
+        Ok(Self { repository, scopes })
     }
 
     /// Returns the normalized repository slug authenticated by the issuer.
@@ -394,12 +427,54 @@ pub enum CacheModelError {
     /// A reference access-control scope is invalid.
     #[error("cache access-control scope is invalid")]
     InvalidScope,
+    /// Server-owned default-branch metadata is not a canonical branch name.
+    #[error("cache default branch is invalid")]
+    InvalidDefaultBranch,
     /// Repository or scope-set authority is invalid.
     #[error("cache authority is invalid")]
     InvalidAuthority,
     /// A cache identity is invalid.
     #[error("cache identity is invalid")]
     InvalidIdentity,
+}
+
+fn normalize_repository(repository: &str) -> Result<String, CacheModelError> {
+    let mut components = repository.split('/');
+    let owner = components.next().unwrap_or_default();
+    let name = components.next().unwrap_or_default();
+    if repository.len() > 512
+        || owner.is_empty()
+        || name.is_empty()
+        || components.next().is_some()
+        || repository.bytes().any(|byte| {
+            !byte.is_ascii()
+                || byte.is_ascii_control()
+                || byte.is_ascii_whitespace()
+                || byte == b'\\'
+        })
+    {
+        return Err(CacheModelError::InvalidAuthority);
+    }
+    Ok(repository.to_ascii_lowercase())
+}
+
+fn is_canonical_branch_name(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch != "@"
+        && !branch.starts_with(['-', '/', '.'])
+        && !branch.starts_with("refs/")
+        && !branch.ends_with(['/', '.'])
+        && !branch.contains("//")
+        && !branch.contains("..")
+        && !branch.contains("@{")
+        && !branch.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        })
+        && branch.split('/').all(|component| {
+            !component.starts_with('.') && !component.as_bytes().ends_with(b".lock")
+        })
 }
 
 /// One cache create mutation bound to current execution authority.
@@ -521,6 +596,47 @@ pub struct LookupCacheEntry {
     pub inactivity_seconds: u64,
 }
 
+impl LookupCacheEntry {
+    pub(crate) fn candidates(&self) -> Vec<CacheLookupCandidate<'_>> {
+        let readable_scopes = self
+            .cache
+            .scopes()
+            .iter()
+            .filter(|scope| scope.permission().can_read());
+        let mut candidates = Vec::with_capacity(
+            readable_scopes
+                .clone()
+                .count()
+                .saturating_mul(self.restore_keys.len().saturating_add(2)),
+        );
+        for scope in readable_scopes {
+            candidates.push(CacheLookupCandidate {
+                cache_ref: scope.scope(),
+                key: self.key.as_str(),
+                exact: true,
+            });
+            candidates.push(CacheLookupCandidate {
+                cache_ref: scope.scope(),
+                key: self.key.as_str(),
+                exact: false,
+            });
+            candidates.extend(self.restore_keys.iter().map(|key| CacheLookupCandidate {
+                cache_ref: scope.scope(),
+                key: key.as_str(),
+                exact: false,
+            }));
+        }
+        candidates
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CacheLookupCandidate<'a> {
+    pub(crate) cache_ref: &'a str,
+    pub(crate) key: &'a str,
+    pub(crate) exact: bool,
+}
+
 /// Exact signed-download resolution.
 #[derive(Clone, Copy, Debug)]
 pub struct ResolveCacheDownload {
@@ -532,4 +648,63 @@ pub struct ResolveCacheDownload {
     pub observed_at_seconds: u64,
     /// Inactivity lifetime.
     pub inactivity_seconds: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_core::{AttemptId, FencingToken, JobId, RunId};
+
+    use super::*;
+
+    #[test]
+    fn lookup_plan_is_scope_first_then_exact_primary_and_ordered_prefixes() {
+        let cache = CacheAuthority::new(
+            "owner/repository",
+            vec![
+                CacheAccessScope::new("refs/heads/feature", CachePermission::ReadWrite)
+                    .expect("current scope"),
+                CacheAccessScope::new("refs/heads/main", CachePermission::Read)
+                    .expect("default scope"),
+                CacheAccessScope::new("refs/heads/write-only", CachePermission::Write)
+                    .expect("write-only scope"),
+            ],
+        )
+        .expect("cache authority");
+        let request = LookupCacheEntry {
+            execution: ExecutionAuthority::new(
+                RunId::new(),
+                JobId::new(),
+                AttemptId::new(),
+                FencingToken::new(1).expect("fence"),
+            ),
+            cache,
+            key: CacheKey::new("cargo-linux-exact").expect("primary key"),
+            restore_keys: vec![
+                CacheKey::new("cargo-linux-").expect("specific restore key"),
+                CacheKey::new("cargo-").expect("broad restore key"),
+            ],
+            version: CacheVersion::new("version-1").expect("version"),
+            observed_at_seconds: 1,
+            inactivity_seconds: 1,
+        };
+
+        let actual = request
+            .candidates()
+            .into_iter()
+            .map(|candidate| (candidate.cache_ref, candidate.key, candidate.exact))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("refs/heads/feature", "cargo-linux-exact", true),
+                ("refs/heads/feature", "cargo-linux-exact", false),
+                ("refs/heads/feature", "cargo-linux-", false),
+                ("refs/heads/feature", "cargo-", false),
+                ("refs/heads/main", "cargo-linux-exact", true),
+                ("refs/heads/main", "cargo-linux-exact", false),
+                ("refs/heads/main", "cargo-linux-", false),
+                ("refs/heads/main", "cargo-", false),
+            ]
+        );
+    }
 }

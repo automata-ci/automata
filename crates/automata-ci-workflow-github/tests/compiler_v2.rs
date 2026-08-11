@@ -532,10 +532,6 @@ fn current_compiler_rejects_context_and_graph_semantics_it_cannot_represent() {
         "github.expression.unrecognized_context",
     );
     assert_rejected(
-        "on: workflow_dispatch\njobs:\n  first:\n    runs-on: linux\n    steps:\n      - run: echo first\n  second:\n    needs: first\n    runs-on: linux\n    steps:\n      - run: echo ${{ toJSON(needs) }}\n",
-        "github.compile.dynamic_needs_reference",
-    );
-    assert_rejected(
         "on: workflow_dispatch\njobs:\n  first:\n    runs-on: linux\n    steps:\n      - run: echo first\n  second:\n    needs: first\n    runs-on: linux\n    steps:\n      - run: echo ${{ needs.first.outputs.missing }}\n",
         "github.compile.unknown_needs_output",
     );
@@ -547,4 +543,38 @@ fn current_compiler_rejects_context_and_graph_semantics_it_cannot_represent() {
         "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - uses: synthetic/${{ inputs.action }}@main\n",
         "github.compile.dynamic_action_reference",
     );
+}
+
+#[test]
+fn whole_and_dynamically_indexed_needs_contexts_compile_for_runtime_evaluation() {
+    let source = r#"on: workflow_dispatch
+jobs:
+  prepare:
+    runs-on: linux
+    outputs:
+      value: ${{ steps.result.outputs.value }}
+    steps:
+      - id: result
+        run: echo 'value=ready' >> "$GITHUB_OUTPUT"
+  consume:
+    needs: prepare
+    strategy:
+      matrix:
+        prerequisite: [prepare]
+    runs-on: linux
+    steps:
+      - run: echo '${{ toJSON(needs) }}'
+      - run: echo '${{ needs[matrix.prerequisite].outputs.value }}'
+"#;
+
+    let report = compile(source, "workflow_dispatch");
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let consume = report
+        .plan()
+        .expect("compiled plan")
+        .jobs()
+        .iter()
+        .find(|job| job.key().value().as_str() == "consume")
+        .expect("consumer job");
+    assert!(consume.result_references().is_empty());
 }

@@ -96,14 +96,6 @@ pub(super) fn compile_template(
         };
         let program = compile_policy_program(evaluation, span, policy, context)?;
         let analysis = analyze_program(&program);
-        if analysis.dynamic_needs {
-            context.unsupported(
-                "github.compile.dynamic_needs_reference",
-                "`needs` references must name one direct prerequisite result or output exactly",
-                span.clone(),
-            );
-            return None;
-        }
         contexts.extend(analysis.contexts);
         references.extend(analysis.references);
         programs.push(program);
@@ -138,14 +130,6 @@ pub(super) fn compile_single_expression(
     let source = source.trim();
     let program = compile_policy_program(source, span, policy, context)?;
     let analysis = analyze_program(&program);
-    if analysis.dynamic_needs {
-        context.unsupported(
-            "github.compile.dynamic_needs_reference",
-            "`needs` references must name one direct prerequisite result or output exactly",
-            span.clone(),
-        );
-        return None;
-    }
     let segments = expression_segments(source).ok()?;
     if !matches!(segments.as_slice(), [ExpressionSegment::Evaluation(_)]) {
         context.semantic(
@@ -188,14 +172,6 @@ pub(super) fn compile_condition_template(
         })
         .ok()?;
     let analysis = analyze_program(&program);
-    if analysis.dynamic_needs {
-        context.unsupported(
-            "github.compile.dynamic_needs_reference",
-            "`needs` references must name one direct prerequisite result or output exactly",
-            value.span().clone(),
-        );
-        return None;
-    }
     let expression = PlanExpression::new(
         value.value(),
         vec![ExpressionSegment::Evaluation(value.value().clone())],

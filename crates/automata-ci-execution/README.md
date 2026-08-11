@@ -8,9 +8,6 @@ runner's durable control protocol.
 `automata-ci-sandbox-podman` implements these ports, while
 `automata-ci-job-executor-github` consumes them to run GitHub-compatible jobs.
 
-Automata is pre-1.0 and not production-ready. This is an internal architecture
-layer, and its Rust API may change between releases.
-
 - [Runner architecture](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-execution)
+- API documentation: run `cargo doc -p automata-ci-execution --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

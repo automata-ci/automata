@@ -8,9 +8,6 @@ keeps replica-local connections out of the authority model.
 The `automata` control plane composes this application layer with mTLS transport,
 PostgreSQL repositories, and object storage.
 
-Automata is pre-1.0 and not production-ready. This is an internal application
-layer, and its Rust API may change between releases.
-
 - [Control-plane documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-runner-control)
+- API documentation: run `cargo doc -p automata-ci-runner-control --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

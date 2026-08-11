@@ -8,10 +8,6 @@ access comes from `automata-ci-scm`, and bundle publication goes through
 GitHub metadata decoding and step execution live in higher-level adapters. This
 crate provides the shared resolution boundary used by `automata-runner`.
 
-Automata is pre-1.0 and not production-ready. This is an internal architecture
-crate rather than a standalone action downloader; its Rust API may change
-between releases.
-
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-action)
+- API documentation: run `cargo doc -p automata-ci-action --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

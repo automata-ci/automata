@@ -46,11 +46,11 @@ async fn queued_creation_persists_current_safety_and_retries_reuse_the_job_ceili
             load_attempt_output_safety(&database, current_attempt).await?,
             AttemptOutputSafety {
                 secret_exposure: "readable_secret".to_owned(),
-                raw_log_disposition: "suppress_user_output".to_owned(),
+                raw_log_disposition: "persist".to_owned(),
                 requested_visibility: "private".to_owned(),
                 effective_visibility: "private".to_owned(),
                 reason: "repository_policy".to_owned(),
-                schema: 1,
+                schema: 2,
                 classified_at: 70,
             }
         );

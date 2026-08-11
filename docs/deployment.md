@@ -1,14 +1,12 @@
 # Control-plane setup
 
-This guide starts the bootstrap `automata server` composition on one development
-machine. It is useful for integration work with the control-plane, runner, and
-optional configured GitHub provider boundaries.
+This guide starts `automata server`, PostgreSQL, RustFS, and one statically
+registered runner on a development machine. Optional sections add GitHub login,
+provider ingress, and the built-in secret provider.
 
 > [!CAUTION]
-> This is not a production deployment guide. Release packaging does not make
-> this bootstrap composition production-ready: automated runner enrollment,
-> the complete workflow-to-runner execution path, production retention, and the
-> end-to-end compatibility gate are not available yet.
+> This is not a production deployment. Runner enrollment is static, production
+> retention is incomplete, and the end-to-end compatibility gate is still open.
 
 ## What you will run
 
@@ -27,7 +25,7 @@ configuration used below.
 
 ## 1. Install Automata and clone the repository
 
-Follow [getting started](getting-started.md#install-automata) to install both
+Follow [Getting started](getting-started.md#install-both-commands) to install both
 commands from a reviewed source checkout. No public release or crates.io
 package is available yet. Verify the commands before starting durable services:
 
@@ -108,7 +106,7 @@ production environment.
 
 ### Bootstrap one static local runner
 
-The v0.1 bootstrap composition has no enrollment API. Its supported initial
+The bootstrap composition has no enrollment API. Its supported initial
 runner-admission path is a privileged declarative fleet file loaded at server
 startup. Run the non-`sudo` commands below as the dedicated non-root runner
 account; the checked-in example assumes UID 1000. The derivation commands also
@@ -304,11 +302,9 @@ dependency prevents the server from becoming ready.
 
 ### Optional GitHub human authentication
 
-The local command above intentionally leaves human authentication disabled. To
-exercise the composed GitHub boundary, first create a GitHub App whose user
-authorization callback is the exact external-origin callback
-`/auth/github/callback`. Then add the complete base configuration to every
-replica:
+The base command leaves human authentication disabled. To enable it, create a
+GitHub App whose user callback is the external origin plus
+`/auth/github/callback`, then create local keys:
 
 ```console
 openssl rand 32 > "$AUTOMATA_LOCAL_SECRET_DIR/auth-session-hmac.key"
@@ -324,21 +320,17 @@ export AUTOMATA_AUTH_ENCRYPTION_KEY_SOURCE="file:${AUTOMATA_LOCAL_SECRET_DIR}/au
 export AUTOMATA_AUTH_KEY_ID=local-auth-2026
 ```
 
-This authentication wrapping key encrypts human GitHub OAuth access and
-refresh tokens stored for browser/device identity and membership refresh. It
-does not encrypt GitHub App installation credentials used by repository
-webhook/source/Checks processing; those use the separate mandatory
-control-plane wrapping key described below.
+Create `github-client-secret` as an owner-only file; do not export its value or
+put it in an option. Restart the complete server command with these variables.
+Loopback HTTP works only because the origin is a literal loopback address and
+the development switch is set. Any non-local deployment requires a canonical
+HTTPS origin.
 
-With those variables exported, restart the complete server command from the
-beginning of this section.
-
-The example assumes an owner-only `github-client-secret` file already exists.
-Do not export the client secret as the shell variable shown for the non-secret
-client ID, and do not place it directly in an option. Plain HTTP authentication
-is accepted only because both the external origin and listener are literal
-loopback and the explicit development switch is present. Production requires a
-canonical HTTPS root origin and omits that switch.
+The authentication key encrypts GitHub user tokens. The control-plane key from
+the base command separately encrypts runner messages and GitHub App service
+credentials. Keep both outside PostgreSQL and its backups. See
+[Authentication and authorization](authentication.md#enable-github-human-authentication)
+for setup state, sessions, and key rotation.
 
 ### Optional GitHub provider runtime
 
@@ -353,8 +345,10 @@ command:
 --github-provider-config-source file:/etc/automata/github-provider.json
 ```
 
-The manifest is strict and current-only. Public entries require a null private-
-source authority; private entries require one. Checks authority is mandatory,
+The manifest is strict and current-only. Every repository declares its
+canonical `default_branch`; cache authority uses it only as a read-only fallback
+after the current job reference. Public entries require a null private-source
+authority; private entries require one. Checks authority is mandatory,
 all authority UUIDs are unique, nested authority revisions equal the repository
 policy revision, and stable numeric GitHub installation/repository/owner IDs
 must match the App installation. The product reference documents every field,
@@ -462,7 +456,7 @@ and refuses create when the name already exists. The authenticated repository
 Secrets page provides value-free metadata and capability-gated create, replace,
 delete, and built-in-provider activation. Runner delivery and external providers
 remain unsupported, so jobs do not receive managed secret values. See the
-[authentication guide](authentication.md#repository-secret-cli) for redirected
+[authentication guide](authentication.md#manage-repository-secrets-from-the-cli) for redirected
 input, safe-file, confirmation, and verification details.
 
 The built-in path now fails closed at restart, periodic readiness, and every
@@ -485,7 +479,7 @@ old decrypt-only keys must be
 retained until every dependent version has been rewrapped or cryptographically
 erased. Storage encryption remains required for database files, WAL, replicas,
 snapshots, backups, swap, crash dumps, and host volumes that can contain key
-material. See [encrypted-at-rest secret providers](authentication.md#encrypted-at-rest-secret-providers)
+material. See [secret storage](authentication.md#secret-storage)
 for the adapter and mutation contracts.
 
 `--database-transport loopback-plaintext` is a development-only exception. It is
@@ -551,8 +545,8 @@ each select private, authenticated, or public visibility. Public means anonymous
 read-only access and never grants mutation authority. Runs snapshot all three
 choices at admission; log and artifact reads remain independent of dashboard
 visibility. Attempts whose user code can read a managed secret always narrow
-logs and artifacts to private, and their raw stdout/stderr is suppressed before
-persistent ingestion.
+logs and artifacts to private. Registered credential bytes are masked before
+stdout/stderr enters persistent ingestion, preserving unrelated diagnostics.
 
 ## 6. Exercise configured provider admission
 
@@ -618,35 +612,7 @@ A future production deployment must, at minimum:
   credentials; and
 - deploy execution hosts according to their advertised isolation class.
 
-The current bootstrap build composes opt-in GitHub browser login, device-flow
-HTTP endpoints, envelope-encrypted login/provider state, hashed browser/CLI
-session credentials, request authentication, repository publication settings,
-and the RBAC management HTTP API when the complete configuration is present. A
-new installation additionally requires the one-use bootstrap tuple; an
-already-configured installation does not. The Linux `automata auth` device
-login/status/logout client is operational through Secret Service, and the
-authenticated browser Access pages compose RBAC management. The CLI does not
-offer web login, and dedicated RBAC CLI commands remain uncomposed. Complete
-GitHub provider configuration composes the exact signed webhook, public/private
-source delivery, fenced Check Runs, scoped App-credential runtime, and exact
-lease-bound repository authority for an already-materialized Standard GitHub
-job. CredentialFree jobs receive no runtime authority, and there is no
-fallback/default installation route. The mandatory autonomous worker discovers
-durable admitted work and supervises logical preparation, activation, and
-materialization; admission remains asynchronous and is not a completion signal.
-Repository-secret HTTP routes, built-in-provider activation, and
-cryptographic-erasure cleanup are composed when their complete configuration is
-present. The repository-scoped Linux CLI supports secret list/create/delete and
-provider status/activation through its Secret Service-backed session. The
-authenticated repository UI additionally supports capability-gated replacement
-without ever serializing stored values. External providers and runner secret
-delivery remain unsupported. Until delivery is complete, jobs do not receive
-managed secrets; readable-secret output is designed to remain suppressed and
-fail-private rather than becoming anonymously publishable. The fail-closed
-key-custody and worker contract is detailed in
-[Managed-secret encryption boundary](#managed-secret-encryption-boundary).
-
-The detailed listener and credential contract lives in the
-[`automata` control-plane reference](../crates/automata-ci/README.md). Do not
-infer production support from the release artifacts or configuration surface
-while the project remains in bootstrap development.
+The detailed listener and credential reference is in the
+[`automata` README](../crates/automata-ci/README.md). Current product support is
+tracked in [Compatibility](compatibility.md); the presence of a flag, manifest,
+or release job is not a production-support claim.

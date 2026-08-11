@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use automata_ci_core::{OperationId, WorkflowEventProvenance};
+use automata_ci_core::{JobRuntimeContext, OperationId, WorkflowEventProvenance};
 use automata_ci_store::{TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
     CompilationReport, CompileWorkflowRequest, GithubEventMetadataV1, GithubWorkflowCompiler,
@@ -126,6 +126,7 @@ fn request_from_compilation(
         Bytes::copy_from_slice(CI_SOURCE.as_bytes()),
         event,
         plan,
+        JobRuntimeContext::empty_base(),
         idempotency,
     )
     .commit_sha(REVISION)
@@ -152,6 +153,7 @@ pub fn changed_event_request(original: &WorkflowAdmissionRequest) -> WorkflowAdm
         original.source().clone(),
         Bytes::from_static(b"{\"changed\":true}"),
         original.plan().clone(),
+        original.base_context().clone(),
         original.idempotency().clone(),
     )
     .commit_sha(original.commit_sha())

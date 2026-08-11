@@ -57,54 +57,107 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --lock
 
 All first-party Rust crates forbid `unsafe` code.
 
+### Test design
+
+Test observable contracts rather than implementation shape. Prefer exact typed
+errors, state transitions, durable custody, side-effect counts, and retry
+identity over `is_ok`, `is_err`, debug-string, or source-text assertions. Keep
+compile-time trait assertions at module scope; do not wrap them in empty runtime
+tests. A failure-path test should also prove which calls or mutations did *not*
+occur.
+
+Coordinate concurrent tests with barriers, notifications, or Tokio's paused
+clock. Wall-clock timeouts are watchdogs, not assertions, and must leave enough
+headroom for a loaded parallel CI worker. Use source inspection only when the
+source artifact itself is the contract, such as a migration or generated-file
+provenance check. Every ignored integration test must name its external
+prerequisite and have a corresponding CI or documented manual lane.
+
+### Opt-in test lanes
+
+The PostgreSQL CI jobs execute every database-only ignored target. The
+remaining ignored integration targets are explicit operator lanes:
+
+```console
+# Public GitHub compatibility.
+cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --ignored
+
+# S3/RustFS contracts. Set AUTOMATA_TEST_S3_ENDPOINT,
+# AUTOMATA_TEST_S3_BUCKET, AUTOMATA_TEST_S3_ACCESS_KEY, and
+# AUTOMATA_TEST_S3_SECRET_KEY. Results and workflow-service also need
+# AUTOMATA_TEST_DATABASE_URL.
+cargo test -p automata-ci-blob-s3 --test rustfs_contract --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-action --test live_github_rustfs --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-action-github --test live_checkout_pipeline --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-results-github --test rustfs_results --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-results-github --test cache_rustfs --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-workflow-service --test live_admission --locked -- --ignored --test-threads=1
+
+# Official Node client compatibility. Set AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE
+# and AUTOMATA_TEST_ACTIONS_CACHE_MODULE to the exact modules named by the tests.
+cargo test -p automata-ci-results-github --test http_compatibility --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-results-github --test cache_http --locked -- --ignored --test-threads=1
+
+# Rootless Podman contracts. Configure the AUTOMATA_PODMAN_TEST_* variables
+# declared by live_rootless.rs and the AUTOMATA_TEST_* paths required by the
+# runner active-probe test.
+cargo test -p automata-ci-sandbox-podman --test live_rootless --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-runner --locked \
+  configured_rootless_lifecycle_matches_both_production_network_policies -- \
+  --ignored --test-threads=1
+```
+
+The three ignored metrics schema printers are maintenance commands rather than
+coverage-bearing tests. Invoke them deliberately with `--ignored --nocapture`
+when reviewing a manifest change; the non-ignored schema assertions remain the
+regression contracts.
+
+### Coverage
+
+Coverage is a diagnostic for finding unexercised behavior; it does not replace
+the PostgreSQL, RustFS, Podman, compatibility, or security contract lanes. The
+Rust report uses the pinned toolchain's LLVM tools and a reviewed
+`cargo-llvm-cov` release:
+
+```console
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --version 0.8.7 --locked
+install -d -m 0755 coverage
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo llvm-cov --workspace --exclude automata-ci-ui-renderer \
+  --all-targets --all-features --locked --jobs 2 --no-fail-fast \
+  --ignore-filename-regex='(/automata-ci-ui-renderer/|/generated/|generated_assets\.rs$|generated_contract\.rs$)' \
+  --json --summary-only --output-path coverage/rust-summary.json
+cargo llvm-cov report \
+  --ignore-filename-regex='(/automata-ci-ui-renderer/|/generated/|generated_assets\.rs$|generated_contract\.rs$)' \
+  --lcov --output-path coverage/rust.lcov
+```
+
+The generated protobuf module and renderer-generated Rust are excluded from the
+report, not from compilation or tests. Keep renderer coverage separate, just as
+CI keeps its resource-heavy build separate. Ignored tests that require external
+services also need their named service lanes before their execution contributes
+coverage. Review per-file and per-crate gaps before setting a threshold; ratchet
+from a reproducible baseline instead of choosing an arbitrary percentage.
+
 ## Runner capability admission
 
-`automata-runner doctor --active` is an ambient operator diagnostic. It finds
-`podman` through the invoking process's `PATH` and uses diagnostic scratch
-settings, so a successful doctor run is not evidence that production startup
-will admit the configured provider. It can return raw Podman failure detail;
-do not use it as an in-process readiness check or forward its output outside
-the operator trust domain.
+`automata-runner doctor --active` checks the ambient host and the `podman` found
+on the caller's `PATH`. Use it for diagnosis, not readiness: production startup
+repeats admission against the exact configured binary, environment, state
+roots, and network policy before it contacts the control plane.
 
-`automata-runner run` constructs one validated Podman configuration and fails
-before starting any listener or control session unless both checks succeed:
-the required nftables modules must be loaded or loadable from the running
-kernel's dependency index, and the active lifecycle must pass against the exact
-configured binary, cleared `HOME`/`PATH`/`XDG_RUNTIME_DIR`/`TMPDIR` environment,
-state-root probe paths, and `NetworkPolicy`. Production requires a nonzero
-effective UID and does not invoke `podman info`. Exercise both policy branches
-in focused work: `PrivateEgress` requires a non-internal network and `Disabled`
-requires `--internal`.
+Runner-focused changes should test both `PrivateEgress` and `Disabled` network
+policies, failed cleanup, changed filesystem metadata, stale leases, and process
+restart. A successful lifecycle probe proves that the configured provider can
+create, inspect, and destroy its test sandbox. It does not prove profile-image
+conformance, resource enforcement, or service-container support.
 
-The active lifecycle checks the running executable as a static ELF, writes its
-exact bytes as the only file in a private rootfs, and runs it with
-`--rootfs <path>:O`. It verifies the source descriptor/name binding and full
-bytes before and after start, network identity and policy, exclusive container
-attachment, loopback readiness, ownership, exact-ID cleanup, and post-delete
-absence. The overlay keeps runtime changes out of the source; an unconfirmed
-container retains its lowerdir rather than invalidating storage that may still
-reference it.
-It does not prove profile-image existence or manifest conformance,
-cgroup/resource enforcement, privilege or root-filesystem policy, or the
-optional job-scoped Docker API. Keep the configured Podman binary and every
-directory in its `PATH` administrator-controlled and immutable to runner jobs.
-Production admits the exact root-owned Podman, conmon, OCI runtime, init,
-seccomp, cleanup, and closed seven-entry helper inputs with
-non-group/world-writable ancestry. It requires the Podman home, runtime,
-temporary, probe-parent, generated configuration, hooks, CDI, and engine roots
-to be runner-owned, non-symlink, mode 0700 paths beneath trusted ancestry. The
-hooks and CDI directories must remain empty; `$HOME/.config/containers` and
-`$HOME/.docker` must be absent or empty and private, and `$HOME/.dockercfg`
-must be absent. The default `/etc/containers/certs.d`,
-`/usr/share/containers/certs.d`, and `/etc/docker/certs.d` registry-client
-certificate trees must likewise be absent or exactly empty, so nested builds
-cannot borrow ambient client keys. Each one-file rootfs child is mode 0711
-beneath the private probe parent. The admitted snapshot is revalidated before every
-runner-initiated Podman spawn and every authorized request to a long-lived job
-Docker service. Podman/conmon's stopped-container cleanup re-exec inherits the
-fixed environment inside the trusted administrator/runtime boundary and does
-not pass through the runner guard. This is filesystem identity and ownership
-evidence, not a byte attestation. Job sandboxes never receive these host paths.
+The complete filesystem, Podman, nftables, and provider checks are maintained
+in the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md)
+and [Arch Linux host guide](platforms/arch-linux.md). Update those operator
+contracts with any admission change; do not duplicate their configuration in
+this contributor guide.
 
 ## Frontend
 
@@ -115,8 +168,17 @@ React renderer and browser assets are embedded in `automata`.
 cd ui
 npm ci
 npm run check
+npm run test:coverage
 npm audit --audit-level=low
 ```
+
+`test:coverage` measures every TypeScript and TSX source file, including files
+that the test graph never imports, and writes its reports under the ignored
+`ui/coverage/` directory. Frontend CI runs this command and enforces aggregate
+floors of 93% statements, 84% branches, 96% functions, and 93% lines. Those
+floors retain 0.99–1.29 percentage points of headroom under the reviewed
+CI-pinned Node 24.19.0 baseline; see the
+[UI guide](../ui/README.md#commands) for the baseline and ratcheting policy.
 
 If a frontend change intentionally updates the embedded renderer, use the
 locked profile launcher. It runs regeneration and asset verification inside

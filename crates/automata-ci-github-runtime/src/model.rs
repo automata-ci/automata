@@ -1,8 +1,19 @@
 use std::fmt;
 
-use crate::CommandScopeIdError;
+use serde::Serialize;
+
+use crate::{ArtifactListEncodingError, ArtifactSubjectError, CommandScopeIdError};
 
 const MAX_SCOPE_ID_BYTES: usize = 512;
+
+/// Fixed upstream ceiling for one `GITHUB_ARTIFACTS` declaration file.
+pub const MAX_ARTIFACT_DECLARATION_FILE_BYTES: usize = 1_024 * 1_024;
+
+/// Fixed upstream ceiling for distinct artifact subjects accumulated by one job.
+pub const MAX_ARTIFACT_SUBJECTS: usize = 500;
+
+/// Automata transport ceiling for the generated read-only artifact list.
+pub const MAX_ARTIFACT_LIST_BYTES: usize = 16 * 1_024 * 1_024;
 
 /// One well-known per-step command file.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -17,6 +28,8 @@ pub enum CommandFileKind {
     State,
     /// Markdown attachment content from `GITHUB_STEP_SUMMARY`.
     StepSummary,
+    /// Artifact-subject declarations from `GITHUB_ARTIFACTS`.
+    Artifacts,
 }
 
 impl CommandFileKind {
@@ -29,6 +42,7 @@ impl CommandFileKind {
             Self::Path => "GITHUB_PATH",
             Self::State => "GITHUB_STATE",
             Self::StepSummary => "GITHUB_STEP_SUMMARY",
+            Self::Artifacts => "GITHUB_ARTIFACTS",
         }
     }
 }
@@ -64,6 +78,201 @@ impl fmt::Debug for SensitiveText {
         formatter
             .debug_struct("SensitiveText")
             .field("bytes", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Artifact subject representation exposed to later steps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactSubjectKind {
+    /// A regular file hashed by the runner inside the job sandbox.
+    File,
+    /// An OCI reference carrying a caller-declared digest.
+    Oci,
+}
+
+/// One validated, job-scoped artifact subject.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ArtifactSubject {
+    name: String,
+    digest: String,
+    kind: ArtifactSubjectKind,
+}
+
+impl ArtifactSubject {
+    /// Creates one subject with a canonical lower-case SHA digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name or a digest outside canonical
+    /// `sha256`, `sha384`, or `sha512` syntax and length.
+    pub fn new(
+        name: impl Into<String>,
+        digest: impl Into<String>,
+        kind: ArtifactSubjectKind,
+    ) -> Result<Self, ArtifactSubjectError> {
+        let name = name.into();
+        let digest = digest.into();
+        if name.is_empty() || !canonical_artifact_digest(&digest) {
+            return Err(ArtifactSubjectError);
+        }
+        Ok(Self { name, digest, kind })
+    }
+
+    /// Returns the exact subject name or OCI reference.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the canonical algorithm-prefixed digest.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Returns whether the subject is a regular file or OCI reference.
+    #[must_use]
+    pub const fn kind(&self) -> ArtifactSubjectKind {
+        self.kind
+    }
+}
+
+impl fmt::Debug for ArtifactSubject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactSubject")
+            .field("kind", &self.kind)
+            .field("name_bytes", &self.name.len())
+            .field("digest_bytes", &self.digest.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn canonical_artifact_digest(digest: &str) -> bool {
+    let Some((algorithm, hexadecimal)) = digest.split_once(':') else {
+        return false;
+    };
+    let expected = match algorithm {
+        "sha256" => 64,
+        "sha384" => 96,
+        "sha512" => 128,
+        _ => return false,
+    };
+    hexadecimal.len() == expected
+        && hexadecimal
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One unresolved declaration parsed from `GITHUB_ARTIFACTS`.
+#[derive(Clone, Eq, PartialEq)]
+pub enum ArtifactDeclaration {
+    /// A path that must be resolved and SHA-256 hashed in the job sandbox.
+    File(ArtifactFileDeclaration),
+    /// A complete OCI subject whose digest was validated during parsing.
+    Oci(ArtifactSubject),
+}
+
+impl fmt::Debug for ArtifactDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(file) => formatter.debug_tuple("File").field(file).finish(),
+            Self::Oci(subject) => formatter.debug_tuple("Oci").field(subject).finish(),
+        }
+    }
+}
+
+/// One workspace-relative or absolute file path awaiting sandbox hashing.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ArtifactFileDeclaration {
+    path: SensitiveText,
+}
+
+impl ArtifactFileDeclaration {
+    pub(crate) fn new(path: String) -> Self {
+        Self {
+            path: SensitiveText::new(path),
+        }
+    }
+
+    /// Returns the declared path for the trusted execution adapter.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.path.as_str()
+    }
+}
+
+impl fmt::Debug for ArtifactFileDeclaration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactFileDeclaration")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// Ordered unresolved declarations from one completed step.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct ArtifactDeclarationCommandFile {
+    pub(crate) declarations: Vec<ArtifactDeclaration>,
+}
+
+impl ArtifactDeclarationCommandFile {
+    /// Returns declarations in file-observation order.
+    #[must_use]
+    pub fn declarations(&self) -> &[ArtifactDeclaration] {
+        &self.declarations
+    }
+
+    /// Reports whether the file contained no effective declarations.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.declarations.is_empty()
+    }
+}
+
+impl fmt::Debug for ArtifactDeclarationCommandFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactDeclarationCommandFile")
+            .field("declaration_count", &self.declarations.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Fully resolved subjects ready for one atomic job-state application.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct ArtifactSubjectCommandFile {
+    subjects: Vec<ArtifactSubject>,
+}
+
+impl ArtifactSubjectCommandFile {
+    /// Wraps subjects resolved by the trusted sandbox adapter.
+    #[must_use]
+    pub fn new(subjects: Vec<ArtifactSubject>) -> Self {
+        Self { subjects }
+    }
+
+    /// Returns resolved subjects in declaration order.
+    #[must_use]
+    pub fn subjects(&self) -> &[ArtifactSubject] {
+        &self.subjects
+    }
+
+    /// Reports whether this step resolved no subjects.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.subjects.is_empty()
+    }
+}
+
+impl fmt::Debug for ArtifactSubjectCommandFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactSubjectCommandFile")
+            .field("subject_count", &self.subjects.len())
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +421,8 @@ pub enum ParsedCommandFile {
     State(StateCommandFile),
     /// Decoded `GITHUB_STEP_SUMMARY` Markdown.
     StepSummary(StepSummaryCommandFile),
+    /// Decoded unresolved `GITHUB_ARTIFACTS` declarations.
+    Artifacts(ArtifactDeclarationCommandFile),
 }
 
 /// All file-command mutations produced by one completed step.
@@ -222,6 +433,7 @@ pub struct CompletedStepCommands {
     pub(crate) path: PathCommandFile,
     pub(crate) state: StateCommandFile,
     pub(crate) summary: StepSummaryCommandFile,
+    pub(crate) artifacts: ArtifactSubjectCommandFile,
 }
 
 impl CompletedStepCommands {
@@ -240,7 +452,17 @@ impl CompletedStepCommands {
             path,
             state,
             summary,
+            artifacts: ArtifactSubjectCommandFile {
+                subjects: Vec::new(),
+            },
         }
+    }
+
+    /// Adds fully resolved artifact subjects for atomic phase application.
+    #[must_use]
+    pub fn with_artifacts(mut self, artifacts: ArtifactSubjectCommandFile) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// Merges deprecated stdout mutations into the corresponding command-file
@@ -293,6 +515,12 @@ impl CompletedStepCommands {
     #[must_use]
     pub const fn summary(&self) -> &StepSummaryCommandFile {
         &self.summary
+    }
+
+    /// Returns fully resolved artifact subjects from this step.
+    #[must_use]
+    pub const fn artifacts(&self) -> &ArtifactSubjectCommandFile {
+        &self.artifacts
     }
 }
 
@@ -409,6 +637,7 @@ pub struct JobCommandState {
     pub(crate) prepend_path: Vec<SensitiveText>,
     pub(crate) outputs: Vec<StepOutputState>,
     pub(crate) action_states: Vec<ActionState>,
+    pub(crate) artifact_subjects: Vec<ArtifactSubject>,
 }
 
 impl JobCommandState {
@@ -421,6 +650,7 @@ impl JobCommandState {
             prepend_path: Vec::new(),
             outputs: Vec::new(),
             action_states: Vec::new(),
+            artifact_subjects: Vec::new(),
         }
     }
 
@@ -473,6 +703,47 @@ impl JobCommandState {
                     .collect()
             })
     }
+
+    /// Returns job-scoped artifact subjects sorted by exact subject name.
+    #[must_use]
+    pub fn artifact_subjects(&self) -> &[ArtifactSubject] {
+        &self.artifact_subjects
+    }
+
+    /// Encodes the deterministic read-only `GITHUB_ARTIFACTS_LIST` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized failure if JSON serialization unexpectedly fails.
+    pub fn artifact_list_json(&self) -> Result<Vec<u8>, ArtifactListEncodingError> {
+        #[derive(Serialize)]
+        struct Subject<'a> {
+            name: &'a str,
+            digest: &'a str,
+            kind: ArtifactSubjectKind,
+        }
+
+        #[derive(Serialize)]
+        struct ArtifactList<'a> {
+            version: u8,
+            subjects: Vec<Subject<'a>>,
+        }
+
+        let subjects = self
+            .artifact_subjects
+            .iter()
+            .map(|subject| Subject {
+                name: subject.name(),
+                digest: subject.digest(),
+                kind: subject.kind(),
+            })
+            .collect();
+        serde_json::to_vec(&ArtifactList {
+            version: 1,
+            subjects,
+        })
+        .map_err(|_| ArtifactListEncodingError)
+    }
 }
 
 impl fmt::Debug for JobCommandState {
@@ -484,6 +755,7 @@ impl fmt::Debug for JobCommandState {
             .field("path_entries", &self.prepend_path.len())
             .field("output_steps", &self.outputs.len())
             .field("action_states", &self.action_states.len())
+            .field("artifact_subjects", &self.artifact_subjects.len())
             .finish()
     }
 }

@@ -422,7 +422,10 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             UnixMillis::new(terminal_completed_at),
         )
         .with_outputs(BTreeMap::from([
-            ("artifact".to_owned(), JobResultOutput::secret_derived()),
+            (
+                "artifact".to_owned(),
+                JobResultOutput::public("bundle-42")?,
+            ),
             ("masked".to_owned(), JobResultOutput::secret_derived()),
         ]));
         result.validate()?;
@@ -717,8 +720,8 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             vec![
                 (
                     "artifact".to_owned(),
-                    "secret_derived".to_owned(),
-                    None,
+                    "public".to_owned(),
+                    Some("bundle-42".to_owned()),
                 ),
                 ("masked".to_owned(), "secret_derived".to_owned(), None),
             ]

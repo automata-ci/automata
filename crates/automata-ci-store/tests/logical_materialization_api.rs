@@ -178,6 +178,7 @@ fn decoded_job_must_match_runtime_event_workspace_and_matrix_identity() {
         activation_reference(fixture.descriptor.runtime_context()),
     )
     .with_actor("octocat")
+    .with_run_id_alias(automata_ci_core::RunIdAlias::new(11).expect("run ID alias"))
     .with_run_number(7)
     .with_run_attempt(1);
     let wrong = JobIrEnvelope::new(
@@ -297,6 +298,7 @@ fn fixture_with_authority_profile(
         "CI".to_owned(),
         "refs/heads/main".to_owned(),
         Some("octocat".to_owned()),
+        automata_ci_core::RunIdAlias::new(11).expect("run ID alias"),
         7,
         1,
     )
@@ -360,6 +362,7 @@ fn fixture_with_authority_profile(
         activation_reference(&runtime),
     )
     .with_actor(execution.actor().expect("actor"))
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
     let envelope = JobIrEnvelope::new(

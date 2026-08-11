@@ -1,9 +1,8 @@
 # Local runner bootstrap
 
-This directory contains the checked-in Linux integration configuration for
-`automata-runner`. It selects the locked bootstrap Ubuntu 24.04 profile and a
-rootless Podman sandbox provider. That local bootstrap digest is not an
-official promoted profile; follow the
+This guide prepares the checked-in Linux integration runner. The example uses
+the locked Ubuntu 24.04 profile and the rootless Podman provider. Its digest is
+a development input, not evidence of a public promoted profile; follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
@@ -238,6 +237,8 @@ The example expects:
 - durable journal and spool directories owned by the runner account;
 - transient Podman state and runtime directories beneath the dedicated tmpfs
   mount, plus home and scratch directories owned by the runner account;
+- absolute trusted toolchain paths including `sha256sum`, which the GitHub
+  executor invokes inside the job sandbox for declared artifact files;
 - the root-owned approved helper directory described above, containing only
   the seven reviewed helper names and no `systemd-run`; and
 - exact root-owned Podman, conmon, crun, catatonit, and seccomp-profile paths
@@ -336,10 +337,11 @@ automata-runner run \
 The checked-in JSON uses conventional service paths and may be run directly
 only when those exact assumptions are true.
 
-Public source repositories and public repository actions remain supported
-through anonymous access. Private repositories and private actions are
-intentionally unsupported until the server can broker a short-lived GitHub App
-credential bound to the exact job and repository.
+Public source repositories and actions use anonymous access. When the exact
+GitHub provider registry is configured, a materialized Standard job may instead
+receive short-lived, lease-bound repository authority for its registered
+private repository. CredentialFree jobs receive none. General private
+marketplace-action compatibility is not claimed.
 
 Before starting any listener or opening its mTLS session, the runner requires
 every networking module to be loaded or available from the running kernel's

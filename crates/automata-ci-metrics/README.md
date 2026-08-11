@@ -28,9 +28,6 @@ only after one hour when resolution had to be reduced. The zero threshold stays
 at the client's unit-neutral default; the shared helper does not widen it
 across unlike seconds, bytes, and count domains.
 
-Automata is pre-1.0 and not production-ready. The metric schema and Rust API
-may change between releases.
-
 - [Observability documentation](https://github.com/automata-ci/automata/blob/main/docs/observability.md)
-- [API documentation](https://docs.rs/automata-ci-metrics)
+- API documentation: run `cargo doc -p automata-ci-metrics --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

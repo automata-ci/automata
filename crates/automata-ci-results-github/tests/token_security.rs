@@ -69,8 +69,10 @@ fn cache_authority() -> CacheAuthority {
     CacheAuthority::new(
         "automata-ci/automata",
         vec![
-            CacheAccessScope::new("refs/heads/main", CachePermission::ReadWrite)
+            CacheAccessScope::new("refs/heads/feature", CachePermission::ReadWrite)
                 .expect("cache scope"),
+            CacheAccessScope::new("refs/heads/main", CachePermission::Read)
+                .expect("default-branch cache scope"),
         ],
     )
     .expect("cache authority")
@@ -111,7 +113,7 @@ fn issued_runtime_token_has_exact_results_scope_and_round_trips() {
     assert_eq!(payload["repository"], "automata-ci/automata");
     assert_eq!(
         payload["ac"],
-        r#"[{"Scope":"refs/heads/main","Permission":3}]"#
+        r#"[{"Scope":"refs/heads/feature","Permission":3},{"Scope":"refs/heads/main","Permission":1}]"#
     );
     assert_eq!(format!("{token:?}"), "RuntimeToken([redacted])");
 }

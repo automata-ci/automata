@@ -7,6 +7,16 @@ use crate::CommandFileKind;
 #[error("command scope identifier is empty, too long, or contains unsupported characters")]
 pub struct CommandScopeIdError;
 
+/// An artifact subject name or canonical digest is invalid.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("artifact subject is invalid")]
+pub struct ArtifactSubjectError;
+
+/// A deterministic artifact-list payload could not be encoded.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("artifact subject list could not be encoded")]
+pub struct ArtifactListEncodingError;
+
 /// A command file is malformed or exceeds the configured protocol envelope.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CommandFileError {
@@ -95,6 +105,12 @@ pub enum CommandFileError {
     HeredocValueMissingNewline {
         /// Channel containing the invalid heredoc value.
         kind: CommandFileKind,
+    },
+    /// One artifact declaration violates the reviewed upstream grammar.
+    #[error("Artifacts command file contains an invalid declaration on line {line}")]
+    InvalidArtifactDeclaration {
+        /// One-based line number without the rejected declaration text.
+        line: usize,
     },
 }
 
@@ -191,6 +207,21 @@ pub enum PhaseApplicationError {
     #[error("job command state exceeds its {maximum}-action-state limit")]
     TooManyActionStates {
         /// Configured maximum number of action-state scopes.
+        maximum: usize,
+    },
+    /// A declaration reused a subject name with a different digest.
+    #[error("artifact subject conflicts with an earlier declaration")]
+    ArtifactConflict,
+    /// The derived artifact-subject set exceeds the upstream job cap.
+    #[error("job command state exceeds its {maximum}-artifact-subject limit")]
+    TooManyArtifactSubjects {
+        /// Fixed maximum number of distinct job-scoped subjects.
+        maximum: usize,
+    },
+    /// The generated read-only artifact list exceeds Automata's copy boundary.
+    #[error("artifact subject list exceeds its {maximum}-byte transport limit")]
+    ArtifactListTooLarge {
+        /// Maximum encoded JSON bytes supported by the sandbox copy boundary.
         maximum: usize,
     },
     /// The sum of durable names, values, paths, and scope IDs is too large.

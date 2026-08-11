@@ -68,6 +68,7 @@ fn repository(
         "repository_id": repository_id,
         "repository_owner_id": owner_id,
         "repository": name,
+        "default_branch": "main",
         "visibility": visibility,
         "manifest_revision": 1,
         "policy_revision": 7,
@@ -98,7 +99,7 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider-runtime",

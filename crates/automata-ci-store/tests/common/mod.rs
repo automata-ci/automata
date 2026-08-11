@@ -189,6 +189,26 @@ pub struct SeedData {
 
 #[allow(clippy::too_many_lines, dead_code)] // Shared fixture; integration targets consume subsets.
 pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResult<SeedData> {
+    seed_control_plane_with_optional_concurrency(pool, runner_count, None).await
+}
+
+#[allow(dead_code)] // Only concurrency-focused integration targets consume this fixture variant.
+pub async fn seed_control_plane_with_concurrency(
+    pool: &PgPool,
+    runner_count: usize,
+    group: &str,
+    queue_policy: &str,
+) -> TestResult<SeedData> {
+    seed_control_plane_with_optional_concurrency(pool, runner_count, Some((group, queue_policy)))
+        .await
+}
+
+#[allow(clippy::too_many_lines)] // Shared relational fixture with one optional concurrency pin.
+async fn seed_control_plane_with_optional_concurrency(
+    pool: &PgPool,
+    runner_count: usize,
+    concurrency: Option<(&str, &str)>,
+) -> TestResult<SeedData> {
     let repository_id = Uuid::new_v4();
     let workflow_id = Uuid::new_v4();
     let snapshot_id = Uuid::new_v4();
@@ -273,9 +293,13 @@ pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResul
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            concurrency_group_key, concurrency_queue_policy
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1)
+        VALUES (
+            $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
+            $6, $7
+        )
         ",
     )
     .bind(run_id)
@@ -283,6 +307,8 @@ pub async fn seed_control_plane(pool: &PgPool, runner_count: usize) -> TestResul
     .bind(workflow_id)
     .bind(snapshot_id)
     .bind(vec![9_u8; 20])
+    .bind(concurrency.map(|(group, _)| group))
+    .bind(concurrency.map(|(_, policy)| policy))
     .execute(pool)
     .await?;
     sqlx::query(

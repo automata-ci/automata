@@ -55,6 +55,9 @@ use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+/// Deadlock guard for event-driven asynchronous tests.
+pub const TEST_WATCHDOG: Duration = Duration::from_secs(15);
+
 pub struct Scratch {
     path: PathBuf,
 }

@@ -543,7 +543,7 @@ fn classified_job_result_outputs_reject_plaintext_and_wire_tampering() {
     ));
 
     assert_unclassified_job_result_fields_fail_closed();
-    assert_readable_secret_result_rejects_public_output();
+    assert_readable_secret_result_accepts_classified_public_output();
 }
 
 fn assert_unclassified_job_result_fields_fail_closed() {
@@ -591,13 +591,12 @@ fn assert_unclassified_job_result_fields_fail_closed() {
     }
 }
 
-fn assert_readable_secret_result_rejects_public_output() {
+fn assert_readable_secret_result_accepts_classified_public_output() {
     let mut readable_with_public = fixture_job_result();
     job_result_payload(&mut readable_with_public).secret_exposure =
         fixture_wire::JobSecretExposure::ReadableSecret as i32;
-    assert!(
-        decode_runner_frame(&encode(&readable_with_public), &ProtocolLimits::default()).is_err()
-    );
+    decode_runner_frame(&encode(&readable_with_public), &ProtocolLimits::default())
+        .expect("job exposure does not override value-level output sensitivity");
 }
 
 #[test]

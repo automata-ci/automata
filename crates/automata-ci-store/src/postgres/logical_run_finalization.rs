@@ -229,6 +229,11 @@ impl LogicalRunFinalizationRepository for PostgresStore {
         request: CommitLogicalRunFinalization,
     ) -> Result<LogicalRunFinalizationReceipt, LogicalRunFinalizationStoreError> {
         let mut transaction = begin_read_committed(&self.pool).await?;
+        let (repository_id, concurrency_key) = super::admission::lock_run_concurrency(
+            &mut transaction,
+            request.claim().target().run_id(),
+        )
+        .await?;
         let row = lock_commit_target(&mut transaction, request.claim().target())
             .await?
             .ok_or(LogicalRunFinalizationStoreError::ClaimRejected)?;
@@ -264,6 +269,14 @@ impl LogicalRunFinalizationRepository for PostgresStore {
         transition_marker(&mut transaction, &request).await?;
         transition_workflow_run(&mut transaction, &request).await?;
         transition_linked_github_check(&mut transaction, &request).await?;
+        super::admission::reconcile_terminal_concurrency(
+            &mut transaction,
+            repository_id,
+            concurrency_key.as_deref(),
+            request.claim().target().run_id(),
+            request.finalized_at(),
+        )
+        .await?;
         let finalized = sqlx::query(
             r"
             UPDATE workflow_plan_v2_run_result_claims

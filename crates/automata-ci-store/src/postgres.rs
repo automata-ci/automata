@@ -95,15 +95,19 @@ const RUNNER_RPC_RESPONSE_ENCRYPTION_PURPOSE: &str = "control-plane/runner-rpc-r
 /// execution context exposes its bearer to user code as
 /// `ACTIONS_RUNTIME_TOKEN`. Standard and descriptor-only legacy attempts are
 /// therefore readable-secret. Only a fully validated credential-free `JobIR` may
-/// admit a secretless logical attempt. The generic retry path may reuse an
-/// already-admitted lower ceiling, including a closed legacy reason or an
-/// administrative narrowing, but it must reproduce that snapshot exactly.
+/// admit a secretless logical attempt. Current schema-2 attempts persist
+/// runner-redacted logs while retaining a private visibility ceiling. The
+/// generic retry path may reuse an already-admitted schema-1 suppression
+/// snapshot, lower ceiling, closed legacy reason, or administrative narrowing,
+/// but it must reproduce that snapshot exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CurrentAttemptOutputSafety {
     secret_exposure: SecretExposureClass,
+    raw_log_disposition: &'static str,
     requested_log_visibility: OutputVisibility,
     effective_log_visibility: OutputVisibility,
     output_safety_reason: &'static str,
+    output_safety_schema: i32,
 }
 
 impl CurrentAttemptOutputSafety {
@@ -133,19 +137,22 @@ impl CurrentAttemptOutputSafety {
         output_safety_reason: &str,
         output_safety_schema: i32,
     ) -> Option<Self> {
+        let secret_exposure = parse_secret_exposure(secret_exposure)?;
+        let raw_log_disposition = parse_raw_log_disposition(raw_log_disposition)?;
         let snapshot = Self {
-            secret_exposure: parse_secret_exposure(secret_exposure)?,
+            secret_exposure,
+            raw_log_disposition,
             requested_log_visibility: parse_output_visibility(requested_log_visibility)?,
             effective_log_visibility: parse_output_visibility(effective_log_visibility)?,
             output_safety_reason: parse_output_safety_reason(output_safety_reason)?,
+            output_safety_schema,
         };
-        (raw_log_disposition == snapshot.raw_log_disposition()
+        (valid_raw_log_policy(secret_exposure, raw_log_disposition, output_safety_schema)
             && snapshot.effective_log_visibility <= snapshot.requested_log_visibility
             && (!matches!(
                 snapshot.secret_exposure,
                 SecretExposureClass::ReadableSecret
-            ) || matches!(snapshot.effective_log_visibility, OutputVisibility::Private))
-            && output_safety_schema == Self::output_safety_schema())
+            ) || matches!(snapshot.effective_log_visibility, OutputVisibility::Private)))
         .then_some(snapshot)
     }
 
@@ -158,10 +165,7 @@ impl CurrentAttemptOutputSafety {
     }
 
     pub(super) const fn raw_log_disposition(self) -> &'static str {
-        match self.secret_exposure {
-            SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly => "persist",
-            SecretExposureClass::ReadableSecret => "suppress_user_output",
-        }
+        self.raw_log_disposition
     }
 
     pub(super) const fn requested_log_visibility(self) -> &'static str {
@@ -176,8 +180,8 @@ impl CurrentAttemptOutputSafety {
         self.output_safety_reason
     }
 
-    pub(super) const fn output_safety_schema() -> i32 {
-        1
+    pub(super) const fn output_safety_schema(self) -> i32 {
+        self.output_safety_schema
     }
 
     pub(super) fn supports_current_authority_profile(self) -> bool {
@@ -186,7 +190,14 @@ impl CurrentAttemptOutputSafety {
             SecretExposureClass::ReadableSecret => JobAuthorityProfile::Standard,
             SecretExposureClass::CapabilityOnly => return false,
         };
-        Self::for_authority_profile(profile, self.requested_log_visibility()) == Some(self)
+        let Some(current) = Self::for_authority_profile(profile, self.requested_log_visibility())
+        else {
+            return false;
+        };
+        self.secret_exposure == current.secret_exposure
+            && self.requested_log_visibility == current.requested_log_visibility
+            && self.effective_log_visibility == current.effective_log_visibility
+            && self.output_safety_reason == current.output_safety_reason
     }
 
     fn with_exposure(
@@ -197,6 +208,7 @@ impl CurrentAttemptOutputSafety {
         let readable_secret = matches!(secret_exposure, SecretExposureClass::ReadableSecret);
         Some(Self {
             secret_exposure,
+            raw_log_disposition: "persist",
             requested_log_visibility,
             effective_log_visibility: if readable_secret {
                 OutputVisibility::Private
@@ -210,7 +222,35 @@ impl CurrentAttemptOutputSafety {
             } else {
                 "repository_policy"
             },
+            output_safety_schema: 2,
         })
+    }
+}
+
+const fn parse_raw_log_disposition(value: &str) -> Option<&'static str> {
+    match value.as_bytes() {
+        b"persist" => Some("persist"),
+        b"suppress_user_output" => Some("suppress_user_output"),
+        _ => None,
+    }
+}
+
+const fn valid_raw_log_policy(
+    exposure: SecretExposureClass,
+    disposition: &str,
+    schema: i32,
+) -> bool {
+    match schema {
+        1 => match exposure {
+            SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly => {
+                matches!(disposition.as_bytes(), b"persist")
+            }
+            SecretExposureClass::ReadableSecret => {
+                matches!(disposition.as_bytes(), b"suppress_user_output")
+            }
+        },
+        2 => matches!(disposition.as_bytes(), b"persist"),
+        _ => false,
     }
 }
 
@@ -268,11 +308,11 @@ mod attempt_output_safety_tests {
             let snapshot = CurrentAttemptOutputSafety::readable(requested)
                 .expect("closed publication audience");
             assert_eq!(snapshot.secret_exposure_class(), "readable_secret");
-            assert_eq!(snapshot.raw_log_disposition(), "suppress_user_output");
+            assert_eq!(snapshot.raw_log_disposition(), "persist");
             assert_eq!(snapshot.requested_log_visibility(), requested);
             assert_eq!(snapshot.effective_log_visibility(), "private");
             assert_eq!(snapshot.output_safety_reason(), reason);
-            assert_eq!(CurrentAttemptOutputSafety::output_safety_schema(), 1);
+            assert_eq!(snapshot.output_safety_schema(), 2);
         }
         assert!(CurrentAttemptOutputSafety::readable("unknown").is_none());
 
@@ -299,6 +339,27 @@ mod attempt_output_safety_tests {
         )
         .expect("canonical secretless snapshot");
         assert_eq!(secretless.secret_exposure_class(), "secretless");
+        assert_eq!(secretless.output_safety_schema(), 1);
+        let current = CurrentAttemptOutputSafety::from_durable(
+            "readable_secret",
+            "persist",
+            "public",
+            "private",
+            "secret_exposure",
+            2,
+        )
+        .expect("current readable-secret snapshot");
+        assert!(current.supports_current_authority_profile());
+        let prior_current = CurrentAttemptOutputSafety::from_durable(
+            "readable_secret",
+            "suppress_user_output",
+            "public",
+            "private",
+            "secret_exposure",
+            1,
+        )
+        .expect("prior readable-secret snapshot");
+        assert!(prior_current.supports_current_authority_profile());
         let legacy = CurrentAttemptOutputSafety::from_durable(
             "readable_secret",
             "suppress_user_output",
@@ -310,6 +371,17 @@ mod attempt_output_safety_tests {
         .expect("closed legacy snapshot remains safe to reuse");
         assert_eq!(legacy.output_safety_reason(), "legacy_restricted");
         assert!(!legacy.supports_current_authority_profile());
+        assert!(
+            CurrentAttemptOutputSafety::from_durable(
+                "readable_secret",
+                "suppress_user_output",
+                "public",
+                "private",
+                "secret_exposure",
+                2,
+            )
+            .is_none()
+        );
         assert!(
             CurrentAttemptOutputSafety::from_durable(
                 "secretless",
@@ -672,7 +744,7 @@ impl InternalAttemptRepository for PostgresStore {
         .bind(safety.requested_log_visibility())
         .bind(safety.effective_log_visibility())
         .bind(safety.output_safety_reason())
-        .bind(CurrentAttemptOutputSafety::output_safety_schema())
+        .bind(safety.output_safety_schema())
         .bind(classified_at)
         .execute(&mut *transaction)
         .await

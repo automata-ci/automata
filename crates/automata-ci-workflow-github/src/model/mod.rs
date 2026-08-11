@@ -6,6 +6,7 @@ mod step;
 mod strategy;
 mod value;
 mod workflow;
+mod workflow_dispatch;
 
 pub use container::{
     ContainerCredentials, ContainerEnvironment, ContainerSequence, DetailedContainer, JobContainer,
@@ -33,4 +34,11 @@ pub use value::{
 };
 pub use workflow::{
     GithubWorkflow, GithubWorkflowSourcePlan, SOURCE_PLAN_SCHEMA_VERSION, SourcePlanVersion,
+};
+pub use workflow_dispatch::{
+    GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
+    GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsError,
+    GithubWorkflowDispatchInputsV1, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
 };

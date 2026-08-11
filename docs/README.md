@@ -1,64 +1,67 @@
-# Automata documentation
+# Documentation
 
-Start with the shortest guide for your goal. Automata is in bootstrap
-development, and the setup guides distinguish working behavior from planned or
-unsupported capabilities.
+Automata is under active development. Each guide states what works now, what
+has only component-level coverage, and what remains planned.
 
-## Start here
+The quickest ways in are:
 
-| Goal | Guide |
+| Goal | Start here |
 | --- | --- |
-| Install Automata and preview the web interface | [Getting started](getting-started.md) |
-| Start PostgreSQL, RustFS, and the bootstrap server | [Control-plane setup](deployment.md) |
-| Configure a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
-| Build, test, or change Automata | [Development](development.md) |
-| Contribute a change | [Contributing](../CONTRIBUTING.md) |
-| Report a vulnerability privately | [Security policy](../SECURITY.md) |
-| Review release history | [Changelog](../CHANGELOG.md) |
-| Publish crates, images, and a GitHub Release | [Releasing](releasing.md) |
+| Build from source and inspect the interface | [Getting started](getting-started.md) |
+| Check support for a workflow feature | [Compatibility](compatibility.md) |
+| Start the durable local composition | [Control-plane setup](deployment.md) |
+| Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
 
-## Product and design
+The [hosted UI demo](https://automata-ci.github.io/automata/) uses sample data.
+It does not connect to repositories or execute workflows.
 
-- [Architecture](architecture.md) — components, data flow, correctness, and
-  isolation boundaries.
-- [Compatibility contract](compatibility.md) — what “GitHub Actions compatible”
-  means and how claims are verified.
-- [Authentication and authorization](authentication.md) — current implementation
-  status and the intended trust-domain separation.
-- [Implementation plan](implementation-plan.md) — ordered milestones and their
-  acceptance gates.
+## Operate Automata
 
-## Operations and internals
+- [Authentication and authorization](authentication.md) covers login, roles,
+  permissions, sessions, secrets, and repository visibility.
+- [Prometheus and OpenMetrics](observability.md) defines the scrape endpoints,
+  metrics, recording rules, alerts, and cardinality limits.
+- [Arch Linux runner host](platforms/arch-linux.md) prepares a host for the
+  current rootless Podman execution profile.
+- [Local durable services](../deploy/dev/README.md) starts PostgreSQL and RustFS
+  for development and integration tests.
+- [`automata` control plane](../crates/automata-ci/README.md) documents listener
+  configuration and secret references.
 
-- [Prometheus and OpenMetrics](observability.md) — scrape topology, metric
-  schema, privacy/cardinality policy, recording rules, alerts, and verification.
-- [Release operations](releasing.md) — one-time repository setup, version and
-  tag flow, publication order, first-push GHCR visibility, and retry behavior.
-- [Local durable services](../deploy/dev/README.md) — PostgreSQL and RustFS for
-  development and integration tests.
-- [Arch Linux runner hosts](platforms/arch-linux.md) — host prerequisites,
-  rootless Podman admission, and local firewall policy.
-- [`automata` control plane](../crates/automata-ci/README.md) — listener and secret
-  reference details.
+## Understand the system
+
+- [Architecture](architecture.md) explains the components, data flow, storage,
+  and trust boundaries.
+- [Compatibility](compatibility.md) lists the supported GitHub Actions subsets
+  and the evidence required for broader claims.
+- [Implementation plan](implementation-plan.md) tracks completed foundations
+  and the acceptance gates that still block a release.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
-  — immutable image contents and publication policy.
-- [React SSR UI](../ui/README.md) — build-time frontend and embedded runtime
-  boundaries.
+  describes the immutable runner image and its publication policy.
+- [React SSR UI](../ui/README.md) explains the build-time frontend and embedded
+  runtime boundary.
 
-## Distribution names
+## Work on the project
+
+- [Development](development.md) covers builds, tests, fixtures, frontend work,
+  and local services.
+- [Contributing](../CONTRIBUTING.md) explains the change and review workflow.
+- [Documentation style](documentation-style.md) defines status labels,
+  terminology, and review checks for these pages.
+- [Releasing](releasing.md) describes repository setup, versioning,
+  publication, and retry behavior.
+- [Changelog](../CHANGELOG.md) records release history.
+- [Security policy](../SECURITY.md) gives the private reporting route.
+
+## Names used for distribution
 
 | Kind | Control plane | Runner |
 | --- | --- | --- |
 | Command | `automata` | `automata-runner` |
-| crates.io package | `automata-ci` | `automata-ci-runner` |
-| GHCR image | `ghcr.io/automata-ci/automata` | `ghcr.io/automata-ci/automata-runner` |
+| Planned crates.io package | `automata-ci` | `automata-ci-runner` |
+| Planned GHCR image | `ghcr.io/automata-ci/automata` | `ghcr.io/automata-ci/automata-runner` |
 
-The wider Rust workspace uses the `automata-ci-*` package namespace and
-`automata_ci_*` crate identifiers. User commands keep the shorter product
-names.
-
-## Documentation conventions
-
-The [documentation style guide](documentation-style.md) records the reader-first
-structure, terminology, command conventions, and public README references used
-throughout this documentation.
+The wider Rust workspace uses `automata-ci-*` package names and
+`automata_ci_*` crate identifiers. The shorter names are the commands users
+run. None of the planned distribution names is public until its registry shows
+an exact released version.

@@ -4,7 +4,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -28,7 +28,8 @@ use automata_ci_runner_runtime::{
     RuntimeControlReply, RuntimeControlRetry, RuntimeExchangeKind, RuntimeInfrastructureFailure,
     RuntimeJobConclusion, RuntimeLeaseDisposition, RuntimeLeasePollOutcome,
     RuntimeOperationOutcome, RuntimeRemoteErrorDisposition, RuntimeRemoteErrorKind,
-    RuntimeRetryCause, RuntimeSessionOutcome, RuntimeTerminalResultStage, SystemRuntimeIds,
+    RuntimeRetryCause, RuntimeSessionOutcome, RuntimeSleeper, RuntimeTerminalResultStage,
+    SleepFuture, SystemRuntimeIds,
 };
 use automata_ci_runner_transport::PreparedRequest;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +54,75 @@ impl RunnerRuntimeObserver for RecordingObserver {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(event);
+    }
+}
+
+#[derive(Debug)]
+struct CleanupRetryGate {
+    delay: Duration,
+    waits: AtomicUsize,
+    entered: tokio::sync::Notify,
+    released: AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl CleanupRetryGate {
+    fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            waits: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            released: AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn waits(&self) -> usize {
+        self.waits.load(Ordering::SeqCst)
+    }
+
+    async fn wait_until_entered(&self) {
+        loop {
+            let entered = self.entered.notified();
+            if self.waits() > 0 {
+                return;
+            }
+            entered.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+impl RuntimeSleeper for CleanupRetryGate {
+    fn sleep(&self, duration: Duration, cancellation: CancellationToken) -> SleepFuture<'_> {
+        if duration != self.delay {
+            return Box::pin(async move {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {}
+                    () = tokio::task::yield_now() => {}
+                }
+            });
+        }
+        Box::pin(async move {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_waiters();
+            loop {
+                let released = self.release.notified();
+                if self.released.load(Ordering::SeqCst) || cancellation.is_cancelled() {
+                    return;
+                }
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return,
+                    () = released => {}
+                }
+            }
+        })
     }
 }
 
@@ -820,6 +890,8 @@ async fn recovered_durable_cancellation_observes_the_actual_executor_signal_once
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
 async fn cleanup_attempts_observe_each_real_error_and_success_once() {
+    const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(37);
+
     let scratch = support::Scratch::new("semantic-cleanup-attempts");
     let runner_id = RunnerId::new();
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
@@ -840,8 +912,9 @@ async fn cleanup_attempts_observe_each_real_error_and_success_once() {
         survivor.lease.attempt_id(),
     ));
     let observer = Arc::new(RecordingObserver::default());
-    let retry = RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(2))
-        .expect("short cleanup retry ramp");
+    let retry = RetryPolicy::new(2, CLEANUP_RETRY_DELAY, CLEANUP_RETRY_DELAY)
+        .expect("fixed cleanup retry delay");
+    let sleeper = Arc::new(CleanupRetryGate::new(CLEANUP_RETRY_DELAY));
     let runtime = RunnerSessionSupervisor::new(
         support::config_with_slots_and_retry(runner_id, 2, retry),
         RunnerRuntimePorts::new(
@@ -850,7 +923,7 @@ async fn cleanup_attempts_observe_each_real_error_and_success_once() {
             spool,
             executor.clone(),
             Arc::new(support::FixedClock::new(10_000, 50)),
-            Arc::new(automata_ci_runner_runtime::TokioRuntimeSleeper),
+            sleeper.clone(),
             Arc::new(SystemRuntimeIds),
         )
         .with_observer(observer.clone()),
@@ -858,12 +931,10 @@ async fn cleanup_attempts_observe_each_real_error_and_success_once() {
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
 
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        executor.wait_until_cleanup_is_parked(),
-    )
-    .await
-    .expect("second cleanup attempt parks after the first uncertain error");
+    tokio::time::timeout(support::TEST_WATCHDOG, sleeper.wait_until_entered())
+        .await
+        .expect("first cleanup error reaches its retry gate");
+    assert_eq!(executor.cleanup_attempts(), 1);
     assert_eq!(
         observer
             .events()
@@ -886,12 +957,21 @@ async fn cleanup_attempts_observe_each_real_error_and_success_once() {
         }
     )));
 
+    sleeper.release();
+    tokio::time::timeout(
+        support::TEST_WATCHDOG,
+        executor.wait_until_cleanup_is_parked(),
+    )
+    .await
+    .expect("released retry starts and parks the second cleanup attempt");
+    assert_eq!(sleeper.waits(), 1);
+
     executor.release_cleanup();
-    tokio::time::timeout(Duration::from_secs(1), client.wait_for_released_slot_poll())
+    tokio::time::timeout(support::TEST_WATCHDOG, client.wait_for_released_slot_poll())
         .await
         .expect("successful cleanup permits terminal acknowledgement and slot release");
     shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(support::TEST_WATCHDOG, task)
         .await
         .expect("two-slot runtime shuts down")
         .expect("runtime task")

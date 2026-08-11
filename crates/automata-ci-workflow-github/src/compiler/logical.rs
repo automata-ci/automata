@@ -291,7 +291,7 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         .collect::<Vec<_>>();
     let span = context.span(workflow.span());
     let invocation = match &event {
-        CompiledEvent::Selected(event) => Some(event),
+        CompiledEvent::Selected { event, .. } => Some(event),
         CompiledEvent::RequiresChangedFiles
         | CompiledEvent::NotSelected(_)
         | CompiledEvent::Rejected => None,
@@ -299,7 +299,9 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
     .and_then(|event| compile_invocation_contract(workflow, event.name(), &jobs, &mut context));
 
     let plan = match (&event, span) {
-        (CompiledEvent::Selected(event), Some(span)) if !has_errors(&context.diagnostics) => {
+        (CompiledEvent::Selected { event, .. }, Some(span))
+            if !has_errors(&context.diagnostics) =>
+        {
             match automata_ci_core::WorkflowPlan::logical_builder(source, event.clone(), jobs, span)
                 .name(name)
                 .invocation(invocation)
@@ -323,11 +325,36 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         }
         _ => None,
     };
-    let disposition = compilation_disposition(&event, plan.as_ref(), &context.diagnostics);
+    finish_compilation(event, plan, context.diagnostics)
+}
+
+fn finish_compilation(
+    event: CompiledEvent,
+    plan: Option<automata_ci_core::WorkflowPlan>,
+    diagnostics: Vec<crate::Diagnostic>,
+) -> CompilationReport {
+    let disposition = compilation_disposition(&event, plan.as_ref(), &diagnostics);
+    let (workflow_dispatch_contract, workflow_dispatch_inputs) =
+        if matches!(disposition, CompilationDisposition::Accepted) {
+            match event {
+                CompiledEvent::Selected {
+                    workflow_dispatch: Some(workflow_dispatch),
+                    ..
+                } => (
+                    Some(workflow_dispatch.contract),
+                    Some(workflow_dispatch.inputs),
+                ),
+                _ => (None, None),
+            }
+        } else {
+            (None, None)
+        };
     CompilationReport {
         plan,
-        diagnostics: context.diagnostics,
+        diagnostics,
         disposition,
+        workflow_dispatch_contract,
+        workflow_dispatch_inputs,
     }
 }
 
@@ -340,10 +367,12 @@ fn compilation_disposition(
         return CompilationDisposition::Rejected;
     }
     match event {
-        CompiledEvent::Selected(_) if plan.is_some() => CompilationDisposition::Accepted,
+        CompiledEvent::Selected { .. } if plan.is_some() => CompilationDisposition::Accepted,
         CompiledEvent::RequiresChangedFiles => CompilationDisposition::RequiresChangedFiles,
         CompiledEvent::NotSelected(reason) => CompilationDisposition::NotSelected(*reason),
-        CompiledEvent::Selected(_) | CompiledEvent::Rejected => CompilationDisposition::Rejected,
+        CompiledEvent::Selected { .. } | CompiledEvent::Rejected => {
+            CompilationDisposition::Rejected
+        }
     }
 }
 

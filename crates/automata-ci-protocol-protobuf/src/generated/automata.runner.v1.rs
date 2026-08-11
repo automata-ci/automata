@@ -524,6 +524,9 @@ pub struct JobExecutionContext {
     /// Required immutable execution-time context for JobIR v5.
     #[prost(message, optional, tag = "8")]
     pub runtime_context: ::core::option::Option<JobContentReference>,
+    /// Stable positive numeric alias for the internal UUID run identity.
+    #[prost(uint64, optional, tag = "9")]
+    pub run_id_alias: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExpressionDialect {
@@ -1101,7 +1104,7 @@ pub struct JobResultOutputEntry {
     #[prost(message, optional, tag = "2")]
     pub value: ::core::option::Option<JobResultOutput>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StepResult {
     #[prost(string, tag = "1")]
     pub step_id: ::prost::alloc::string::String,
@@ -1113,6 +1116,26 @@ pub struct StepResult {
     pub started_at_unix_millis: i64,
     #[prost(sint64, tag = "5")]
     pub completed_at_unix_millis: i64,
+    #[prost(string, optional, tag = "6")]
+    pub summary_markdown: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "7")]
+    pub annotations: ::prost::alloc::vec::Vec<StepAnnotation>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StepAnnotationProperty {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StepAnnotation {
+    #[prost(enumeration = "StepAnnotationLevel", tag = "1")]
+    pub level: i32,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub properties: ::prost::alloc::vec::Vec<StepAnnotationProperty>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JobResult {
@@ -1716,6 +1739,38 @@ impl JobConclusion {
             "JOB_CONCLUSION_CANCELLED" => Some(Self::Cancelled),
             "JOB_CONCLUSION_TIMED_OUT" => Some(Self::TimedOut),
             "JOB_CONCLUSION_SKIPPED" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum StepAnnotationLevel {
+    Unspecified = 0,
+    Error = 1,
+    Warning = 2,
+    Notice = 3,
+}
+impl StepAnnotationLevel {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "STEP_ANNOTATION_LEVEL_UNSPECIFIED",
+            Self::Error => "STEP_ANNOTATION_LEVEL_ERROR",
+            Self::Warning => "STEP_ANNOTATION_LEVEL_WARNING",
+            Self::Notice => "STEP_ANNOTATION_LEVEL_NOTICE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STEP_ANNOTATION_LEVEL_UNSPECIFIED" => Some(Self::Unspecified),
+            "STEP_ANNOTATION_LEVEL_ERROR" => Some(Self::Error),
+            "STEP_ANNOTATION_LEVEL_WARNING" => Some(Self::Warning),
+            "STEP_ANNOTATION_LEVEL_NOTICE" => Some(Self::Notice),
             _ => None,
         }
     }

@@ -24,6 +24,14 @@ const CANCELLATION_INTENT_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-inten
 const CANCELLATION_COMMAND_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-command.v1";
 const PUBLICATION_SAFETY_REASON: &str = "repository_policy";
 const PUBLICATION_SAFETY_SCHEMA: i32 = 1;
+pub(super) const MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP: i64 = 4_096;
+
+pub(super) const fn queue_policy_name(policy: automata_ci_core::QueuePolicy) -> &'static str {
+    match policy {
+        automata_ci_core::QueuePolicy::Single => "single",
+        automata_ci_core::QueuePolicy::Max => "max",
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RunPublicationSnapshot {
@@ -191,7 +199,13 @@ impl WorkflowAdmissionRepository for PostgresStore {
         let run_number = allocate_run_number(&mut transaction, command.workflow_id()).await?;
 
         if let Some(concurrency) = command.concurrency() {
-            lock_concurrency_group(&mut transaction, &command, concurrency).await?;
+            lock_concurrency_group(
+                &mut transaction,
+                command.repository().id(),
+                command.admitted_at(),
+                concurrency,
+            )
+            .await?;
         }
         insert_run(&mut transaction, &command, run_number, &publication).await?;
         insert_jobs_and_dag(&mut transaction, &command, &publication).await?;
@@ -199,7 +213,9 @@ impl WorkflowAdmissionRepository for PostgresStore {
             assign_concurrency_slot(
                 &mut transaction,
                 self.runner_payload_encryption.as_ref(),
-                &command,
+                command.repository().id(),
+                command.run_id(),
+                command.admitted_at(),
                 concurrency,
             )
             .await?;
@@ -559,14 +575,15 @@ async fn allocate_run_number(
         .ok_or(WorkflowAdmissionStoreError::RunNumberExhausted)
 }
 
-async fn lock_concurrency_group(
+pub(super) async fn lock_concurrency_group(
     transaction: &mut Transaction<'_, Postgres>,
-    command: &AdmitWorkflowRun,
+    repository_id: RepositoryId,
+    admitted_at: UnixMillis,
     concurrency: &WorkflowConcurrency,
 ) -> Result<(), WorkflowAdmissionStoreError> {
     lock_concurrency_advisory(
         transaction,
-        command.repository().id().as_uuid(),
+        repository_id.as_uuid(),
         concurrency.normalized_key(),
     )
     .await
@@ -579,22 +596,22 @@ async fn lock_concurrency_group(
         ON CONFLICT (repository_id, normalized_key) DO NOTHING
         ",
     )
-    .bind(command.repository().id().as_uuid())
+    .bind(repository_id.as_uuid())
     .bind(concurrency.normalized_key())
     .bind(concurrency.display_key())
-    .bind(command.admitted_at().get())
+    .bind(admitted_at.get())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
     sqlx::query(
         r"
-        SELECT running_run_id, pending_run_id
+        SELECT running_run_id
         FROM concurrency_groups
         WHERE repository_id = $1 AND normalized_key = $2
         FOR UPDATE
         ",
     )
-    .bind(command.repository().id().as_uuid())
+    .bind(repository_id.as_uuid())
     .bind(concurrency.normalized_key())
     .fetch_one(&mut **transaction)
     .await
@@ -621,6 +638,7 @@ async fn insert_run(
             event_name, event_object_key, head_sha, status, workflow_name,
             git_ref, actor, display_title, commit_subject,
             created_at_ms, updated_at_ms, concurrency_group_key,
+            concurrency_queue_policy,
             admission_epoch, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
             publication_policy_revision, requested_dashboard_visibility,
@@ -629,9 +647,9 @@ async fn insert_run(
             publication_safety_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
-            $11,$12,$13,$14,$15,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,
-            $26,$27,$27,$28,$29,$30,$31
+            $11,$12,$13,$14,$15,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,
+            $27,$28,$28,$29,$30,$31,$32
         )
         ",
     )
@@ -654,6 +672,11 @@ async fn insert_run(
         command
             .concurrency()
             .map(WorkflowConcurrency::normalized_key),
+    )
+    .bind(
+        command
+            .concurrency()
+            .map(|concurrency| queue_policy_name(concurrency.queue_policy())),
     )
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(event.digest().as_bytes().as_slice())
@@ -731,7 +754,7 @@ async fn insert_jobs_and_dag(
         .bind(attempt_safety.requested_log_visibility())
         .bind(attempt_safety.effective_log_visibility())
         .bind(attempt_safety.output_safety_reason())
-        .bind(CurrentAttemptOutputSafety::output_safety_schema())
+        .bind(attempt_safety.output_safety_schema())
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -755,21 +778,23 @@ async fn insert_jobs_and_dag(
     Ok(())
 }
 
-async fn assign_concurrency_slot(
+pub(super) async fn assign_concurrency_slot(
     transaction: &mut Transaction<'_, Postgres>,
     encryption: Option<&RunnerPayloadEncryption>,
-    command: &AdmitWorkflowRun,
+    repository_id: RepositoryId,
+    run_id: RunId,
+    admitted_at: UnixMillis,
     concurrency: &WorkflowConcurrency,
 ) -> Result<(), WorkflowAdmissionStoreError> {
     let row = sqlx::query(
         r"
-        SELECT running_run_id, pending_run_id
+        SELECT running_run_id
         FROM concurrency_groups
         WHERE repository_id = $1 AND normalized_key = $2
         FOR UPDATE
         ",
     )
-    .bind(command.repository().id().as_uuid())
+    .bind(repository_id.as_uuid())
     .bind(concurrency.normalized_key())
     .fetch_one(&mut **transaction)
     .await
@@ -777,56 +802,64 @@ async fn assign_concurrency_slot(
     let mut running = row
         .try_get::<Option<Uuid>, _>("running_run_id")
         .map_err(operation_error)?;
-    let mut pending = row
-        .try_get::<Option<Uuid>, _>("pending_run_id")
-        .map_err(operation_error)?;
 
     running = discard_terminal_slot(transaction, running).await?;
-    pending = discard_terminal_slot(transaction, pending).await?;
-    if let Some(old_pending) = pending.take() {
-        cancel_run(
-            transaction,
-            encryption,
-            old_pending,
-            command.run_id(),
-            command.admitted_at(),
-        )
-        .await?;
+    delete_terminal_pending_runs(transaction, repository_id, concurrency).await?;
+    if concurrency.queue_policy() == automata_ci_core::QueuePolicy::Single {
+        let old_pending = active_pending_runs(transaction, repository_id, concurrency).await?;
+        for old_pending in old_pending {
+            cancel_run(transaction, encryption, old_pending, run_id, admitted_at).await?;
+        }
+        delete_pending_runs(transaction, repository_id, concurrency).await?;
     }
 
+    let mut enqueue = false;
     if concurrency.cancel_in_progress() {
         if let Some(old_running) = running.take() {
-            cancel_run(
-                transaction,
-                encryption,
-                old_running,
-                command.run_id(),
-                command.admitted_at(),
-            )
-            .await?;
+            cancel_run(transaction, encryption, old_running, run_id, admitted_at).await?;
         }
-        running = Some(command.run_id().as_uuid());
+        running = Some(run_id.as_uuid());
     } else if running.is_some() {
-        pending = Some(command.run_id().as_uuid());
+        enqueue = true;
     } else {
-        running = Some(command.run_id().as_uuid());
+        running = Some(run_id.as_uuid());
+    }
+
+    if enqueue {
+        let count = pending_run_count(transaction, repository_id, concurrency).await?;
+        if count >= MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP {
+            return Err(WorkflowAdmissionStoreError::ConcurrencyQueueFull);
+        }
+        sqlx::query(
+            r"
+            INSERT INTO concurrency_group_pending_runs (
+                repository_id, normalized_key, run_id, enqueued_at_ms
+            ) VALUES ($1,$2,$3,$4)
+            ",
+        )
+        .bind(repository_id.as_uuid())
+        .bind(concurrency.normalized_key())
+        .bind(run_id.as_uuid())
+        .bind(admitted_at.get())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
     }
 
     let rows = sqlx::query(
         r"
         UPDATE concurrency_groups
-        SET display_key = $3, running_run_id = $4, pending_run_id = $5,
-            generation = generation + 1, updated_at_ms = $6
+        SET display_key = $3, running_run_id = $4,
+            generation = generation + 1, updated_at_ms = $5
         WHERE repository_id = $1 AND normalized_key = $2
           AND generation < 9223372036854775807
         ",
     )
-    .bind(command.repository().id().as_uuid())
+    .bind(repository_id.as_uuid())
     .bind(concurrency.normalized_key())
     .bind(concurrency.display_key())
     .bind(running)
-    .bind(pending)
-    .bind(command.admitted_at().get())
+    .bind(admitted_at.get())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -835,6 +868,88 @@ async fn assign_concurrency_slot(
         return Err(StoreError::corrupt_data("concurrency generation is exhausted").into());
     }
     Ok(())
+}
+
+async fn active_pending_runs(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: RepositoryId,
+    concurrency: &WorkflowConcurrency,
+) -> Result<Vec<Uuid>, WorkflowAdmissionStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT pending.run_id
+        FROM concurrency_group_pending_runs AS pending
+        JOIN workflow_runs AS run ON run.id = pending.run_id
+        WHERE pending.repository_id = $1 AND pending.normalized_key = $2
+          AND run.status IN ('queued', 'in_progress')
+        ORDER BY pending.enqueued_at_ms, pending.run_id
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(concurrency.normalized_key())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)
+}
+
+async fn delete_terminal_pending_runs(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: RepositoryId,
+    concurrency: &WorkflowConcurrency,
+) -> Result<(), WorkflowAdmissionStoreError> {
+    sqlx::query(
+        r"
+        DELETE FROM concurrency_group_pending_runs AS pending
+        USING workflow_runs AS run
+        WHERE pending.repository_id = $1 AND pending.normalized_key = $2
+          AND run.id = pending.run_id
+          AND run.status NOT IN ('queued', 'in_progress')
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(concurrency.normalized_key())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
+async fn delete_pending_runs(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: RepositoryId,
+    concurrency: &WorkflowConcurrency,
+) -> Result<(), WorkflowAdmissionStoreError> {
+    sqlx::query(
+        r"
+        DELETE FROM concurrency_group_pending_runs
+        WHERE repository_id = $1 AND normalized_key = $2
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(concurrency.normalized_key())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
+async fn pending_run_count(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository_id: RepositoryId,
+    concurrency: &WorkflowConcurrency,
+) -> Result<i64, WorkflowAdmissionStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT count(*)
+        FROM concurrency_group_pending_runs
+        WHERE repository_id = $1 AND normalized_key = $2
+        ",
+    )
+    .bind(repository_id.as_uuid())
+    .bind(concurrency.normalized_key())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)
 }
 
 async fn discard_terminal_slot(
@@ -1346,6 +1461,35 @@ pub(super) async fn lock_attempt_concurrency(
     Ok(())
 }
 
+/// Acquires one run's repository concurrency lock before any run-owned row.
+pub(super) async fn lock_run_concurrency(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: RunId,
+) -> Result<(Uuid, Option<String>), StoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT repository_id, concurrency_group_key
+        FROM workflow_runs
+        WHERE id = $1
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(StoreError::operation)?
+    .ok_or(StoreError::RunNotFound(run_id))?;
+    let repository_id: Uuid = row
+        .try_get("repository_id")
+        .map_err(StoreError::operation)?;
+    let key: Option<String> = row
+        .try_get("concurrency_group_key")
+        .map_err(StoreError::operation)?;
+    if let Some(key) = key.as_deref() {
+        lock_concurrency_advisory(transaction, repository_id, key).await?;
+    }
+    Ok((repository_id, key))
+}
+
 pub(super) async fn reconcile_attempt_run(
     transaction: &mut Transaction<'_, Postgres>,
     attempt_id: AttemptId,
@@ -1517,7 +1661,7 @@ async fn latest_attempt_aggregate(
     ))
 }
 
-async fn reconcile_terminal_concurrency(
+pub(super) async fn reconcile_terminal_concurrency(
     transaction: &mut Transaction<'_, Postgres>,
     repository_id: Uuid,
     concurrency_key: Option<&str>,
@@ -1529,7 +1673,7 @@ async fn reconcile_terminal_concurrency(
     };
     let row = sqlx::query(
         r"
-        SELECT running_run_id, pending_run_id
+        SELECT running_run_id
         FROM concurrency_groups
         WHERE repository_id = $1 AND normalized_key = $2
         FOR UPDATE
@@ -1544,42 +1688,120 @@ async fn reconcile_terminal_concurrency(
     let running: Option<Uuid> = row
         .try_get("running_run_id")
         .map_err(StoreError::operation)?;
-    let pending: Option<Uuid> = row
-        .try_get("pending_run_id")
+    sqlx::query(
+        r"
+        DELETE FROM concurrency_group_pending_runs AS pending
+        USING workflow_runs AS queued
+        WHERE pending.repository_id = $1 AND pending.normalized_key = $2
+          AND queued.id = pending.run_id
+          AND queued.status NOT IN ('queued', 'in_progress')
+        ",
+    )
+    .bind(repository_id)
+    .bind(concurrency_key)
+    .execute(&mut **transaction)
+    .await
+    .map_err(StoreError::operation)?;
+
+    let pending_member: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1 FROM concurrency_group_pending_runs
+            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
+        )
+        ",
+    )
+    .bind(repository_id)
+    .bind(concurrency_key)
+    .bind(run_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(StoreError::operation)?;
+    if pending_member {
+        sqlx::query(
+            r"
+            DELETE FROM concurrency_group_pending_runs
+            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
+            ",
+        )
+        .bind(repository_id)
+        .bind(concurrency_key)
+        .bind(run_id.as_uuid())
+        .execute(&mut **transaction)
+        .await
         .map_err(StoreError::operation)?;
-    let (next_running, next_pending, promoted): (Option<Uuid>, Option<Uuid>, Option<RunId>) =
-        if running == Some(run_id.as_uuid()) {
-            let promotable = if let Some(pending_id) = pending {
-                let status: String =
-                    sqlx::query_scalar("SELECT status FROM workflow_runs WHERE id = $1 FOR UPDATE")
-                        .bind(pending_id)
-                        .fetch_one(&mut **transaction)
-                        .await
-                        .map_err(StoreError::operation)?;
-                matches!(status.as_str(), "queued" | "in_progress").then_some(pending_id)
-            } else {
-                None
-            };
-            (promotable, None, promotable.map(RunId::from_uuid))
-        } else if pending == Some(run_id.as_uuid()) {
-            (running, None, None)
-        } else {
-            return Ok(None);
-        };
+    }
+    if running != Some(run_id.as_uuid()) {
+        if pending_member {
+            let rows = sqlx::query(
+                r"
+                UPDATE concurrency_groups
+                SET generation = generation + 1,
+                    updated_at_ms = greatest(updated_at_ms, $3)
+                WHERE repository_id = $1 AND normalized_key = $2
+                  AND generation < 9223372036854775807
+                ",
+            )
+            .bind(repository_id)
+            .bind(concurrency_key)
+            .bind(observed_at.get())
+            .execute(&mut **transaction)
+            .await
+            .map_err(StoreError::operation)?
+            .rows_affected();
+            if rows != 1 {
+                return Err(StoreError::corrupt_data(
+                    "concurrency generation is exhausted",
+                ));
+            }
+        }
+        return Ok(None);
+    }
+
+    let promotable: Option<Uuid> = sqlx::query_scalar(
+        r"
+        SELECT pending.run_id
+        FROM concurrency_group_pending_runs AS pending
+        JOIN workflow_runs AS queued ON queued.id = pending.run_id
+        WHERE pending.repository_id = $1 AND pending.normalized_key = $2
+          AND queued.status IN ('queued', 'in_progress')
+        ORDER BY pending.enqueued_at_ms, pending.run_id
+        LIMIT 1
+        FOR UPDATE OF pending, queued
+        ",
+    )
+    .bind(repository_id)
+    .bind(concurrency_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(StoreError::operation)?;
+    if let Some(promoted) = promotable {
+        sqlx::query(
+            r"
+            DELETE FROM concurrency_group_pending_runs
+            WHERE repository_id = $1 AND normalized_key = $2 AND run_id = $3
+            ",
+        )
+        .bind(repository_id)
+        .bind(concurrency_key)
+        .bind(promoted)
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::operation)?;
+    }
     let rows = sqlx::query(
         r"
         UPDATE concurrency_groups
-        SET running_run_id = $3, pending_run_id = $4,
+        SET running_run_id = $3,
             generation = generation + 1,
-            updated_at_ms = greatest(updated_at_ms, $5)
+            updated_at_ms = greatest(updated_at_ms, $4)
         WHERE repository_id = $1 AND normalized_key = $2
           AND generation < 9223372036854775807
         ",
     )
     .bind(repository_id)
     .bind(concurrency_key)
-    .bind(next_running)
-    .bind(next_pending)
+    .bind(promotable)
     .bind(observed_at.get())
     .execute(&mut **transaction)
     .await
@@ -1590,7 +1812,7 @@ async fn reconcile_terminal_concurrency(
             "concurrency generation is exhausted",
         ));
     }
-    Ok(promoted)
+    Ok(promotable.map(RunId::from_uuid))
 }
 
 async fn lock_concurrency_advisory(

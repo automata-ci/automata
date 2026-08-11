@@ -30,6 +30,7 @@ fn rebuild(
         source,
         event,
         original.plan().clone(),
+        original.base_context().clone(),
         original.idempotency().clone(),
     )
     .commit_sha(original.commit_sha())

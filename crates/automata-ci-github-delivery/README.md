@@ -1,12 +1,16 @@
 # automata-ci-github-delivery
 
 `automata-ci-github-delivery` implements the verified GitHub delivery boundary
-used by Automata's control plane. It authenticates an exact push request,
-stores the raw event in immutable blob storage, and then records only a
-credential-free descriptor in the durable provider inbox. A separate bounded
-worker claims that inbox entry, resolves public or explicitly authorized
-private source, and submits the resulting workflow through the ordinary
-admission boundary.
+used by Automata's control plane. It authenticates a request, stores the raw
+event in immutable blob storage, and records a credential-free descriptor in
+the provider inbox. A worker claims that entry, resolves public or explicitly
+authorized private source, and submits the workflow through normal admission.
+
+The legacy ingress accepts `push`. A versioned component boundary also
+normalizes authenticated `push`, `pull_request`, and `merge_group` evidence,
+including the selected ref and source revisions. The `automata server` webhook
+route still calls the legacy push-only ingress; the broader event path is not a
+product capability yet.
 
 The crate also contains the restart-safe GitHub Checks publisher port and its
 credential-custody interfaces. Provider credentials, webhook secrets, source

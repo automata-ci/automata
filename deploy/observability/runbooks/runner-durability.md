@@ -3,7 +3,7 @@
 Journal or spool poison means the runner cannot prove the outcome of a durable
 mutation and must fail closed.
 
-1. Automata v0.1 has no online drain or mutable desired-state operation. Do
+1. Automata has no online drain or mutable desired-state operation yet. Do
    not assume a graceful drain. If the runner must be isolated, stop its
    service while preserving its state, then account for active leases and
    orphan recovery before restart.

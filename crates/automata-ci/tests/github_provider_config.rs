@@ -90,6 +90,7 @@ fn repository(
         "repository_id": repository_id,
         "repository_owner_id": repository_owner_id,
         "repository": name,
+        "default_branch": "main",
         "visibility": visibility,
         "manifest_revision": 3,
         "policy_revision": 7,
@@ -138,7 +139,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 1,
+        "schema": 2,
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",
@@ -254,6 +255,12 @@ fn checked_in_example_matches_the_current_provider_manifest_contract() {
     assert_eq!(
         config.repositories()[1].authority_profile(),
         JobAuthorityProfile::Standard
+    );
+    assert_eq!(
+        config.repositories()[0]
+            .cache_repository()
+            .default_branch_ref(),
+        "refs/heads/main"
     );
     assert!(
         config.repositories()[0]
@@ -574,7 +581,7 @@ fn document_and_repository_bounds_are_exact() {
 fn typed_values_and_nested_sources_fail_closed() {
     let mut cases = Vec::new();
     let mut value = manifest(vec![private_repository()]);
-    value["schema"] = json!(2);
+    value["schema"] = json!(3);
     cases.push(("schema", value));
     for (case, path) in [
         ("app-id", vec!["app", "id"]),
@@ -636,6 +643,9 @@ fn typed_values_and_nested_sources_fail_closed() {
     let mut invalid_name = manifest(vec![private_repository()]);
     invalid_name["repositories"][0]["repository"] = json!("owner/repository.git");
     cases.push(("name", invalid_name));
+    let mut invalid_default_branch = manifest(vec![private_repository()]);
+    invalid_default_branch["repositories"][0]["default_branch"] = json!("refs/heads/main");
+    cases.push(("default-branch", invalid_default_branch));
     let mut invalid_check = manifest(vec![private_repository()]);
     invalid_check["repositories"][0]["check_name"] = json!("\n");
     cases.push(("check", invalid_check));

@@ -1,348 +1,195 @@
 # Implementation and conformance plan
 
-This plan treats GitHub Actions compatibility as a versioned product surface,
-not as a YAML parsing feature. Each milestone ends in an executable gate. A
-feature is unsupported until its semantics, failure behavior, and recovery
-behavior have passed that gate.
+This plan tracks the work required before Automata can claim GitHub Actions
+compatibility. A feature remains unsupported until its normal product path,
+failure behavior, and recovery behavior pass the gate that owns it.
 
-## Architectural seams
+The [compatibility page](compatibility.md) owns current support claims. The
+[architecture page](architecture.md) owns component and trust-boundary detail.
 
-GitHub Actions is the first workflow dialect. Its frontend parses and validates
-source YAML into a dialect-owned source plan. A separate compiler lowers that
-plan and event provenance into immutable WorkflowPlan v2 logical state; fenced
-activation later expands bounded strategies and projects concrete JobIR v5.
-The scheduler and providers never parse GitHub YAML or evaluate GitHub
-expressions.
+## Current foundation
 
-```text
-GitHub frontend -> compiler -> WorkflowPlan -> fenced activation -> JobIR
-                                                                  |
-                                                         durable scheduler
-                                                                  |
-                                                            runner lease
-                                                                  |
-                                                       SandboxProvider
-                                                                  |
-                                      ExecutionEndpoint + ContainerEngine
-```
+As of 2026-08-11, the source tree contains:
 
-The principal internal ports are deliberately narrower than a provider API:
+- workflow parsing, expression evaluation, logical planning, bounded matrix
+  expansion, and JobIR projection;
+- PostgreSQL admission, scheduling, leases, fencing, maintenance, result
+  projection, and immutable numeric run aliases;
+- mTLS runner transport, provider admission, rootless Podman execution, crash
+  journals, and cleanup;
+- Results, artifact, and CacheService v2 boundaries backed by
+  S3-compatible storage;
+- configured GitHub provider ingress, source delivery, authentication, Check
+  Runs, and scoped repository credentials;
+- tenant RBAC, repository publication settings, managed-secret administration,
+  the management CLI, and the server-rendered UI; and
+- reproducible distribution, SBOM, notice, image, and release automation.
 
-- `WorkflowFrontend` owns bounded GitHub source parsing and dialect validation.
-  `WorkflowCompiler` lowers the source plan into the logical workflow contract;
-  fenced activation expands strategies and projects executable jobs. Reusable
-  workflow execution and complete action pre/main/post orchestration remain
-  separate, capability-gated phases.
-- `SchedulerPolicy` matches runner group and label routing separately from
-  typed requirements and scores eligible capacity without provisioning it.
-- `FleetController` asynchronously reconciles runner supply. Kubernetes,
-  cloud VMs, and static hosts plug in here without blocking a scheduling
-  transaction.
-- `SandboxProvider` creates, attaches, inspects, and idempotently destroys a
-  whole-job isolation boundary. It returns an `ExecutionEndpoint`; native,
-  container, microVM, Kubernetes, and remote guest-agent execution share that
-  contract.
-- `ContainerEngine` is separate because job containers, service containers,
-  and sequential container actions exist inside one job sandbox. Unsupported
-  Docker options are rejected, never dropped.
-- `BlobStore`, `ArtifactStore`, `CacheStore`, `SecretVault`, `ScmProvider`,
-  `RepositoryCredentialBroker`, and `AuthenticationProvider` are
-  provider-neutral ports. Adapters use owned, versioned data. Opaque
-  secret-provider handles may be retained durably only as authenticated,
-  encrypted provider-reference envelopes; plaintext handles never enter
-  durable records, diagnostics, or audits.
+Focused component and boundary tests cover these paths. The production
+composition has not yet run this repository's unchanged CI workflow from
+admission through differential result comparison. No release artifact is
+public.
 
-Rust traits are used only within one release and address space. Guest agents,
-privileged helpers, third-party providers, and remote runners use versioned RPC
-over Unix sockets, vsock, or mTLS; Rust dynamic libraries are not a plugin ABI.
-The production boundary is the checked, fully typed `automata.runner.v1`
-protobuf adapter; it has no opaque JSON fields, runtime `protoc`, or Rust-layout
-serialization. The adapter is wired into a bounded, mutually authenticated TLS
-1.3 and HTTP/2 runner transport. The G1 product composition binds that transport
-to the durable application handler, PostgreSQL-backed runner machine authority,
-and the two product binaries. The end-to-end gate below remains the acceptance
-boundary for compatibility claims.
+## Active work order
 
-## Durable correctness rules
+These items are ordered by dependency. A checked item has focused evidence; it
+does not by itself close the end-to-end gate.
 
-PostgreSQL is the source of truth for runs, jobs, attempts, concurrency,
-environment admission, leases, and published metadata. S3/RustFS stores
-immutable snapshots, action bundles, log segments, artifacts, caches, and
-manifests; it is never a coordination service.
+- [x] Preserve ordinary logs and explicitly public outputs while redacting
+  registered runtime and repository credential values.
+- [x] Hydrate phase-correct inputs, variables, and opaque secret references
+  through autonomous preparation and runner execution.
+- [x] Resolve eligible runner labels and groups to one immutable environment
+  profile before JobIR admission, including dynamically evaluated selections.
+- [x] Expose immutable positive numeric run and attempt identities without
+  replacing internal UUIDs.
+- [ ] Compose authenticated `pull_request` and `merge_group` event evidence
+  through the product webhook route; normalization currently stops at the
+  component boundary.
+- [ ] Finish the `concurrency.queue` implementation and its PostgreSQL tests,
+  then keep it explicitly outside GitHub compatibility or place it behind a
+  distinct non-compatibility mode.
+- [ ] Pass the unchanged public bootstrap workflow through admission,
+  orchestration, runner execution, Results, and Check Runs.
+- [ ] Pass differential fixtures for actions, command files, matrices,
+  reusable workflows, artifacts, caches, services, and cancellation.
+- [ ] Pass control-plane fixtures for permissions, protected environments,
+  secrets and variables, OIDC, events, reruns, concurrency, and the supported
+  REST surface.
+- [ ] Pass heterogeneous Linux fleet fixtures for isolated Docker and BuildKit,
+  large transfers, persistent-cache trust boundaries, and exclusive devices.
+- [ ] Pass scale, fault-injection, strong-isolation, workflow-chaining, Windows,
+  and macOS gates before advertising those capabilities.
 
-An attempt is identified by `(job_id, attempt_id, lease_id, fencing_token)`.
-Delivery is at least once. Every state transition, output, artifact manifest,
-and terminal result compares the current fencing token, so a late runner
-cannot commit. Provider mutations also carry an operation ID and expected
-generation. Create, cancel, stop, and destroy are idempotent and reconcilable
-after either side crashes.
+## Acceptance gates
 
-The runner journals an accepted lease and sandbox handle before acknowledging
-work. It renews outbound over mTLS, kills work after lease expiry even while
-disconnected, resumes acknowledged log sequences, and reconciles orphans at
-startup. Log frames are redacted before transmission and spill to bounded,
-encrypted local storage rather than blocking heartbeats or cancellation.
+### G0: reproducible bootstrap
 
-## Deployment and trust boundaries
+The workspace uses safe Rust, pinned toolchains, two product executables, an
+embedded resource-limited WASI renderer, PostgreSQL, and S3-compatible storage.
+CI verifies distribution contents, static Linux builds, checksums, SBOMs,
+license notices, and execution in `scratch`.
 
-The target distribution contains exactly two product executables, both
-statically linked:
-
-- `automata` can run any control-plane role and also provides the
-  administration CLI;
-- `automata-runner` can supervise host or guest execution.
-
-The current v0.1 composition starts all control-plane roles together and has no
-role selector. Its runner supports rootless Linux host execution; guest-agent
-and non-Linux execution remain target-state work.
-
-First-party adapters are compiled in and selected by configuration. Neither
-binary needs a language runtime or shared library. Podman, KVM, Kubernetes,
-and platform hypervisors are provider services invoked at runtime, not linked
-application dependencies. The archive also preserves third-party license,
-NOTICE, and copyright texts for both binaries and their embedded renderer/UI
-assets; these compliance documents are data, not additional product binaries.
-
-Human authentication is provider-pluggable. The first server adapter uses a
-GitHub App and exposes browser and device-flow endpoints. On Linux with an
-available Secret Service, `automata auth login`, `auth status`, and `auth
-logout` are operational.
-GitHub tokens are encrypted provider credentials, not general Automata bearer
-tokens.
-Explicit organization/team mappings grant Automata roles; membership never
-implies administrator. Runner mTLS identity, workload tokens, SCM credentials,
-and human sessions are separate trust domains.
-
-Three product-composition boundaries remain explicit. The current-reference
-CacheService-v2 upload/download path, digest verification, seven-day inactivity
-retention, and runtime authority are composed, while base/default-branch
-fallback, REST management, BuildKit compatibility, and physical object garbage
-collection are not. Service-container execution is
-authorized in the durable registration ceiling only by an exact immutable proxy
-pin, then observed only after live provider verification; scheduling intersects
-both inventories so either missing proof removes the feature. The checked-in
-configuration still omits the unpublished helper image. Workload OIDC now
-composes its issuer, durable storage, fail-closed optional control issuer, and
-`/oidc/token` on the non-human Results listener. Migration 0037 completes
-signed ingress with immutable positive numeric-owner evidence, and migration
-0039 revalidates its receipt and current authority at reservation and every
-mint. Workload OIDC nevertheless remains unsupported and unadvertised pending
-external TLS and homogeneous multi-replica/key-fleet readiness. Its unbounded
-authority and issuance-slot ledgers also prevent production retention claims
-until a safe bounded archive or erasure path exists.
-
-The React/Vite UI is entirely server rendered. Its component and hashed client
-assets are embedded in `automata`; rendering runs in a resource-limited WASI
-component with no filesystem, network, inherited environment, or subprocess
-authority. JavaScript is optional progressive enhancement.
-
-## Isolation provider matrix
-
-| Provider | Initial role | Isolation claim | Container semantics |
-| --- | --- | --- | --- |
-| Rootless Podman | Linux local/job sandbox | shared kernel, dedicated user/network/cgroup namespaces | full target, private job-scoped engine |
-| Firecracker+jailer | Linux hostile workload | one KVM microVM per job | engine behind guest agent |
-| Kubernetes | fleet controller first | depends on node/runtime | inner job-scoped engine |
-| Kubernetes+Kata | pod sandbox adapter | VM-backed pod | inner engine retained |
-| KubeVirt | fleet or sandbox adapter | one VM/VMI per job | guest agent |
-| Linux native | trusted workloads only | account+cgroup/LSM | optional local engine |
-| Windows native | trusted workloads only | restricted token+Job Object | Windows engine |
-| Windows Hyper-V | hostile workload | disposable VM/Hyper-V isolation | guest engine |
-| macOS native | trusted workloads only | dedicated account+sandbox profile | limited |
-| Virtualization.framework | strong macOS tier | disposable macOS VM | guest agent |
-
-Kubernetes is not initially modeled as “one workflow job equals one static
-Pod”: sequential dynamic container actions, sibling service networking, and a
-shared workspace do not map generally to immutable Pod container specs.
-Kubernetes first creates ephemeral runner Pods with a supported inner engine.
-
-## Milestones and gates
-
-### G0 — reproducible bootstrap
-
-- Safe-Rust workspace, MIT license, pinned toolchains and dependencies.
-- Two static-musl executables verified in `scratch`.
-- Deterministic CycloneDX inventories for both binaries, the embedded WASI
-  renderer, and its React runtime, with binary/component digest binding.
-- React/Vite SSR build, PostgreSQL, and RustFS development stack.
-- Arch production runner admission fails before any listener or control
-  session unless its nftables prerequisites are loaded or loadable from the
-  running kernel's dependency index and an active rootless-Podman lifecycle
-  succeeds. The lifecycle uses the exact configured binary, a cleared
-  `HOME`/`PATH`/`XDG_RUNTIME_DIR`/`TMPDIR` environment, state-root scratch, and
-  the exact `PrivateEgress` or `Disabled` (`--internal`) network policy.
-- The lifecycle verifies created-network identity and policy, exclusive
-  container attachment, loopback readiness, owned-resource cleanup, and
-  post-delete absence. It is intentionally not evidence of profile-image
-  existence or manifest conformance, cgroup/resource enforcement,
-  privilege/root-filesystem policy, or the optional job-scoped Docker API;
-  those remain operator assertions or other runtime checks. The configured
-  Podman binary and helper `PATH` have root-owned, non-group/world-writable
-  ancestry; private Podman process/state trees are runner-owned mode 0700 and
-  never mounted into jobs. Startup revalidates its pre-probe filesystem metadata
-  snapshot before provider construction. This is not a byte attestation.
-- Ordinary `.github/workflows/ci.yml` remains valid GitHub Actions syntax and
-  produces consumable checksummed bootstrap artifacts.
+Runner admission must fail before connecting to the control plane when the
+configured rootless Podman binary, filesystem ownership, network policy, or
+create/inspect/destroy probe is invalid.
 
 Gate: GitHub Actions builds generation-zero artifacts from a reviewed commit.
+The automation exists; no public generation-zero product release has been
+published.
 
-### G1 — durable single-node integration
+### G1: durable single-node execution
 
-- PostgreSQL schema and migrations for repositories, workflow snapshots,
-  runs, jobs, attempts, leases, concurrency groups, and runner registrations.
-- Outbound runner protocol negotiation, leases, fencing, cancellation, log
-  resume, and crash/orphan recovery.
-- GitHub workflow parser, source spans, the phase-correct expression subset,
-  `needs`, timeouts, current-workflow concurrency cancellation, `run` steps,
-  command files, and local action resolution required by this repository's
-  unchanged CI.
-- The minimum JavaScript-action runtime needed for the exact pinned checkout,
-  setup-node, and upload-artifact actions used by bootstrap CI, including
-  pre/main/post behavior and action-runtime environment endpoints.
-- Fenced RustFS log/result objects plus the artifact upload protocol and
-  immutable manifest semantics exercised by `actions/upload-artifact`.
-- Rootless Podman sandbox provider, static local fleet controller, an explicit
-  `ubuntu-24.04` environment image/profile, and a private job-scoped
-  Podman-backed `docker` CLI sufficient for the `scratch` smoke test. The host
-  Podman socket is never exposed.
-- Outbound dependency access for Cargo/npm, command-file behavior, and the SSR
-  run-list/run-detail routes.
+Run this repository's unchanged `.github/workflows/ci.yml` through the durable
+control plane and one Linux runner. The run must exercise source admission,
+planning, `run` and required JavaScript actions, local actions, command files,
+services, artifacts, logs, results, cancellation, and cleanup.
 
-Gate: generation zero runs the repository's unchanged CI workflow through
-Automata to build and test generation one. Automata never replaces the control
-plane that is executing it; promotion happens only after the run finishes and
-the differential report passes. This gate is not satisfied by invoking an
-Automata-specific test harness or by editing the workflow for Automata.
+Gate: generation zero builds and tests generation one. Promotion happens only
+after the run and differential comparison finish. A special Automata-only
+workflow does not satisfy the gate.
 
-### G2 — broader Actions runtime compatibility
+### G2: broader Actions runtime
 
-- Arbitrary JavaScript and composite actions beyond the pinned G1 set, with
-  complete pre/main/post ordering.
-- Complete official artifact and cache runtime protocols beyond the composed
-  current-reference CacheService-v2 path: multipart uploads,
-  base/default-branch fallback, REST management, physical object garbage
-  collection, and the BuildKit cache endpoint.
-- Job/service containers, dynamic ports, container actions, shell defaults,
-  annotations, summaries, masks, timeouts, and cancellation.
-- Matrix expansion, `needs`, outputs, status functions, implicit success
-  guards, fail-fast, max-parallel, and reusable workflows.
+Complete JavaScript and composite pre/main/post behavior, job and service
+containers, container actions, matrices, status functions, fail-fast,
+max-parallel, reusable workflows, artifacts, cache management, cancellation,
+summaries, and annotations.
 
-Gate: Automata's CI uses its own uploaded static artifacts and caches, then
-passes differential comparison against GitHub at the same commit.
+Gate: Automata's CI consumes its own artifacts and caches and matches GitHub at
+the same commit.
 
-### G3 — GitHub control-plane compatibility
+### G3: GitHub control-plane behavior
 
-- GitHub App installation/user authentication, Check Runs and statuses.
-- Actions-compatible results, artifact, broader cache, OIDC, and selected REST
-  facade. OIDC's product issuer and non-human Results-listener route are
-  composed, but runner/registration capability support and its operational
-  proof remain gated. Unsupported GitHub API calls currently fail closed; the
-  product has no arbitrary job-scoped fallback proxy.
-- Permissions, protected environments, approvals, secrets/vars, concurrency
-  coalescing and cancellation, rerun attempts, schedules, and webhooks.
-- Administration CLI endpoints for the complete declared command tree.
+Complete the supported permissions, protected environments, approvals,
+secrets and variables, concurrency, reruns, schedules, webhook events, OIDC,
+and selected REST surfaces. Unknown GitHub compatibility routes continue to
+fail closed; there is no general job-token proxy.
 
-Gate: a safe read-only migration progression passes: event and platform
-selection, workflow validation, then a dry-run maintenance workflow.
+Gate: event selection and workflow validation pass first, followed by a
+non-mutating maintenance workflow and an agreed staging soak.
 
-### G4 — representative heterogeneous Linux fleet
+### G4: heterogeneous Linux fleet
 
-- General Linux services job with PostgreSQL and Redis.
-- Docker CLI compatibility over a private Podman engine, Buildx, Compose, and
-  `type=gha` cache.
-- Multi-gigabyte raw artifact producer/consumer handoff with exact attempt and
-  digest semantics.
-- Reusable Linux engine builds, OIDC-backed external S3 cache, persistent-cache
-  trust namespaces, dynamic matrices, GPU-exclusive queueing, and reruns.
+Add canary runner groups for services, private Podman-backed Docker and
+BuildKit, large artifact handoffs, persistent-cache namespaces, dynamic
+matrices, reruns, OIDC-backed external storage, and exclusive devices such as
+GPUs.
 
-Gate: unchanged Linux PR CI passes on canary runner groups, including
-Dependabot-originated untrusted code. No job sees a host-wide Podman socket,
-broker credentials, or another attempt's storage/network.
+Gate: unchanged Linux pull-request CI passes for trusted and untrusted sources.
+No job can reach the host Podman socket, broker credentials, or another
+attempt's storage or network.
 
-### G5 — scale and strong isolation
+### G5: scale and strong isolation
 
-- Multiple stateless control-plane replicas under transaction/fencing tests.
-- Kubernetes fleet controller, autoscaling signals, placement scoring, drain,
-  and rolling protocol-skew upgrades.
-- Firecracker sandbox with jailer, tap/netns, read-only base and CoW disk,
-  vsock guest agent, snapshot-key validation, and secret rotation after
-  restore.
-- Kubernetes/Kata and KubeVirt sandbox adapters behind the same contracts.
+Add multiple control-plane replicas, Kubernetes fleet reconciliation,
+autoscaling, drain and upgrade behavior, Firecracker, Kubernetes with Kata,
+and KubeVirt behind the existing provider contracts.
 
-Gate: fault injection proves no double commit during replica, network, runner,
-PostgreSQL, or object-store disruptions; hostile fixtures cannot escape their
-advertised isolation class.
+Gate: fault injection proves that replica, network, runner, PostgreSQL, and
+object-store failures cannot cause a double commit. Hostile fixtures cannot
+escape the isolation class advertised by their runner.
 
-### G6 — Windows, macOS, and full fleet migration
+### G6: Windows, macOS, and fleet migration
 
-- PowerShell/cmd shell rules, Windows path and process semantics, services,
-  Hyper-V/native providers, and signing environments.
-- macOS shell/keychain semantics, native and Virtualization.framework
-  providers, arm64 profiles, and GPU resource locks.
-- Workflow-run chaining/API facade behavior required by complex repositories, plus
-  release/deployment canaries that cannot address production credentials.
+Implement Windows shell, path, process, service, native, and Hyper-V behavior;
+macOS shell, keychain, native, arm64, and Virtualization.framework behavior;
+and the workflow-chaining surfaces required by larger fleets.
 
-Gate: the full existing fleet runs unchanged workflows with per-platform
-differential reports. Production publish/deploy workflows enter only after
-read-only and staging gates have held over an agreed soak period.
+Gate: unchanged workflows pass per-platform differential comparison. Publish,
+deploy, recovery, and release workflows enter only after read-only and staging
+gates have completed their agreed soak periods.
 
-## Migration acceptance contract
+## Planned provider scope
 
-Private migration targets remain outside this public repository. Automata's
-checked-in compatibility suites use synthetic workflows, public upstream action
-fixtures, and generated capability manifests without copying or naming private
-repositories. Operators may run an external acceptance harness against their own
-workflow corpus, but its source, identifiers, counts, and rollout policy are not
-part of Automata's source tree or documentation.
+Rootless Podman on Linux is the current execution path. The other providers are
+planned and must not appear in runner capability inventory before their gates
+pass.
 
-A migration should begin with non-mutating authorization and validation jobs,
-then dry-run maintenance, service-container checks, Docker builds,
-artifact/cache and matrix handoffs, reusable workflows, specialized runner
-profiles, and non-production workflow chaining. Publish, deploy, recovery, and
-release workflows enter only after read-only and staging gates have held for an
-agreed soak period.
+| Provider | Planned use | Isolation boundary |
+| --- | --- | --- |
+| Firecracker with jailer | Hostile Linux jobs | One KVM microVM per job |
+| Kubernetes | Ephemeral runner fleet | Node and runtime dependent |
+| Kubernetes with Kata | VM-backed pod sandbox | One VM-backed pod per runner |
+| KubeVirt | VM fleet or job sandbox | One VMI per runner or job |
+| Linux native | Trusted jobs | Account, cgroup, and LSM policy |
+| Windows native / Hyper-V | Windows jobs | Restricted host process or disposable VM |
+| macOS native / Virtualization.framework | macOS jobs | Dedicated account or disposable VM |
 
-The hardest external boundary is explicit: GitHub does not let another system
-insert arbitrary native Actions run/job/artifact records. Automata supplies its
-own compatible results facade and plans to report through Check Runs, but
-hard-coded `api.github.com` or `gh` queries for upstream workflow-run records
-require either a GitHub bridge or a targeted endpoint-routing change. This
-limitation is recorded per capability rather than hidden behind a broad
-“compatible” label.
+Kubernetes is not treated as “one workflow job equals one fixed Pod.” Dynamic
+container actions, sibling services, and a shared workspace require an
+ephemeral runner with an inner engine unless a separately tested provider can
+offer equivalent behavior.
 
-## Verification disciplines
+## External migration evidence
 
-- Golden parser/planner fixtures retain source spans and upstream provenance.
-- Differential tests compare the same commit/event on GitHub and Automata,
-  normalizing only documented volatile fields.
-- Model/state-machine tests cover every transition, lease race, retry, and
-  stale fencing token.
-- Adapter contract suites run unchanged against in-memory fakes, RustFS/S3,
-  Podman, Firecracker, Kubernetes, and platform providers.
-- Property and fuzz tests target YAML/expression parsing, protocol envelopes,
-  command files, archives, path handling, redaction, and SSR model validation.
+Private migration targets stay outside this repository. Public conformance uses
+synthetic workflows, public upstream fixtures, and generated capability
+manifests without naming or copying private repositories.
+
+An operator's external acceptance corpus should progress from read-only
+authorization and validation to dry-run maintenance, services, image builds,
+artifact and cache handoffs, matrices, reusable workflows, specialized runner
+profiles, and non-production chaining. Production publishing and deployment
+come last.
+
+GitHub does not allow another system to create arbitrary native Actions run,
+job, log, or artifact records. Workflows that query those records directly
+through `api.github.com` or `gh` need a specific bridge or endpoint change; a
+broad compatibility label does not remove that limitation.
+
+## Verification rules
+
+- Parser and planner fixtures retain source spans and upstream provenance.
+- Differential tests compare the same commit and event, normalizing only the
+  volatile fields listed in [Compatibility](compatibility.md).
+- State-machine tests cover transitions, lease races, retries, and stale
+  fencing tokens.
+- Adapter suites run against in-memory fakes and the real storage or execution
+  boundary where practical.
+- Property and fuzz tests cover YAML and expressions, protocol envelopes,
+  command files, archives, paths, redaction, and UI model validation.
 - Integration tests live in each crate's `tests/` tree; implementation modules
-  contain no test-only architecture.
-- Bootstrap CI checks formatting, strict Clippy, tests, dependency policy,
-  frontend SSR/hydration, reproducible embedded assets, full build provenance,
-  static ELF properties, `scratch` execution, checksums, SBOMs, and reproducible
-  lockfile-driven third-party notices. Release promotion adds keyless signatures
-  and attestations before a public release.
-
-## Primary design references
-
-- GitHub workflow and runner behavior: [workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax),
-  [runner groups](https://docs.github.com/en/actions/concepts/runners/runner-groups),
-  and GitHub's own [container customization hook boundary](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/customize-containers).
-- Container data model and rootless execution: [OCI runtime specification](https://github.com/opencontainers/runtime-spec),
-  [Podman rootless operation](https://docs.podman.io/en/latest/markdown/podman.1.html),
-  and [Podman system service](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html).
-- MicroVM isolation: Firecracker [jailer](https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md)
-  and [snapshot support](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md).
-- Kubernetes behavior: [Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/),
-  [RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/),
-  and [CRI](https://kubernetes.io/docs/concepts/containers/cri/); plus the
-  [Kata architecture](https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md)
-  and [KubeVirt architecture](https://kubevirt.io/user-guide/architecture/).
-- Platform virtualization: Apple [Virtualization framework](https://developer.apple.com/documentation/virtualization)
-  and Microsoft [Windows container isolation modes](https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/hyperv-container).
+  do not carry a second test-only architecture.
+- A gate stays open until its public fixture passes through the production
+  composition.

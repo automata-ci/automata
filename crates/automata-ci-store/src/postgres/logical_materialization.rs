@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use async_trait::async_trait;
 use automata_ci_core::{
     AttemptId, JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile,
-    JobConclusion, JobId, JobSecretExposure, MAX_LOGICAL_JOBS, OutputSensitivity, Sha256Digest,
-    UnixMillis, WorkflowId, WorkflowJobKey, WorkflowOutputKey,
+    JobConclusion, JobId, JobSecretExposure, MAX_LOGICAL_JOBS, OutputSensitivity, RunIdAlias,
+    Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey, WorkflowOutputKey,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
@@ -1096,7 +1096,7 @@ fn instance_query() -> &'static str {
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_number, run.run_attempt,
+           run.run_id_alias, run.run_number, run.run_attempt,
            run.requested_log_visibility,
            run.event_digest, run.event_object_key, run.event_size_bytes,
            run.event_media_type,
@@ -1177,7 +1177,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_number, run.run_attempt,
+           run.run_id_alias, run.run_number, run.run_attempt,
            run.requested_log_visibility,
            run.event_digest, run.event_object_key, run.event_size_bytes,
            run.event_media_type,
@@ -3406,6 +3406,14 @@ fn decode_descriptor(
         row.try_get("workflow_name").map_err(operation_error)?,
         row.try_get("git_ref").map_err(operation_error)?,
         row.try_get("actor").map_err(operation_error)?,
+        RunIdAlias::new(
+            u64::try_from(
+                row.try_get::<i64, _>("run_id_alias")
+                    .map_err(operation_error)?,
+            )
+            .map_err(|_| StoreError::corrupt_data("invalid durable run ID alias"))?,
+        )
+        .map_err(|_| StoreError::corrupt_data("invalid durable run ID alias"))?,
         u64::try_from(
             row.try_get::<i64, _>("run_number")
                 .map_err(operation_error)?,
@@ -3589,7 +3597,7 @@ async fn insert_initial_attempt(
     .bind(safety.requested_log_visibility())
     .bind(safety.effective_log_visibility())
     .bind(safety.output_safety_reason())
-    .bind(CurrentAttemptOutputSafety::output_safety_schema())
+    .bind(safety.output_safety_schema())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

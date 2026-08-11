@@ -1701,7 +1701,7 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
         );
         assert_eq!(
             first_admission.raw_log_disposition(),
-            RawLogDisposition::SuppressUserOutput
+            RawLogDisposition::Persist
         );
         let first_segment = CommitRunnerLogSegment::new(
             first_admission,

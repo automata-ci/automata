@@ -8,8 +8,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim, RepositoryId,
-    Sha256Digest, StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim,
+    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, Sha256Digest, StoreError,
+    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 
 /// Relational logical-orchestration schema installed for phase-one admission.
@@ -162,6 +163,7 @@ pub struct AdmitLogicalWorkflowRun {
     snapshot_id: WorkflowSnapshotId,
     source: AdmissionObject,
     plan: AdmissionObject,
+    base_context: Option<AdmissionObject>,
     run_id: RunId,
     run_attempt: u32,
     root_invocation_id: LogicalWorkflowInvocationId,
@@ -171,6 +173,7 @@ pub struct AdmitLogicalWorkflowRun {
     actor: Option<String>,
     display_title: Option<String>,
     commit_subject: Option<String>,
+    concurrency: Option<crate::WorkflowConcurrency>,
     jobs: Vec<AdmittedLogicalWorkflowJob>,
     admitted_at: UnixMillis,
 }
@@ -219,6 +222,7 @@ impl AdmitLogicalWorkflowRun {
                 snapshot_id,
                 source,
                 plan,
+                base_context: None,
                 run_id,
                 run_attempt,
                 root_invocation_id,
@@ -228,6 +232,7 @@ impl AdmitLogicalWorkflowRun {
                 actor: None,
                 display_title: None,
                 commit_subject: None,
+                concurrency: None,
                 jobs,
                 admitted_at,
             },
@@ -300,6 +305,12 @@ impl AdmitLogicalWorkflowRun {
         &self.plan
     }
 
+    /// Returns the immutable versioned base runtime-context descriptor.
+    #[must_use]
+    pub const fn base_context(&self) -> Option<&AdmissionObject> {
+        self.base_context.as_ref()
+    }
+
     /// Returns the workflow-run identity.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
@@ -354,6 +365,12 @@ impl AdmitLogicalWorkflowRun {
         self.commit_subject.as_deref()
     }
 
+    /// Returns the evaluated workflow-level concurrency request.
+    #[must_use]
+    pub const fn concurrency(&self) -> Option<&crate::WorkflowConcurrency> {
+        self.concurrency.as_ref()
+    }
+
     /// Returns source-ordered logical jobs.
     #[must_use]
     pub fn jobs(&self) -> &[AdmittedLogicalWorkflowJob] {
@@ -368,6 +385,13 @@ impl AdmitLogicalWorkflowRun {
 }
 
 impl AdmitLogicalWorkflowRunBuilder {
+    /// Binds the canonical admission-time base runtime-context object.
+    #[must_use]
+    pub fn base_context(mut self, base_context: AdmissionObject) -> Self {
+        self.command.base_context = Some(base_context);
+        self
+    }
+
     /// Adds an event actor projection.
     #[must_use]
     pub fn actor(mut self, actor: impl Into<String>) -> Self {
@@ -386,6 +410,13 @@ impl AdmitLogicalWorkflowRunBuilder {
     #[must_use]
     pub fn commit_subject(mut self, commit_subject: impl Into<String>) -> Self {
         self.command.commit_subject = Some(commit_subject.into());
+        self
+    }
+
+    /// Binds an evaluated workflow-level concurrency request.
+    #[must_use]
+    pub fn concurrency(mut self, concurrency: Option<crate::WorkflowConcurrency>) -> Self {
+        self.command.concurrency = concurrency;
         self
     }
 
@@ -423,6 +454,11 @@ impl AdmitLogicalWorkflowRunBuilder {
         }
         if command.run_attempt == 0 || command.run_attempt > i32::MAX as u32 {
             return Err(LogicalWorkflowAdmissionValueError::InvalidRunAttempt);
+        }
+        if command.base_context.as_ref().is_some_and(|context| {
+            context.media_type() != LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
+        }) {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidBaseContext);
         }
         if !matches!(command.head_sha.len(), 20 | 32) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha);
@@ -581,6 +617,9 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The run attempt did not fit a positive SQL integer.
     #[error("workflow run attempt must fit a positive PostgreSQL INTEGER")]
     InvalidRunAttempt,
+    /// The base runtime-context object did not use the current canonical media type.
+    #[error("workflow base runtime context is not a current canonical object")]
+    InvalidBaseContext,
     /// The commit digest did not have a supported byte length.
     #[error("head SHA must contain exactly 20 or 32 bytes")]
     InvalidHeadSha,
@@ -631,6 +670,9 @@ pub enum LogicalWorkflowAdmissionStoreError {
     /// The per-workflow run number counter cannot advance.
     #[error("workflow run-number sequence is exhausted")]
     RunNumberExhausted,
+    /// The generalized pending queue reached its hard safety ceiling.
+    #[error("workflow concurrency pending queue reached its safety limit")]
+    ConcurrencyQueueFull,
     /// This deployment requires immutable authenticated provider evidence.
     #[error("logical workflow admission source is not supported by current policy")]
     UnsupportedAdmissionSource,

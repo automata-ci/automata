@@ -16,19 +16,26 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Fail-closed configured rootless-Podman admission plus privileged static runner
   registration for bootstrap deployments without an enrollment API.
 - Static x86-64 Linux archive, checksum-verifying installer, crates.io workspace,
-  GHCR images, SBOMs, third-party license material, and release attestations.
+  GHCR image publication, SBOM generation, third-party license collection, and
+  release-attestation automation.
 - Opt-in GitHub browser login and device-flow server endpoints with
   envelope-encrypted login/provider state, hashed session credentials, fresh
   numeric membership authority, and the RBAC management HTTP API.
+- Configured signed GitHub webhook ingress, public and private source delivery,
+  fenced Check Runs, scoped App credentials, and lease-bound repository
+  authority.
+- Results artifacts, CacheService v2 current/default-branch lookup, immutable
+  numeric run aliases, typed dispatch-input components, and value-level output
+  sensitivity.
 
 ### Known limitations
 
 - This bootstrap release is not production-ready and has not passed the full
   end-to-end compatibility gate.
-- Signed GitHub webhooks, Check Runs, automated runner enrollment,
-  managed-secret runner delivery, and complete administration UI/CLI surfaces
-  are not composed.
-- Prebuilt archives and release images currently target Linux x86-64; runner
-  execution additionally requires the documented rootless Podman host path.
+- Automated runner enrollment, managed-secret runner delivery, workload OIDC,
+  and several workflow semantics remain unsupported end to end.
+- No public archive, crate, or product image has been published. Planned static
+  archives and images target Linux x86-64; runner execution also requires the
+  documented rootless Podman host path.
 
 [Unreleased]: https://github.com/automata-ci/automata/commits/main

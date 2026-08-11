@@ -2885,9 +2885,9 @@ async fn exercise_concurrency_scope(
 
     let cross_repository_pending_slot = sqlx::query(
         r"
-        UPDATE concurrency_groups
-        SET pending_run_id = $2
-        WHERE repository_id = $1 AND normalized_key = 'deploy'
+        INSERT INTO concurrency_group_pending_runs (
+            repository_id, normalized_key, run_id, enqueued_at_ms
+        ) VALUES ($1, 'deploy', $2, 2)
         ",
     )
     .bind(first_repository)
@@ -2897,7 +2897,7 @@ async fn exercise_concurrency_scope(
     .expect_err("a pending concurrency slot must remain repository-scoped");
     assert_constraint(
         &cross_repository_pending_slot,
-        "concurrency_groups_pending_run_matches_repository",
+        "concurrency_group_pending_runs_run_fk",
     );
 
     sqlx::query(

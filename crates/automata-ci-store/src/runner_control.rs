@@ -670,7 +670,7 @@ impl CommitRunnerTerminalResult {
 /// Whether raw user-controlled output may enter persistent log storage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawLogDisposition {
-    /// Raw standard output and standard error may be persisted.
+    /// Runner-redacted standard output and standard error may be persisted.
     Persist,
     /// Raw standard output and standard error must not be persisted.
     SuppressUserOutput,
@@ -796,6 +796,8 @@ impl RunnerLogAdmission {
     ///
     /// # Errors
     /// Rejects a raw-log disposition inconsistent with the immutable exposure ceiling.
+    /// Readable-secret attempts may carry the current masked-persistence policy
+    /// or a stricter immutable legacy suppression snapshot.
     pub fn new(
         request: RunnerLogAdmissionRequest,
         tenant_id: TenantId,
@@ -806,7 +808,9 @@ impl RunnerLogAdmission {
         let consistent = matches!(
             (secret_exposure, raw_log_disposition),
             (
-                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
+                SecretExposureClass::Secretless
+                    | SecretExposureClass::CapabilityOnly
+                    | SecretExposureClass::ReadableSecret,
                 RawLogDisposition::Persist
             ) | (
                 SecretExposureClass::ReadableSecret,
@@ -849,7 +853,7 @@ impl RunnerLogAdmission {
         self.secret_exposure
     }
 
-    /// Returns the authoritative handling required for raw user output.
+    /// Returns the authoritative handling required for runner-filtered user output.
     #[must_use]
     pub const fn raw_log_disposition(&self) -> RawLogDisposition {
         self.raw_log_disposition

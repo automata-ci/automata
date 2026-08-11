@@ -6,6 +6,10 @@ use automata_ci_core::{
     Architecture, ContainerFeature, EnvironmentProfile, OperatingSystem, RunnerLabel,
 };
 /// One server-owned mapping from a GitHub runner selector to an attested image profile.
+///
+/// Projection replaces only this selector with the exact profile requirement;
+/// additional activated labels and the optional runner group remain routing
+/// requirements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubRunnerProfileMapping {
     selector: RunnerLabel,

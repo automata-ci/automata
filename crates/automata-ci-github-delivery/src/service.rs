@@ -915,7 +915,7 @@ impl GithubDeliveryService {
                 .map_err(Into::into);
         }
 
-        if prepared.push().deleted() {
+        if prepared.deleted() {
             return self.worker.finish_deleted(lease).await.map_err(Into::into);
         }
 
@@ -992,7 +992,7 @@ impl GithubDeliveryService {
             let observed_at = self.now()?;
             let requested_snapshot = lease.require_live_at(observed_at).map_err(claim_error)?;
             let repository_owner_id =
-                ProviderRepositoryOwnerId::new(prepared.push().repository().owner_id().get())
+                ProviderRepositoryOwnerId::new(prepared.event().repository().owner_id().get())
                     .map_err(|_| {
                         GithubDeliveryServiceError::Worker(
                             GithubDeliveryWorkerError::InvariantViolation,

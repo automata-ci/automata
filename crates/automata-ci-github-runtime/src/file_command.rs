@@ -3,8 +3,9 @@ use std::fmt::Debug;
 use crate::model::SensitiveText;
 use crate::{
     CommandFileError, CommandFileKind, CommandFileLimits, CommandFilePlatform,
-    EnvironmentCommandFile, NameValueCommand, OutputCommandFile, ParsedCommandFile,
-    PathCommandFile, StateCommandFile, StepSummaryCommandFile,
+    EnvironmentCommandFile, MAX_ARTIFACT_DECLARATION_FILE_BYTES, NameValueCommand,
+    OutputCommandFile, ParsedCommandFile, PathCommandFile, StateCommandFile,
+    StepSummaryCommandFile, artifact::parse_artifact_declarations,
 };
 
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -67,10 +68,17 @@ impl CommandFileDecoder for GithubCommandFileDecoder {
                 received: source.len(),
             });
         }
-        if source.len() > self.limits.maximum_file_bytes() {
+        let maximum_file_bytes = if kind == CommandFileKind::Artifacts {
+            self.limits
+                .maximum_file_bytes()
+                .min(MAX_ARTIFACT_DECLARATION_FILE_BYTES)
+        } else {
+            self.limits.maximum_file_bytes()
+        };
+        if source.len() > maximum_file_bytes {
             return Err(CommandFileError::FileTooLarge {
                 kind,
-                maximum: self.limits.maximum_file_bytes(),
+                maximum: maximum_file_bytes,
                 received: source.len(),
             });
         }
@@ -104,6 +112,9 @@ impl CommandFileDecoder for GithubCommandFileDecoder {
                     markdown: SensitiveText::new(text.to_owned()),
                 }))
             }
+            CommandFileKind::Artifacts => Ok(ParsedCommandFile::Artifacts(
+                parse_artifact_declarations(text, self.limits)?,
+            )),
         }
     }
 }

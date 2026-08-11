@@ -8,9 +8,6 @@ Automata control plane and runner.
 Provider-neutral identity and SCM contracts remain in `automata-ci-auth` and
 `automata-ci-scm`.
 
-Automata is pre-1.0 and not production-ready. This is an internal provider
-adapter, and its configuration and Rust API may change between releases.
-
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-github)
+- API documentation: run `cargo doc -p automata-ci-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

@@ -1,13 +1,13 @@
 # Prometheus and OpenMetrics observability
 
-Automata exposes operational metrics from the control plane and each runner.
-The metrics contract is designed for Prometheus-compatible pull collection,
-bounded cardinality, and the project's retry, replay, and durable-state
-semantics.
+Automata exposes Prometheus-compatible metrics from the control plane and each
+runner. This page is the metric reference: it defines the listeners, protocol,
+families, allowed labels, cardinality budget, recording rules, alerts, and
+verification.
 
-This guide is both the metric schema and the operator contract. Adding or
-changing a family requires updating this document, its finite label definitions,
-the cardinality budget, recording and alert rules, and protocol tests.
+When a metric changes, update this reference, the finite label definitions,
+`deploy/observability/cardinality.json`, the recording and alert rules, and the
+protocol tests in the same change.
 
 ## Collection topology
 
@@ -113,10 +113,10 @@ scrape. Initial limits are:
 | Encoded response | 2 MiB | 2 MiB |
 | Series per target | 5,000 | 1,000 |
 
-The reviewed, fully preinitialized classic schema currently uses at most 4,840
-control-plane series and 938 runner series per Linux target. With native and
-classic histograms ingested together, the reviewed Prometheus maxima are 4,978
-control-plane samples and 968 runner samples per scrape. Both remain below the
+The canonical schema currently uses at most 4,779 control-plane series and 939
+runner series per Linux target. With native and classic histograms ingested
+together, the Prometheus maxima are 4,916 control-plane samples and 969 runner
+samples per scrape. Both remain below the
 same 5,000 and 1,000 limits. The limits are release gates; remaining headroom
 is not an invitation to add unbounded labels.
 

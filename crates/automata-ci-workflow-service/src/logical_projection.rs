@@ -19,6 +19,7 @@ use automata_ci_core::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_workflow_github::{
     GithubConditionCompiler, GithubConditionPhase, GithubRunnerProfileCatalog,
+    GithubRunnerProfileMapping,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -262,10 +263,6 @@ fn reject_unsupported_semantics(
             UnsupportedLogicalJobSemantics::ReusableWorkflowInvocation,
         ),
         (
-            plan.logical().concurrency().is_some(),
-            UnsupportedLogicalJobSemantics::WorkflowConcurrency,
-        ),
-        (
             job.concurrency().is_some(),
             UnsupportedLogicalJobSemantics::JobConcurrency,
         ),
@@ -366,24 +363,34 @@ fn runner_requirements(
     runner: &ActivatedRunnerSelection,
     profiles: &GithubRunnerProfileCatalog,
 ) -> Result<RunnerRequirements, LogicalJobProjectionError> {
-    let mapped = runner
-        .labels()
-        .iter()
-        .filter_map(|label| profiles.get(label))
-        .collect::<Vec<_>>();
-    if let Some(mapping) = mapped.first() {
-        if mapped.len() != 1 || runner.labels().len() != 1 || runner.group().is_some() {
-            return Err(LogicalJobProjectionError::AmbiguousHostedProfile);
+    let mut mapped: Option<&GithubRunnerProfileMapping> = None;
+    for label in runner.labels() {
+        let Some(candidate) = profiles.get(label) else {
+            continue;
+        };
+        if mapped.is_some_and(|current| current.selector() != candidate.selector()) {
+            return Err(LogicalJobProjectionError::AmbiguousRunnerProfile);
         }
-        return Ok(RunnerRequirements::default()
-            .with_environment_profile(mapping.environment_profile().clone())
-            .with_operating_system(mapping.operating_system().clone())
-            .with_architecture(mapping.architecture().clone())
-            .with_container_features(mapping.container_features().iter().cloned()));
+        mapped = Some(candidate);
     }
 
-    let mut operating_system = MergedSelector::Unset;
-    let mut architecture = MergedSelector::Unset;
+    let mut requirements = RunnerRequirements::default().with_labels(
+        runner
+            .labels()
+            .iter()
+            .filter(|label| mapped.is_none_or(|mapping| mapping.selector() != *label))
+            .cloned(),
+    );
+    if let Some(group) = runner.group() {
+        requirements = requirements.with_eligible_groups([group.clone()]);
+    }
+
+    let mut operating_system = mapped.map_or(MergedSelector::Unset, |mapping| {
+        MergedSelector::Value(mapping.operating_system().clone())
+    });
+    let mut architecture = mapped.map_or(MergedSelector::Unset, |mapping| {
+        MergedSelector::Value(mapping.architecture().clone())
+    });
     for label in runner.labels() {
         match label.as_str() {
             "linux" => merge_selector(&mut operating_system, OperatingSystem::Linux),
@@ -399,10 +406,10 @@ fn runner_requirements(
     {
         return Err(LogicalJobProjectionError::ConflictingRunnerSelectors);
     }
-    let mut requirements =
-        RunnerRequirements::default().with_labels(runner.labels().iter().cloned());
-    if let Some(group) = runner.group() {
-        requirements = requirements.with_eligible_groups([group.clone()]);
+    if let Some(mapping) = mapped {
+        requirements = requirements
+            .with_environment_profile(mapping.environment_profile().clone())
+            .with_container_features(mapping.container_features().iter().cloned());
     }
     if let MergedSelector::Value(value) = operating_system {
         requirements = requirements.with_operating_system(value);
@@ -883,8 +890,6 @@ pub enum UnsupportedLogicalJobSemantics {
     ReusableWorkflowJob,
     /// A job output is sourced from a reusable-workflow result.
     ReusableWorkflowOutput,
-    /// Workflow-level concurrency semantics are present.
-    WorkflowConcurrency,
     /// Job-level concurrency semantics are present.
     JobConcurrency,
     /// Deployment-environment semantics are present.
@@ -901,7 +906,6 @@ impl fmt::Display for UnsupportedLogicalJobSemantics {
             Self::ReusableWorkflowInvocation => "reusable workflow invocation contract",
             Self::ReusableWorkflowJob => "reusable workflow job",
             Self::ReusableWorkflowOutput => "reusable workflow output",
-            Self::WorkflowConcurrency => "workflow concurrency",
             Self::JobConcurrency => "job concurrency",
             Self::Deployment => "deployment environment",
             Self::ContainerAction => "container action",
@@ -931,9 +935,9 @@ pub enum LogicalJobProjectionError {
     /// A step job reached projection without an activated runner selection.
     #[error("activated step job has no resolved runner selectors")]
     MissingActivatedRunner,
-    /// Hosted-profile selectors do not resolve to one exact profile.
-    #[error("hosted runner profile selector is ambiguous")]
-    AmbiguousHostedProfile,
+    /// More than one activated selector maps to an exact environment profile.
+    #[error("runner profile selector is ambiguous")]
+    AmbiguousRunnerProfile,
     /// Generic labels select mutually incompatible platforms.
     #[error("runner selectors require conflicting platforms")]
     ConflictingRunnerSelectors,

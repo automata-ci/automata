@@ -653,6 +653,7 @@ fn job_execution_context(value: &core::JobExecutionContext) -> wire::JobExecutio
         run_attempt: value.run_attempt(),
         event: Some(job_content_reference(value.event())),
         runtime_context: Some(job_content_reference(value.runtime_context())),
+        run_id_alias: value.run_id_alias().map(core::RunIdAlias::get),
     }
 }
 
@@ -1191,6 +1192,27 @@ fn step_result(value: &core::StepResult) -> wire::StepResult {
         conclusion: job_conclusion(value.conclusion()),
         started_at_unix_millis: value.started_at().get(),
         completed_at_unix_millis: value.completed_at().get(),
+        summary_markdown: value.summary_markdown().map(str::to_owned),
+        annotations: value.annotations().iter().map(step_annotation).collect(),
+    }
+}
+
+fn step_annotation(value: &core::StepAnnotation) -> wire::StepAnnotation {
+    wire::StepAnnotation {
+        level: match value.level() {
+            core::StepAnnotationLevel::Error => wire::StepAnnotationLevel::Error as i32,
+            core::StepAnnotationLevel::Warning => wire::StepAnnotationLevel::Warning as i32,
+            core::StepAnnotationLevel::Notice => wire::StepAnnotationLevel::Notice as i32,
+        },
+        message: value.message().to_owned(),
+        properties: value
+            .properties()
+            .iter()
+            .map(|property| wire::StepAnnotationProperty {
+                name: property.name().to_owned(),
+                value: property.value().to_owned(),
+            })
+            .collect(),
     }
 }
 

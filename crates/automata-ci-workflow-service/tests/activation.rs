@@ -967,6 +967,60 @@ fn cumulative_include_width_fails_before_unbounded_growth() {
 }
 
 #[test]
+fn include_matching_is_charged_once_against_aggregate_work_limit() {
+    const AXIS_COUNT: usize = 32;
+    const AXIS_VALUES: usize = 256;
+    const INCLUDE_PATCHES: usize = 64;
+
+    let axis_names = (0..AXIS_COUNT)
+        .map(|index| format!("axis_{index:02}"))
+        .collect::<Vec<_>>();
+    let axes = axis_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| numbered_axis(name, if index == 0 { AXIS_VALUES } else { 1 }))
+        .collect();
+    let include = (0..INCLUDE_PATCHES)
+        .map(|_| {
+            MatrixPatch::new(
+                axis_names
+                    .iter()
+                    .map(|name| {
+                        (
+                            located(name.clone()),
+                            located(MatrixValueTemplate::Literal(MatrixValue::String(
+                                "0".to_owned(),
+                            ))),
+                        )
+                    })
+                    .collect(),
+                span(),
+            )
+        })
+        .collect();
+    let axis_work = AXIS_COUNT * AXIS_VALUES;
+    let include_work = AXIS_VALUES * INCLUDE_PATCHES * AXIS_COUNT;
+    assert!(axis_work + include_work <= automata_ci_workflow_service::MAX_MATRIX_EXPANSION_WORK);
+    assert!(axis_work + 2 * include_work > automata_ci_workflow_service::MAX_MATRIX_EXPANSION_WORK);
+
+    let matrix = MatrixTemplate::new(
+        axes,
+        MatrixPatchSet::Static(include),
+        MatrixPatchSet::Static(Vec::new()),
+        span(),
+    );
+    let activation = activate_strategy(WorkflowStrategyTemplate::new(
+        None,
+        None,
+        matrix,
+        AXIS_VALUES as u16,
+        span(),
+    ))
+    .expect("valid include matching must consume one aggregate-work charge");
+    assert_eq!(activation.instances().len(), AXIS_VALUES);
+}
+
+#[test]
 fn successful_aggregate_status_rejects_failed_direct_need() {
     let plan = job(None, &["prepare"], None, None);
     let (inputs, vars, mut needs, secrets) = common_contexts();

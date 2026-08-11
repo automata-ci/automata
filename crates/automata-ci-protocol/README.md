@@ -8,9 +8,6 @@ format; production framing is supplied by the separately versioned
 Control-plane and runner application layers depend on these messages without
 depending on a particular HTTP or serialization implementation.
 
-Automata is pre-1.0 and not production-ready. The protocol is explicitly
-versioned, but compatibility and the Rust API may change between releases.
-
 - [Protocol documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-protocol)
+- API documentation: run `cargo doc -p automata-ci-protocol --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

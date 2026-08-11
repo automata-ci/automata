@@ -78,6 +78,31 @@ fn exact_current_blobs_map_coe_and_preserve_only_classified_outputs() {
 }
 
 #[test]
+fn readable_secret_results_preserve_individually_public_outputs() {
+    let fixture = fixture_with_exposure(
+        JobConclusion::Success,
+        false,
+        valid_outputs(),
+        JobSecretExposure::ReadableSecret,
+        JobSecretExposure::ReadableSecret,
+    );
+    let commit = CommitLogicalInstanceResult::new(
+        &fixture.claimed,
+        &fixture.result_bytes,
+        &fixture.result,
+        &fixture.job_ir_bytes,
+        &fixture.envelope,
+        UnixMillis::new(140),
+    )
+    .expect("value-classified readable-secret result");
+
+    assert_eq!(commit.secret_exposure(), JobSecretExposure::ReadableSecret);
+    assert_eq!(commit.outputs()[0].name(), "artifact");
+    assert_eq!(commit.outputs()[0].sensitivity(), OutputSensitivity::Public);
+    assert_eq!(commit.outputs()[0].public_value(), Some("bundle-42"));
+}
+
+#[test]
 fn output_names_and_static_sensitivity_are_bound_to_decoded_job_ir() {
     let mut undeclared = valid_outputs();
     undeclared.insert(

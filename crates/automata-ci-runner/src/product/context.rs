@@ -231,7 +231,6 @@ impl StandardGithubContext {
             plain("GITHUB_REPOSITORY", source.repository()),
             plain("GITHUB_REPOSITORY_OWNER", repository_owner),
             plain("GITHUB_REF", execution.git_ref()),
-            plain("GITHUB_RUN_ID", job.job().run_id().to_string()),
             plain("GITHUB_SERVER_URL", self.github.server_url().as_str()),
             plain("GITHUB_SHA", source.revision()),
             plain("GITHUB_WORKFLOW", execution.workflow_name()),
@@ -261,6 +260,9 @@ impl StandardGithubContext {
         }
         if let Some(actor) = execution.actor() {
             values.push(plain("GITHUB_ACTOR", actor));
+        }
+        if let Some(run_id_alias) = execution.run_id_alias() {
+            values.push(plain("GITHUB_RUN_ID", run_id_alias.to_string()));
         }
         if let Some(run_number) = execution.run_number() {
             values.push(plain("GITHUB_RUN_NUMBER", run_number.to_string()));
@@ -389,7 +391,6 @@ fn github_value(
         string_entry("ref", execution.git_ref()),
         string_entry("repository", source.repository()),
         string_entry("repository_owner", repository_owner),
-        string_entry("run_id", job.job().run_id().to_string()),
         string_entry("server_url", github.server_url().as_str()),
         string_entry("sha", source.revision()),
         string_entry(
@@ -407,6 +408,9 @@ fn github_value(
     }
     if let Some(actor) = execution.actor() {
         values.push(string_entry("actor", actor));
+    }
+    if let Some(run_id_alias) = execution.run_id_alias() {
+        values.push(string_entry("run_id", run_id_alias.to_string()));
     }
     if let Some(run_number) = execution.run_number() {
         values.push(string_entry("run_number", run_number.to_string()));

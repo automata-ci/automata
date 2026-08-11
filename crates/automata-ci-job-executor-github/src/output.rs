@@ -4,10 +4,10 @@ use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use automata_ci_core::{JobSecretExposure, LogChannel, MAX_LOG_FRAME_BYTES};
 use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
 use automata_ci_github_runtime::{
-    GithubWorkflowCommandSession, LegacyStepMutation, WorkflowCommandEvent, WorkflowCommandLimits,
-    WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
+    Annotation, GithubWorkflowCommandSession, LegacyStepMutation, WorkflowCommandEvent,
+    WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
 };
-use automata_ci_output_policy::{RawLogDisposition, SecretExposureClass};
+use automata_ci_output_policy::SecretExposureClass;
 use automata_ci_runner_runtime::{ExecutionEvents, LogEvent};
 
 use crate::{ExecutorAdapterError, error::ExecutorAdapterErrorKind};
@@ -41,9 +41,9 @@ impl SecretMasker {
         if value.is_empty() {
             return Ok(());
         }
-        // Once user code can observe any value that requires masking, exact
-        // replacement is only defense in depth: code can transform, split, or
-        // encrypt the value. Suppress all subsequent user-controlled output.
+        // Record the maximum observed exposure independently from value-level
+        // redaction. Publication policy keeps readable-secret logs private,
+        // while exact masks preserve ordinary diagnostic output.
         self.exposure = SecretExposureClass::ReadableSecret;
         self.register_bytes(value.as_bytes())?;
         for line in value
@@ -115,6 +115,11 @@ impl SecretMasker {
         Ok(self.matcher()?.find(value.as_bytes()).is_some())
     }
 
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "used by the external source-level regression harness"
+    )]
     pub(crate) const fn exposure_class(&self) -> SecretExposureClass {
         self.exposure
     }
@@ -269,6 +274,7 @@ pub(crate) fn process_output(
     masker: &mut SecretMasker,
     events: &Arc<dyn ExecutionEvents>,
     legacy: &mut Vec<LegacyStepMutation>,
+    annotations: &mut Vec<Annotation>,
     cancellation: &dyn Fn() -> bool,
 ) -> Result<(), ExecutorAdapterError> {
     for line in parsed.lines {
@@ -295,6 +301,7 @@ pub(crate) fn process_output(
                         events,
                         Some(cancellation),
                     )?;
+                    annotations.push(annotation);
                 }
                 WorkflowCommandEvent::BeginGroup(group) => {
                     emit_line_with_cancellation(
@@ -453,11 +460,6 @@ fn emit_line_with_cancellation(
         return Err(ExecutorAdapterError::new(
             ExecutorAdapterErrorKind::Cancelled,
         ));
-    }
-    if channel != LogChannel::System
-        && masker.exposure_class().raw_log_disposition() == RawLogDisposition::SuppressUserOutput
-    {
-        return Ok(());
     }
     let mut payload = masker.mask(content)?;
     if newline {

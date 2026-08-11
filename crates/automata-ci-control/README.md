@@ -8,9 +8,6 @@ messages.
 HTTP serving, protobuf framing, database access, and product configuration stay
 in separate adapters. The `automata` executable assembles those layers.
 
-Automata is pre-1.0 and not production-ready. This is an internal application
-layer, and its Rust API may change between releases.
-
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-control)
+- API documentation: run `cargo doc -p automata-ci-control --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

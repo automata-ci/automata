@@ -1131,6 +1131,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
         "repository_id": case.repository_id,
         "repository_owner_id": case.repository_owner_id,
         "repository": case.repository,
+        "default_branch": "main",
         "visibility": visibility_text(case.visibility),
         "manifest_revision": manifest_revision,
         "policy_revision": policy_revision,
@@ -1154,7 +1155,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
 
 fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",

@@ -1,8 +1,11 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicI64, Ordering},
-};
 use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use automata_ci_blob::{
@@ -10,9 +13,9 @@ use automata_ci_blob::{
     MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{
-    JobAuthorityProfile, JobConclusion, JobPermissionRequest, OutputSensitivity, RunId,
-    Sha256Digest, UnixMillis, WorkflowEventProvenance, WorkflowId, WorkflowJobKey,
-    WorkflowOutputKey,
+    ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest, JobRuntimeContext,
+    OutputSensitivity, RunId, RunIdAlias, SecretBinding, Sha256Digest, UnixMillis,
+    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
@@ -92,6 +95,78 @@ jobs:
     steps:
       - run: echo autonomous
 ";
+
+const WORKFLOW_WITH_NEEDS_SOURCE: &str = r"name: Autonomous CI
+on: workflow_dispatch
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo setup
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo autonomous
+";
+
+const OUTPUT_DRIVEN_MATRIX_SOURCE: &str = r"name: Autonomous CI
+on: workflow_dispatch
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.emit.outputs.matrix }}
+    steps:
+      - id: emit
+        run: echo matrix
+  build:
+    needs: plan
+    strategy:
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo matrix job
+";
+
+const OUTPUT_DRIVEN_MATRIX_VALUE: &str = r#"{
+  "profile": [
+    {
+      "name": "stable",
+      "options": ["fast", true],
+      "metadata": {"tier": "primary"}
+    },
+    {
+      "name": "preview",
+      "options": ["safe", false],
+      "metadata": {"tier": "secondary"}
+    }
+  ],
+  "shard": [1, 2],
+  "exclude": [
+    {"profile": {"metadata": {"tier": "primary"}}, "shard": 2}
+  ],
+  "include": [
+    {
+      "profile": {
+        "name": "stable",
+        "options": ["fast", true],
+        "metadata": {"tier": "primary"}
+      },
+      "shard": 1,
+      "settings": {"retry": 3, "enabled": true}
+    },
+    {
+      "profile": {
+        "name": "edge",
+        "options": [],
+        "metadata": {"tier": "experimental"}
+      },
+      "shard": 3,
+      "settings": {"retry": 0, "enabled": false}
+    }
+  ]
+}"#;
 
 const MATRIX_CREDENTIAL_FREE_SOURCE: &str = r"name: Autonomous CI
 on: workflow_dispatch
@@ -1421,6 +1496,8 @@ async fn new_harness_with(
     let trace = HarnessTrace::default();
     let blobs = Arc::new(FaultBlobStore::new(trace.clone()));
     let plan = compile_plan(source);
+    let logical_key = WorkflowJobKey::new("build").expect("logical key");
+    let source_order = logical_job_source_order(&plan, &logical_key);
     let plan_object = put_input(
         &blobs.inner,
         "admission/v2/autonomous/plan.json",
@@ -1435,6 +1512,19 @@ async fn new_harness_with(
         Bytes::from_static(br#"{"mode":"autonomous"}"#),
     )
     .await;
+    let base_context = admitted_base_context(authority_profile);
+    let base_context_bytes = automata_ci_protocol_protobuf::encode_job_runtime_context(
+        &base_context,
+        &ProtocolLimits::default(),
+    )
+    .expect("base runtime context");
+    let base_context_object = put_input(
+        &blobs.inner,
+        "admission/v2/base-runtime-context/context.pb",
+        JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+        Bytes::from(base_context_bytes),
+    )
+    .await;
     let target = LogicalActivationPreparationTarget::new(
         TenantScope::from_authenticated_tenant_id("synthetic-tenant").expect("tenant"),
         RunId::from_uuid(Uuid::from_u128(11)),
@@ -1445,13 +1535,14 @@ async fn new_harness_with(
     let (runner_policy, runtime_policy) = put_runtime_policy(&blobs.inner, &target).await;
     let descriptor = LogicalActivationPreparationDescriptor::new(
         target,
-        WorkflowJobKey::new("build").expect("logical key"),
-        0,
+        logical_key,
+        source_order,
         LogicalActivationExecutionContext::new(
             WorkflowId::from_uuid(Uuid::from_u128(14)),
             "Autonomous CI".to_owned(),
             GIT_REF.to_owned(),
             Some("synthetic-actor".to_owned()),
+            RunIdAlias::new(11).expect("run ID alias"),
             7,
             1,
         )
@@ -1461,7 +1552,8 @@ async fn new_harness_with(
         runtime_policy,
         plan_object,
         event_object,
-        LogicalActivationBaseContextKind::RootEmpty,
+        LogicalActivationBaseContextKind::AdmissionV2,
+        base_context_object,
         prerequisites,
         UnixMillis::new(10),
     )
@@ -1500,6 +1592,10 @@ async fn new_harness_with(
         clock,
         trace,
     }
+}
+
+fn logical_job_source_order(plan: &WorkflowPlan, key: &WorkflowJobKey) -> u16 {
+    u16::try_from(plan.job(key).expect("logical job").source_order()).expect("bounded source order")
 }
 
 fn orchestration_worker() -> LogicalActivationWorkerId {
@@ -1608,13 +1704,64 @@ fn prerequisite_evidence() -> LogicalActivationPrerequisiteEvidence {
         Sha256Digest::from_bytes([0x32; 32]),
         Sha256Digest::from_bytes([0x33; 32]),
         JobConclusion::Success,
-        true,
+        false,
         false,
         false,
         outputs,
         UnixMillis::new(9),
     )
     .expect("prerequisite evidence")
+}
+
+fn matrix_prerequisite_evidence(
+    sensitivity: OutputSensitivity,
+    value: Option<&str>,
+) -> LogicalActivationPrerequisiteEvidence {
+    let output = LogicalActivationPrerequisiteOutput::new(
+        WorkflowOutputKey::new("matrix").expect("matrix output key"),
+        sensitivity,
+        value.map(str::to_owned),
+    )
+    .expect("matrix prerequisite output");
+    LogicalActivationPrerequisiteEvidence::new(
+        LogicalWorkflowJobId::from_uuid(Uuid::from_u128(41)).expect("prerequisite job"),
+        WorkflowJobKey::new("plan").expect("prerequisite logical key"),
+        0,
+        Sha256Digest::from_bytes([0x41; 32]),
+        Sha256Digest::from_bytes([0x42; 32]),
+        Sha256Digest::from_bytes([0x43; 32]),
+        JobConclusion::Success,
+        false,
+        false,
+        false,
+        vec![output],
+        UnixMillis::new(9),
+    )
+    .expect("matrix prerequisite evidence")
+}
+
+fn admitted_base_context(authority_profile: JobAuthorityProfile) -> JobRuntimeContext {
+    let inputs = ContextValue::object(BTreeMap::from([(
+        "target".to_owned(),
+        ContextValue::string("production"),
+    )]))
+    .expect("inputs");
+    let vars = ContextValue::object(BTreeMap::from([(
+        "channel".to_owned(),
+        ContextValue::string("stable"),
+    )]))
+    .expect("variables");
+    let secrets = match authority_profile {
+        JobAuthorityProfile::Standard => {
+            let secret = SecretBinding::new("grant-00000000-0000-0000-0000-000000000001")
+                .expect("secret binding")
+                .with_version_id("version-00000000-0000-0000-0000-000000000002")
+                .expect("secret version");
+            BTreeMap::from([("DEPLOY_TOKEN".to_owned(), secret)])
+        }
+        JobAuthorityProfile::CredentialFree => BTreeMap::new(),
+    };
+    JobRuntimeContext::new_base(inputs, vars, secrets).expect("admission base context")
 }
 
 fn admission_blob_descriptor(object: &AdmissionObject) -> BlobDescriptor {
@@ -2039,13 +2186,13 @@ async fn real_executor_completes_all_phases_without_a_second_claim() {
         vec![
             HarnessOperation::ClaimOrchestration,
             HarnessOperation::ConsumeOrchestration,
-            HarnessOperation::BlobPut,
+            HarnessOperation::BlobGet,
             HarnessOperation::BlobPut,
             HarnessOperation::RenewPreparation,
             HarnessOperation::ConsumeOrchestration,
             HarnessOperation::BindPreparation,
         ],
-        "preparation must write both blobs before its renewed-fence binding"
+        "preparation must verify its admitted base and write prerequisites before binding"
     );
     assert_eq!(
         harness
@@ -2158,6 +2305,28 @@ async fn all_blob_error_kinds_have_closed_retry_or_quarantine_classification() {
         assert_eq!(harness.repository.mutation_counts(), (0, 0, 0));
         assert_eq!(harness.repository.renewal_counts(), (0, 0, 0));
     }
+}
+
+#[tokio::test]
+async fn tampered_admission_base_context_is_rejected_before_derived_writes() {
+    let harness = new_harness().await;
+    harness.blobs.fail_next(BlobStoreErrorKind::Integrity);
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("closed integrity classification"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(harness.blobs.operations(), 1);
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.binding_attempts().is_empty());
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::ObjectEvidence]
+    );
 }
 
 #[tokio::test]
@@ -2575,9 +2744,9 @@ async fn activation_rechecks_immutable_evidence_after_each_renewal() {
 }
 
 #[tokio::test]
-async fn preparation_preserves_public_values_and_redacts_secret_derived_prerequisites() {
+async fn preparation_hydrates_admitted_base_and_classified_prerequisites() {
     let harness = new_harness_with(
-        WORKFLOW_SOURCE,
+        WORKFLOW_WITH_NEEDS_SOURCE,
         JobAuthorityProfile::Standard,
         vec![prerequisite_evidence()],
     )
@@ -2598,15 +2767,19 @@ async fn preparation_preserves_public_values_and_redacts_secret_derived_prerequi
     let base_bytes = load_admission_blob(&harness.blobs.inner, binding.base_context()).await;
     let base = automata_ci_protocol_protobuf::decode_job_runtime_context(&base_bytes, &limits)
         .expect("base runtime context");
-    assert!(
+    assert_eq!(
         base.inputs()
             .as_object()
-            .is_some_and(std::collections::BTreeMap::is_empty)
+            .and_then(|inputs| inputs.get("target"))
+            .and_then(ContextValue::as_string),
+        Some("production"),
     );
-    assert!(
+    assert_eq!(
         base.vars()
             .as_object()
-            .is_some_and(std::collections::BTreeMap::is_empty)
+            .and_then(|vars| vars.get("channel"))
+            .and_then(ContextValue::as_string),
+        Some("stable"),
     );
     assert!(
         base.matrix()
@@ -2614,7 +2787,24 @@ async fn preparation_preserves_public_values_and_redacts_secret_derived_prerequi
             .is_some_and(std::collections::BTreeMap::is_empty)
     );
     assert!(base.needs().is_empty());
-    assert!(base.secrets().is_empty());
+    let secret_binding = base.secrets().get("DEPLOY_TOKEN").expect("secret locator");
+    assert_eq!(
+        secret_binding.binding_id(),
+        "grant-00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(
+        secret_binding.version_id(),
+        Some("version-00000000-0000-0000-0000-000000000002")
+    );
+    let debug = format!("{base:?}");
+    for redacted in [
+        "production",
+        "stable",
+        secret_binding.binding_id(),
+        secret_binding.version_id().unwrap(),
+    ] {
+        assert!(!debug.contains(redacted), "Debug exposed {redacted}");
+    }
 
     let prerequisite_bytes =
         load_admission_blob(&harness.blobs.inner, binding.prerequisite_context()).await;
@@ -2638,6 +2828,42 @@ async fn preparation_preserves_public_values_and_redacts_secret_derived_prerequi
     assert_eq!(secret.sensitivity(), OutputSensitivity::SecretDerived);
     assert!(secret.expose_value().is_empty());
     assert_eq!(secret.public_value(), None);
+
+    assert_merged_runtime_context(&harness, &base, &limits).await;
+}
+
+async fn assert_merged_runtime_context(
+    harness: &Harness,
+    base: &JobRuntimeContext,
+    limits: &ProtocolLimits,
+) {
+    complete_activation(harness).await;
+    let publications = harness.repository.publication_attempts();
+    let instance = publications
+        .last()
+        .and_then(|publication| publication.instances().first())
+        .expect("activated instance");
+    let runtime_bytes =
+        load_activation_blob(&harness.blobs.inner, instance.runtime_context()).await;
+    let runtime = automata_ci_protocol_protobuf::decode_job_runtime_context(&runtime_bytes, limits)
+        .expect("merged instance runtime context");
+    assert_eq!(runtime.inputs(), base.inputs());
+    assert_eq!(runtime.vars(), base.vars());
+    assert_eq!(runtime.secrets(), base.secrets());
+    let setup = runtime.needs().get("setup").expect("merged direct need");
+    assert_eq!(setup.result(), JobConclusion::Success);
+    assert_eq!(
+        setup
+            .outputs()
+            .get("public")
+            .expect("merged public output")
+            .public_value(),
+        Some("visible")
+    );
+    assert!(
+        !setup.outputs().contains_key("secret"),
+        "unreferenced secret-derived output metadata must not expand runtime exposure"
+    );
 }
 
 #[tokio::test]
@@ -2689,6 +2915,10 @@ async fn bounded_matrix_projects_credential_free_job_ir_for_every_instance() {
         assert_eq!(
             envelope.job().authority_profile(),
             JobAuthorityProfile::CredentialFree
+        );
+        assert_eq!(
+            envelope.execution().run_id_alias(),
+            Some(RunIdAlias::new(11).expect("run ID alias")),
         );
         assert!(matches!(
             envelope.job().permission_request(),
@@ -3034,7 +3264,7 @@ async fn expired_polled_final_requests_exactly_replay_without_phase_work() {
     let preparation_renewals = preparation.repository.renewal_counts();
     complete_preparation(&preparation).await;
     assert_eq!(preparation.blobs.operations(), 2);
-    assert_eq!(preparation.blobs.put_outcomes(), (2, 0));
+    assert_eq!(preparation.blobs.put_outcomes(), (1, 0));
     assert_eq!(
         preparation.repository.selection_consume_counts(),
         preparation_counts
@@ -3136,7 +3366,7 @@ async fn assert_committed_preparation_operation_replays_exactly() {
     let preparation_renewals = preparation.repository.renewal_counts();
     complete_preparation(&preparation).await;
     assert_eq!(preparation.blobs.operations(), 2);
-    assert_eq!(preparation.blobs.put_outcomes(), (2, 0));
+    assert_eq!(preparation.blobs.put_outcomes(), (1, 0));
     assert_eq!(
         preparation.repository.selection_consume_counts(),
         preparation_counts
@@ -3151,7 +3381,7 @@ async fn assert_committed_preparation_operation_replays_exactly() {
         [
             HarnessOperation::ClaimOrchestration,
             HarnessOperation::ConsumeOrchestration,
-            HarnessOperation::BlobPut,
+            HarnessOperation::BlobGet,
             HarnessOperation::BlobPut,
             HarnessOperation::RenewPreparation,
             HarnessOperation::ConsumeOrchestration,
@@ -3264,7 +3494,7 @@ async fn dropped_final_store_awaits_replay_before_any_repeated_blob_io() {
     let preparation_renewals = preparation.repository.renewal_counts();
     complete_preparation(&preparation).await;
     assert_eq!(preparation.blobs.operations(), 2);
-    assert_eq!(preparation.blobs.put_outcomes(), (2, 0));
+    assert_eq!(preparation.blobs.put_outcomes(), (1, 0));
     assert_eq!(
         preparation.repository.selection_consume_counts(),
         preparation_counts
@@ -3482,7 +3712,7 @@ async fn assert_definitive_preparation_final_clears(fault: FinalMutationFault) {
         "preparation must renew again after a definitive final error"
     );
     assert_eq!(harness.blobs.operations(), 4);
-    assert_eq!(harness.blobs.put_outcomes(), (2, 2));
+    assert_eq!(harness.blobs.put_outcomes(), (1, 1));
     assert_eq!(attempts.len(), 2);
     assert!(
         attempts[0] != attempts[1],

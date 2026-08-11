@@ -77,7 +77,7 @@ fn publication_settings_are_independent_but_secret_safety_is_a_hard_ceiling() {
     );
     assert_eq!(
         SecretExposureClass::ReadableSecret.raw_log_disposition(),
-        RawLogDisposition::SuppressUserOutput
+        RawLogDisposition::Persist
     );
     assert_eq!(
         SecretExposureClass::CapabilityOnly.raw_log_disposition(),

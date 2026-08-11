@@ -15,11 +15,12 @@ use automata_ci_blob::{
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::GithubPushRefKind;
 use automata_ci_github_delivery::{
-    GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
-    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
-    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
-    GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
+    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryEventWorkflowRequest, GithubDeliverySourceAuthority, GithubDeliveryWorker,
+    GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError,
+    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
+    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
+    GithubDeliveryWorkflowRequest,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -27,20 +28,21 @@ use automata_ci_scm::{
 };
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
-    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
-    ProviderDeliveryWorkflowConclusion, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
+    CompleteProviderDelivery, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
+    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
+    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RejectProviderDelivery, RepositoryId as StoreRepositoryId,
+    RetryProviderDelivery, TenantScope,
 };
 use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
 use bytes::Bytes;
@@ -218,6 +220,15 @@ struct WorkflowObservation {
     debug: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventWorkflowObservation {
+    event_name: String,
+    git_ref: String,
+    revision: String,
+    raw_media_type: String,
+    debug: String,
+}
+
 #[derive(Clone, Debug)]
 enum ProcessorBehavior {
     Conclusion(ProviderDeliveryWorkflowConclusion),
@@ -228,6 +239,7 @@ enum ProcessorBehavior {
 struct RecordingProcessor {
     behavior: ProcessorBehavior,
     observations: Mutex<Vec<WorkflowObservation>>,
+    event_observations: Mutex<Vec<EventWorkflowObservation>>,
 }
 
 impl RecordingProcessor {
@@ -235,6 +247,7 @@ impl RecordingProcessor {
         Self {
             behavior: ProcessorBehavior::Conclusion(conclusion),
             observations: Mutex::new(Vec::new()),
+            event_observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -242,6 +255,7 @@ impl RecordingProcessor {
         Self {
             behavior: ProcessorBehavior::Error(error),
             observations: Mutex::new(Vec::new()),
+            event_observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -249,6 +263,13 @@ impl RecordingProcessor {
         self.observations
             .lock()
             .expect("processor observations lock")
+            .clone()
+    }
+
+    fn event_observations(&self) -> Vec<EventWorkflowObservation> {
+        self.event_observations
+            .lock()
+            .expect("event processor observations lock")
             .clone()
     }
 }
@@ -272,6 +293,31 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                     .manifest_pinned_evidence()
                     .private_source_authority()
                     .is_some(),
+                debug: format!("{request:?}"),
+            });
+        let result = match &self.behavior {
+            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion.clone()),
+            ProcessorBehavior::Error(error) => Err(*error),
+        };
+        request.finish(result).await
+    }
+
+    async fn process_authenticated_event_v1_workflow(
+        &self,
+        request: GithubDeliveryEventWorkflowRequest<'_>,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        let event = request
+            .manifest_pinned_evidence()
+            .authenticated_event_v1()
+            .expect("V1 coordinates");
+        self.event_observations
+            .lock()
+            .expect("event processor observations lock")
+            .push(EventWorkflowObservation {
+                event_name: request.event().event_name().to_owned(),
+                git_ref: event.git_ref().to_owned(),
+                revision: request.repository_source().revision().as_str().to_owned(),
+                raw_media_type: request.raw_event().media_type().to_owned(),
                 debug: format!("{request:?}"),
             });
         let result = match &self.behavior {
@@ -485,6 +531,32 @@ impl FixtureSubjectEvidence {
         .expect("historical subject evidence");
         Self(evidence)
     }
+
+    fn authenticated_event_v1(
+        claimed: &ClaimedProviderDelivery,
+        check_head_sha: GithubCheckHeadSha,
+        kind: GithubAuthenticatedEventKind,
+        git_ref: &str,
+    ) -> Self {
+        let legacy = Self::from_claimed(claimed, check_head_sha).0;
+        let event = GithubAuthenticatedEventV1::new(kind, git_ref).expect("event coordinates");
+        let evidence =
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+                legacy.delivery_id(),
+                legacy.repository_owner_id(),
+                legacy.manifest().clone(),
+                legacy.authenticated_webhook_verifier_fingerprint(),
+                legacy.authenticated_webhook_verifier_revision(),
+                legacy.checks_authority().clone(),
+                legacy.private_source_authority().cloned(),
+                legacy.check_subject_id(),
+                legacy.check_head_sha(),
+                event,
+                legacy.accepted_at(),
+            )
+            .expect("V1 subject evidence");
+        Self(evidence)
+    }
 }
 
 #[async_trait]
@@ -602,6 +674,70 @@ fn claimed_fixture_with_visibility(
     }
 }
 
+fn pull_request_claimed_fixture() -> ClaimedFixture {
+    let body = Bytes::from(format!(
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+    ));
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
+    let key_text = format!("provider-deliveries/github/event-v1/sha256/{digest}.json");
+    let descriptor = BlobDescriptor::new(
+        BlobKey::new(key_text.clone()).expect("blob key"),
+        digest,
+        u64::try_from(body.len()).expect("body length"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("media type"),
+    );
+    let raw_event = AdmissionObject::new_event(
+        digest,
+        ObjectKey::new(key_text).expect("object key"),
+        descriptor.size(),
+        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+    )
+    .expect("raw event");
+    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(11)).expect("delivery id");
+    let receipt = ProviderDeliveryReceipt::from_durable_parts(
+        delivery_id,
+        ProviderDeliveryState::Claimed,
+        1,
+        UnixMillis::new(50),
+    )
+    .expect("claimed receipt");
+    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(12)).expect("owner");
+    let claim =
+        ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 7).expect("claim fence");
+    let repository = ProviderRepositoryCoordinates::new(
+        ProviderRepositoryId::new(REPOSITORY_ID).expect("repository"),
+        ProviderRepositoryVisibility::Private,
+        format!("{OWNER}/{REPOSITORY}"),
+    )
+    .expect("repository coordinates");
+    let identity = ProviderDeliveryIdentity::new(
+        TenantScope::from_authenticated_tenant_id("tenant-private").expect("tenant"),
+        "github",
+        ProviderConnectionId::from_uuid(Uuid::from_u128(3)).expect("connection"),
+        ProviderInstallationId::new(INSTALLATION_ID).expect("installation"),
+        repository,
+        DELIVERY,
+    )
+    .expect("identity");
+    let claimed = ClaimedProviderDelivery::from_durable_parts(
+        receipt,
+        identity,
+        Sha256Digest::from_bytes([0x43; 32]),
+        raw_event,
+        claim,
+        UnixMillis::new(100),
+        UnixMillis::new(10_000),
+    )
+    .expect("claimed delivery");
+    ClaimedFixture {
+        claimed,
+        receipt,
+        descriptor,
+        body,
+        check_head_sha: fixture_check_head_sha(AFTER),
+    }
+}
+
 fn push_body(
     git_ref: &str,
     after: &str,
@@ -634,20 +770,36 @@ fn worker(
     deliveries: Arc<RecordingDeliveries>,
     config: GithubDeliveryWorkerConfig,
 ) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
+    let subject_evidence =
+        FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha);
+    worker_with_evidence(
+        fixture,
+        source,
+        processor,
+        deliveries,
+        config,
+        subject_evidence,
+    )
+}
+
+fn worker_with_evidence(
+    fixture: &ClaimedFixture,
+    source: Arc<RecordingSourcePort>,
+    processor: Arc<RecordingProcessor>,
+    deliveries: Arc<RecordingDeliveries>,
+    config: GithubDeliveryWorkerConfig,
+    subject_evidence: FixtureSubjectEvidence,
+) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
     let objects = Arc::new(FixtureBlobStore::exact(
         fixture.descriptor.clone(),
         fixture.body.clone(),
-    ));
-    let subject_evidence = Arc::new(FixtureSubjectEvidence::from_claimed(
-        &fixture.claimed,
-        fixture.check_head_sha,
     ));
     let worker = GithubDeliveryWorker::new(
         objects.clone(),
         source,
         processor,
         deliveries,
-        subject_evidence,
+        Arc::new(subject_evidence),
         Arc::new(FixedClock(UnixMillis::new(500))),
         config,
     )
@@ -787,6 +939,60 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             .collect::<Vec<_>>(),
         [".github/workflows/ci.yml"]
     );
+}
+
+#[tokio::test]
+async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evidence() {
+    let fixture = pull_request_claimed_fixture();
+    let archive = archive(BTreeMap::from([(
+        ".github/workflows/ci.yml",
+        b"on: pull_request\njobs: {}\n".to_vec(),
+    )]));
+    let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
+    let processor = Arc::new(RecordingProcessor::returning(skipped()));
+    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
+    let evidence = FixtureSubjectEvidence::authenticated_event_v1(
+        &fixture.claimed,
+        fixture.check_head_sha,
+        GithubAuthenticatedEventKind::PullRequest,
+        "refs/pull/7/merge",
+    );
+    let config = GithubDeliveryWorkerConfig::default();
+    let (worker, objects) = worker_with_evidence(
+        &fixture,
+        Arc::clone(&source),
+        Arc::clone(&processor),
+        Arc::clone(&deliveries),
+        config,
+        evidence,
+    );
+    let credential = SecretString::new(CREDENTIAL_MARKER).expect("credential");
+
+    let outcome = worker
+        .process_claimed(
+            fixture.claimed,
+            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                credential: &credential,
+                changed_files_credentials: None,
+            },
+        )
+        .await
+        .expect("pull-request completion");
+
+    assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Completed(_)));
+    assert_eq!(objects.read_count(), 1);
+    assert_eq!(source.observations()[0].revision, AFTER);
+    let observations = processor.event_observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].event_name, "pull_request");
+    assert_eq!(observations[0].git_ref, "refs/pull/7/merge");
+    assert_eq!(observations[0].revision, AFTER);
+    assert_eq!(
+        observations[0].raw_media_type,
+        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+    );
+    assert!(!observations[0].debug.contains(OWNER));
+    assert!(!observations[0].debug.contains(REPOSITORY));
 }
 
 #[tokio::test]

@@ -1,8 +1,12 @@
 # Ubuntu 24.04 x64 compatibility profile
 
-This image is the initial immutable environment behind the GitHub
-`ubuntu-24.04` label. The Arch Linux runner host remains outside the job; each
-job receives a fresh rootless Podman sandbox using this Ubuntu userspace.
+This directory defines the locked Ubuntu 24.04 environment used by the current
+integration runner work. It is intended to back the GitHub `ubuntu-24.04`
+label, but the control plane does not yet compose a hosted-label profile
+catalog. Publishing the image alone does not make that label schedulable.
+
+The Arch Linux runner host stays outside the job. Each admitted job receives a
+fresh rootless Podman sandbox using this Ubuntu userspace.
 
 The profile intentionally gives the job UID 0 only inside its rootless user
 namespace. It does not use `--privileged`, host sockets, host credentials, or
@@ -79,7 +83,7 @@ rebuilds an image after its digest is reviewed:
 4. Put that registry digest in `profile-manifest.json`, recompute the manifest
    and Containerfile hashes in `profile-lock.json`, and update
    `../../crates/automata-ci-runner/config/runner.local.example.json`. Review
-   and merge that lock commit. v0.1 does not yet compose a control-plane
+   and merge that lock commit. The control plane does not yet compose a
    profile-catalog configuration, so promotion publishes the reviewed image
    but does not by itself enable hosted-label scheduling.
 5. Make the GHCR package public, then dispatch `promote-locked` from the default

@@ -2,7 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
-use automata_ci_execution::{ExecutionEndpoint, SandboxCapability, SandboxProvider};
+use automata_ci_execution::{SandboxCapability, SandboxProvider};
 use automata_ci_sandbox_podman::{
     JobContainerEngine, PodmanCommandExecutor, PodmanConfigurationError, PodmanHostGatewayAlias,
     RootlessPodmanProvider,
@@ -13,17 +13,6 @@ use support::{FakePodman, ScratchRoot, options};
 
 assert_impl_all!(RootlessPodmanProvider: Send, Sync);
 assert_obj_safe!(PodmanCommandExecutor);
-
-#[test]
-fn provider_ports_remain_object_safe() {
-    fn provider(_provider: &dyn SandboxProvider) {}
-    fn endpoint(_endpoint: &dyn ExecutionEndpoint) {}
-    fn command_adapter(_adapter: &dyn PodmanCommandExecutor) {}
-
-    let _ = provider;
-    let _ = endpoint;
-    let _ = command_adapter;
-}
 
 #[test]
 fn docker_api_capability_is_advertised_only_when_explicitly_enabled() {

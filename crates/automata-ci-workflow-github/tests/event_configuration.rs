@@ -101,11 +101,11 @@ fn empty_dispatch_and_reusable_workflow_contracts_are_admitted() {
 }
 
 #[test]
-fn dispatch_inputs_stay_gated_until_dispatch_payload_validation_exists() {
+fn configured_dispatch_inputs_require_verified_payload_evidence() {
     let source = "on:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     assert_rejected_with(
         &compile(source, "workflow_dispatch", None),
-        "github.compile.workflow_dispatch_inputs_require_context",
+        "github.compile.event_metadata_required",
     );
 }
 
@@ -142,6 +142,56 @@ fn schedule_admission_requires_the_exact_firing_cron() {
     assert_rejected_with(
         &compile(source, "schedule", Some(GithubEventMetadataV1::push(false))),
         "github.compile.event_metadata_mismatch",
+    );
+}
+
+#[test]
+fn merge_group_requires_exact_authenticated_metadata() {
+    let source =
+        "on: merge_group\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let selected = compile(
+        source,
+        "merge_group",
+        Some(GithubEventMetadataV1::merge_group(
+            "checks_requested",
+            "refs/heads/main",
+        )),
+    );
+    assert!(selected.is_accepted(), "{:#?}", selected.diagnostics());
+
+    assert_not_selected(
+        &compile(
+            source,
+            "merge_group",
+            Some(GithubEventMetadataV1::merge_group(
+                "destroyed",
+                "refs/heads/main",
+            )),
+        ),
+        WorkflowNotSelectedReason::EventFiltersNotMatched,
+    );
+    assert_rejected_with(
+        &compile(source, "merge_group", None),
+        "github.compile.event_metadata_required",
+    );
+    assert_rejected_with(
+        &compile(
+            source,
+            "merge_group",
+            Some(GithubEventMetadataV1::pull_request("opened", "main")),
+        ),
+        "github.compile.event_metadata_mismatch",
+    );
+    assert_rejected_with(
+        &compile(
+            source,
+            "merge_group",
+            Some(GithubEventMetadataV1::merge_group(
+                "checks_requested",
+                "main",
+            )),
+        ),
+        "github.compile.invalid_merge_group_metadata",
     );
 }
 

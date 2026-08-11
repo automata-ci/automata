@@ -574,7 +574,7 @@ pub struct HumanOutputPublication {
 /// Durable handling selected for raw user-controlled log output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HumanRawLogDisposition {
-    /// User-controlled log frames may be durably persisted.
+    /// Runner-redacted user-controlled log frames may be durably persisted.
     Persist,
     /// User-controlled output must be suppressed for this stream.
     SuppressUserOutput,

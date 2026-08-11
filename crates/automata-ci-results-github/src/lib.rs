@@ -26,10 +26,10 @@ mod token;
 pub use cache_http::{GithubCacheApi, GithubCacheHttpLimits, GithubCacheHttpLimitsError};
 pub use cache_model::{
     CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
-    CacheKey, CacheModelError, CachePermission, CacheProtocolEntryId, CacheVersion,
-    CommitCacheBlocks, CompleteCacheBlock, CompleteCacheFinalization, CreateCacheEntry,
-    CreatedCacheEntry, FinalizedCacheEntry, LookupCacheEntry, PrepareCacheFinalization,
-    PreparedCacheFinalization, ReserveCacheBlock, ResolveCacheDownload,
+    CacheKey, CacheModelError, CachePermission, CacheProtocolEntryId, CacheRepositoryMetadata,
+    CacheVersion, CommitCacheBlocks, CompleteCacheBlock, CompleteCacheFinalization,
+    CreateCacheEntry, CreatedCacheEntry, FinalizedCacheEntry, LookupCacheEntry,
+    PrepareCacheFinalization, PreparedCacheFinalization, ReserveCacheBlock, ResolveCacheDownload,
 };
 pub use cache_port::{
     CacheRepository, CacheRepositoryError, CacheRepositoryErrorKind, SignedCacheCapability,
@@ -37,7 +37,7 @@ pub use cache_port::{
 pub use cache_postgres::PostgresCacheRepository;
 pub use cache_service::{
     CacheDownloadSegment, CacheLimits, CacheLimitsError, CacheService, CacheServiceError,
-    CacheServiceErrorKind, PreparedCacheDownload, derive_current_cache_authority,
+    CacheServiceErrorKind, PreparedCacheDownload, derive_cache_authority,
 };
 pub use http::{GithubResultsApi, GithubResultsHttpLimits, GithubResultsHttpLimitsError};
 pub use model::{

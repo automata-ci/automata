@@ -200,13 +200,27 @@ fn authentication_covers_exact_raw_bytes_and_precedes_json() {
 }
 
 #[test]
-fn unsupported_signed_events_are_rejected_without_json_admission() {
-    let body = encode(&valid_payload());
-    let headers = signed_headers(SECRET, &body, "pull_request", "delivery-event");
+fn authenticated_non_push_envelopes_are_available_before_event_support() {
+    let body = b"generic-body-marker:not-json";
+    let headers = signed_headers(SECRET, body, "repository_dispatch", "delivery-event");
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
+    let authenticated = verifier
+        .authenticate_chunks(&headers, [&body[..9], &body[9..]])
+        .expect("authenticated generic envelope");
+    assert_eq!(authenticated.delivery_id(), "delivery-event");
+    assert_eq!(authenticated.event_name(), "repository_dispatch");
+    assert_eq!(authenticated.raw_body().as_ref(), body);
+    assert_eq!(
+        authenticated.body_sha256().as_bytes(),
+        digest::digest(&digest::SHA256, body).as_ref()
+    );
+    let debug = format!("{authenticated:?}");
+    assert!(!debug.contains("generic-body-marker"));
+    assert!(!debug.contains("delivery-event"));
+
     assert_eq!(
         verifier
-            .verify(&headers, Bytes::from(body))
+            .verify(&headers, Bytes::from_static(body))
             .expect_err("unsupported event"),
         GithubWebhookError::UnsupportedEvent
     );

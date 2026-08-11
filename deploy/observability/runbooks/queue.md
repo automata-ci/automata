@@ -34,7 +34,7 @@ correct runner shape; a fleet-wide idle-slot total is not relevant.
 
 For `compatible_runners_busy`, compatible runners exist but every authorized
 slot is occupied. Confirm current runner slot conservation, lease expiry,
-session health, and runner control progress. Automata v0.1 has no online
+session health, and runner control progress. The current control plane has no online
 enrollment or fleet-scaling operation: restore already-declared compatible
 capacity first. Planned expansion requires a reviewed deployment/bootstrap
 change, normally with a new static runner identity, rather than an incident-time

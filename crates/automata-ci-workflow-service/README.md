@@ -16,9 +16,10 @@ evidence and close runs with complete job-result graphs. Admission remains
 asynchronous: its durable receipt is not a job-completion signal, and the full
 runner, provider, and service-image acceptance gate remains separate.
 
-Automata is pre-1.0 and not production-ready. This is an internal application
-layer, and its Rust API may change between releases.
+Current component tests also cover typed `workflow_dispatch` inputs and the
+base runtime context. The external dispatch route and complete repository
+variable and secret-reference hydration are still product work.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-workflow-service)
+- API documentation: run `cargo doc -p automata-ci-workflow-service --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

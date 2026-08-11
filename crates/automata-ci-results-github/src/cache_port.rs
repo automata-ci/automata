@@ -90,7 +90,7 @@ pub trait CacheRepository: fmt::Debug + Send + Sync {
         request: CompleteCacheFinalization,
     ) -> Result<FinalizedCacheEntry, CacheRepositoryError>;
 
-    /// Applies current-ref-first exact/prefix matching and updates one access timestamp.
+    /// Applies scope-first exact-primary/primary-prefix/restore-prefix matching.
     async fn lookup(
         &self,
         request: LookupCacheEntry,

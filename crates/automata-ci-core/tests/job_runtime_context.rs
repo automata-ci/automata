@@ -150,6 +150,59 @@ fn runtime_context_round_trips_with_opaque_secret_bindings() {
 }
 
 #[test]
+fn admitted_base_context_preserves_values_and_redacts_all_debug_payloads() {
+    let binding_id = "opaque-binding-locator";
+    let version_id = "opaque-version-locator";
+    let input_value = "production-target";
+    let variable_value = "stable-channel";
+    let context = JobRuntimeContext::new_base(
+        object([("target", ContextValue::string(input_value))]),
+        object([("channel", ContextValue::string(variable_value))]),
+        BTreeMap::from([(
+            "DEPLOY_TOKEN".to_owned(),
+            SecretBinding::new(binding_id)
+                .expect("binding")
+                .with_version_id(version_id)
+                .expect("version"),
+        )]),
+    )
+    .expect("admitted base context");
+
+    assert_eq!(
+        context
+            .inputs()
+            .as_object()
+            .and_then(|inputs| inputs.get("target"))
+            .and_then(ContextValue::as_string),
+        Some(input_value)
+    );
+    assert_eq!(
+        context
+            .vars()
+            .as_object()
+            .and_then(|vars| vars.get("channel"))
+            .and_then(ContextValue::as_string),
+        Some(variable_value)
+    );
+    assert!(context.matrix().as_object().is_some_and(BTreeMap::is_empty));
+    assert!(context.needs().is_empty());
+    assert_eq!(context.strategy().job_total(), 1);
+    assert_eq!(
+        context.secrets()["DEPLOY_TOKEN"].version_id(),
+        Some(version_id)
+    );
+
+    let context_debug = format!("{context:?}");
+    let binding_debug = format!("{:?}", context.secrets()["DEPLOY_TOKEN"]);
+    for sentinel in [binding_id, version_id, input_value, variable_value] {
+        assert!(!context_debug.contains(sentinel));
+        assert!(!binding_debug.contains(sentinel));
+    }
+    assert!(context_debug.contains("REDACTED"));
+    assert!(binding_debug.contains("REDACTED"));
+}
+
+#[test]
 fn need_outputs_retain_sensitivity_and_redact_debug_values() {
     let sentinel = "secret-output\nsecond-line";
     let public = NeedOutput::new("published", OutputSensitivity::Public).expect("public output");

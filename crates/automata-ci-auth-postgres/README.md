@@ -25,5 +25,5 @@ evidence and direct bindings are resolved from the newest current state rather
 than trusted from session claims.
 
 - [Authentication design](https://github.com/automata-ci/automata/blob/main/docs/authentication.md)
-- [API documentation](https://docs.rs/automata-ci-auth-postgres)
+- API documentation: run `cargo doc -p automata-ci-auth-postgres --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

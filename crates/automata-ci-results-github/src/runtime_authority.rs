@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_protocol::{
@@ -8,7 +8,11 @@ use automata_ci_runner_control::{
     ControlPortError, RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer,
 };
 
-use crate::{ExecutionAuthority, HmacResultsAuthority, derive_current_cache_authority};
+use crate::{
+    CacheRepositoryMetadata, ExecutionAuthority, HmacResultsAuthority, derive_cache_authority,
+};
+
+const MAX_CACHE_AUTHORITY_REPOSITORIES: usize = 1_024;
 
 /// Stable authority namespace consumed by the GitHub job executor.
 pub const GITHUB_RESULTS_RUNTIME_AUTHORITY: &str = "github-actions-results";
@@ -17,6 +21,7 @@ pub const GITHUB_RESULTS_RUNTIME_AUTHORITY: &str = "github-actions-results";
 pub struct GithubResultsRuntimeAuthorityIssuer {
     authority: Arc<HmacResultsAuthority>,
     valid_for_seconds: u64,
+    repositories: BTreeMap<String, CacheRepositoryMetadata>,
 }
 
 impl GithubResultsRuntimeAuthorityIssuer {
@@ -24,18 +29,31 @@ impl GithubResultsRuntimeAuthorityIssuer {
     ///
     /// # Errors
     ///
-    /// Rejects a zero validity interval. The authority enforces its configured
-    /// maximum during every issuance.
+    /// Rejects a zero validity interval or a duplicate/excessive repository
+    /// metadata registry. The authority enforces its configured token maximum
+    /// during every issuance.
     pub fn new(
         authority: Arc<HmacResultsAuthority>,
         valid_for_seconds: u64,
+        repositories: impl IntoIterator<Item = CacheRepositoryMetadata>,
     ) -> Result<Self, ControlPortError> {
         if valid_for_seconds == 0 {
             return Err(ControlPortError::Corrupt);
         }
+        let mut repository_registry = BTreeMap::new();
+        for repository in repositories {
+            if repository_registry.len() >= MAX_CACHE_AUTHORITY_REPOSITORIES
+                || repository_registry
+                    .insert(repository.repository().to_owned(), repository)
+                    .is_some()
+            {
+                return Err(ControlPortError::Corrupt);
+            }
+        }
         Ok(Self {
             authority,
             valid_for_seconds,
+            repositories: repository_registry,
         })
     }
 }
@@ -46,6 +64,7 @@ impl fmt::Debug for GithubResultsRuntimeAuthorityIssuer {
             .debug_struct("GithubResultsRuntimeAuthorityIssuer")
             .field("authority", &self.authority)
             .field("valid_for_seconds", &self.valid_for_seconds)
+            .field("repository_count", &self.repositories.len())
             .finish()
     }
 }
@@ -80,11 +99,15 @@ impl RuntimeAuthorityIssuer for GithubResultsRuntimeAuthorityIssuer {
             lease.attempt_id(),
             lease.fencing_token(),
         );
-        let cache = derive_current_cache_authority(
+        let repository_metadata = self
+            .repositories
+            .get(&job.source().repository().to_ascii_lowercase());
+        let cache = derive_cache_authority(
             job.source().provider(),
             job.source().repository(),
             job.execution().git_ref(),
             job.source().event_name(),
+            repository_metadata,
         )
         .map_err(|_| ControlPortError::Corrupt)?;
         let token = self

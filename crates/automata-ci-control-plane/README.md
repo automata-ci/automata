@@ -8,9 +8,6 @@ a database, clock, transport, or executor.
 `automata-ci-control` composes these policies with durable application ports;
 the `automata` package supplies the product-level adapters.
 
-Automata is pre-1.0 and not production-ready. This is an internal domain layer,
-and its Rust API may change between releases.
-
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-control-plane)
+- API documentation: run `cargo doc -p automata-ci-control-plane --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

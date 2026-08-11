@@ -16,9 +16,6 @@ run, job, attempt, and fencing token; its expiry is the earlier of GitHub's
 provider expiry and the exact lease expiry. The GitHub App key is never sent to
 or configured on a runner.
 
-Automata is pre-1.0 and not production-ready. This is an internal provider
-adapter, and its configuration and Rust API may change between releases.
-
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-credential-github)
+- API documentation: run `cargo doc -p automata-ci-credential-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

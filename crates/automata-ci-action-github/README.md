@@ -8,9 +8,6 @@ expressions for later compilation rather than executing them during parsing.
 This adapter sits between provider-neutral action resolution and the GitHub
 job executor used by `automata-runner`.
 
-Automata is pre-1.0 and not production-ready. This is an internal compatibility
-layer; supported metadata and its Rust API may change between releases.
-
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-action-github)
+- API documentation: run `cargo doc -p automata-ci-action-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

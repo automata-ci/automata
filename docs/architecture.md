@@ -1,150 +1,176 @@
 # Architecture
 
-This document explains the system Automata is being built toward and the
-boundaries already enforced by the bootstrap implementation. It is not a claim
-that every provider or control-plane feature below is available today. See the
-[current status](../README.md#what-works-today) and
-[implementation gates](implementation-plan.md#milestones-and-gates) before
-planning a deployment.
+`automata` turns repository events and workflow files into scheduled work.
+`automata-runner` executes that work inside a configured isolation provider.
+PostgreSQL coordinates mutable state; S3-compatible storage holds immutable
+payloads.
 
-At a high level, `automata` turns workflow inputs into durable scheduled work,
-and `automata-runner` executes that work inside a provider-owned isolation
-boundary. PostgreSQL coordinates mutable state; S3-compatible storage holds
-immutable payloads.
+This page describes the source tree as of 2026-08-11 and separates the current
+composition from the provider roadmap. See [Compatibility](compatibility.md)
+for supported behavior and the [implementation plan](implementation-plan.md)
+for open gates.
 
-## Components and boundaries
-
-The Cargo workspace contains libraries, but produces only two distributed
-executables. The target architecture lets `automata` run all control-plane
-roles together or a configured subset so each role can scale independently
-from the same artifact. The current v0.1 server has no role selector: every
-replica starts the complete composed control plane. Likewise, guest-agent
-execution is a target design; the current `automata-runner` supports rootless
-Linux host execution only.
+## Current composition
 
 ```text
-GitHub / API / schedules                     Browser
-          |                                     |
-          +------------- automata -------------+
-                       |          |
-                  PostgreSQL   S3 / RustFS
-                       |
-                 leased JobIR
-                       |
-                 automata-runner
-                       |
-             SandboxProvider boundary
-                       |
-        Podman | KVM | Firecracker | Kubernetes
+GitHub events          Browser / CLI
+      |                     |
+      +------ automata -----+
+                 |     |
+           PostgreSQL object storage
+                 |
+            fenced JobIR lease over mTLS
+                 |
+          automata-runner on Linux
+                 |
+        rootless Podman job sandbox
 ```
 
-The primary internal ports are:
+The workspace builds many libraries but distributes two product commands:
 
-1. `WorkflowFrontend`, which parses and validates one provider dialect into its
-   source plan. A separate compiler lowers that plan into immutable logical
-   WorkflowPlan state, and fenced activation later projects concrete JobIR.
-   GitHub-specific syntax and lowering remain outside the scheduler.
-2. `SchedulerPolicy`, which matches typed requirements and user routing policy
-   without knowing how capacity is provisioned.
-3. `FleetController`, which asynchronously reconciles desired runner capacity.
-4. `SandboxProvider`, which owns the complete job lifetime: create, attach,
-   inspect, execute, signal, copy, and idempotent destroy.
-5. `ContainerEngine`, which implements job containers, services, and sequential
-   container actions *inside* a job sandbox.
-6. Storage, SCM, and workload-credential ports for PostgreSQL, S3-compatible
-   object stores, secrets, and GitHub.
+- `automata` starts the complete control plane and provides administration
+  commands. It has no per-role server selector yet.
+- `automata-runner` supervises rootless Linux execution, host admission, lease
+  renewal, logging, cancellation, and cleanup.
 
-Human authentication, authorization, repository workload credentials,
-provider-token custody, sessions, and runner machine identity are separate
-ports. See the
-[authentication design](authentication.md).
+The browser preview is a smaller mode of `automata`; it does not start the
+durable services or runner listener. Production dependencies never fall back
+to preview behavior.
 
-Rust traits are internal to one release and receive owned, versioned domain
-types. Remote runners, guest agents, privileged helpers, and optional external
-providers use explicitly versioned messages. The remote runner wire contract is
-the typed `automata.runner.v1` protobuf package; its package version is
-independent from negotiated protocol and JobIR versions. Backend-native
-identifiers never leak into durable JobIR.
+## Workflow boundary
 
-## Correctness model
+GitHub-specific code stops before scheduling:
 
-PostgreSQL is the source of truth for runs, jobs, attempts, leases, concurrency
-groups, admission, and artifact metadata. Server replicas are disposable and
-coordinate through transactions and fencing rather than process-local locks.
-S3/RustFS stores immutable workflow snapshots, action bundles, log segments,
-artifacts, caches, and final manifests.
+```text
+workflow YAML + event
+        |
+ WorkflowFrontend
+        |
+  source plan
+        |
+ WorkflowCompiler
+        |
+ immutable logical WorkflowPlan
+        |
+ fenced activation and matrix expansion
+        |
+       JobIR
+```
 
-The current Results listener also composes the current-reference CacheService-v2
-upload/download path and its job-scoped runtime authority. Base/default-branch
-fallback, REST cache management, BuildKit compatibility, and physical object
-garbage collection remain later compatibility work.
+`WorkflowFrontend` parses and validates the GitHub dialect. The compiler lowers
+it with event provenance into logical state. Activation evaluates the
+run-dependent parts, expands bounded strategies, and projects executable
+JobIR. The scheduler and runner do not parse YAML or evaluate provider syntax.
 
-Attempt identity includes the job, attempt, lease, and monotonically increasing
-fencing token. All state changes and published outputs compare the expected
-token. Network delivery is at-least-once; externally visible commits are
-fenced. Mutating provider calls carry operation IDs and generations so create,
-cancel, and destroy are idempotent.
+An Automata-only `concurrency.queue` field is under development in this
+frontend and the durable concurrency model. It is an optional extension, not a
+GitHub Actions compatibility feature, and is not supported by the product yet.
 
-Runners journal an accepted lease and sandbox handle before acknowledging it.
-After restart they either reattach to a live attempt or terminate and clean an
-orphan. Cancellation is persisted first, stops new steps, interrupts the active
-process, applies a grace period, kills the entire sandbox boundary, and always
-reconciles teardown.
+The remaining internal boundaries have narrower jobs:
 
-Logs are append-only frames with stream and sequence metadata. Acknowledgement
-tracks the highest contiguous sequence, allowing reconnect and replay. The
-runner masks secrets before transmission and spills bounded encrypted frames
-to disk under backpressure. The server writes immutable compressed segments
-and publishes a final S3 manifest.
+- `SchedulerPolicy` matches routing, typed requirements, and eligible capacity.
+- `FleetController` reconciles runner supply outside scheduling transactions.
+- `SandboxProvider` owns a job sandbox from creation through idempotent
+  destruction.
+- `ContainerEngine` runs job containers, services, and sequential container
+  actions inside that sandbox.
+- Storage, source-control, secret, authentication, and credential-broker ports
+  keep backend data out of JobIR.
 
-## Capability and routing model
+Rust traits are private to one release and process. Remote runners and helpers
+use versioned protocols. The runner wire format is the typed
+`automata.runner.v1` protobuf package over mutually authenticated TLS 1.3 and
+HTTP/2; it has no opaque JSON or Rust-layout serialization.
 
-Labels and runner groups are user-facing routing and authorization. Machine
-facts are structured requirements: OS, architecture, isolation class, resource
-minimums, container actions, services, nested containers, devices, and GPU.
-The runner handshake negotiates protocol and JobIR ranges plus namespaced
-capabilities. Unknown optional capabilities are ignored; an unknown required
-capability produces a typed decline reason. Every attempt records the exact
-negotiated capability snapshot.
+## State and storage
 
-Static runner registration is the durable upper bound on that snapshot. An
-exact immutable service-proxy pin authorizes service containers in that ceiling,
-while the live runner strips the feature and restores it only after provider
-verification. Scheduling intersects the registered ceiling with the observed
-session, so an unverified feature remains ineligible. Workload OIDC is absent
-from both supported inventories. Its issuer, durable storage, fail-closed
-optional control issuer, and `/oidc/token` placement on the non-human Results
-listener are product-composed, but capability advertisement remains disabled
-pending external TLS, homogeneous multi-replica/key-fleet operational proof,
-and bounded authority/issuance retention.
+PostgreSQL owns repositories, workflow snapshots, runs, numeric compatibility
+aliases, jobs, attempts, leases, runner registration, admission, concurrency,
+publication settings, and result metadata. Server replicas coordinate with
+transactions and fencing rather than process-local locks.
 
-## Provider roadmap
+S3-compatible storage owns immutable workflow and action bundles, log segments,
+artifacts, cache objects, and final manifests. It is not used for coordination.
 
-The first local provider is one rootless Podman job pod with a private network,
-workspace, limits, labels, and job-scoped container API. It is a shared-kernel
-isolation tier, not a hostile multi-tenant boundary.
+The Results listener serves job-scoped log, artifact, result, cache, and OIDC
+boundaries. Cache lookup checks the current ref first, then the server-owned
+default branch read-only. Current policy expires entries after seven inactive
+days and applies a 10 GiB LRU quota per repository. Physical object collection
+and the cache management API remain planned.
 
-Linux production isolation uses an ephemeral KVM VM; Firecracker is a later
-optimized provider using a guest `automata-runner`, vsock, a read-only base, and
-copy-on-write job disk. Kubernetes first provisions ephemeral runner pods as a
-fleet controller. Later Kubernetes, Kata, and KubeVirt implement stronger
-sandbox providers behind the same contract. Windows uses disposable Hyper-V
-VMs for strong isolation; macOS uses Virtualization.framework VMs, with native
-execution restricted to trusted workloads.
+## Leases, retries, and cleanup
 
-## Frontend
+An attempt is bound to its job, attempt ID, lease ID, and increasing fencing
+token. Every state change and published result compares that token. A delayed
+runner may repeat a request, but it cannot commit after a newer lease takes
+ownership.
 
-Rust owns routing, authorization, data loading, response status, and mutations.
-It passes a typed `PageModel` to an embedded React renderer built by Vite. The
-SSR component, manifest, and hashed assets are embedded in `automata`; Node
-is never a production dependency. All routes return complete HTML and use
-normal links/forms. Hydration is limited to progressive enhancement such as
-theme preference, in-page log filtering, and repository-settings draft and
-submission state. It does not fetch page data or provide live log transport.
+The runner journals a lease and sandbox handle before acknowledging the work.
+After a restart it reattaches to a live attempt or terminates and removes an
+orphan. Cancellation is stored first, prevents another step from starting,
+interrupts the active process, waits for the configured grace period, kills the
+sandbox, and reconciles cleanup.
 
-The administration surface is a `gh`-style client for control-plane status,
-workflow admission, encrypted repository secrets, and Linux device-flow
-`auth login`, `auth status`, and `auth logout` when Secret Service is
-available. The CLI and browser authentication designs share provider-neutral
-server sessions;
-machine-to-machine runner identity remains a separate mTLS trust domain.
+Logs use stream and sequence numbers. The server acknowledges the highest
+contiguous sequence so a runner can reconnect and replay. The runner redacts
+registered credential values before transmission and may spill a bounded,
+encrypted backlog to disk. The server stores immutable compressed segments and
+publishes a final manifest.
+
+## Capabilities and routing
+
+Labels and runner groups express user routing and authorization. Machine facts
+are typed: operating system, architecture, isolation class, resource minimums,
+container features, devices, and GPU requirements.
+
+Runner registration is an upper limit. A live session reports what its current
+provider probes actually support, and scheduling uses the intersection. An
+unknown required capability returns a typed decline; it is not ignored. Each
+attempt records the negotiated snapshot.
+
+Service containers illustrate this rule. Registration may allow them only when
+an exact immutable service-proxy image is configured. The runner still removes
+the feature until its provider probe succeeds. The checked-in configuration
+omits the unpublished helper image, so the end-to-end service path remains
+open.
+
+Workload OIDC is implemented at the issuer and Results boundary but is absent
+from supported runner inventories. External TLS, consistent keys across
+replicas, and bounded authority retention must be proven before it can be
+advertised.
+
+## Trust boundaries
+
+Human sessions, tenant authorization, runner mTLS identity, GitHub provider
+credentials, repository workload credentials, managed secrets, and workload
+tokens are separate trust domains. GitHub membership can grant a mapped role;
+it never grants Automata administrator access by itself.
+
+Jobs do not receive the host Podman socket, provider-control credentials, or
+control-plane credentials. CredentialFree jobs receive no repository
+credential. Managed-secret administration is implemented, but managed values
+are not delivered to jobs yet. See [Authentication and authorization](authentication.md)
+for the current interfaces and limits.
+
+## Web interface
+
+Rust owns routing, authorization, data loading, response codes, and mutations.
+It sends a typed page model to an embedded React renderer built by Vite. The
+renderer runs as a resource-limited WASI component without filesystem, network,
+environment, or subprocess access. Node.js is a build dependency, not a server
+dependency.
+
+Every route returns complete HTML. Browser JavaScript adds small conveniences
+such as theme preference, log filtering, and form state; it does not own page
+data or live log transport.
+
+## Planned providers and topology
+
+Later gates add independent control-plane roles, multiple replicas,
+Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
+KubeVirt, Windows native and Hyper-V execution, and macOS native and
+Virtualization.framework execution.
+
+Those providers share the scheduler, JobIR, and sandbox contracts. They are not
+available merely because their interfaces or roadmap entries exist. Their
+acceptance gates are listed in the [implementation plan](implementation-plan.md#planned-provider-scope).

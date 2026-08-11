@@ -7,8 +7,8 @@ use automata_ci_protocol::{
     SessionDisposition,
 };
 use automata_ci_runner_transport::{
-    ClientErrorKind, PreparedRequest, RetryClass, RunnerControlClient, RunnerControlClientObserver,
-    RunnerControlHandler, TransportLimits,
+    ClientErrorKind, PrepareError, PreparedRequest, RetryClass, RunnerControlClient,
+    RunnerControlClientObserver, RunnerControlHandler, TransportLimits,
 };
 use static_assertions::assert_obj_safe;
 use tokio_util::sync::CancellationToken;
@@ -21,18 +21,6 @@ use support::{
 assert_obj_safe!(RunnerControlHandler);
 assert_obj_safe!(RunnerControlClient);
 assert_obj_safe!(RunnerControlClientObserver);
-
-#[test]
-fn transport_ports_remain_object_safe() {}
-
-#[test]
-fn prepared_request_clone_preserves_operation_and_canonical_bytes() {
-    let prepared = hello_request();
-    let retry = prepared.clone();
-    assert_eq!(retry.operation_id(), prepared.operation_id());
-    assert_eq!(retry.canonical_bytes(), prepared.canonical_bytes());
-    assert_eq!(retry.message(), prepared.message());
-}
 
 #[test]
 fn sync_preparation_rejects_a_cross_session_header() {
@@ -51,7 +39,10 @@ fn sync_preparation_rejects_a_cross_session_header() {
         ),
         RunnerSlotOrdinal::new(1).expect("slot"),
     ));
-    assert!(PreparedRequest::for_session(request, negotiated, &ProtocolLimits::default()).is_err());
+    assert!(matches!(
+        PreparedRequest::for_session(request, negotiated, &ProtocolLimits::default()),
+        Err(PrepareError::SessionMismatch)
+    ));
 }
 
 #[tokio::test]

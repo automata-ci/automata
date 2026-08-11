@@ -8,9 +8,6 @@ remains behind an explicit `JobExecutor` port.
 The `automata-runner` executable assembles this runtime with durable local
 state, transport, a job executor, and the selected isolation provider.
 
-Automata is pre-1.0 and not production-ready. This is an internal runtime layer,
-and its Rust API may change between releases.
-
 - [Runner documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-runner-runtime)
+- API documentation: run `cargo doc -p automata-ci-runner-runtime --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

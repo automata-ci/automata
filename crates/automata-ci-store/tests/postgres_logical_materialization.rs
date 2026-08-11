@@ -938,8 +938,8 @@ async fn prepare_materialization_race_fixture(
         r"
         INSERT INTO concurrency_groups (
             repository_id, normalized_key, display_key,
-            running_run_id, pending_run_id, generation, updated_at_ms
-        ) VALUES ($1, $2, $2, $3, NULL, 1, 1100)
+            running_run_id, generation, updated_at_ms
+        ) VALUES ($1, $2, $2, $3, 1, 1100)
         ",
     )
     .bind(fixture.command.repository().id().as_uuid())
@@ -1299,6 +1299,10 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         vec![logical_job],
         UnixMillis::new(clock_origin_ms),
     )
+    .base_context(runtime_context_object(
+        format!("materialization/{namespace}/base-context.pb"),
+        0x15,
+    ))
     .build()
     .expect("logical admission");
     Ok(Fixture {
@@ -1537,6 +1541,9 @@ fn logical_command_at(
     if let Some(commit_subject) = command.commit_subject() {
         builder = builder.commit_subject(commit_subject);
     }
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
     Ok(builder.build()?)
 }
 
@@ -1570,11 +1577,11 @@ async fn load_attempt_safety(
 fn standard_public_attempt_safety(classified_at: i64) -> DurableAttemptSafety {
     DurableAttemptSafety {
         secret_exposure: "readable_secret".to_owned(),
-        raw_log_disposition: "suppress_user_output".to_owned(),
+        raw_log_disposition: "persist".to_owned(),
         requested_visibility: "public".to_owned(),
         effective_visibility: "private".to_owned(),
         reason: "secret_exposure".to_owned(),
-        schema: 1,
+        schema: 2,
         classified_at,
     }
 }
@@ -1644,16 +1651,8 @@ async fn claim_activation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             preparation.descriptor().clone(),
             preparation.claim().clone(),
-            admission_object_with_media(
-                format!("materialization/{owner}/base-context.pb"),
-                0x51,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
-            admission_object_with_media(
-                format!("materialization/{owner}/needs-context.pb"),
-                0x52,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            preparation.descriptor().base_context().clone(),
+            runtime_context_object(format!("materialization/{owner}/needs-context.pb"), 0x52),
             UnixMillis::new(bound_at),
         )?)
         .await?;
@@ -1758,6 +1757,7 @@ fn prepared_instance(
         content_reference(event),
         activation_reference(&runtime),
     )
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
     let envelope = JobIrEnvelope::new(
@@ -1933,6 +1933,14 @@ fn admission_object_with_media(key: String, digest: u8, media_type: &str) -> Adm
         media_type,
     )
     .expect("admission object")
+}
+
+fn runtime_context_object(key: String, digest: u8) -> AdmissionObject {
+    admission_object_with_media(
+        key,
+        digest,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    )
 }
 
 fn admission_object_from_bytes(key: String, bytes: &[u8], media_type: &str) -> AdmissionObject {

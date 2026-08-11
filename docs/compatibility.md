@@ -1,126 +1,105 @@
-# GitHub Actions compatibility contract
+# GitHub Actions compatibility
 
-Automata compatibility mode accepts standard GitHub workflow and action files.
-It does not add YAML keywords or require expressions that branch on the
-orchestrator. A repository is compatible only when the same immutable source
-revision runs with equivalent observable semantics on GitHub Actions and
-Automata.
+Automata reads standard GitHub workflow and action files, and standard
+workflows do not need expressions that detect the orchestrator. An
+Automata-specific `concurrency.queue` extension is under development; it is
+outside GitHub compatibility and is not part of the supported product surface.
 
-## Reference and evidence
+A feature is compatible only when the same repository revision has equivalent
+observable behavior on GitHub Actions and Automata. Parsing a field, storing it,
+or testing one component is not enough.
 
-Each release records the upstream `actions/runner` revision against which it was
-developed. The open runner's parser, schema, expression behavior, fixtures, and
-protocol documentation are treated as a reference implementation. Automata
-ports behavior into safe Rust and keeps provenance for imported MIT fixtures.
+## Reference implementation
 
-The initial G1 baseline, reviewed on 2026-08-07, is
+The current comparison baseline is
 [`actions/runner` v2.336.0](https://github.com/actions/runner/releases/tag/v2.336.0)
 at commit
-[`98aabcd429c4e8402406c56ce2d26387fed3b9ce`](https://github.com/actions/runner/commit/98aabcd429c4e8402406c56ce2d26387fed3b9ce).
-Its bundled JavaScript-action runtime is Node.js 24.18.0. This pin is a
-semantic research and differential-test baseline, not a dependency in either
-Automata binary. Advancing it requires a reviewed compatibility-delta record
-and rerunning the conformance suite; a floating upstream branch is never used
-as evidence.
+[`98aabcd429c4e8402406c56ce2d26387fed3b9ce`](https://github.com/actions/runner/commit/98aabcd429c4e8402406c56ce2d26387fed3b9ce),
+reviewed on 2026-08-07. Its JavaScript-action runtime is Node.js 24.18.0.
 
-The initial immutable Ubuntu profile carries Node.js 24.19.0. That reviewed
-patch-level delta is shared with the renderer build toolchain and is recorded in
-the profile manifest; JavaScript-action conformance remains measured against
-the v2.336.0/Node.js 24.18.0 reference above.
+Automata uses the open runner's parser, schema, expression behavior, fixtures,
+and protocol documentation as research material. The upstream runner is not a
+dependency of either Automata binary. Changing the pin requires a reviewed
+delta and a new conformance run.
 
-The v2.336.0 delta also makes background-step control, the
-`GITHUB_ARTIFACTS` file command, `$self` repository-action references, and the
-effective cache-mode environment part of the tracked compatibility surface.
-They are not claimed by G1 until their differential fixtures pass.
+One post-baseline delta has been reviewed without moving that pin:
+[`GITHUB_ARTIFACTS` and `GITHUB_ARTIFACTS_LIST`](https://github.com/actions/runner/pull/4527)
+at merge commit
+[`35e45850b519df66a669e2c91e0917804a33d0c7`](https://github.com/actions/runner/commit/35e45850b519df66a669e2c91e0917804a33d0c7).
+The runtime crate records the exact reviewed source and test files.
 
-A conformance run records:
+The initial Ubuntu execution profile contains Node.js 24.19.0. That patch-level
+difference is recorded in the image manifest and remains subject to the
+v2.336.0 differential tests.
 
-- source workflow/action digests and event payload digest;
-- expanded jobs, matrices, dependencies, conditions, and concurrency groups;
-- step order, outcome, conclusion, outputs, and registered post actions;
-- command files, annotations, masked logs, services, and dynamic ports;
-- attempt, rerun, cancellation, timeout, and artifact/cache behavior; and
-- environment and negotiated runner capability fingerprints.
+## What a conformance run compares
 
-Differential comparison may normalize only inherently volatile data such as
-opaque IDs, timestamps, temporary paths, signed URLs, and credentials. Any
-semantic difference is a compatibility failure. Unsupported syntax or runtime
-requirements fail before scheduling with a source span and machine-readable
-reason; Automata never silently ignores an option.
+A conformance record contains the source and event digests; expanded jobs and
+matrices; dependencies and conditions; step order and results; outputs;
+registered post actions; command files; annotations; masked logs; services;
+artifacts and caches; cancellation and rerun behavior; and the runner capability
+fingerprint.
 
-## Compatibility surface
-
-The required surface includes triggers and filters, reusable workflows,
-expressions and coercions, matrices, DAGs, defaults, permissions, environments,
-secrets, outputs, status functions, implicit success guards, concurrency,
-reruns, file commands, shell selection, JavaScript/composite/container actions,
-pre/main/post lifecycle, job and service containers, labels, runner groups,
-artifacts, cache APIs, results APIs, OIDC, and the relevant GitHub REST surface.
-
-Hosted labels map to immutable, fingerprinted environment profiles. They are
-not generic aliases. The acceptance rule is that a provider may advertise a
-profile only after its image and behavior probes pass the corresponding
-conformance suite. Current runner startup exercises an exact
-create/inspect/destroy lifecycle for every configured profile before it builds
-the advertised inventory, including profile/generation/running evidence and
-mandatory cleanup. That gate proves the configured provider can launch the
-digest-pinned image through its declared policy path; it is not supply-chain
-attestation or the complete hosted-image conformance suite.
+The comparison may normalize opaque IDs, timestamps, temporary paths, signed
+URLs, and credentials. It may not normalize a semantic difference. Unsupported
+syntax or runtime requirements must fail before scheduling with a source span
+and a machine-readable reason.
 
 ## v0.1 implementation status
 
-Automata 0.1 is a bootstrap release, not a claim of end-to-end GitHub Actions
-parity. The statuses below describe the composed product, not merely a parser,
-model, or adapter that exists elsewhere in the workspace. Capability-gated or
-unsupported behavior fails closed; it is never silently ignored.
+No v0.1 release has been published. The table describes the source tree as of
+2026-08-11. “Component complete” means the boundary has focused tests but the
+repository's full workflow has not passed through the production composition.
+See [Documentation style](documentation-style.md#state-capability-precisely) for
+the other status labels.
 
-| Area | v0.1 status | Current boundary |
-| --- | --- | --- |
-| Workflow YAML, expressions, and planning | Partial | The implemented strict subset is parsed and compiled into current logical plans; unsupported syntax and semantics produce diagnostics. |
-| Matrices, needs, conditions, and outputs | Partial | Current models and deterministic activation components exist, but the complete durable orchestration path is still being integrated. |
-| JavaScript and local composite actions | Partial | Bounded runtime and executor components have focused conformance coverage; full pre/main/post and marketplace compatibility is not claimed. |
-| Job containers and service containers | Partial | Digest-pinned service configuration reaches the current logical plan, JobIR, execution boundary, and Podman backend. An exact immutable service-proxy pin adds the service-container feature only to the durable registration ceiling. The live runner strips it and restores it only after provider verification; scheduling intersects registered and observed capabilities, so an unverified feature is never eligible. The checked-in bootstrap configuration intentionally omits the unpublished helper image, so the repository CI has not passed this path end to end. |
-| Scheduling and runner execution | Partial | Durable leases, fencing, runner transport, and configured fail-closed rootless-Podman network admission are composed. The complete workflow-to-runner acceptance path has not passed end to end. |
-| Logs, Results, and artifacts | Partial | Durable storage, the implemented Results facade, verified reads, and the SSR UI exist. For artifacts and logs, cross-run REST APIs, deletion, retention policy, byte-range reads, and full client compatibility remain unsupported. |
-| GitHub provider integration | Partial | GitHub browser login and device-flow HTTP endpoints, envelope-encrypted login/provider state, hashed session credentials, fresh numeric membership authority, and the RBAC management HTTP API are composed. On Linux with an available Secret Service, `automata auth login`, `auth status`, and `auth logout` are operational. Exact provider configuration additionally composes signed webhook ingress, public/private source delivery, fenced Check Runs, scoped App service credentials, and exact lease-bound repository authority for materialized Standard jobs. A mandatory autonomous worker supervises asynchronous logical preparation, activation, and materialization after admission; end-to-end runner, provider, and service-image acceptance remains open. |
-| CacheService v2 | Partial | The product composes the current-reference CacheService-v2 upload/download path and gives eligible jobs its runtime JWT and URLs. Cache entries have seven-day inactivity retention, and signed downloads support `HEAD`, full `GET`, and one byte range. Base/default-branch fallback, the REST management surface, BuildKit compatibility, and physical object garbage collection remain unsupported. |
-| Workload OIDC | Unsupported end to end | The product composes the issuer, durable storage, fail-closed optional control issuer, and `/oidc/token` on the non-human Results listener. Migration 0037 completes signed ingress with immutable positive numeric-owner evidence, and migration 0039 revalidates its receipt and current authority at reservation and every mint. The supported runner and static-registration inventories intentionally leave OIDC unadvertised pending external TLS and homogeneous multi-replica/key-fleet readiness, so entitled jobs remain ineligible. Unbounded authority and issuance-slot ledgers also prevent production retention claims until a safe bounded archive or erasure path exists. |
-| Reusable workflows, permissions, environments, schedules, reruns, and generalized concurrency | Unsupported end to end | Some source fields may be modeled for loss-aware diagnostics, but the product does not claim their runtime semantics. |
-| Arbitrary GitHub REST fallback proxy | Unsupported | Unknown or unavailable compatibility routes fail closed; Automata does not forward them with a job-scoped GitHub token. |
+| Area | Status | Implemented boundary | Remaining work |
+| --- | --- | --- | --- |
+| Workflow parsing and planning | Component complete | The strict subset is parsed into logical plans. Unsupported syntax produces diagnostics. | Pass the complete workflow through admission, execution, and result comparison. |
+| Matrices, dependencies, conditions, and outputs | Component complete | Deterministic expansion and activation are tested. Public job outputs, summaries, and annotations cross the executor boundary; registered credential values are redacted. | Prove the behavior in the end-to-end fixture. |
+| `workflow_dispatch` inputs and base context | Component complete | Typed dispatch inputs and the base runtime context have component coverage. | Compose and verify the complete external dispatch path and repository variable/secret hydration. |
+| Workflow-level concurrency | Component complete for the standard source model | Group and `cancel-in-progress` parsing, admission-time evaluation, and durable coordination have component paths. | Pass the production composition. Job-level concurrency and the Automata-only `queue: max` extension remain unsupported. |
+| JavaScript and local composite actions | Component complete | Bounded runtime and executor subsets have focused conformance tests. | Complete pre/main/post and marketplace compatibility. |
+| Job and service containers | Experimental | Digest-pinned service configuration reaches the logical plan, JobIR, executor, and rootless Podman backend. Provider lifecycle and service boundaries have component tests. | Publish and configure the reviewed immutable service-proxy helper, then pass the full composition. |
+| Scheduling and runner execution | Experimental | PostgreSQL coordination, leases, fencing, mTLS runner transport, host probes, and rootless Podman execution are composed. | Pass the normal CI workflow from admission through runner cleanup. |
+| Runtime identity and result projection | Component complete | Runs receive immutable positive numeric aliases. Logs, public outputs, summaries, annotations, and finalized results have focused tests. | Complete production retention and end-to-end comparison. |
+| Artifacts and Results API | Component complete | The implemented GitHub Actions Results boundary supports durable block and manifest admission, verified reads, and signed downloads. The executor also processes the separately reviewed `GITHUB_ARTIFACTS` declaration file, hashes workspace files in the sandbox, and publishes a fresh deterministic read-only `GITHUB_ARTIFACTS_LIST` snapshot to later phases. | Add the unsupported cross-run management, deletion, retention, remaining client behavior, and end-to-end conformance evidence for the environment-file delta. |
+| CacheService v2 | Component complete | Eligible jobs receive runtime URLs and a JWT. Lookup checks the current ref, then the server-owned default branch read-only. Entries expire after seven inactive days; a repository has a 10 GiB LRU quota. Signed downloads support `HEAD`, full `GET`, and one byte range. | Add the management API, physical object collection, and any separately claimed BuildKit behavior. |
+| GitHub provider | Experimental | Configured deployments include browser and device login, encrypted provider state, push webhook ingress, public/private source delivery, fenced Check Runs, scoped App credentials, and lease-bound repository authority. Authenticated `pull_request` and `merge_group` normalization has component tests only. | Compose the broader event path, then pass provider, runner, and service-image acceptance together. |
+| Authentication, permissions, and UI | Component complete | Tenant-scoped RBAC, management APIs, browser forms, repository publication settings, SSR run pages, and Linux Secret Service-backed CLI sessions are composed. | Complete the production acceptance and operating evidence. |
+| Managed secrets | Component complete for management; unsupported for jobs | PostgreSQL-backed create, replace, delete, activation, readiness, and metadata paths fail closed around key custody. | Deliver managed values to eligible runners and add external providers. Jobs do not receive managed secret values today. |
+| Workload OIDC | Unsupported end to end | The issuer, storage, authority checks, and `/oidc/token` endpoint exist. | Prove external TLS and homogeneous multi-replica key operation, bound authority history, and advertise the runner capability. |
+| Reusable workflows, environments, schedules, reruns, job-level concurrency, the `queue: max` extension, and complete permissions semantics | Unsupported end to end | Some fields are retained for diagnostics or active implementation. | Implement, compose, and compare their runtime semantics. |
+| Arbitrary GitHub REST fallback | Unsupported | Unknown compatibility routes fail closed. | No transparent job-token proxy is planned. Add individual reviewed surfaces if required. |
 
-The repository's own CI workflow is the target end-to-end acceptance fixture.
-Until that gate passes through the production composition, users should treat
-the entries above as component-level coverage rather than workflow parity.
+Hosted runner labels map to immutable environment profiles, not generic machine
+aliases. A runner advertises a configured profile only after a create, inspect,
+and destroy probe succeeds through that provider. This proves that the local
+provider can start the pinned image and clean it up; it is not supply-chain
+attestation or hosted-image conformance.
 
-## GitHub-owned boundary
+## GitHub-owned records
 
-GitHub's public APIs do not allow a third party to insert arbitrary native
-Actions workflow-run, job, log, or artifact records. The long-term reporting
-boundary therefore uses GitHub Check Runs, an Actions-compatible Results facade,
-and Automata's own SSR run UI. In v0.1, the optional exact provider runtime can
-create fenced Check Runs for its configured delivery identities, but the product
-still does not insert native Actions records or proxy arbitrary GitHub API
-requests with a job-scoped token.
+GitHub does not let third parties insert arbitrary native Actions workflow-run,
+job, log, or artifact records. Automata reports through fenced Check Runs, an
+Actions-compatible Results service, and its own run UI. It does not pretend
+that these are native GitHub Actions records.
 
-Secrets must be configured in Automata because GitHub does not expose their
-values. GitHub-compatible workload OIDC is product-composed, including the
-token endpoint on the non-human Results listener, but remains disabled end to
-end until the runner and registration paths advertise the capability after the
-remaining operational proofs. Its issuer uses Automata signing keys, so cloud
-trust policies must trust it explicitly rather than treating it as GitHub's
-issuer.
+GitHub also does not expose stored secret values. Secrets used by Automata jobs
+must be configured in Automata after runner delivery is implemented. The
+workload OIDC issuer uses Automata keys, so a cloud policy must trust it
+explicitly; it is not GitHub's issuer.
 
 ## End-to-end acceptance gate
 
-The first end-to-end workflow is Automata's normal
-`.github/workflows/ci.yml`, not a special smoke workflow. Generation zero is
-built by GitHub Actions from a reviewed commit. It runs the exact same workflow
-bytes and repository SHA through Automata to produce generation one. Results
-are compared before a canary promotion; a workflow can never replace the
-control plane currently executing it.
+The acceptance fixture is this repository's normal
+`.github/workflows/ci.yml`, not a reduced smoke workflow. GitHub Actions builds
+generation zero from a reviewed commit. Automata must run the same workflow
+bytes and repository revision to produce generation one. The results are
+compared before promotion, and a generation never replaces the control plane
+that is executing it.
 
-New runtime features enter that workflow as they land: static distribution,
+The fixture grows as runtime features land. It covers static distribution,
 artifacts, caches, matrices, reusable workflows, concurrency cancellation,
-services, Podman-backed Docker compatibility, and React/Vite SSR. GitHub remains
-the differential oracle until the full suite is stable, and continues to run
-periodically afterward to detect upstream semantic drift.
+services, Podman-backed Docker behavior, and React/Vite SSR. Until it passes,
+the table above is component evidence rather than a claim of workflow parity.

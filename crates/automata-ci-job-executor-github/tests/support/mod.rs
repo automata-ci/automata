@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     sync::{
         Arc, Mutex,
@@ -26,12 +26,12 @@ use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
     ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment, ExecutionError,
     ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
-    ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, ProviderCapabilities,
-    ProviderError, ProviderId, ResourceLimits, RootFilesystemPolicy, SandboxCapability,
-    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxInspection,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
-    ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork, ServicePortBinding,
-    SignalRequest, TargetPath, WaitRequest,
+    ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, OperationOutcome,
+    ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
+    SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord,
+    SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
+    ServicePortBinding, SignalRequest, TargetPath, WaitRequest,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -56,11 +56,12 @@ use automata_ci_protocol::{
 };
 use automata_ci_protocol_protobuf::encode_job_runtime_context;
 use automata_ci_runner_journal::{
-    ContentKind, DurableContentRef, ProviderFailureOutcome, ProviderName, ProviderOperationKind,
-    SandboxHandle as JournalSandboxHandle, SandboxIdentity,
+    CommitStage, ContentKind, DurableContentRef, JournalError, ProviderFailureOutcome,
+    ProviderName, ProviderOperationKind, SandboxHandle as JournalSandboxHandle, SandboxIdentity,
 };
 use automata_ci_runner_runtime::{
-    ExecutionCancellation, ExecutionCancellationReason, ExecutionEvents, ExecutionRequest, LogEvent,
+    ExecutionCancellation, ExecutionCancellationReason, ExecutionEventError, ExecutionEvents,
+    ExecutionRequest, LogEvent,
 };
 use automata_ci_runner_spool::ProtectionId;
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
@@ -338,6 +339,7 @@ impl Fixture {
             target("/usr/bin/sh"),
             target("/usr/bin/install"),
             target("/usr/bin/tar"),
+            target("/usr/bin/sha256sum"),
         )
         .expect("valid tools")
         .with_python(target("/usr/bin/python3"))
@@ -856,6 +858,7 @@ pub struct PhaseResponse {
     pub termination: ExecutionTermination,
     pub output: Vec<(ExecutionOutputStream, Vec<u8>)>,
     pub files: Vec<(CommandFileKind, Vec<u8>)>,
+    artifacts_list_write: Option<Vec<u8>>,
     truncated: bool,
     cancellation: Option<ExecutionCancellation>,
     cancellation_before_copy_from: Option<ExecutionCancellation>,
@@ -868,6 +871,7 @@ impl PhaseResponse {
             termination: ExecutionTermination::Exited(0),
             output: Vec::new(),
             files: Vec::new(),
+            artifacts_list_write: None,
             truncated: false,
             cancellation: None,
             cancellation_before_copy_from: None,
@@ -889,6 +893,11 @@ impl PhaseResponse {
 
     pub fn with_file(mut self, kind: CommandFileKind, value: impl Into<Vec<u8>>) -> Self {
         self.files.push((kind, value.into()));
+        self
+    }
+
+    pub fn with_artifacts_list_write(mut self, value: impl Into<Vec<u8>>) -> Self {
+        self.artifacts_list_write = Some(value.into());
         self
     }
 
@@ -998,6 +1007,41 @@ impl ExecutionEndpoint for FakeEndpoint {
             )
             .map_err(|_| execution_error(ExecutionStage::Exec));
         }
+        if program == "/usr/bin/sh"
+            && request
+                .argv()
+                .arguments()
+                .get(1)
+                .is_some_and(|argument| argument.contains("automata-artifact-sha256"))
+        {
+            let declared = request
+                .argv()
+                .arguments()
+                .get(3)
+                .expect("artifact path argument");
+            let resolved = if declared.starts_with('/') {
+                declared.clone()
+            } else {
+                format!(
+                    "{}/{declared}",
+                    request.working_directory().as_str().trim_end_matches('/')
+                )
+            };
+            let Some(bytes) = state.files.get(&resolved) else {
+                return execution_output(ExecutionTermination::Exited(44), Vec::new(), false)
+                    .map_err(|_| execution_error(ExecutionStage::Exec));
+            };
+            let digest = Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            return execution_output(
+                ExecutionTermination::Exited(0),
+                vec![(ExecutionOutputStream::Stdout, digest.into_bytes())],
+                false,
+            )
+            .map_err(|_| execution_error(ExecutionStage::Exec));
+        }
         let response = state
             .responses
             .pop_front()
@@ -1017,6 +1061,17 @@ impl ExecutionEndpoint for FakeEndpoint {
                 .iter()
                 .find(|value| value.name().as_str() == kind.environment_variable())
                 .expect("command file env")
+                .value()
+                .expose();
+            state.files.insert(path.to_owned(), bytes.clone());
+        }
+        if let Some(bytes) = &response.artifacts_list_write {
+            let path = request
+                .environment()
+                .values()
+                .iter()
+                .find(|value| value.name().as_str() == "GITHUB_ARTIFACTS_LIST")
+                .expect("artifact list env")
                 .value()
                 .expose();
             state.files.insert(path.to_owned(), bytes.clone());
@@ -1121,6 +1176,8 @@ pub struct FakeProvider {
 #[derive(Default)]
 struct ProviderState {
     pub creates: usize,
+    pub create_operations: BTreeSet<OperationId>,
+    pub create_failures: VecDeque<ProviderError>,
     pub attaches: usize,
     pub destroy_requests: Vec<DestroySandbox>,
     pub specs: Vec<SandboxSpec>,
@@ -1166,6 +1223,28 @@ impl FakeProvider {
         (state.creates, state.attaches, state.destroy_requests.len())
     }
 
+    pub fn unique_create_operation_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("provider lock")
+            .create_operations
+            .len()
+    }
+
+    pub fn fail_next_create(&self, kind: ProviderErrorKind, outcome: OperationOutcome) {
+        let recovery_handle = (outcome == OperationOutcome::Uncertain).then(|| self.handle.clone());
+        self.state
+            .lock()
+            .expect("provider lock")
+            .create_failures
+            .push_back(ProviderError::new(
+                kind,
+                ProviderStage::CreateSandbox,
+                outcome,
+                recovery_handle,
+            ));
+    }
+
     pub fn specs(&self) -> Vec<SandboxSpec> {
         self.state.lock().expect("provider lock").specs.clone()
     }
@@ -1204,7 +1283,11 @@ impl SandboxProvider for FakeProvider {
     ) -> Result<SandboxRecord, ProviderError> {
         let mut state = self.state.lock().expect("provider lock");
         state.creates += 1;
+        state.create_operations.insert(spec.operation_id());
         state.specs.push(spec.clone());
+        if let Some(error) = state.create_failures.pop_front() {
+            return Err(error);
+        }
         Ok(SandboxRecord::new(
             self.handle.clone(),
             spec.generation(),
@@ -1718,9 +1801,20 @@ struct EventState {
     transitions: Vec<JobLifecycle>,
     logs: Vec<LogEvent>,
     sandbox: Option<SandboxIdentity>,
-    provider_operations: Vec<(OperationId, ProviderOperationKind)>,
+    provider_operation_begins: Vec<(OperationId, ProviderOperationKind)>,
+    provider_operation_failures: Vec<(OperationId, ProviderFailureOutcome)>,
+    pending_provider_operation: Option<(OperationId, ProviderOperationKind)>,
+    provider_event_failures: BTreeSet<ProviderEventFailurePoint>,
     cancellation_on_log: Option<ExecutionCancellation>,
     fail_log_after_cancellation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ProviderEventFailurePoint {
+    BeginOperation,
+    SandboxCreated,
+    OperationCompleted,
+    OperationFailed,
 }
 
 impl FakeEvents {
@@ -1734,6 +1828,61 @@ impl FakeEvents {
 
     pub fn sandbox(&self) -> Option<SandboxIdentity> {
         self.state.lock().expect("events lock").sandbox.clone()
+    }
+
+    pub fn provider_operation_begins(&self) -> Vec<(OperationId, ProviderOperationKind)> {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_operation_begins
+            .clone()
+    }
+
+    pub fn pending_provider_operation(&self) -> Option<(OperationId, ProviderOperationKind)> {
+        self.state
+            .lock()
+            .expect("events lock")
+            .pending_provider_operation
+    }
+
+    pub fn provider_operation_failures(&self) -> Vec<(OperationId, ProviderFailureOutcome)> {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_operation_failures
+            .clone()
+    }
+
+    pub fn fail_next_begin_provider_operation(&self) {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_event_failures
+            .insert(ProviderEventFailurePoint::BeginOperation);
+    }
+
+    pub fn fail_next_sandbox_created(&self) {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_event_failures
+            .insert(ProviderEventFailurePoint::SandboxCreated);
+    }
+
+    pub fn fail_next_provider_operation_completed(&self) {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_event_failures
+            .insert(ProviderEventFailurePoint::OperationCompleted);
+    }
+
+    pub fn fail_next_provider_operation_failed(&self) {
+        self.state
+            .lock()
+            .expect("events lock")
+            .provider_event_failures
+            .insert(ProviderEventFailurePoint::OperationFailed);
     }
 
     pub fn cancel_on_next_log(&self, cancellation: ExecutionCancellation) {
@@ -1791,40 +1940,103 @@ impl ExecutionEvents for FakeEvents {
     fn begin_provider_operation(
         &self,
         kind: ProviderOperationKind,
-    ) -> Result<OperationId, automata_ci_runner_runtime::ExecutionEventError> {
-        let operation = OperationId::new();
-        self.state
-            .lock()
-            .expect("events lock")
-            .provider_operations
-            .push((operation, kind));
+    ) -> Result<OperationId, ExecutionEventError> {
+        let mut state = self.state.lock().expect("events lock");
+        if state
+            .provider_event_failures
+            .remove(&ProviderEventFailurePoint::BeginOperation)
+        {
+            return Err(injected_journal_failure());
+        }
+        let operation = match state.pending_provider_operation {
+            Some((operation, pending_kind)) if pending_kind == kind => operation,
+            Some(_) => return Err(ExecutionEventError::InvalidEvent),
+            None => {
+                let operation = OperationId::new();
+                state.pending_provider_operation = Some((operation, kind));
+                operation
+            }
+        };
+        state.provider_operation_begins.push((operation, kind));
         Ok(operation)
     }
 
     fn sandbox_created(
         &self,
-        _operation_id: OperationId,
+        operation_id: OperationId,
         sandbox: SandboxIdentity,
-    ) -> Result<(), automata_ci_runner_runtime::ExecutionEventError> {
-        self.state.lock().expect("events lock").sandbox = Some(sandbox);
+    ) -> Result<(), ExecutionEventError> {
+        let mut state = self.state.lock().expect("events lock");
+        if state
+            .provider_event_failures
+            .remove(&ProviderEventFailurePoint::SandboxCreated)
+        {
+            return Err(injected_journal_failure());
+        }
+        if state.pending_provider_operation
+            != Some((operation_id, ProviderOperationKind::CreateSandbox))
+        {
+            return Err(ExecutionEventError::InvalidEvent);
+        }
+        state.sandbox = Some(sandbox);
+        state.pending_provider_operation = None;
         Ok(())
     }
 
     fn provider_operation_completed(
         &self,
-        _operation_id: OperationId,
-    ) -> Result<(), automata_ci_runner_runtime::ExecutionEventError> {
-        self.state.lock().expect("events lock").sandbox = None;
+        operation_id: OperationId,
+    ) -> Result<(), ExecutionEventError> {
+        let mut state = self.state.lock().expect("events lock");
+        if state
+            .provider_event_failures
+            .remove(&ProviderEventFailurePoint::OperationCompleted)
+        {
+            return Err(injected_journal_failure());
+        }
+        let Some((pending_id, kind)) = state.pending_provider_operation else {
+            return Err(ExecutionEventError::InvalidEvent);
+        };
+        if pending_id != operation_id || kind == ProviderOperationKind::CreateSandbox {
+            return Err(ExecutionEventError::InvalidEvent);
+        }
+        if kind == ProviderOperationKind::DestroySandbox {
+            state.sandbox = None;
+        }
+        state.pending_provider_operation = None;
         Ok(())
     }
 
     fn provider_operation_failed(
         &self,
-        _operation_id: OperationId,
-        _failure: ProviderFailureOutcome,
-    ) -> Result<(), automata_ci_runner_runtime::ExecutionEventError> {
+        operation_id: OperationId,
+        failure: ProviderFailureOutcome,
+    ) -> Result<(), ExecutionEventError> {
+        let mut state = self.state.lock().expect("events lock");
+        if state
+            .provider_event_failures
+            .remove(&ProviderEventFailurePoint::OperationFailed)
+        {
+            return Err(injected_journal_failure());
+        }
+        if state
+            .pending_provider_operation
+            .is_none_or(|(pending_id, _)| pending_id != operation_id)
+        {
+            return Err(ExecutionEventError::InvalidEvent);
+        }
+        state
+            .provider_operation_failures
+            .push((operation_id, failure));
+        if !failure.is_uncertain() {
+            state.pending_provider_operation = None;
+        }
         Ok(())
     }
+}
+
+fn injected_journal_failure() -> ExecutionEventError {
+    ExecutionEventError::Journal(JournalError::InjectedFault(CommitStage::FileSynced))
 }
 
 pub fn environment_map(command: &ExecutionCommand) -> BTreeMap<String, String> {

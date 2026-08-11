@@ -28,7 +28,7 @@ use crate::{
 /// Maximum duration of one concrete-job materialization claim.
 pub const MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
-const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-materialization-descriptor.v3\0";
+const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-materialization-descriptor.v4\0";
 const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-materialization-commit.v3\0";
 // This is the current projector contract. Materialization independently
 // derives the identity and verifies the value embedded in the decoded JobIR.
@@ -1124,6 +1124,7 @@ fn validate_envelope_identity(
         && execution.workflow_name() == durable_execution.workflow_name()
         && execution.git_ref() == durable_execution.git_ref()
         && execution.actor() == durable_execution.actor()
+        && execution.run_id_alias() == Some(durable_execution.run_id_alias())
         && execution.run_number() == Some(durable_execution.run_number())
         && execution.run_attempt() == Some(durable_execution.run_attempt())
         && content_reference_matches_admission(execution.event(), descriptor.event())
@@ -1217,6 +1218,7 @@ fn descriptor_digest(
     hash_text(&mut hasher, execution.workflow_name());
     hash_text(&mut hasher, execution.git_ref());
     hash_optional_text(&mut hasher, execution.actor());
+    hasher.update(execution.run_id_alias().get().to_be_bytes());
     hasher.update(execution.run_number().to_be_bytes());
     hasher.update(execution.run_attempt().to_be_bytes());
     hasher.update([authority_profile_code(authority_profile)]);

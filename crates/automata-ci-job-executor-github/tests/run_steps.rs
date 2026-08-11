@@ -2,7 +2,9 @@ mod support;
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use automata_ci_core::{JobConclusion, JobSecretExposure, StepIr, ValueSource};
+use automata_ci_core::{
+    JobConclusion, JobSecretExposure, StepAnnotationLevel, StepIr, ValueSource,
+};
 use automata_ci_execution::{RootFilesystemPolicy, SandboxPrivilegePolicy};
 use automata_ci_github_runtime::{CommandFileKind, WorkflowCommandPolicy};
 use automata_ci_runner_runtime::{
@@ -160,11 +162,59 @@ async fn run_steps_preserve_scripts_and_apply_fresh_command_files_after_exit() {
     assert_eq!(event.1, b"{}");
     drop(state);
 
-    assert!(
-        fixture.events.logs().is_empty(),
-        "raw user output is not persistable once job code receives a secret"
-    );
+    let logs = fixture.events.logs();
+    let persisted = logs
+        .iter()
+        .map(|event| std::str::from_utf8(event.payload()).expect("UTF-8 test output"))
+        .collect::<String>();
+    assert!(persisted.contains("*** before-dynamic\n"));
+    assert!(persisted.contains("*** *** visible\n"));
+    assert!(!persisted.contains(SECRET));
+    assert!(!persisted.contains("dynamic-secret"));
     assert!(!format!("{:?}", fixture.executor).contains(SECRET));
+}
+
+#[tokio::test]
+async fn summaries_and_structured_annotations_are_masked_and_retained() {
+    let secret = "attachment-secret";
+    let response = PhaseResponse::success()
+        .with_stdout(format!(
+            "::add-mask::{secret}\n::warning file=src/lib.rs,line=7,title=Lint,ignored={secret}::problem {secret}\n"
+        ))
+        .with_file(
+            CommandFileKind::StepSummary,
+            format!("## Result\nvalue: {secret}\n").into_bytes(),
+        );
+    let fixture = Fixture::secretless(Vec::new(), vec![response]);
+    let request = fixture.request(support::envelope(vec![run_step("build", "Build", "true")]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("job executes");
+
+    let step = &result.steps()[0];
+    assert_eq!(step.summary_markdown(), Some("## Result\nvalue: ***\n"));
+    assert_eq!(step.annotations().len(), 1);
+    let annotation = &step.annotations()[0];
+    assert_eq!(annotation.level(), StepAnnotationLevel::Warning);
+    assert_eq!(annotation.message(), "problem ***");
+    assert_eq!(
+        annotation
+            .properties()
+            .iter()
+            .map(|property| (property.name(), property.value()))
+            .collect::<Vec<_>>(),
+        [("file", "src/lib.rs"), ("line", "7"), ("title", "Lint")]
+    );
+    assert!(!format!("{result:?}").contains(secret));
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("serialize")
+            .contains(secret)
+    );
 }
 
 #[tokio::test]
@@ -213,7 +263,7 @@ async fn python_and_pwsh_use_exact_script_suffixes_argv_and_powershell_fixup() {
 }
 
 #[tokio::test]
-async fn stderr_mask_registration_suppresses_a_secret_captured_on_stdout() {
+async fn stderr_mask_registration_redacts_a_secret_captured_on_stdout() {
     let secret = "cross-stream-dynamic-secret";
     let response = PhaseResponse::success()
         .with_stdout(format!("{secret}\n"))
@@ -232,10 +282,10 @@ async fn stderr_mask_registration_suppresses_a_secret_captured_on_stdout() {
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
     assert_eq!(result.secret_exposure(), JobSecretExposure::ReadableSecret);
-    assert!(
-        fixture.events.logs().is_empty(),
-        "neither captured channel may emit before cross-stream mask discovery"
-    );
+    let logs = fixture.events.logs();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].channel(), automata_ci_core::LogChannel::Stdout);
+    assert_eq!(logs[0].payload(), b"***\n");
 }
 
 #[tokio::test]
@@ -308,7 +358,7 @@ async fn ordered_cross_stream_resume_activates_a_later_stdout_mutation() {
 }
 
 #[tokio::test]
-async fn long_stop_command_token_is_suppressed_when_later_printed() {
+async fn long_stop_command_token_is_redacted_without_hiding_adjacent_output() {
     let token = "resume-token-123";
     let response = PhaseResponse::success().with_stdout(format!(
         "::stop-commands::{token}\nordinary output\n{token}\n"
@@ -327,10 +377,10 @@ async fn long_stop_command_token_is_suppressed_when_later_printed() {
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
     assert_eq!(result.secret_exposure(), JobSecretExposure::ReadableSecret);
-    assert!(
-        fixture.events.logs().is_empty(),
-        "a masked stop token and adjacent user output must not persist"
-    );
+    let logs = fixture.events.logs();
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[0].payload(), b"ordinary output\n");
+    assert_eq!(logs[1].payload(), b"***\n");
 }
 
 #[tokio::test]

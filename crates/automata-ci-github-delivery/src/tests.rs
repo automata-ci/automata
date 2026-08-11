@@ -22,10 +22,10 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN,
-    GithubCheckName, GithubCheckSubjectId, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderRunnerPolicyObject, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
@@ -42,9 +42,9 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::{
-    GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryConfigurationError,
-    GithubDeliveryConnection, GithubDeliveryIngress, GithubDeliveryIngressError,
-    MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_request_digest,
+    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryConfigurationError, GithubDeliveryConnection, GithubDeliveryIngress,
+    GithubDeliveryIngressError, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_request_digest,
 };
 
 const SECRET: &[u8] = b"delivery-test-secret";
@@ -282,18 +282,35 @@ fn fixture_manifest_receipt(
         });
     let check_subject_id =
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(200 + ordinal)).expect("check subject");
-    let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-        delivery_id,
-        request.repository_owner_id(),
-        manifest,
-        request.authenticated_webhook_verifier_fingerprint(),
-        request.authenticated_webhook_verifier_revision(),
-        checks_authority,
-        private_source_authority,
-        check_subject_id,
-        request.head_sha(),
-        delivery.accepted_at(),
-    )
+    let evidence = match request.authenticated_event_v1() {
+        Some(event) => {
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+                delivery_id,
+                request.repository_owner_id(),
+                manifest,
+                request.authenticated_webhook_verifier_fingerprint(),
+                request.authenticated_webhook_verifier_revision(),
+                checks_authority,
+                private_source_authority,
+                check_subject_id,
+                request.head_sha(),
+                event.clone(),
+                delivery.accepted_at(),
+            )
+        }
+        None => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            delivery_id,
+            request.repository_owner_id(),
+            manifest,
+            request.authenticated_webhook_verifier_fingerprint(),
+            request.authenticated_webhook_verifier_revision(),
+            checks_authority,
+            private_source_authority,
+            check_subject_id,
+            request.head_sha(),
+            delivery.accepted_at(),
+        ),
+    }
     .expect("manifest evidence");
     ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence)
 }
@@ -359,6 +376,8 @@ impl GithubSubjectEvidenceRepository for RecordingDeliveryAcceptance {
                         == request.delivery().raw_event()
                     && existing.request.repository_owner_id() == request.repository_owner_id()
                     && existing.request.head_sha() == request.head_sha()
+                    && existing.request.authenticated_event_v1()
+                        == request.authenticated_event_v1()
                     && existing
                         .request
                         .authenticated_webhook_verifier_fingerprint()
@@ -625,6 +644,18 @@ fn push_body_with_visibility(
     };
     Bytes::from(format!(
         r#"{{"ref":"refs/heads/main","before":"{BEFORE_COMMIT}","after":"{AFTER_COMMIT}","created":false,"deleted":false,"forced":false,"repository":{{"id":{repository_id},"private":{private},"visibility":"{visibility}","name":"{name}","full_name":"{owner}/{name}","owner":{{"id":{repository_owner_id},"login":"{owner}"}}}},"installation":{{"id":{installation_id}}},"commits":{commits}}}"#
+    ))
+}
+
+fn pull_request_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"head":{{"ref":"feature/topic","sha":"{AFTER_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}},"base":{{"ref":"main","sha":"{BEFORE_COMMIT}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+    ))
+}
+
+fn merge_group_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"checks_requested","merge_group":{{"head_sha":"{AFTER_COMMIT}","head_ref":"refs/heads/merge-queue/main/group-7","base_sha":"{BEFORE_COMMIT}","base_ref":"refs/heads/main","head_commit":{{}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -922,6 +953,15 @@ fn fixture_body() -> Bytes {
 }
 
 fn signed_headers(secret: &[u8], body: &[u8], delivery_id: &str) -> HeaderMap {
+    signed_event_headers(secret, body, "push", delivery_id)
+}
+
+fn signed_event_headers(
+    secret: &[u8],
+    body: &[u8],
+    event_name: &str,
+    delivery_id: &str,
+) -> HeaderMap {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let tag = hmac::sign(&key, body);
     let mut signature = String::from("sha256=");
@@ -933,7 +973,10 @@ fn signed_headers(secret: &[u8], body: &[u8], delivery_id: &str) -> HeaderMap {
         X_HUB_SIGNATURE_256,
         HeaderValue::from_str(&signature).expect("fixture signature is a header value"),
     );
-    headers.insert(X_GITHUB_EVENT, HeaderValue::from_static("push"));
+    headers.insert(
+        X_GITHUB_EVENT,
+        HeaderValue::from_str(event_name).expect("fixture event is a header value"),
+    );
     headers.insert(
         X_GITHUB_DELIVERY,
         HeaderValue::from_str(delivery_id).expect("fixture delivery is a header value"),
@@ -1498,6 +1541,70 @@ async fn object_and_request_digest_are_byte_deterministic() {
     );
     assert_eq!(delivery.identity().delivery_id(), "delivery-deterministic");
     assert_eq!(delivery.accepted_at(), UnixMillis::new(1_700_000_000_123));
+}
+
+#[tokio::test]
+async fn generic_ingress_persists_typed_event_coordinates_without_legacy_aliasing() {
+    for (body, event_name, delivery_id, expected_kind, expected_ref) in [
+        (
+            fixture_body(),
+            "push",
+            "delivery-push-v1",
+            GithubAuthenticatedEventKind::Push,
+            "refs/heads/main",
+        ),
+        (
+            pull_request_body(),
+            "pull_request",
+            "delivery-pr-v1",
+            GithubAuthenticatedEventKind::PullRequest,
+            "refs/pull/7/merge",
+        ),
+        (
+            merge_group_body(),
+            "merge_group",
+            "delivery-group-v1",
+            GithubAuthenticatedEventKind::MergeGroup,
+            "refs/heads/merge-queue/main/group-7",
+        ),
+    ] {
+        let objects = Arc::new(RecordingBlobStore::default());
+        let deliveries = Arc::new(RecordingDeliveryAcceptance::default());
+        let ingress = ingress(
+            SECRET,
+            Arc::clone(&objects),
+            Arc::clone(&deliveries),
+            Arc::new(FixedClock(UnixMillis::new(1_700_000_000_123))),
+        );
+        let headers = signed_event_headers(SECRET, &body, event_name, delivery_id);
+        let accepted = ingress
+            .accept_authenticated_event_v1(&headers, body.clone())
+            .await
+            .expect("generic event is accepted");
+
+        assert_eq!(
+            accepted.raw_event().media_type(),
+            GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        );
+        assert!(
+            accepted
+                .raw_event()
+                .object_key()
+                .as_str()
+                .starts_with("provider-deliveries/github/event-v1/sha256/")
+        );
+        assert_eq!(
+            objects.bytes_at(accepted.raw_event().object_key().as_str()),
+            Some(body)
+        );
+        let requests = deliveries.requests();
+        let event = requests[0]
+            .authenticated_event_v1()
+            .expect("explicit V1 event coordinates");
+        assert_eq!(event.kind(), expected_kind);
+        assert_eq!(event.git_ref(), expected_ref);
+        assert_eq!(requests[0].delivery().identity().delivery_id(), delivery_id);
+    }
 }
 
 #[test]

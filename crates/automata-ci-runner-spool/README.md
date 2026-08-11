@@ -15,9 +15,6 @@ authenticated removal, and reconciliation require the exact protection ID in
 the durable reference. An unknown ID fails before missing-file or idempotent
 deletion behavior can hide a retired key.
 
-Automata is pre-1.0 and not production-ready. This is an internal durability
-layer; its Rust API and local format may change between releases.
-
 - [Runner documentation](https://github.com/automata-ci/automata/tree/main/docs)
-- [API documentation](https://docs.rs/automata-ci-runner-spool)
+- API documentation: run `cargo doc -p automata-ci-runner-spool --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

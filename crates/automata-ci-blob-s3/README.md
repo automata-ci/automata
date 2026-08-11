@@ -8,10 +8,6 @@ state for coordination.
 The control plane and runner compose this adapter behind `automata-ci-blob`.
 PostgreSQL remains the coordination authority for the product.
 
-Automata is pre-1.0 and not production-ready. This adapter is an internal
-integration layer, and its configuration and Rust API may change between
-releases.
-
 - [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
-- [API documentation](https://docs.rs/automata-ci-blob-s3)
+- API documentation: run `cargo doc -p automata-ci-blob-s3 --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

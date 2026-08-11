@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, RunId,
-    Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -967,7 +967,7 @@ fn claim_target_query() -> &'static str {
            job.logical_key, job.source_order,
            job.execution_kind, job.created_at_ms,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_number, run.run_attempt,
+           run.run_id_alias, run.run_number, run.run_attempt,
            invocation.plan_digest, invocation.plan_object_key,
            invocation.plan_size_bytes, invocation.plan_media_type,
            run.event_digest, run.event_object_key, run.event_size_bytes,
@@ -1209,6 +1209,7 @@ async fn decode_claimed(
     let workflow_name: String = row.try_get("workflow_name").map_err(operation_error)?;
     let git_ref: String = row.try_get("git_ref").map_err(operation_error)?;
     let actor: Option<String> = row.try_get("actor").map_err(operation_error)?;
+    let run_id_alias: i64 = row.try_get("run_id_alias").map_err(operation_error)?;
     let run_number: i64 = row.try_get("run_number").map_err(operation_error)?;
     let run_attempt: i32 = row.try_get("run_attempt").map_err(operation_error)?;
     let execution = LogicalActivationExecutionContext::new(
@@ -1216,6 +1217,11 @@ async fn decode_claimed(
         workflow_name,
         git_ref,
         actor,
+        RunIdAlias::new(
+            u64::try_from(run_id_alias)
+                .map_err(|_| StoreError::corrupt_data("invalid durable workflow run ID alias"))?,
+        )
+        .map_err(|_| StoreError::corrupt_data("invalid durable workflow run ID alias"))?,
         u64::try_from(run_number)
             .map_err(|_| StoreError::corrupt_data("invalid durable workflow run number"))?,
         u32::try_from(run_attempt)

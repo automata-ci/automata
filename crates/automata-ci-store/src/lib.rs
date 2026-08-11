@@ -164,10 +164,11 @@ pub use github_service_authority::{
 };
 pub use github_subject_evidence::{
     AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence,
-    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt,
-    RecordGithubWorkflowRunSubjectEvidence, ValidateGithubWorkflowRunSubjectEvidenceReplay,
+    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
+    GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
+    ManifestPinnedGithubDeliveryReceipt, RecordGithubWorkflowRunSubjectEvidence,
+    ValidateGithubWorkflowRunSubjectEvidenceReplay,
 };
 pub use logical_activation::{
     ActivatedLogicalInstanceDescriptor, ClaimLogicalJobActivation, ClaimedLogicalJobActivation,

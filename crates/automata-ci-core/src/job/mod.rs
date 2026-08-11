@@ -43,7 +43,9 @@ pub use permission::{
 };
 pub use result::{
     JobConclusion, JobResult, JobResultOutput, JobResultValidationError, JobSecretExposure,
-    MAX_JOB_RESULT_OUTPUT_UTF16_BYTES, StepResult,
+    MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
+    MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, StepAnnotation,
+    StepAnnotationLevel, StepAnnotationProperty, StepResult,
 };
 pub use step::{
     ActionReference, RunValueTemplates, RuntimePositiveInteger, RuntimeTimeoutTemplate,

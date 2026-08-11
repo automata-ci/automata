@@ -14,9 +14,6 @@ Plaintext and key buffers are non-cloneable, non-serializable, redacted, and
 zeroized. Durable adapters store only the envelope schema, wrapping key ID,
 wrapped data key, nonce, and authenticated ciphertext.
 
-Automata is pre-1.0 and not production-ready. This is an internal security
-boundary, and its Rust API may change between releases.
-
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
-- [API documentation](https://docs.rs/automata-ci-key-management)
+- API documentation: run `cargo doc -p automata-ci-key-management --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

@@ -6,10 +6,10 @@ use automata_ci_core::{
     FencingToken, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
     JobPermissionRequest, JobSource, Lease, LeaseId, OperationId, OutputSensitivity,
-    PermissionLevel, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, UnixMillis, ValueSource, ValueTemplate, ValueTemplateSegment,
-    WorkflowId,
+    PermissionLevel, RunId, RunIdAlias, RunValueTemplates, RunnerId, RunnerRequirements,
+    RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
+    Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis, ValueSource, ValueTemplate,
+    ValueTemplateSegment, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, LeaseOffer, MessageValidationError, ProtocolLimits,
@@ -145,7 +145,8 @@ fn v5_envelope_with_profile(
                 0x22,
                 "application/vnd.automata.job-runtime-context.protobuf",
             ),
-        ),
+        )
+        .with_run_id_alias(RunIdAlias::new(42).expect("run ID alias")),
         job,
     )
 }
@@ -211,6 +212,7 @@ fn standalone_job_ir_v5_is_deterministic_and_round_trips() {
     assert_eq!(wire.schema_version, 5);
     let execution = wire.execution.expect("execution");
     assert!(execution.runtime_context.is_some());
+    assert_eq!(execution.run_id_alias, Some(42));
     let job = wire.job.expect("job");
     assert!(job.instance.is_some());
     assert_eq!(
@@ -274,6 +276,21 @@ fn standalone_job_ir_v5_is_deterministic_and_round_trips() {
         shell,
         Some(fixture_wire::shell_template::Value::Dynamic(_))
     ));
+}
+
+#[test]
+fn run_id_alias_rejects_non_positive_or_inexact_wire_values() {
+    let limits = ProtocolLimits::default();
+    for value in [0, RunIdAlias::MAX + 1] {
+        let mut wire = wire_v5();
+        wire.execution.as_mut().expect("execution").run_id_alias = Some(value);
+        assert!(matches!(
+            decode_job_ir(&wire.encode_to_vec(), &limits),
+            Err(DecodeError::InvalidValue {
+                field: "job_execution_context.run_id_alias"
+            })
+        ));
+    }
 }
 
 #[test]

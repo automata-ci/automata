@@ -1,5 +1,5 @@
 use automata_ci_core::{
-    JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    JobAuthorityProfile, RunId, RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AdmissionObject, ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
@@ -47,6 +47,7 @@ fn execution() -> LogicalActivationExecutionContext {
         "Checks".to_owned(),
         "refs/heads/main".to_owned(),
         Some("octocat".to_owned()),
+        RunIdAlias::new(11).expect("run ID alias"),
         1,
         1,
     )

@@ -530,6 +530,8 @@ pub trait GithubToolchain: fmt::Debug + Send + Sync {
     fn install(&self) -> &TargetPath;
     /// Returns the exact archive extraction utility.
     fn tar(&self) -> &TargetPath;
+    /// Returns the exact SHA-256 regular-file hashing utility.
+    fn sha256sum(&self) -> &TargetPath;
     /// Returns the exact executable for a metadata-selected Node runtime.
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath>;
 }
@@ -554,6 +556,12 @@ pub enum OperationPurpose {
     ReadCommandFile = 7,
     /// Materializes the exact verified workflow event payload.
     CopyEvent = 8,
+    /// Creates the fresh per-phase `GITHUB_ARTIFACTS` declaration file.
+    InitializeArtifactsFile = 9,
+    /// Publishes the fresh read-only `GITHUB_ARTIFACTS_LIST` snapshot.
+    InitializeArtifactsList = 10,
+    /// Reads one completed `GITHUB_ARTIFACTS` declaration file.
+    ReadArtifactsFile = 11,
 }
 
 /// Derives deterministic IDs for retryable endpoint operations.
@@ -564,6 +572,14 @@ pub trait ExecutionOperationIds: fmt::Debug + Send + Sync {
         attempt_id: AttemptId,
         purpose: OperationPurpose,
         ordinal: u32,
+    ) -> OperationId;
+
+    /// Derives a stable hash operation from both phase and per-phase file index.
+    fn artifact_hash_operation_id(
+        &self,
+        attempt_id: AttemptId,
+        phase: u32,
+        file_index: u32,
     ) -> OperationId;
 }
 
@@ -583,6 +599,25 @@ impl ExecutionOperationIds for DeterministicOperationIds {
         hasher.update(attempt_id.as_uuid().as_bytes());
         hasher.update([purpose as u8]);
         hasher.update(ordinal.to_be_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        OperationId::from_uuid(Uuid::from_bytes(bytes))
+    }
+
+    fn artifact_hash_operation_id(
+        &self,
+        attempt_id: AttemptId,
+        phase: u32,
+        file_index: u32,
+    ) -> OperationId {
+        let mut hasher = Sha256::new();
+        hasher.update(b"automata/github-job-executor/artifact-hash-operation/v1\0");
+        hasher.update(attempt_id.as_uuid().as_bytes());
+        hasher.update(phase.to_be_bytes());
+        hasher.update(file_index.to_be_bytes());
         let digest: [u8; 32] = hasher.finalize().into();
         let mut bytes = [0_u8; 16];
         bytes.copy_from_slice(&digest[..16]);

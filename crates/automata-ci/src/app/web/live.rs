@@ -1317,22 +1317,41 @@ fn publication_target(
 }
 
 const fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
-    matches!(
-        (
-            stream.publication.secret_exposure,
-            stream.raw_log_disposition,
-            stream.publication.effective_visibility,
+    match stream.publication.safety_schema {
+        1 => matches!(
+            (
+                stream.publication.secret_exposure,
+                stream.raw_log_disposition,
+                stream.publication.effective_visibility,
+            ),
+            (
+                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
+                HumanRawLogDisposition::Persist,
+                _,
+            ) | (
+                SecretExposureClass::ReadableSecret,
+                HumanRawLogDisposition::SuppressUserOutput,
+                OutputVisibility::Private,
+            )
         ),
-        (
-            SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
-            HumanRawLogDisposition::Persist,
-            _,
-        ) | (
-            SecretExposureClass::ReadableSecret,
-            HumanRawLogDisposition::SuppressUserOutput,
-            OutputVisibility::Private,
-        )
-    )
+        2 => matches!(
+            (
+                stream.publication.secret_exposure,
+                stream.raw_log_disposition,
+                stream.publication.effective_visibility,
+            ),
+            (
+                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
+                HumanRawLogDisposition::Persist,
+                _,
+            ) | (
+                SecretExposureClass::ReadableSecret,
+                HumanRawLogDisposition::Persist,
+                OutputVisibility::Private,
+            )
+        ),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3574,7 +3593,7 @@ mod tests {
         let run_id = RunId::new();
         let job_id = JobId::new();
         let attempt_id = AttemptId::new();
-        let log_publication = fixture_output_publication(
+        let mut log_publication = fixture_output_publication(
             policy.log_visibility,
             policy.log_exposure,
             if policy.log_exposure == SecretExposureClass::ReadableSecret {
@@ -3583,6 +3602,9 @@ mod tests {
                 "repository_policy"
             },
         );
+        if policy.raw_log_disposition == HumanRawLogDisposition::Persist {
+            log_publication.safety_schema = 2;
+        }
         let (detail, log_stream) = fixture_job_detail(
             fixture_run(run_id, policy.dashboard_visibility),
             job_id,
@@ -3942,6 +3964,45 @@ mod tests {
             Err(WebDataError::Corrupt)
         );
         assert!(calls.lock().expect("authorization calls").is_empty());
+    }
+
+    #[tokio::test]
+    async fn masked_readable_secret_logs_are_private_and_preserve_user_output() {
+        let policy = FakeLivePolicy {
+            dashboard_visibility: OutputVisibility::Private,
+            log_visibility: OutputVisibility::Private,
+            log_exposure: SecretExposureClass::ReadableSecret,
+            raw_log_disposition: HumanRawLogDisposition::Persist,
+            allow_dashboard: false,
+            allow_logs: true,
+            allow_settings_read: false,
+            allow_settings_update: false,
+        };
+        let (data, anonymous, repository, run_id, job_id, _) =
+            fake_live_data_with_policy(policy).await;
+        let request = first_log_page_request();
+
+        assert!(
+            WebData::job_log(&data, &anonymous, &repository, run_id, job_id, &request,)
+                .await
+                .expect("anonymous readable-secret denial")
+                .is_none()
+        );
+        let page = WebData::job_log(
+            &data,
+            &authenticated_request_context(),
+            &repository,
+            run_id,
+            job_id,
+            &request,
+        )
+        .await
+        .expect("authenticated masked-log lookup")
+        .expect("log-authorized viewer");
+
+        assert_eq!(page.output_visibility, LogOutputVisibility::Full);
+        assert_eq!(page.lines.len(), 1);
+        assert_eq!(page.lines[0].text, "checkout ok");
     }
 
     #[tokio::test]

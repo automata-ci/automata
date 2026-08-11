@@ -1,11 +1,16 @@
-use automata_ci_core::{PlanSourceSpan, WorkflowEventProvenance};
+use std::collections::{BTreeMap, BTreeSet};
+
+use automata_ci_core::{ContextValue, PlanSourceSpan, WorkflowEventProvenance, WorkflowInputKey};
 
 use crate::{
-    EventName, GithubChangedFilesV1, GithubEventMetadataV1, PushPullRequestFilter, SourceSpan,
+    EventName, GithubChangedFilesV1, GithubEventMetadataV1, GithubWorkflowDispatchContract,
+    GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputDefinition,
+    GithubWorkflowDispatchInputType, GithubWorkflowDispatchInputValue,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, PushPullRequestFilter, ScalarResolution, SourceSpan,
     Spanned, TriggerConfiguration, YamlMappingEntry, YamlNode,
 };
 
-use super::{CompileContext, CompiledEvent, WorkflowNotSelectedReason};
+use super::{CompileContext, CompiledEvent, CompiledWorkflowDispatch, WorkflowNotSelectedReason};
 
 const DEFAULT_PULL_REQUEST_ACTIONS: &[&str] = &["opened", "synchronize", "reopened"];
 const MAX_PATTERN_BYTES: usize = 4_096;
@@ -14,7 +19,7 @@ const MAX_CHANGED_FILES: usize = 3_000;
 const MAX_CHANGED_FILE_BYTES: usize = MAX_CHANGED_FILES * MAX_CANDIDATE_BYTES;
 
 pub(super) enum TriggerSelection {
-    Selected,
+    Selected(Option<CompiledWorkflowDispatch>),
     RequiresChangedFiles,
     NotSelected(WorkflowNotSelectedReason),
     Rejected,
@@ -27,7 +32,10 @@ impl TriggerSelection {
         span: PlanSourceSpan,
     ) -> CompiledEvent {
         match self {
-            Self::Selected => CompiledEvent::Selected(event.with_configured_trigger_span(span)),
+            Self::Selected(workflow_dispatch) => CompiledEvent::Selected {
+                event: event.with_configured_trigger_span(span),
+                workflow_dispatch: workflow_dispatch.map(Box::new),
+            },
             Self::RequiresChangedFiles => CompiledEvent::RequiresChangedFiles,
             Self::NotSelected(reason) => CompiledEvent::NotSelected(reason),
             Self::Rejected => CompiledEvent::Rejected,
@@ -40,9 +48,12 @@ pub(super) fn validate_configuration(
     configuration: &TriggerConfiguration,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
-) {
+) -> Option<GithubWorkflowDispatchContract> {
     match configuration {
-        TriggerConfiguration::Push(filter) => validate_filter(filter, false, trigger_span, context),
+        TriggerConfiguration::Push(filter) => {
+            validate_filter(filter, false, trigger_span, context);
+            None
+        }
         TriggerConfiguration::PullRequest(filter) => {
             validate_filter(filter, true, trigger_span, context);
             if filter.tags_configured() || filter.tags_ignore_configured() {
@@ -52,17 +63,21 @@ pub(super) fn validate_configuration(
                     trigger_span.clone(),
                 );
             }
+            None
         }
-        TriggerConfiguration::WorkflowDispatch(configuration) => {
-            if let Some(configuration) = configuration {
-                validate_workflow_dispatch(configuration, context);
-            }
+        TriggerConfiguration::WorkflowDispatch(Some(configuration)) => {
+            compile_workflow_dispatch_contract(configuration, context)
+        }
+        TriggerConfiguration::WorkflowDispatch(None) => {
+            Some(GithubWorkflowDispatchContract::default())
         }
         TriggerConfiguration::Schedule(configuration) => {
             validate_schedule(configuration, context);
+            None
         }
         TriggerConfiguration::WorkflowCall(configuration) => {
             validate_workflow_call(configuration, context);
+            None
         }
         TriggerConfiguration::Empty => {
             if matches!(event_name, EventName::Schedule) {
@@ -72,14 +87,20 @@ pub(super) fn validate_configuration(
                     trigger_span.clone(),
                 );
             }
+            if matches!(event_name, EventName::WorkflowDispatch) {
+                Some(GithubWorkflowDispatchContract::default())
+            } else {
+                None
+            }
         }
-        TriggerConfiguration::Preserved(_) => {}
+        TriggerConfiguration::Preserved(_) => None,
     }
 }
 
 pub(super) fn event_matches(
     event: &WorkflowEventProvenance,
     configuration: &TriggerConfiguration,
+    workflow_dispatch_contract: Option<&GithubWorkflowDispatchContract>,
     metadata: Option<&GithubEventMetadataV1>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
@@ -87,13 +108,9 @@ pub(super) fn event_matches(
     match event.name() {
         "push" => push_matches(event, configuration, metadata, trigger_span, context),
         "pull_request" => pull_request_matches(configuration, metadata, trigger_span, context),
+        "merge_group" => merge_group_matches(configuration, metadata, trigger_span, context),
         "workflow_dispatch" => {
-            if metadata.is_some() {
-                metadata_mismatch("workflow_dispatch", trigger_span, context);
-                TriggerSelection::Rejected
-            } else {
-                TriggerSelection::Selected
-            }
+            workflow_dispatch_matches(workflow_dispatch_contract, metadata, trigger_span, context)
         }
         "schedule" => schedule_matches(configuration, metadata, trigger_span, context),
         _ => {
@@ -101,42 +118,591 @@ pub(super) fn event_matches(
                 metadata_mismatch(event.name(), trigger_span, context);
                 TriggerSelection::Rejected
             } else {
-                TriggerSelection::Selected
+                TriggerSelection::Selected(None)
             }
         }
     }
 }
 
-fn validate_workflow_dispatch(configuration: &YamlNode, context: &mut CompileContext<'_>) {
+fn merge_group_matches(
+    configuration: &TriggerConfiguration,
+    metadata: Option<&GithubEventMetadataV1>,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> TriggerSelection {
+    let (action, base_ref) = match metadata {
+        Some(GithubEventMetadataV1::MergeGroup { action, base_ref }) => {
+            (action.as_str(), base_ref.as_str())
+        }
+        Some(_) => {
+            metadata_mismatch("merge_group", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+        None => {
+            missing_metadata("merge_group", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+    };
+    if action.is_empty()
+        || action.len() > MAX_CANDIDATE_BYTES
+        || GithubRef::parse(base_ref).is_none()
+        || base_ref.len() > MAX_CANDIDATE_BYTES
+    {
+        context.semantic(
+            "github.compile.invalid_merge_group_metadata",
+            "merge_group metadata requires a bounded action and fully qualified base branch ref",
+            trigger_span.clone(),
+        );
+        return TriggerSelection::Rejected;
+    }
+    if !matches!(configuration, TriggerConfiguration::Empty) {
+        context.semantic(
+            "github.compile.unsupported_merge_group_configuration",
+            "this compiler version accepts merge_group only without event configuration",
+            trigger_span.clone(),
+        );
+        return TriggerSelection::Rejected;
+    }
+    match action {
+        "checks_requested" => TriggerSelection::Selected(None),
+        "destroyed" => {
+            TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
+        }
+        _ => {
+            context.semantic(
+                "github.compile.invalid_merge_group_action",
+                "merge_group metadata contains an unsupported action",
+                trigger_span.clone(),
+            );
+            TriggerSelection::Rejected
+        }
+    }
+}
+
+fn compile_workflow_dispatch_contract(
+    configuration: &YamlNode,
+    context: &mut CompileContext<'_>,
+) -> Option<GithubWorkflowDispatchContract> {
+    if configuration
+        .as_scalar()
+        .is_some_and(crate::YamlScalar::is_null)
+    {
+        return Some(GithubWorkflowDispatchContract::default());
+    }
     let Some(entries) = configuration.as_mapping() else {
         context.semantic(
             "github.compile.invalid_workflow_dispatch_configuration",
             "`on.workflow_dispatch` must be null or a mapping",
             configuration.span().clone(),
         );
-        return;
+        return None;
     };
 
+    let mut inputs = None;
     for entry in entries {
-        match mapping_key(entry) {
-            Some("inputs") => validate_empty_contract_mapping(
-                entry.value(),
-                "on.workflow_dispatch.inputs",
-                "github.compile.workflow_dispatch_inputs_require_context",
-                "configured workflow_dispatch inputs require typed dispatch input validation and an inputs context",
-                context,
-            ),
+        match dispatch_mapping_key(entry, "on.workflow_dispatch", context).as_deref() {
+            Some("inputs") => {
+                if inputs.replace(entry.value()).is_some() {
+                    context.semantic(
+                        "github.compile.duplicate_workflow_dispatch_field",
+                        "`on.workflow_dispatch` fields must be unique",
+                        entry.key().span().clone(),
+                    );
+                }
+            }
             Some(field) => context.unsupported(
                 "github.compile.workflow_dispatch_configuration",
                 format!("`on.workflow_dispatch.{field}` is not supported by this frontend version"),
                 entry.key().span().clone(),
             ),
-            None => context.semantic(
-                "github.compile.invalid_workflow_dispatch_configuration",
-                "`on.workflow_dispatch` field names must be scalar text",
-                entry.key().span().clone(),
-            ),
+            None => {}
         }
+    }
+
+    match inputs {
+        Some(inputs) => compile_workflow_dispatch_inputs(inputs, context),
+        None => Some(GithubWorkflowDispatchContract::default()),
+    }
+}
+
+fn compile_workflow_dispatch_inputs(
+    node: &YamlNode,
+    context: &mut CompileContext<'_>,
+) -> Option<GithubWorkflowDispatchContract> {
+    let Some(entries) = node.as_mapping() else {
+        context.semantic(
+            "github.compile.invalid_event_contract",
+            "`on.workflow_dispatch.inputs` must be a mapping",
+            node.span().clone(),
+        );
+        return None;
+    };
+    if entries.len() > MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS {
+        context.semantic(
+            "github.compile.too_many_workflow_dispatch_inputs",
+            format!(
+                "`on.workflow_dispatch.inputs` may contain at most {MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS} definitions"
+            ),
+            node.span().clone(),
+        );
+    }
+
+    let mut inputs = BTreeMap::new();
+    for entry in entries {
+        let Some((key, definition)) = compile_workflow_dispatch_input(entry, context) else {
+            continue;
+        };
+        if inputs.insert(key, definition).is_some() {
+            context.semantic(
+                "github.compile.duplicate_workflow_dispatch_input",
+                "`on.workflow_dispatch.inputs` identifiers must be unique",
+                entry.key().span().clone(),
+            );
+        }
+    }
+    Some(GithubWorkflowDispatchContract::new(inputs))
+}
+
+fn compile_workflow_dispatch_input(
+    entry: &YamlMappingEntry,
+    context: &mut CompileContext<'_>,
+) -> Option<(WorkflowInputKey, GithubWorkflowDispatchInputDefinition)> {
+    let raw_key = dispatch_mapping_key(entry, "on.workflow_dispatch.inputs", context)?;
+    let key = WorkflowInputKey::new(raw_key)
+        .map_err(|error| {
+            context.semantic(
+                "github.compile.invalid_workflow_dispatch_input_key",
+                error.to_string(),
+                entry.key().span().clone(),
+            );
+        })
+        .ok()?;
+    let Some(entries) = entry.value().as_mapping() else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_input_definition",
+            "each `on.workflow_dispatch.inputs` definition must be a mapping",
+            entry.value().span().clone(),
+        );
+        return None;
+    };
+
+    let mut fields = BTreeMap::new();
+    for field in entries {
+        let Some(name) =
+            dispatch_mapping_key(field, "on.workflow_dispatch.inputs.<input>", context)
+        else {
+            continue;
+        };
+        if !["type", "required", "default", "options", "description"].contains(&name.as_str()) {
+            context.unsupported(
+                "github.compile.workflow_dispatch_input_field",
+                format!("`on.workflow_dispatch.inputs.<input>.{name}` is not supported"),
+                field.key().span().clone(),
+            );
+            continue;
+        }
+        if fields.insert(name, field.value()).is_some() {
+            context.semantic(
+                "github.compile.duplicate_workflow_dispatch_input_field",
+                "workflow_dispatch input definition fields must be unique",
+                field.key().span().clone(),
+            );
+        }
+    }
+
+    let Some(type_node) = fields.get("type") else {
+        context.semantic(
+            "github.compile.workflow_dispatch_input_type_required",
+            "every `on.workflow_dispatch` input requires `type`",
+            entry.value().span().clone(),
+        );
+        return None;
+    };
+    let input_type = compile_workflow_dispatch_input_type(type_node, context)?;
+    let required = match fields.get("required") {
+        Some(node) => dispatch_boolean(node, "workflow_dispatch input required", context)?,
+        None => false,
+    };
+    let description = match fields.get("description") {
+        Some(node) => Some(dispatch_text(
+            node,
+            "workflow_dispatch input description",
+            context,
+        )?),
+        None => None,
+    };
+    let options = compile_workflow_dispatch_options(
+        input_type,
+        fields.get("options").copied(),
+        entry.value(),
+        context,
+    )?;
+    let default = match fields.get("default") {
+        Some(node) => Some(compile_workflow_dispatch_default(
+            input_type, node, &options, context,
+        )?),
+        None => None,
+    };
+
+    Some((
+        key,
+        GithubWorkflowDispatchInputDefinition::new(
+            input_type,
+            required,
+            default,
+            options,
+            description,
+        ),
+    ))
+}
+
+fn compile_workflow_dispatch_input_type(
+    node: &YamlNode,
+    context: &mut CompileContext<'_>,
+) -> Option<GithubWorkflowDispatchInputType> {
+    let value = dispatch_text(node, "workflow_dispatch input type", context)?;
+    match value.as_str() {
+        "boolean" => Some(GithubWorkflowDispatchInputType::Boolean),
+        "choice" => Some(GithubWorkflowDispatchInputType::Choice),
+        "string" => Some(GithubWorkflowDispatchInputType::String),
+        _ => {
+            context.unsupported(
+                "github.compile.unsupported_workflow_dispatch_input_type",
+                "workflow_dispatch input types currently support `boolean`, `choice`, and `string`",
+                node.span().clone(),
+            );
+            None
+        }
+    }
+}
+
+fn compile_workflow_dispatch_options(
+    input_type: GithubWorkflowDispatchInputType,
+    node: Option<&YamlNode>,
+    definition: &YamlNode,
+    context: &mut CompileContext<'_>,
+) -> Option<Vec<String>> {
+    if input_type != GithubWorkflowDispatchInputType::Choice {
+        if let Some(node) = node {
+            context.semantic(
+                "github.compile.workflow_dispatch_options_require_choice",
+                "workflow_dispatch `options` may be declared only for a `choice` input",
+                node.span().clone(),
+            );
+            return None;
+        }
+        return Some(Vec::new());
+    }
+    let Some(node) = node else {
+        context.semantic(
+            "github.compile.workflow_dispatch_choice_options_required",
+            "workflow_dispatch choice inputs require a non-empty `options` sequence",
+            definition.span().clone(),
+        );
+        return None;
+    };
+    let Some(entries) = node.as_sequence() else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_options",
+            "workflow_dispatch choice `options` must be a non-empty sequence of strings",
+            node.span().clone(),
+        );
+        return None;
+    };
+    if entries.is_empty() {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_options",
+            "workflow_dispatch choice `options` must not be empty",
+            node.span().clone(),
+        );
+        return None;
+    }
+    let mut options = Vec::with_capacity(entries.len());
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let option = dispatch_text(entry, "workflow_dispatch choice option", context)?;
+        if !seen.insert(option.clone()) {
+            context.semantic(
+                "github.compile.duplicate_workflow_dispatch_option",
+                "workflow_dispatch choice options must be unique",
+                entry.span().clone(),
+            );
+            return None;
+        }
+        options.push(option);
+    }
+    Some(options)
+}
+
+fn compile_workflow_dispatch_default(
+    input_type: GithubWorkflowDispatchInputType,
+    node: &YamlNode,
+    options: &[String],
+    context: &mut CompileContext<'_>,
+) -> Option<GithubWorkflowDispatchInputDefault> {
+    match input_type {
+        GithubWorkflowDispatchInputType::Boolean => {
+            dispatch_boolean(node, "workflow_dispatch boolean default", context)
+                .map(GithubWorkflowDispatchInputDefault::Boolean)
+        }
+        GithubWorkflowDispatchInputType::Choice => {
+            let value = dispatch_text(node, "workflow_dispatch choice default", context)?;
+            if options.contains(&value) {
+                Some(GithubWorkflowDispatchInputDefault::String(value))
+            } else {
+                context.semantic(
+                    "github.compile.workflow_dispatch_choice_default_not_allowed",
+                    "workflow_dispatch choice defaults must exactly match one configured option",
+                    node.span().clone(),
+                );
+                None
+            }
+        }
+        GithubWorkflowDispatchInputType::String => {
+            dispatch_text(node, "workflow_dispatch string default", context)
+                .map(GithubWorkflowDispatchInputDefault::String)
+        }
+    }
+}
+
+fn dispatch_mapping_key(
+    entry: &YamlMappingEntry,
+    path: &str,
+    context: &mut CompileContext<'_>,
+) -> Option<String> {
+    let Some(scalar) = entry.key().as_scalar() else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_key",
+            format!("`{path}` field names must be non-empty strings"),
+            entry.key().span().clone(),
+        );
+        return None;
+    };
+    if scalar.resolution() != ScalarResolution::String || scalar.decoded().is_empty() {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_key",
+            format!("`{path}` field names must be non-empty strings"),
+            entry.key().span().clone(),
+        );
+        return None;
+    }
+    Some(scalar.decoded().to_owned())
+}
+
+fn dispatch_text(node: &YamlNode, field: &str, context: &mut CompileContext<'_>) -> Option<String> {
+    let Some(scalar) = node.as_scalar() else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_string",
+            format!("{field} must be a YAML string"),
+            node.span().clone(),
+        );
+        return None;
+    };
+    if scalar.resolution() != ScalarResolution::String {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_string",
+            format!("{field} must be a YAML string"),
+            node.span().clone(),
+        );
+        return None;
+    }
+    Some(scalar.decoded().to_owned())
+}
+
+fn dispatch_boolean(
+    node: &YamlNode,
+    field: &str,
+    context: &mut CompileContext<'_>,
+) -> Option<bool> {
+    let Some(scalar) = node.as_scalar() else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_boolean",
+            format!("{field} must be a YAML boolean"),
+            node.span().clone(),
+        );
+        return None;
+    };
+    if scalar.resolution() != ScalarResolution::Boolean {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_boolean",
+            format!("{field} must be a YAML boolean"),
+            node.span().clone(),
+        );
+        return None;
+    }
+    Some(scalar.decoded().eq_ignore_ascii_case("true"))
+}
+
+fn workflow_dispatch_matches(
+    contract: Option<&GithubWorkflowDispatchContract>,
+    metadata: Option<&GithubEventMetadataV1>,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> TriggerSelection {
+    let Some(contract) = contract else {
+        return TriggerSelection::Rejected;
+    };
+    let inputs = match metadata {
+        Some(GithubEventMetadataV1::WorkflowDispatch { inputs }) => inputs,
+        Some(_) => {
+            metadata_mismatch("workflow_dispatch", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+        None if contract.is_empty() => {
+            return TriggerSelection::Selected(Some(CompiledWorkflowDispatch {
+                contract: contract.clone(),
+                inputs: ContextValue::empty_object(),
+            }));
+        }
+        None => {
+            missing_metadata("workflow_dispatch", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+    };
+    let Some(inputs) = resolve_workflow_dispatch_inputs(contract, inputs, trigger_span, context)
+    else {
+        return TriggerSelection::Rejected;
+    };
+    TriggerSelection::Selected(Some(CompiledWorkflowDispatch {
+        contract: contract.clone(),
+        inputs,
+    }))
+}
+
+fn resolve_workflow_dispatch_inputs(
+    contract: &GithubWorkflowDispatchContract,
+    payload: &crate::GithubWorkflowDispatchInputsV1,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> Option<ContextValue> {
+    let mut valid = true;
+    for key in payload.values().keys() {
+        if !contract.inputs().contains_key(key) {
+            context.semantic(
+                "github.compile.unknown_workflow_dispatch_input",
+                format!("verified workflow_dispatch payload supplied undeclared input `{key}`"),
+                trigger_span.clone(),
+            );
+            valid = false;
+        }
+    }
+
+    let mut values = BTreeMap::new();
+    for (key, definition) in contract.inputs() {
+        let value = match payload.values().get(key) {
+            Some(value) => {
+                coerce_workflow_dispatch_input(key, definition, value, trigger_span, context)
+            }
+            None => default_workflow_dispatch_input(key, definition, trigger_span, context),
+        };
+        match value {
+            Some(value) => {
+                values.insert(key.as_str().to_owned(), value);
+            }
+            None => valid = false,
+        }
+    }
+    if !valid {
+        return None;
+    }
+    ContextValue::object(values)
+        .map_err(|error| {
+            context.semantic(
+                "github.compile.invalid_workflow_dispatch_context",
+                error.to_string(),
+                trigger_span.clone(),
+            );
+        })
+        .ok()
+}
+
+fn coerce_workflow_dispatch_input(
+    key: &WorkflowInputKey,
+    definition: &GithubWorkflowDispatchInputDefinition,
+    value: &GithubWorkflowDispatchInputValue,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> Option<ContextValue> {
+    match (definition.input_type(), value) {
+        (
+            GithubWorkflowDispatchInputType::Boolean,
+            GithubWorkflowDispatchInputValue::Boolean(value),
+        ) => Some(ContextValue::boolean(*value)),
+        (
+            GithubWorkflowDispatchInputType::Boolean,
+            GithubWorkflowDispatchInputValue::String(value),
+        ) => match value.as_str() {
+            "true" => Some(ContextValue::boolean(true)),
+            "false" => Some(ContextValue::boolean(false)),
+            _ => {
+                context.semantic(
+                    "github.compile.invalid_workflow_dispatch_boolean_input",
+                    format!("workflow_dispatch Boolean input `{key}` must be `true` or `false`"),
+                    trigger_span.clone(),
+                );
+                None
+            }
+        },
+        (
+            GithubWorkflowDispatchInputType::String,
+            GithubWorkflowDispatchInputValue::String(value),
+        ) => Some(ContextValue::string(value.clone())),
+        (
+            GithubWorkflowDispatchInputType::Choice,
+            GithubWorkflowDispatchInputValue::String(value),
+        ) => {
+            if definition.options().contains(value) {
+                Some(ContextValue::string(value.clone()))
+            } else {
+                context.semantic(
+                    "github.compile.invalid_workflow_dispatch_choice_input",
+                    format!("workflow_dispatch choice input `{key}` must exactly match one configured option"),
+                    trigger_span.clone(),
+                );
+                None
+            }
+        }
+        (
+            GithubWorkflowDispatchInputType::String | GithubWorkflowDispatchInputType::Choice,
+            GithubWorkflowDispatchInputValue::Boolean(_),
+        ) => {
+            context.semantic(
+                "github.compile.workflow_dispatch_input_type_mismatch",
+                format!("workflow_dispatch input `{key}` requires a string payload value"),
+                trigger_span.clone(),
+            );
+            None
+        }
+    }
+}
+
+fn default_workflow_dispatch_input(
+    key: &WorkflowInputKey,
+    definition: &GithubWorkflowDispatchInputDefinition,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> Option<ContextValue> {
+    match definition.default() {
+        Some(GithubWorkflowDispatchInputDefault::Boolean(value)) => {
+            Some(ContextValue::boolean(*value))
+        }
+        Some(GithubWorkflowDispatchInputDefault::String(value)) => {
+            Some(ContextValue::string(value.clone()))
+        }
+        None if definition.required() => {
+            context.semantic(
+                "github.compile.required_workflow_dispatch_input_missing",
+                format!("verified workflow_dispatch payload omitted required input `{key}`"),
+                trigger_span.clone(),
+            );
+            None
+        }
+        None => match definition.input_type() {
+            GithubWorkflowDispatchInputType::Boolean => Some(ContextValue::boolean(false)),
+            GithubWorkflowDispatchInputType::String | GithubWorkflowDispatchInputType::Choice => {
+                Some(ContextValue::string(String::new()))
+            }
+        },
     }
 }
 
@@ -189,26 +755,6 @@ fn validate_contract_mapping(node: &YamlNode, path: &str, context: &mut CompileC
             format!("`{path}` must be a mapping"),
             node.span().clone(),
         );
-    }
-}
-
-fn validate_empty_contract_mapping(
-    node: &YamlNode,
-    path: &str,
-    unsupported_code: &str,
-    unsupported_message: &str,
-    context: &mut CompileContext<'_>,
-) {
-    let Some(entries) = node.as_mapping() else {
-        context.semantic(
-            "github.compile.invalid_event_contract",
-            format!("`{path}` must be a mapping"),
-            node.span().clone(),
-        );
-        return;
-    };
-    if !entries.is_empty() {
-        context.unsupported(unsupported_code, unsupported_message, node.span().clone());
     }
 }
 
@@ -340,7 +886,7 @@ fn schedule_matches(
         _ => false,
     };
     if matched {
-        TriggerSelection::Selected
+        TriggerSelection::Selected(None)
     } else {
         TriggerSelection::NotSelected(WorkflowNotSelectedReason::ScheduleNotConfigured)
     }
@@ -610,7 +1156,7 @@ fn push_matches(
         _ => false,
     };
     if matched {
-        TriggerSelection::Selected
+        TriggerSelection::Selected(None)
     } else {
         TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
     }
@@ -689,7 +1235,7 @@ fn pull_request_matches(
         _ => false,
     };
     if matched {
-        TriggerSelection::Selected
+        TriggerSelection::Selected(None)
     } else {
         TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
     }

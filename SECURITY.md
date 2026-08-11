@@ -1,8 +1,9 @@
 # Security policy
 
 Automata 0.1 is bootstrap software and is not supported for production use.
-Security fixes target the newest published release line; older bootstrap
-releases may require upgrading rather than receiving a backport.
+No public release exists yet. Security fixes currently target the latest
+reviewed source on `main`; after publication, the project will state which
+release lines receive fixes.
 
 ## Report a vulnerability privately
 

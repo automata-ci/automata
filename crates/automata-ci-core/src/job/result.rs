@@ -17,6 +17,19 @@ use crate::{AttemptId, CORE_SCHEMA_VERSION, OutputSensitivity, UnixMillis};
 /// Secret-derived output markers carry no value and consume no value budget.
 pub const MAX_JOB_RESULT_OUTPUT_UTF16_BYTES: usize = 1_048_576;
 
+/// Maximum UTF-8 bytes retained across step summaries and annotations in one job result.
+pub const MAX_JOB_RESULT_ATTACHMENT_BYTES: usize = 8 * 1_048_576;
+
+/// Maximum structured annotations retained across one job result.
+pub const MAX_JOB_RESULT_ANNOTATIONS: usize = 4_096;
+
+/// Maximum properties retained on one structured step annotation.
+pub const MAX_STEP_ANNOTATION_PROPERTIES: usize = 64;
+
+/// Maximum UTF-8 bytes retained in one summary, annotation message, or property value.
+pub const MAX_STEP_ATTACHMENT_TEXT_BYTES: usize = 1_048_576;
+const MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES: usize = 256;
+
 /// Terminal conclusion produced by a runner.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,9 +49,8 @@ pub enum JobConclusion {
 /// Maximum credential visibility reached by user-controlled code in one job.
 ///
 /// The order is the authority order: a later variant permits every exposure
-/// represented by an earlier variant. Terminal output validation uses this
-/// evidence to keep plaintext out of ordinary persistence whenever user code
-/// could read a secret.
+/// represented by an earlier variant. This job-level evidence narrows resource
+/// visibility; each terminal output carries its own value-level sensitivity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobSecretExposure {
@@ -58,14 +70,123 @@ impl JobSecretExposure {
     }
 }
 
-/// Outcome and conclusion of a completed step.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Severity of one structured step annotation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepAnnotationLevel {
+    /// A failing diagnostic.
+    Error,
+    /// A warning diagnostic.
+    Warning,
+    /// An informational diagnostic.
+    Notice,
+}
+
+/// One ordered annotation property retained for a provider presentation adapter.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StepAnnotationProperty {
+    name: String,
+    value: String,
+}
+
+impl StepAnnotationProperty {
+    /// Creates one annotation property.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Returns the provider-normalized property name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the redaction-safe retained property value.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Debug for StepAnnotationProperty {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StepAnnotationProperty")
+            .field("name", &"[REDACTED]")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One structured diagnostic emitted while executing a step.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StepAnnotation {
+    level: StepAnnotationLevel,
+    message: String,
+    properties: Vec<StepAnnotationProperty>,
+}
+
+impl StepAnnotation {
+    /// Creates a structured annotation in retained observation order.
+    #[must_use]
+    pub fn new(
+        level: StepAnnotationLevel,
+        message: impl Into<String>,
+        properties: Vec<StepAnnotationProperty>,
+    ) -> Self {
+        Self {
+            level,
+            message: message.into(),
+            properties,
+        }
+    }
+
+    /// Returns the normalized severity.
+    #[must_use]
+    pub const fn level(&self) -> StepAnnotationLevel {
+        self.level
+    }
+
+    /// Returns the redaction-safe retained message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns normalized properties in retained observation order.
+    #[must_use]
+    pub fn properties(&self) -> &[StepAnnotationProperty] {
+        &self.properties
+    }
+}
+
+impl fmt::Debug for StepAnnotation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StepAnnotation")
+            .field("level", &self.level)
+            .field("message", &"[REDACTED]")
+            .field("properties", &self.properties)
+            .finish()
+    }
+}
+
+/// Outcome, conclusion, timeline, and bounded presentation attachments of a completed step.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StepResult {
     step_id: StepId,
     outcome: JobConclusion,
     conclusion: JobConclusion,
     started_at: UnixMillis,
     completed_at: UnixMillis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary_markdown: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    annotations: Vec<StepAnnotation>,
 }
 
 impl StepResult {
@@ -87,6 +208,8 @@ impl StepResult {
             conclusion,
             started_at,
             completed_at,
+            summary_markdown: None,
+            annotations: Vec::new(),
         }
     }
 
@@ -118,6 +241,51 @@ impl StepResult {
     #[must_use]
     pub const fn completed_at(&self) -> UnixMillis {
         self.completed_at
+    }
+
+    /// Returns the masked Markdown summary emitted by this step, when non-empty.
+    #[must_use]
+    pub fn summary_markdown(&self) -> Option<&str> {
+        self.summary_markdown.as_deref()
+    }
+
+    /// Returns structured annotations in emission order.
+    #[must_use]
+    pub fn annotations(&self) -> &[StepAnnotation] {
+        &self.annotations
+    }
+
+    /// Replaces the step summary, canonicalizing an empty summary to absence.
+    #[must_use]
+    pub fn with_summary_markdown(mut self, summary: impl Into<String>) -> Self {
+        let summary = summary.into();
+        self.summary_markdown = (!summary.is_empty()).then_some(summary);
+        self
+    }
+
+    /// Replaces the complete ordered annotation collection.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Vec<StepAnnotation>) -> Self {
+        self.annotations = annotations;
+        self
+    }
+}
+
+impl fmt::Debug for StepResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StepResult")
+            .field("step_id", &self.step_id)
+            .field("outcome", &self.outcome)
+            .field("conclusion", &self.conclusion)
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field(
+                "summary_markdown",
+                &self.summary_markdown.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("annotations", &self.annotations)
+            .finish()
     }
 }
 
@@ -345,11 +513,6 @@ impl JobResult {
             validate_logical_name(name, "job result output")
                 .map_err(|_| JobResultValidationError::InvalidOutputName)?;
             output.validate()?;
-            if self.secret_exposure == JobSecretExposure::ReadableSecret
-                && output.sensitivity() == OutputSensitivity::Public
-            {
-                return Err(JobResultValidationError::PublicOutputFromReadableSecret);
-            }
             if let Some(value) = output.public_value() {
                 output_bytes = output_bytes.checked_add(utf16_bytes(value)?).ok_or(
                     JobResultValidationError::OutputValuesTooLarge {
@@ -365,6 +528,8 @@ impl JobResult {
         }
 
         let mut step_ids = BTreeSet::new();
+        let mut attachment_bytes = 0_usize;
+        let mut annotation_count = 0_usize;
         for step in &self.steps {
             if step.completed_at < step.started_at {
                 return Err(JobResultValidationError::StepCompletedBeforeStart(
@@ -381,9 +546,61 @@ impl JobResult {
                     step.step_id.clone(),
                 ));
             }
+            if let Some(summary) = step.summary_markdown() {
+                charge_attachment_text(&mut attachment_bytes, summary)?;
+            }
+            annotation_count = annotation_count
+                .checked_add(step.annotations().len())
+                .ok_or(JobResultValidationError::TooManyStepAnnotations {
+                    maximum: MAX_JOB_RESULT_ANNOTATIONS,
+                })?;
+            if annotation_count > MAX_JOB_RESULT_ANNOTATIONS {
+                return Err(JobResultValidationError::TooManyStepAnnotations {
+                    maximum: MAX_JOB_RESULT_ANNOTATIONS,
+                });
+            }
+            for annotation in step.annotations() {
+                charge_attachment_text(&mut attachment_bytes, annotation.message())?;
+                if annotation.properties().len() > MAX_STEP_ANNOTATION_PROPERTIES {
+                    return Err(JobResultValidationError::TooManyStepAnnotationProperties {
+                        maximum: MAX_STEP_ANNOTATION_PROPERTIES,
+                    });
+                }
+                let mut property_names = BTreeSet::new();
+                for property in annotation.properties() {
+                    if property.name().is_empty()
+                        || property.name().len() > MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES
+                        || property.name().chars().any(char::is_control)
+                        || !property_names.insert(property.name().to_ascii_lowercase())
+                    {
+                        return Err(JobResultValidationError::InvalidStepAnnotationProperty);
+                    }
+                    charge_attachment_text(&mut attachment_bytes, property.name())?;
+                    charge_attachment_text(&mut attachment_bytes, property.value())?;
+                }
+            }
         }
         Ok(())
     }
+}
+
+fn charge_attachment_text(total: &mut usize, value: &str) -> Result<(), JobResultValidationError> {
+    if value.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+        return Err(JobResultValidationError::StepAttachmentTextTooLarge {
+            maximum: MAX_STEP_ATTACHMENT_TEXT_BYTES,
+        });
+    }
+    *total = total.checked_add(value.len()).ok_or(
+        JobResultValidationError::StepAttachmentsTooLarge {
+            maximum: MAX_JOB_RESULT_ATTACHMENT_BYTES,
+        },
+    )?;
+    if *total > MAX_JOB_RESULT_ATTACHMENT_BYTES {
+        return Err(JobResultValidationError::StepAttachmentsTooLarge {
+            maximum: MAX_JOB_RESULT_ATTACHMENT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn utf16_bytes(value: &str) -> Result<usize, JobResultValidationError> {
@@ -423,9 +640,6 @@ pub enum JobResultValidationError {
     /// A secret-derived marker improperly retained plaintext.
     #[error("secret-derived job result output must not carry plaintext")]
     SecretDerivedOutputCarriesValue,
-    /// A readable-secret execution attempted to publish ordinary output plaintext.
-    #[error("readable-secret job results must not carry public output plaintext")]
-    PublicOutputFromReadableSecret,
     /// One public output exceeded the provider-compatible UTF-16 budget.
     #[error("job result output value exceeds the {maximum}-byte UTF-16 limit")]
     OutputValueTooLarge {
@@ -447,4 +661,31 @@ pub enum JobResultValidationError {
     /// More than one terminal result was supplied for the same admitted step.
     #[error("job result contains duplicate step ID {0:?}")]
     DuplicateStepId(StepId),
+    /// One summary, annotation message, or property value exceeded its text ceiling.
+    #[error("step attachment text exceeds the {maximum}-byte limit")]
+    StepAttachmentTextTooLarge {
+        /// Maximum UTF-8 bytes accepted for one attachment text value.
+        maximum: usize,
+    },
+    /// Step attachment text exceeded the aggregate result budget.
+    #[error("step attachments exceed the {maximum}-byte aggregate limit")]
+    StepAttachmentsTooLarge {
+        /// Maximum aggregate UTF-8 bytes accepted across one job result.
+        maximum: usize,
+    },
+    /// More structured annotations were supplied than one result permits.
+    #[error("job result contains too many step annotations; maximum is {maximum}")]
+    TooManyStepAnnotations {
+        /// Maximum annotations accepted across one job result.
+        maximum: usize,
+    },
+    /// One annotation carried too many properties.
+    #[error("step annotation contains too many properties; maximum is {maximum}")]
+    TooManyStepAnnotationProperties {
+        /// Maximum properties accepted on one annotation.
+        maximum: usize,
+    },
+    /// An annotation property name was empty, duplicated, unbounded, or unsafe.
+    #[error("step annotation property name is invalid")]
+    InvalidStepAnnotationProperty,
 }

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    JobAuthorityProfile, JobConclusion, OutputSensitivity, RunId, Sha256Digest, UnixMillis,
-    WorkflowId, WorkflowJobKey, WorkflowOutputKey,
+    JobAuthorityProfile, JobConclusion, OutputSensitivity, RunId, RunIdAlias, Sha256Digest,
+    UnixMillis, WorkflowId, WorkflowJobKey, WorkflowOutputKey,
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -913,6 +913,7 @@ async fn lock_target(
     Ok(Some(row))
 }
 
+#[allow(clippy::too_many_lines)] // One exact lock query projects both current and durable evidence.
 async fn fetch_locked_target(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalActivationPreparationTarget,
@@ -926,11 +927,14 @@ async fn fetch_locked_target(
                manifest.runner_policy_size_bytes,
                manifest.runner_policy_media_type,
                run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-               run.run_number, run.run_attempt,
+               run.run_id_alias, run.run_number, run.run_attempt,
                invocation.plan_digest, invocation.plan_object_key,
                invocation.plan_size_bytes, invocation.plan_media_type,
                run.event_digest, run.event_object_key, run.event_size_bytes,
                run.event_media_type,
+               marker.base_context_digest, marker.base_context_object_key,
+               marker.base_context_size_bytes, marker.base_context_media_type,
+               marker.base_context_schema,
                claim.logical_job_id AS durable_logical_job_id,
                claim.run_id AS durable_run_id,
                claim.invocation_id AS durable_invocation_id,
@@ -948,7 +952,7 @@ async fn fetch_locked_target(
                claim.workflow_name AS durable_workflow_name,
                claim.git_ref AS durable_git_ref,
                claim.actor AS durable_actor,
-               claim.run_number AS durable_run_number,
+               run.run_id_alias AS durable_run_id_alias, claim.run_number AS durable_run_number,
                claim.run_attempt AS durable_run_attempt,
                claim.plan_digest AS durable_plan_digest,
                claim.plan_object_key AS durable_plan_object_key,
@@ -960,6 +964,11 @@ async fn fetch_locked_target(
                claim.event_size_bytes AS durable_event_size_bytes,
                claim.event_media_type AS durable_event_media_type,
                claim.base_context_kind AS durable_base_context_kind,
+               claim.base_context_digest AS durable_base_context_digest,
+               claim.base_context_object_key AS durable_base_context_object_key,
+               claim.base_context_size_bytes AS durable_base_context_size_bytes,
+               claim.base_context_media_type AS durable_base_context_media_type,
+               claim.base_context_schema AS durable_base_context_schema,
                claim.workspace AS durable_workspace,
                claim.prerequisite_count AS durable_prerequisite_count,
                claim.prerequisites_digest AS durable_prerequisites_digest,
@@ -1001,6 +1010,7 @@ async fn fetch_locked_target(
               'application/vnd.automata.workflow-plan+json'
           AND invocation.state IN ('pending', 'active')
           AND marker.orchestration_schema = 1
+          AND marker.base_context_schema = 2
           AND marker.state IN ('pending', 'active')
           AND run.admission_epoch = 4 AND run.plan_schema = 2
           AND run.event_media_type = 'application/json'
@@ -1255,6 +1265,11 @@ fn build_descriptor(
         get_string(row, prefix, "workflow_name")?,
         get_string(row, prefix, "git_ref")?,
         get_optional_string(row, prefix, "actor")?,
+        RunIdAlias::new(
+            u64::try_from(get_i64(row, prefix, "run_id_alias")?)
+                .map_err(|_| StoreError::corrupt_data("invalid preparation run ID alias"))?,
+        )
+        .map_err(|_| StoreError::corrupt_data("invalid preparation run ID alias"))?,
         u64::try_from(get_i64(row, prefix, "run_number")?)
             .map_err(|_| StoreError::corrupt_data("invalid preparation run number"))?,
         u32::try_from(get_i32(row, prefix, "run_attempt")?)
@@ -1267,6 +1282,8 @@ fn build_descriptor(
         decode_admission_object(row, prefix, "runner_policy", AdmissionObjectLimit::Standard)?;
     let plan = decode_admission_object(row, prefix, "plan", AdmissionObjectLimit::Standard)?;
     let event = decode_admission_object(row, prefix, "event", AdmissionObjectLimit::ProviderEvent)?;
+    let base_context =
+        decode_admission_object(row, prefix, "base_context", AdmissionObjectLimit::Standard)?;
     let ready_at = if prefix.is_empty() {
         UnixMillis::new(row.try_get("created_at_ms").map_err(operation_error)?)
     } else {
@@ -1282,13 +1299,15 @@ fn build_descriptor(
         runtime_policy,
         plan,
         event,
-        LogicalActivationBaseContextKind::RootEmpty,
+        LogicalActivationBaseContextKind::AdmissionV2,
+        base_context,
         prerequisites,
         ready_at,
     )
     .map_err(corrupt_value)?;
     if !prefix.is_empty() {
-        let exact = get_string(row, prefix, "base_context_kind")? == "root_empty"
+        let exact = get_string(row, prefix, "base_context_kind")? == "admission_v2"
+            && get_i16(row, prefix, "base_context_schema")? == 2
             && usize::try_from(get_i32(row, prefix, "prerequisite_count")?).ok()
                 == Some(descriptor.prerequisites().len())
             && decode_prefixed_digest(row, prefix, "prerequisites_digest")?
@@ -1322,7 +1341,9 @@ async fn insert_claim(
             actor, run_number, run_attempt, plan_digest, plan_object_key,
             plan_size_bytes, plan_media_type, plan_schema, event_digest,
             event_object_key, event_size_bytes, event_media_type,
-            base_context_kind, workspace, prerequisite_count,
+            base_context_kind, base_context_digest, base_context_object_key,
+            base_context_size_bytes, base_context_media_type, base_context_schema,
+            workspace, prerequisite_count,
             prerequisites_digest, aggregate_status, evidence_ready_at_ms,
             runtime_policy_revision, runtime_policy_digest,
             state, owner_id, generation, claimed_at_ms, expires_at_ms,
@@ -1330,8 +1351,8 @@ async fn insert_claim(
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
             $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-            'root_empty',$27,$28,$29,$30,$31,
-            $32,$33,'preparing',$34,1,$35,$36,$35,$35,$37
+            'admission_v2',$27,$28,$29,$30,2,$31,$32,$33,$34,$35,
+            $36,$37,'preparing',$38,1,$39,$40,$39,$39,$41
         )
         ON CONFLICT (logical_job_id) DO NOTHING
         ",
@@ -1362,6 +1383,10 @@ async fn insert_claim(
     .bind(descriptor.event().object_key().as_str())
     .bind(size_i64(descriptor.event().encoded_size())?)
     .bind(descriptor.event().media_type())
+    .bind(descriptor.base_context().digest().as_bytes().as_slice())
+    .bind(descriptor.base_context().object_key().as_str())
+    .bind(size_i64(descriptor.base_context().encoded_size())?)
+    .bind(descriptor.base_context().media_type())
     .bind(descriptor.workspace().as_str())
     .bind(count_i32(descriptor.prerequisites().len())?)
     .bind(descriptor.prerequisites_digest().as_bytes().as_slice())
@@ -1882,6 +1907,15 @@ fn get_i32(
     prefix: &str,
     name: &str,
 ) -> Result<i32, LogicalActivationPreparationStoreError> {
+    row.try_get(format!("{prefix}{name}").as_str())
+        .map_err(operation_error)
+}
+
+fn get_i16(
+    row: &PgRow,
+    prefix: &str,
+    name: &str,
+) -> Result<i16, LogicalActivationPreparationStoreError> {
     row.try_get(format!("{prefix}{name}").as_str())
         .map_err(operation_error)
 }

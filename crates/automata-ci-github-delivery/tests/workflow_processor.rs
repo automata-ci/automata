@@ -15,12 +15,12 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
-    GithubDeliverySourceAuthority, GithubDeliverySourceCredential,
-    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
-    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
-    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerError,
-    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
+    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
+    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
+    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
+    GithubDeliverySourceCredentialRequest, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
+    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
     GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
     GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
     GithubServerServiceCredentialRelease,
@@ -32,7 +32,8 @@ use automata_ci_scm::{
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, AdmitLogicalWorkflowRun,
     AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, GithubServerServiceAction, GithubServerServiceAuthorityId,
+    CompleteProviderDelivery, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
+    GithubServerServiceAction, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceConsumerClaim,
     GithubServerServiceHandoffId, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowAdmissionReceipt,
@@ -69,6 +70,7 @@ const CREDENTIAL: &str = "installation-token-private-marker";
 const DIFF_CREDENTIAL: &str = "installation-token-private-diff-marker";
 const ACCEPTED_WORKFLOW: &[u8] = b"name: Exact CI\non: push\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo exact\n";
 const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
+const PULL_REQUEST_WORKFLOW: &[u8] = b"name: Pull Request CI\non: pull_request\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request\n";
 
 #[derive(Debug)]
 struct FixedClock;
@@ -238,6 +240,31 @@ impl FixtureSubjectEvidence {
             claimed.receipt().accepted_at(),
             0x7101,
         ))
+    }
+
+    fn authenticated_event_v1(
+        claimed: &ClaimedProviderDelivery,
+        kind: GithubAuthenticatedEventKind,
+        git_ref: &str,
+    ) -> Self {
+        let legacy = Self::from_claimed(claimed).0;
+        let event = GithubAuthenticatedEventV1::new(kind, git_ref).expect("event coordinates");
+        Self(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+                legacy.delivery_id(),
+                legacy.repository_owner_id(),
+                legacy.manifest().clone(),
+                legacy.authenticated_webhook_verifier_fingerprint(),
+                legacy.authenticated_webhook_verifier_revision(),
+                legacy.checks_authority().clone(),
+                legacy.private_source_authority().cloned(),
+                legacy.check_subject_id(),
+                legacy.check_head_sha(),
+                event,
+                legacy.accepted_at(),
+            )
+            .expect("V1 subject evidence"),
+        )
     }
 }
 
@@ -547,6 +574,71 @@ async fn harness_with_visibility(
     }
 }
 
+async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
+    let blobs = Arc::new(MemoryBlobStore::default());
+    let body = pull_request_body();
+    let raw_key = "provider-deliveries/github/event-v1/pull-request-fixture.json";
+    let raw_payload = BlobPayload::from_bytes(
+        BlobKey::new(raw_key).expect("raw key"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("raw media type"),
+        body,
+    );
+    let raw_descriptor = raw_payload.descriptor().clone();
+    blobs
+        .put_if_absent(raw_payload)
+        .await
+        .expect("publish raw event");
+    let raw_event = AdmissionObject::new_event(
+        raw_descriptor.digest(),
+        ObjectKey::new(raw_key).expect("raw object key"),
+        raw_descriptor.size(),
+        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+    )
+    .expect("raw event");
+    let claimed = claimed(raw_event, ProviderRepositoryVisibility::Private);
+    let logical = Arc::new(LogicalAdmissions::default());
+    let admission = WorkflowAdmissionService::with_system_ports(
+        blobs.clone(),
+        logical.clone(),
+        Arc::new(GithubWorkflowPlanVerifier::new()),
+    );
+    let source = RepositorySource::from_bytes(
+        ScmProviderId::new("github").expect("provider"),
+        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+        ExactRevision::new(AFTER).expect("revision"),
+        ArchiveFormat::TarGzip,
+        archive(files),
+    );
+    let deliveries = Arc::new(DeliveryOutcomes::default());
+    let credentials = Arc::new(DiffCredentials::default());
+    let subject_evidence = Arc::new(FixtureSubjectEvidence::authenticated_event_v1(
+        &claimed,
+        GithubAuthenticatedEventKind::PullRequest,
+        "refs/pull/7/merge",
+    ));
+    let worker = GithubDeliveryWorker::new(
+        blobs.clone(),
+        Arc::new(FixedSource {
+            source,
+            visibility: ProviderRepositoryVisibility::Private,
+        }),
+        Arc::new(GithubDeliveryWorkflowAdmissionProcessor::new(admission)),
+        deliveries.clone(),
+        subject_evidence,
+        Arc::new(FixedClock),
+        GithubDeliveryWorkerConfig::default(),
+    )
+    .expect("worker");
+    Harness {
+        worker,
+        claimed,
+        blobs,
+        logical,
+        deliveries,
+        credentials,
+    }
+}
+
 fn claimed(
     raw_event: AdmissionObject,
     visibility: ProviderRepositoryVisibility,
@@ -603,6 +695,12 @@ fn push_body(commit_count: usize, visibility: ProviderRepositoryVisibility) -> B
     };
     Bytes::from(format!(
         r#"{{"ref":"refs/heads/main","before":"{BEFORE}","after":"{AFTER}","created":false,"deleted":false,"forced":false,"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"commits":[{commits}]}}"#,
+    ))
+}
+
+fn pull_request_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -739,6 +837,38 @@ async fn accepted_path_admits_exact_evidence_and_replays_the_same_run() {
         &ProviderDeliveryWorkflowConclusion::Admitted {
             run_id: first.run_id()
         }
+    );
+}
+
+#[tokio::test]
+async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
+    let harness =
+        pull_request_harness(BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_WORKFLOW)])).await;
+
+    assert!(matches!(
+        process(&harness).await.expect("pull-request processing"),
+        GithubDeliveryWorkerOutcome::Completed(_)
+    ));
+    let commands = harness.logical.commands();
+    assert_eq!(commands.len(), 1);
+    let command = &commands[0];
+    assert_eq!(command.event_name(), "pull_request");
+    assert_eq!(command.git_ref(), "refs/pull/7/merge");
+    assert_eq!(command.workflow_name(), "Pull Request CI");
+    assert_eq!(
+        command.head_sha(),
+        &[
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+        ]
+    );
+    assert_eq!(
+        read_admission_object(&harness.blobs, command.event()).await,
+        pull_request_body()
+    );
+    assert_eq!(
+        outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
+        ("admitted", None)
     );
 }
 

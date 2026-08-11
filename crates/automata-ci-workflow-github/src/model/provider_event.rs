@@ -1,5 +1,7 @@
 use std::fmt;
 
+use super::GithubWorkflowDispatchInputsV1;
+
 /// Provider-verified changed-file selection used by path-filter evaluation.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
@@ -64,10 +66,22 @@ pub enum GithubEventMetadataV1 {
         /// Provider-verified diff selection, required only for path filters.
         changed_files: Option<GithubChangedFilesV1>,
     },
+    /// A GitHub `merge_group` payload.
+    MergeGroup {
+        /// The payload's top-level activity `action`.
+        action: String,
+        /// The merge group's fully qualified target branch reference.
+        base_ref: String,
+    },
     /// A trusted scheduler invocation for one configured `on.schedule` entry.
     Schedule {
         /// The exact configured cron expression that fired the workflow.
         cron: String,
+    },
+    /// A provider-verified `workflow_dispatch` invocation.
+    WorkflowDispatch {
+        /// Bounded raw input properties to validate against the selected source contract.
+        inputs: GithubWorkflowDispatchInputsV1,
     },
 }
 
@@ -117,9 +131,28 @@ impl GithubEventMetadataV1 {
         }
     }
 
+    /// Creates metadata for a merge-queue group event.
+    #[must_use]
+    pub fn merge_group(action: impl Into<String>, base_ref: impl Into<String>) -> Self {
+        Self::MergeGroup {
+            action: action.into(),
+            base_ref: base_ref.into(),
+        }
+    }
+
     /// Creates metadata for a scheduled invocation.
     #[must_use]
     pub fn schedule(cron: impl Into<String>) -> Self {
         Self::Schedule { cron: cron.into() }
+    }
+
+    /// Creates metadata for a manually dispatched invocation.
+    ///
+    /// The input wrapper must have been constructed from integrity-verified
+    /// provider evidence; the compiler validates it against the exact workflow
+    /// source contract before producing an `inputs` context.
+    #[must_use]
+    pub const fn workflow_dispatch(inputs: GithubWorkflowDispatchInputsV1) -> Self {
+        Self::WorkflowDispatch { inputs }
     }
 }
