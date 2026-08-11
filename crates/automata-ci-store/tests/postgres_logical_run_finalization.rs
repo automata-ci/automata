@@ -34,7 +34,8 @@ use automata_ci_store::{
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderRepositoryVisibility, TenantScope, WorkflowAdmissionIdempotency, WorkflowConcurrency,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -281,14 +282,10 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn preterminal_concurrency_cancellation_closes_with_immutable_run_evidence() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = fixture("run-finalization-preterminal-cancel", 124_000, 1);
+        let fixture =
+            fixture_with_concurrency("run-finalization-preterminal-cancel", 124_000, 1, true);
         admit_and_finalize_all_skipped(&database, &fixture).await?;
-        sqlx::query(
-            "UPDATE workflow_runs SET status = 'cancelled', updated_at_ms = 1250 WHERE id = $1",
-        )
-        .bind(fixture.command.run_id().as_uuid())
-        .execute(database.pool())
-        .await?;
+        record_concurrency_cancellation(&database, &fixture).await?;
 
         let claimed = database
             .store()
@@ -540,6 +537,7 @@ async fn assert_linked_check_terminalization(
         namespace,
         1,
         visibility,
+        false,
     );
     let subject_id = admit_authenticated_fixture(database, &fixture).await?;
     finalize_skipped_job(database, &fixture, 0).await?;
@@ -756,7 +754,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -776,8 +774,72 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    if let Some(concurrency) = command.concurrency() {
+        builder = builder.concurrency(Some(concurrency.clone()));
+    }
+    Ok(builder.build()?)
+}
+
+async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixture) -> TestResult {
+    let cancelled_at = database_now_ms(database).await?;
+    let preempting_run_id = Uuid::from_u128(fixture.namespace + 1_100);
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runs (
+            id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
+            event_name, event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            concurrency_group_key, concurrency_queue_policy
+        )
+        SELECT $2, repository_id, workflow_id, snapshot_id, run_number + 1, 1,
+               event_name, event_object_key, head_sha, 'queued', $3, $3,
+               concurrency_group_key, concurrency_queue_policy
+        FROM workflow_runs
+        WHERE id = $1
+        ",
     )
-    .build()?)
+    .bind(fixture.command.run_id().as_uuid())
+    .bind(preempting_run_id)
+    .bind(cancelled_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_concurrency_cancellations (
+            run_id, root_invocation_id, preempting_run_id,
+            prior_workflow_status, prior_workflow_updated_at_ms,
+            prior_marker_state, prior_marker_revision, prior_marker_updated_at_ms,
+            prior_invocation_state, prior_invocation_revision,
+            prior_invocation_updated_at_ms, cancelled_at_ms
+        )
+        SELECT run.id, marker.root_invocation_id, $2,
+               run.status, run.updated_at_ms,
+               marker.state, marker.revision, marker.updated_at_ms,
+               invocation.state, invocation.revision, invocation.updated_at_ms, $3
+        FROM workflow_runs AS run
+        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+        JOIN workflow_plan_v2_invocations AS invocation
+          ON invocation.run_id = marker.run_id
+         AND invocation.id = marker.root_invocation_id
+        WHERE run.id = $1
+        ",
+    )
+    .bind(fixture.command.run_id().as_uuid())
+    .bind(preempting_run_id)
+    .bind(cancelled_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE workflow_runs SET status = 'cancelled', updated_at_ms = $2 WHERE id = $1")
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(cancelled_at)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn set_linked_check_back_to_queued(database: &TestDatabase, subject_id: Uuid) -> TestResult {
@@ -1158,11 +1220,7 @@ async fn prepare_activation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             preparation.descriptor().clone(),
             preparation.claim().clone(),
-            admission_object(
-                format!("run-finalization/{owner}/base-context.pb"),
-                &[0x51; 64],
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            preparation.descriptor().base_context().clone(),
             admission_object(
                 format!("run-finalization/{owner}/needs-context.pb"),
                 &[0x52; 64],
@@ -1251,11 +1309,21 @@ async fn select_orchestration(
 }
 
 fn fixture(tenant: &str, namespace: u128, job_count: usize) -> Fixture {
+    fixture_with_concurrency(tenant, namespace, job_count, false)
+}
+
+fn fixture_with_concurrency(
+    tenant: &str,
+    namespace: u128,
+    job_count: usize,
+    concurrency: bool,
+) -> Fixture {
     fixture_with_visibility(
         tenant,
         namespace,
         job_count,
         ProviderRepositoryVisibility::Public,
+        concurrency,
     )
 }
 
@@ -1264,6 +1332,7 @@ fn fixture_with_visibility(
     namespace: u128,
     job_count: usize,
     visibility: ProviderRepositoryVisibility,
+    concurrency: bool,
 ) -> Fixture {
     let tenant_scope =
         TenantScope::from_authenticated_tenant_id(tenant).expect("authenticated tenant");
@@ -1297,7 +1366,7 @@ fn fixture_with_visibility(
             .expect("admitted logical job")
         })
         .collect();
-    let command = AdmitLogicalWorkflowRun::builder(
+    let mut command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("run-finalization-{namespace}"))
             .expect("idempotency"),
@@ -1338,8 +1407,17 @@ fn fixture_with_visibility(
         logical_jobs,
         UnixMillis::new(1_000),
     )
-    .build()
-    .expect("logical admission");
+    .base_context(admission_object(
+        format!("run-finalization/{namespace}/base-context"),
+        &[0x15; 512],
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ));
+    if concurrency {
+        command = command.concurrency(Some(
+            WorkflowConcurrency::new("run-finalization", false).expect("concurrency"),
+        ));
+    }
+    let command = command.build().expect("logical admission");
     Fixture {
         tenant: tenant.to_owned(),
         namespace,

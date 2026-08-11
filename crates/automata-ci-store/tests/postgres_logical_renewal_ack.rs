@@ -1945,7 +1945,7 @@ async fn bind_preparation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             claimed.descriptor().clone(),
             claimed.claim().clone(),
-            context_object(&format!("contexts/{namespace}/base.pb"), 0x31),
+            claimed.descriptor().base_context().clone(),
             context_object(&format!("contexts/{namespace}/needs.pb"), 0x32),
             UnixMillis::new(database_now_ms(database).await?),
         )?)
@@ -2140,6 +2140,11 @@ async fn fixture(
         admitted_jobs,
         UnixMillis::new(database_now_ms(database).await?),
     )
+    .base_context(admission_object(
+        format!("renewal/{namespace}/base-context"),
+        4,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()?;
     Ok(Fixture {
         tenant: tenant.to_owned(),
@@ -2245,7 +2250,7 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -2265,8 +2270,11 @@ fn logical_command_at(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2328,6 +2336,7 @@ fn prepared_instance(
         content_reference(claimed.event()),
         activation_reference(&runtime),
     )
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
     if let Some(actor) = execution.actor() {
