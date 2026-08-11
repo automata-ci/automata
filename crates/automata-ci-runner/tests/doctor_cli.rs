@@ -37,6 +37,8 @@ fn doctor_json_command_emits_a_machine_readable_report() {
 fn active_doctor_json_reports_unsupported_platform_and_exits_unsuccessfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
         .args(["doctor", "--active", "--json"])
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
         .env_remove("RUST_LOG")
         .output()
         .expect("active runner doctor must start");
