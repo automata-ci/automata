@@ -259,6 +259,11 @@ fn logical_oidc_fixture_with_profile(
         vec![logical_job],
         UnixMillis::new(1_000),
     )
+    .base_context(admission_object(
+        format!("oidc/{namespace}/base-context"),
+        0x15,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("test logical admission");
     LogicalOidcFixture {
@@ -352,7 +357,7 @@ fn retime_logical_admission(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -372,8 +377,11 @@ fn retime_logical_admission(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 #[allow(clippy::too_many_lines)] // Keep the canonical signed OIDC admission transaction contiguous.
@@ -515,11 +523,7 @@ async fn claim_oidc_activation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             preparation.descriptor().clone(),
             preparation.claim().clone(),
-            admission_object(
-                format!("oidc/{owner}/base-context"),
-                0x51,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            preparation.descriptor().base_context().clone(),
             admission_object(
                 format!("oidc/{owner}/needs-context"),
                 0x52,
@@ -710,15 +714,19 @@ fn prepare_oidc_instance(
         job
     };
     let execution = claimed.execution();
-    let job_execution = JobExecutionContext::new(
+    let mut job_execution = JobExecutionContext::new(
         execution.workflow_name(),
         execution.git_ref(),
         workspace,
         content_reference(claimed.event()),
         activation_reference(&runtime),
     )
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
+    if let Some(actor) = execution.actor() {
+        job_execution = job_execution.with_actor(actor);
+    }
     let envelope = JobIrEnvelope::new(
         execution.workflow_id(),
         JobSource::new(
@@ -1698,11 +1706,7 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
             .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
                 preparation.descriptor().clone(),
                 preparation.claim().clone(),
-                admission_object(
-                    "oidc/corrupt/base-context".to_owned(),
-                    0x51,
-                    "application/vnd.automata.job-runtime-context.protobuf",
-                ),
+                preparation.descriptor().base_context().clone(),
                 admission_object(
                     "oidc/corrupt/needs-context".to_owned(),
                     0x52,
