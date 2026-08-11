@@ -269,8 +269,14 @@ The first audit identified these implementation owners:
 
 1. [x] Obtain design review for durable Windows control-plane issue #16.
 2. [x] Complete the server-side platform-conditional inventory.
-3. [ ] Spike the Credential Manager `CredWrite` blob limit against real session
+3. [x] Spike the Credential Manager `CredWrite` blob limit against real session
    payloads before fixing the CLI custody interface.
+
+   Evidence: on the Windows 11 evaluation host, generic-credential `CredWriteW`
+   round-trips 512- and 2560-byte blobs byte-exact and fails with error 1783
+   at 2561 bytes; user-scoped DPAPI adds a fixed 230-byte envelope, so the
+   512-byte contract payload (`MAX_STORED_CREDENTIAL_BYTES`) protects to
+   742 bytes. Direct records are adopted; no indirection file is needed.
 4. [ ] Draft custody and secure-file adapter interfaces.
 5. [ ] Select the safe Windows API boundary for ACL and handle inspection.
 6. [ ] Add the fail-closed Windows server composition test fixture.

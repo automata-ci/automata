@@ -235,6 +235,12 @@ recorded these decisions:
    2560 bytes): the adapter either stores an indirection (a DPAPI-protected
    file whose key lives in Credential Manager) or rejects oversized records.
    Chunking would violate the ambiguity contract and is rejected.
+   *Spike outcome (2026-08-11, Windows 11 evaluation host):* generic-credential
+   `CredWriteW` round-trips 512- and 2560-byte blobs byte-exact and fails with
+   error 1783 at 2561 bytes; user-scoped DPAPI adds a fixed 230-byte envelope,
+   so the 512-byte session contract protects to 742 bytes. Direct records are
+   adopted; the adapter enforces the 512-byte plaintext bound and needs no
+   indirection file.
 4. **Certificate Store** — not required in the first release; the mandatory
    secure-file adapter covers TLS identity. Remains a proposed follow-up.
 5. **Safe dependency boundary** — follow the `automata-ci-sandbox-windows`
