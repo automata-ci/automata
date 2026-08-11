@@ -3000,22 +3000,17 @@ impl GithubJobExecutor {
         }
         let artifact_hash_timeout = execution.timeout.min(ARTIFACT_HASH_TIMEOUT);
         let command_paths = paths.command_files(execution.phase)?;
-        if let Err(error) = self.initialize_command_files(
+        let initialized = self.initialize_command_files(
             endpoint,
             attempt_id,
             execution.phase,
             &command_paths,
             commands,
             cancellation,
-        ) {
-            if cancellation.is_cancelled() {
-                return Ok(CommandOutcome::Cancelled);
-            }
-            return Err(error);
-        }
-        if cancellation.is_cancelled() {
+        );
+        let Some(()) = reconcile_cancelled_operation(initialized, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
-        }
+        };
         let mut environment = execution.environment;
         environment = add_command_file_environment(&environment, &command_paths)?;
         let argv = ExecutionArgv::new(execution.program, execution.arguments)
@@ -3033,15 +3028,11 @@ impl GithubJobExecutor {
             self.config.maximum_output_bytes(),
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let output = match endpoint
+        let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
-            .map_err(map_execution_error)
-        {
-            Ok(output) => output,
-            Err(_) if cancellation.is_cancelled() => {
-                return Ok(CommandOutcome::Cancelled);
-            }
-            Err(error) => return Err(error),
+            .map_err(map_execution_error);
+        let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
+            return Ok(CommandOutcome::Cancelled);
         };
         if cancellation.is_cancelled() || output.termination() == ExecutionTermination::Cancelled {
             return Ok(CommandOutcome::Cancelled);
@@ -3056,7 +3047,7 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::ResourceExhausted,
             ));
         }
-        let completed = match self.collect_completed_phase(
+        let completed = self.collect_completed_phase(
             endpoint,
             attempt_id,
             execution.phase,
@@ -3065,12 +3056,9 @@ impl GithubJobExecutor {
             masker,
             events,
             cancellation,
-        ) {
-            Ok(completed) => completed,
-            Err(_) if cancellation.is_cancelled() => {
-                return Ok(CommandOutcome::Cancelled);
-            }
-            Err(error) => return Err(error),
+        );
+        let Some(completed) = reconcile_cancelled_operation(completed, cancellation)? else {
+            return Ok(CommandOutcome::Cancelled);
         };
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
@@ -3091,7 +3079,7 @@ impl GithubJobExecutor {
         let applied = self
             .completed_steps
             .apply_completed_step(commands, &scope, &completed_commands)
-            .map_err(map_phase_application_error);
+            .map_err(|error| map_phase_application_error(&error));
         let Some(applied) = reconcile_cancelled_operation(applied, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
@@ -3261,35 +3249,7 @@ impl GithubJobExecutor {
                     .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
             );
         }
-        let [environment, output, path, state, summary] = parsed
-            .try_into()
-            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let ParsedCommandFile::Environment(environment) = environment else {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        };
-        let ParsedCommandFile::Output(output) = output else {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        };
-        let ParsedCommandFile::Path(path) = path else {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        };
-        let ParsedCommandFile::State(state) = state else {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        };
-        let ParsedCommandFile::StepSummary(summary) = summary else {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        };
-        let commands = CompletedStepCommands::new(environment, output, path, state, summary);
+        let commands = decoded_step_commands(parsed)?;
         let request = CopyFromRequest::new(
             self.ports.operation_ids.operation_id(
                 attempt_id,
@@ -3741,6 +3701,33 @@ struct CollectedPhase {
 struct DecodedCommandFiles {
     commands: CompletedStepCommands,
     artifacts: ArtifactDeclarationCommandFile,
+}
+
+fn decoded_step_commands(
+    parsed: Vec<ParsedCommandFile>,
+) -> Result<CompletedStepCommands, ExecutorAdapterError> {
+    let parsed: [ParsedCommandFile; COMMAND_FILE_KINDS.len()] = parsed
+        .try_into()
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+    let [
+        ParsedCommandFile::Environment(environment),
+        ParsedCommandFile::Output(output),
+        ParsedCommandFile::Path(path),
+        ParsedCommandFile::State(state),
+        ParsedCommandFile::StepSummary(summary),
+    ] = parsed
+    else {
+        return Err(ExecutorAdapterError::new(
+            ExecutorAdapterErrorKind::Internal,
+        ));
+    };
+    Ok(CompletedStepCommands::new(
+        environment,
+        output,
+        path,
+        state,
+        summary,
+    ))
 }
 
 #[derive(Default)]
@@ -4884,7 +4871,7 @@ fn artifact_file_name(path: &str) -> Result<String, ExecutorAdapterError> {
         .ok_or_else(invalid_job)
 }
 
-const fn map_phase_application_error(error: PhaseApplicationError) -> ExecutorAdapterError {
+const fn map_phase_application_error(error: &PhaseApplicationError) -> ExecutorAdapterError {
     match error {
         PhaseApplicationError::ArtifactConflict => invalid_job(),
         PhaseApplicationError::TooManyEnvironmentEntries { .. }

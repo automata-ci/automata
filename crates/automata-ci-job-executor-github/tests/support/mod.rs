@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fmt,
+    fmt::{self, Write as _},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, AtomicUsize, Ordering},
@@ -1007,40 +1007,8 @@ impl ExecutionEndpoint for FakeEndpoint {
             )
             .map_err(|_| execution_error(ExecutionStage::Exec));
         }
-        if program == "/usr/bin/sh"
-            && request
-                .argv()
-                .arguments()
-                .get(1)
-                .is_some_and(|argument| argument.contains("automata-artifact-sha256"))
-        {
-            let declared = request
-                .argv()
-                .arguments()
-                .get(3)
-                .expect("artifact path argument");
-            let resolved = if declared.starts_with('/') {
-                declared.clone()
-            } else {
-                format!(
-                    "{}/{declared}",
-                    request.working_directory().as_str().trim_end_matches('/')
-                )
-            };
-            let Some(bytes) = state.files.get(&resolved) else {
-                return execution_output(ExecutionTermination::Exited(44), Vec::new(), false)
-                    .map_err(|_| execution_error(ExecutionStage::Exec));
-            };
-            let digest = Sha256::digest(bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            return execution_output(
-                ExecutionTermination::Exited(0),
-                vec![(ExecutionOutputStream::Stdout, digest.into_bytes())],
-                false,
-            )
-            .map_err(|_| execution_error(ExecutionStage::Exec));
+        if let Some(output) = artifact_hash_output(request, &state) {
+            return output;
         }
         let response = state
             .responses
@@ -1138,6 +1106,59 @@ impl ExecutionEndpoint for FakeEndpoint {
             .cloned()
             .unwrap_or_default())
     }
+}
+
+fn artifact_hash_output(
+    request: &ExecutionCommand,
+    state: &EndpointState,
+) -> Option<Result<ExecutionOutput, ExecutionError>> {
+    let is_hash = request
+        .argv()
+        .arguments()
+        .get(1)
+        .is_some_and(|argument| argument.contains("automata-artifact-sha256"));
+    if request.argv().program().as_str() != "/usr/bin/sh" || !is_hash {
+        return None;
+    }
+    let declared = request
+        .argv()
+        .arguments()
+        .get(3)
+        .expect("artifact path argument");
+    let resolved = if declared.starts_with('/') {
+        declared.clone()
+    } else {
+        format!(
+            "{}/{declared}",
+            request.working_directory().as_str().trim_end_matches('/')
+        )
+    };
+    let Some(bytes) = state.files.get(&resolved) else {
+        return Some(
+            execution_output(ExecutionTermination::Exited(44), Vec::new(), false)
+                .map_err(|_| execution_error(ExecutionStage::Exec)),
+        );
+    };
+    Some(
+        execution_output(
+            ExecutionTermination::Exited(0),
+            vec![(
+                ExecutionOutputStream::Stdout,
+                sha256_hex(bytes).into_bytes(),
+            )],
+            false,
+        )
+        .map_err(|_| execution_error(ExecutionStage::Exec)),
+    )
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        })
 }
 
 fn execution_error(stage: ExecutionStage) -> ExecutionError {

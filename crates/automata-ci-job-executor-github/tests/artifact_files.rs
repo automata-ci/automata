@@ -8,10 +8,10 @@ use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
 use support::{
     Fixture, PhaseResponse, envelope, environment_map, run_step, run_step_with_working_directory,
+    sha256_hex,
 };
 
 const WORKSPACE: &str = "/__w/automata/automata";
@@ -111,10 +111,11 @@ async fn declarations_are_hashed_in_the_workspace_and_list_is_read_only_and_dete
         .expect("third list path");
     let payload: Value = serde_json::from_slice(state.files.get(third_list).expect("third list"))
         .expect("valid list JSON");
-    let file_digest = Sha256::digest(file_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    assert_artifact_subjects(&payload, file_bytes);
+}
+
+fn assert_artifact_subjects(payload: &Value, file_bytes: &[u8]) {
+    let file_digest = sha256_hex(file_bytes);
     assert_eq!(payload["version"], 1);
     assert_eq!(
         payload["subjects"],
