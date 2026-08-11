@@ -831,7 +831,9 @@ async fn missing_create_retries_only_reconciliation_until_exact_bind() -> TestRe
         let missing = ResolveGithubCheckRunCreate::missing(
             reconcile.claim(),
             observed_at,
-            UnixMillis::new(observed_at.get() + 100),
+            // Preserve enough live database time for exact replay and the
+            // immutable schedule checks before proving retry ineligibility.
+            UnixMillis::new(observed_at.get() + 5_000),
         )?;
         assert_eq!(
             database

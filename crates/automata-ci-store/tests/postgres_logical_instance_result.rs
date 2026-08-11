@@ -771,7 +771,9 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             LogicalInstanceResultSelectionId::from_uuid(Uuid::from_u128(30_690))?,
             LogicalInstanceResultWorkerId::from_uuid(Uuid::from_u128(30_691))?,
             UnixMillis::new(short_idle_observed_at),
-            UnixMillis::new(short_idle_observed_at + 100),
+            // The reserving transactions must finish before the later wait
+            // proves expiry and bounded cleanup under hosted database load.
+            UnixMillis::new(short_idle_observed_at + 5_000),
         )?;
         assert!(matches!(
             database
@@ -793,7 +795,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
                     LogicalInstanceResultSelectionId::from_uuid(Uuid::from_u128(30_700))?,
                     LogicalInstanceResultWorkerId::from_uuid(Uuid::from_u128(30_701))?,
                     UnixMillis::new(cleanup_observed_at),
-                    UnixMillis::new(cleanup_observed_at + 1_000),
+                    UnixMillis::new(cleanup_observed_at + 5_000),
                 )?)
                 .await?,
             LogicalInstanceResultClaimNextOutcome::Idle

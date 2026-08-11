@@ -814,7 +814,9 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             LogicalJobResultSelectionId::from_uuid(Uuid::from_u128(90_690))?,
             LogicalJobResultWorkerId::from_uuid(Uuid::from_u128(90_691))?,
             UnixMillis::new(short_idle_observed_at),
-            UnixMillis::new(short_idle_observed_at + 100),
+            // The reserving transactions must finish before the later wait
+            // proves expiry and bounded cleanup under hosted database load.
+            UnixMillis::new(short_idle_observed_at + 5_000),
         )?;
         assert!(matches!(
             database
@@ -836,7 +838,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
                     LogicalJobResultSelectionId::from_uuid(Uuid::from_u128(90_700))?,
                     LogicalJobResultWorkerId::from_uuid(Uuid::from_u128(90_701))?,
                     UnixMillis::new(cleanup_observed_at),
-                    UnixMillis::new(cleanup_observed_at + 1_000),
+                    UnixMillis::new(cleanup_observed_at + 5_000),
                 )?)
                 .await?,
             LogicalJobResultClaimNextOutcome::Idle
