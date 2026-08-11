@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    collections::BTreeMap,
     fmt, fs,
     path::{Path, PathBuf},
     sync::{
@@ -3787,6 +3788,7 @@ struct FailureIsolationState {
     terminal_results: Vec<(AttemptId, JobConclusion)>,
     terminal_secret_exposures: Vec<JobSecretExposure>,
     log_frames: Vec<LogFrame>,
+    log_receipts: BTreeMap<OperationId, Vec<u8>>,
     terminal_results_after_eos: Vec<bool>,
     heartbeat_lifecycles: Vec<JobLifecycle>,
 }
@@ -3904,11 +3906,23 @@ impl RunnerRuntimeControlClient for FailureIsolationClient {
                 }
                 RunnerToServer::LogBatch(batch) => {
                     let last = batch.frames().last().expect("nonempty log batch");
-                    self.state
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .log_frames
-                        .extend(batch.frames().iter().cloned());
+                    let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(canonical) = state.log_receipts.get(&batch.header().operation_id())
+                    {
+                        // A lost acknowledgement may replay the stable operation, just as the
+                        // real control handler replays its durable receipt without appending.
+                        assert_eq!(
+                            canonical.as_slice(),
+                            request.canonical_bytes().as_ref(),
+                            "a log receipt only replays for the exact canonical request"
+                        );
+                    } else {
+                        state.log_frames.extend(batch.frames().iter().cloned());
+                        state.log_receipts.insert(
+                            batch.header().operation_id(),
+                            request.canonical_bytes().to_vec(),
+                        );
+                    }
                     ServerToRunner::LogAck(LogAckMessage::new(
                         reply_header(batch.header()),
                         LogAck::new(last.stream_id(), Some(last.sequence())),
