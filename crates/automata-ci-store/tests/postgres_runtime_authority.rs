@@ -1270,12 +1270,15 @@ async fn reclaim_and_begin_mint(
 ) -> TestResult<ClaimedGithubRuntimeAuthorityMint> {
     tokio::time::sleep(Duration::from_millis(3_100)).await;
     let observed_at = database_now(database).await?;
+    // This second claim proves takeover and mint-start fencing, not a short
+    // expiry boundary. Leave enough live time for a hosted PostgreSQL WAL
+    // checkpoint between the post-lock clock sample and the guarded update.
     let reclaimed = database
         .store()
         .claim_github_runtime_authority_mint(fixture.claim_for_at(
             AuthorityFixture::owner(200),
             observed_at,
-            5_000,
+            60_000,
         ))
         .await?
         .expect("expired pre-mint claim is reclaimable");
