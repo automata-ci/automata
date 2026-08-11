@@ -323,8 +323,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
             ));
         }
-        self.finish_authenticated_event_compilation(request, report)
-            .await
+        Box::pin(self.finish_authenticated_event_compilation(request, report)).await
     }
 
     async fn resolve_changed_files(
@@ -653,8 +652,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                     BTreeMap::new(),
                 )
                 .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-                self.admit_authenticated_event(request, plan, base_context)
-                    .await
+                Box::pin(self.admit_authenticated_event(request, plan, base_context)).await
             }
             CompilationDisposition::NotSelected(reason) => Ok(skipped(reason)),
             CompilationDisposition::Rejected => Ok(failed("github.workflow.compilation_rejected")),
@@ -999,7 +997,7 @@ fn authenticated_event_provenance(
     let git_ref = request
         .manifest_pinned_evidence()
         .authenticated_event_v1()
-        .map(|event| event.git_ref());
+        .map(automata_ci_store::GithubAuthenticatedEventV1::git_ref);
     let provenance = WorkflowEventProvenance::new(GITHUB_PROVIDER, request.event().event_name())
         .with_delivery_id(request.event().delivery_id())
         .with_commit_sha(request.repository_source().revision().as_str());
