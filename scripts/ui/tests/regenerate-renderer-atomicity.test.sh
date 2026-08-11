@@ -667,8 +667,12 @@ set -e
     -d "${entrypoint_temporary}" && -d "${entrypoint_state}/active" ]]
 
 set +e
-CARGO_HOME=/noncanonical/cargo \
-RUSTUP_HOME=/noncanonical/rustup \
+/usr/bin/env \
+    -u CARGO_BUILD_JOBS \
+    -u CARGO_PROFILE_DEV_DEBUG \
+    -u CARGO_PROFILE_TEST_DEBUG \
+    CARGO_HOME=/noncanonical/cargo \
+    RUSTUP_HOME=/noncanonical/rustup \
     bash "${entrypoint_repository}/scripts/ui/regenerate-renderer.sh" \
     >"${scratch_directory}/entrypoint-restart.log" 2>&1
 entrypoint_restart_status=$?
