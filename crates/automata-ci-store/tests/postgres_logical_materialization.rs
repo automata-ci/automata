@@ -785,7 +785,7 @@ async fn cancellation_first_rejects_a_waiting_materialization_without_partial_ro
         let replacement = replacement_admission(&race.fixture, 0xd1, 1_200)?;
         let expected_job_id = race.claimed.descriptor().expected_job_id();
         let expected_attempt_id = race.claimed.descriptor().expected_attempt_id();
-        let commit = materialization_commit(&race, 1_150)?;
+        let commit = materialization_commit(&race)?;
 
         let mut gate = database.pool().begin().await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -867,7 +867,7 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
             prepare_materialization_race_fixture(&database, "materialization-commit-first", 40_000)
                 .await?;
         let replacement = replacement_admission(&race.fixture, 0xd2, 1_200)?;
-        let commit = materialization_commit(&race, 1_150)?;
+        let commit = materialization_commit(&race)?;
         let expected_attempt_id = race.claimed.descriptor().expected_attempt_id();
 
         let mut gate = database.pool().begin().await?;
@@ -982,7 +982,6 @@ async fn prepare_materialization_race_fixture(
 
 fn materialization_commit(
     race: &MaterializationRaceFixture,
-    committed_at: i64,
 ) -> TestResult<CommitLogicalInstanceMaterialization> {
     Ok(CommitLogicalInstanceMaterialization::new(
         &race.claimed,
@@ -990,7 +989,7 @@ fn materialization_commit(
         &race.prepared.envelope,
         &race.prepared.runtime_encoded,
         &race.prepared.runtime_context,
-        race.fixture.at(committed_at),
+        race.claimed.claim().claimed_at(),
     )?)
 }
 
