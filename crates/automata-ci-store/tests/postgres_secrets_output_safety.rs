@@ -239,6 +239,13 @@ async fn secrets_upgrade_backfills_outputs_private_and_seeds_builtin_provider() 
             .bind(seed.job_id.as_uuid())
             .execute(database.pool())
             .await?;
+        let completed = sqlx::query(
+            "UPDATE workflow_runs SET status = 'completed', updated_at_ms = 2 WHERE id = $1",
+        )
+        .bind(seed.run_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+        assert_eq!(completed.rows_affected(), 1);
         database.store().migrate().await?;
         let compatibility: (i32, i32) = sqlx::query_as(
             "SELECT minimum_admission_epoch, job_ir_schema FROM automata_cluster_compatibility WHERE singleton",
