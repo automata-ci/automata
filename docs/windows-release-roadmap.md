@@ -57,8 +57,13 @@ release artifact is published.
 
 ## W2 — release design authority
 
-- [ ] Open a durable Windows control-plane epic.
-- [ ] Link issue #13 as the trusted-runner prerequisite.
+The [durable Windows control-plane proposal](windows-control-plane-design-proposal.md)
+was filed as [issue #16](https://github.com/automata-ci/automata/issues/16).
+It is not accepted design authority until maintainers complete design review.
+
+- [x] Open durable Windows control-plane issue #16.
+- [x] Link issue #13 as the trusted-runner prerequisite.
+- [ ] Obtain maintainer design approval for issue #16.
 - [ ] Declare Windows Server 2025 x86-64 as the production target.
 - [ ] Declare Windows 11 x86-64 as development and evaluation only.
 - [ ] Define the first release's supported and unsupported surfaces.
@@ -91,10 +96,10 @@ The first audit identified these implementation owners:
 | Installation and service lifecycle | release and deployment tooling | Not implemented |
 
 - [x] Record the initial server and custody boundary inventory.
-- [ ] Inventory every remaining server-side Unix/Linux conditional.
-- [ ] Map each conditional to portable core, custody, filesystem, lifecycle, or
+- [x] Inventory every remaining server-side Unix/Linux conditional.
+- [x] Map each conditional to portable core, custody, filesystem, lifecycle, or
   provider ownership.
-- [ ] Record the result in the durable Windows design epic.
+- [ ] Record the result in the accepted durable Windows design epic.
 
 ## W3 — secure Windows adapter architecture
 
@@ -242,8 +247,8 @@ The first audit identified these implementation owners:
 
 ## Immediate work queue
 
-1. [ ] Open and review the durable Windows control-plane epic.
-2. [ ] Complete the server-side platform-conditional inventory.
+1. [ ] Obtain design review for durable Windows control-plane issue #16.
+2. [x] Complete the server-side platform-conditional inventory.
 3. [ ] Draft custody and secure-file adapter interfaces.
 4. [ ] Select the safe Windows API boundary for ACL and handle inspection.
 5. [ ] Add the fail-closed Windows server composition test fixture.

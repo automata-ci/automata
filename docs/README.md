@@ -43,6 +43,9 @@ It does not connect to repositories or execute workflows.
   and the acceptance gates that still block a release.
 - [Durable Windows release roadmap](windows-release-roadmap.md) tracks the
   Windows control-plane, service, packaging, and release milestones.
+- [Durable Windows control-plane proposal](windows-control-plane-design-proposal.md)
+  records the issue-ready problem, trust boundaries, alternatives, and design
+  decisions awaiting review.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
   describes the immutable runner image and its publication policy.
 - [React SSR UI](../ui/README.md) explains the build-time frontend and embedded
