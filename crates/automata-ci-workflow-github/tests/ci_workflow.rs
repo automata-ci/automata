@@ -33,14 +33,22 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 4);
+    assert_eq!(plan.workflow().jobs().len(), 7);
     assert_eq!(
         plan.workflow()
             .jobs()
             .iter()
             .map(|job| job.id().as_str())
             .collect::<Vec<_>>(),
-        ["verify", "frontend", "renderer", "dist"]
+        [
+            "verify",
+            "rust_tests",
+            "postgres_store",
+            "postgres_integrations",
+            "frontend",
+            "renderer",
+            "dist",
+        ]
     );
 
     let Permissions::Mapping {
@@ -73,12 +81,24 @@ fn repository_ci_produces_an_accepted_source_plan() {
     assert!(renderer.permissions().is_none());
     assert_eq!(renderer.steps().len(), 2);
     assert_eq!(
-        plan.workflow().jobs()[3]
+        plan.workflow()
+            .jobs()
+            .iter()
+            .find(|job| job.id().as_str() == "dist")
+            .expect("distribution job")
             .job()
             .condition()
             .expect("distribution condition")
             .value(),
-        "${{ !cancelled() && needs.verify.result == 'success' && needs.frontend.result == 'success' && (needs.renderer.result == 'success' || (github.event_name == 'pull_request' && needs.renderer.result == 'skipped')) }}"
+        r"${{ !cancelled()
+    && needs.verify.result == 'success'
+    && needs.rust_tests.result == 'success'
+    && needs.postgres_store.result == 'success'
+    && needs.postgres_integrations.result == 'success'
+    && needs.frontend.result == 'success'
+    && (needs.renderer.result == 'success'
+        || (github.event_name == 'pull_request'
+            && needs.renderer.result == 'skipped')) }}"
     );
 
     let triggers = plan.workflow().triggers().expect("on is required");

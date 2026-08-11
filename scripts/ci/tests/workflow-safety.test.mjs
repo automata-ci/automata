@@ -246,12 +246,8 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
 
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".github/workflows/ci.yml");
-  const verify = section(ci, "\n  verify:", "\n  frontend:");
-  const rustTests = section(
-    verify,
-    "      - name: Test\n",
-    "      - name: Check public API documentation",
-  );
+  const verify = section(ci, "\n  verify:", "\n  rust_tests:");
+  const rustTests = section(ci, "\n  rust_tests:", "\n  postgres_store:");
   const shellContracts = section(
     verify,
     "      - name: Lint workflows and shell scripts",
@@ -300,9 +296,10 @@ test("pull requests retain the distribution gate when renderer reproduction is s
   assert.match(renderer, /if: \$\{\{ github\.event_name != 'pull_request' \}\}/);
   assert.match(
     dist,
-    /needs:\n      - verify\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+    /needs:\n      - verify\n      - rust_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
   );
   assert.match(dist, /needs\.verify\.result == 'success'/);
+  assert.match(dist, /needs\.rust_tests\.result == 'success'/);
   assert.match(dist, /needs\.postgres_store\.result == 'success'/);
   assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);
   assert.match(dist, /needs\.frontend\.result == 'success'/);
