@@ -137,7 +137,9 @@ compatibility.
 
 ## Known work
 
-The immediate portability backlog is:
+The [durable Windows release roadmap](windows-release-roadmap.md) owns the
+control-plane, service, installer, recovery, and publication checklist. The
+immediate cross-platform backlog is:
 
 - keep native Windows builds warning-free and expand portable test coverage
   without disabling Windows-provider tests;

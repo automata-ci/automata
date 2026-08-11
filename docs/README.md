@@ -10,6 +10,7 @@ The quickest ways in are:
 | Build from source and inspect the interface | [Getting started](getting-started.md) |
 | Check support for a workflow feature | [Compatibility](compatibility.md) |
 | Check Linux, Windows, and macOS support | [Platform support](platform-support.md) |
+| Track the durable Windows release | [Windows release roadmap](windows-release-roadmap.md) |
 | Start the durable local composition | [Control-plane setup](deployment.md) |
 | Prepare an execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
 | Build, test, or change Automata | [Development](development.md) |
@@ -40,6 +41,8 @@ It does not connect to repositories or execute workflows.
   and the evidence required for broader claims.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
+- [Durable Windows release roadmap](windows-release-roadmap.md) tracks the
+  Windows control-plane, service, packaging, and release milestones.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
   describes the immutable runner image and its publication policy.
 - [React SSR UI](../ui/README.md) explains the build-time frontend and embedded
