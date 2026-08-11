@@ -5,8 +5,8 @@ use automata_ci_core::{
     ContextValue, JobRuntimeContext, OperationId, SecretBinding, WorkflowEventProvenance,
     WorkflowId,
 };
-use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_store::ResolveAuthenticatedWorkflowDispatchSource;
+use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadataV1,
     GithubWorkflowCompiler, GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsError,
@@ -259,7 +259,10 @@ impl GithubWorkflowDispatchService {
         request: DurableGithubWorkflowDispatchRequest,
     ) -> Result<WorkflowAdmissionResult, GithubWorkflowDispatchError> {
         if request.operation_id.as_uuid().is_nil()
-            || request.git_ref.strip_prefix("refs/").is_none_or(str::is_empty)
+            || request
+                .git_ref
+                .strip_prefix("refs/")
+                .is_none_or(str::is_empty)
             || !valid_text(&request.git_ref)
             || !valid_commit_sha(&request.commit_sha)
             || request

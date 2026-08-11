@@ -55,9 +55,9 @@ use automata_ci_store::{
     LogicalInstanceResultWorkerId, LogicalJobResultRepository, LogicalJobResultWorkerId,
     LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
-    LogicalWorkSelectionRepository, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
-    ProductBootstrapRepository as _, RepositoryPublicationRepository,
+    LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
+    PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
+    PostgresStoreError, ProductBootstrapRepository as _, RepositoryPublicationRepository,
     RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
     RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
     RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
@@ -106,11 +106,11 @@ use crate::app::{
         repository_secret_browser_router,
     },
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
-    workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
         SetupPageAvailabilityError, SetupPageAvailabilityState, WebData,
     },
+    workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
 };
 
 use super::human_auth::HumanAuthRuntime;
@@ -334,11 +334,10 @@ impl ProductionComponents {
                 Arc::new(GithubWorkflowPlanVerifier::new()),
             )
             .with_observer(Arc::new(metrics.clone()));
-            let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> = Arc::new(
-                OperationalWorkflowDispatchBackend::new(GithubWorkflowDispatchService::new(
-                    admission,
-                )),
-            );
+            let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> =
+                Arc::new(OperationalWorkflowDispatchBackend::new(
+                    GithubWorkflowDispatchService::new(admission),
+                ));
             let dispatch_clock: Arc<dyn Clock> = Arc::new(SystemClock);
             human.router = human.router.merge(workflow_dispatch_api_router(
                 dispatch_backend,

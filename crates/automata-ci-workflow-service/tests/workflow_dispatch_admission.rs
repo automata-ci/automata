@@ -190,7 +190,10 @@ async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
     let inputs = GithubWorkflowDispatchInputsV1::try_new([
         ("target", GithubWorkflowDispatchInputValue::from("test")),
         ("dry_run", GithubWorkflowDispatchInputValue::Boolean(false)),
-        ("note", GithubWorkflowDispatchInputValue::from("durable source")),
+        (
+            "note",
+            GithubWorkflowDispatchInputValue::from("durable source"),
+        ),
     ])
     .expect("bounded inputs");
     let request = DurableGithubWorkflowDispatchRequest::new(
@@ -219,10 +222,7 @@ async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
         OperationId::from_uuid(Uuid::from_u128(0x103)),
     );
     assert!(matches!(
-        harness
-            .service
-            .dispatch_from_durable_source(missing)
-            .await,
+        harness.service.dispatch_from_durable_source(missing).await,
         Err(GithubWorkflowDispatchError::DurableSourceNotFound)
     ));
     assert_eq!(harness.repository.source_calls.load(Ordering::SeqCst), 2);

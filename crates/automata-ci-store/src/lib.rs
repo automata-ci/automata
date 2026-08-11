@@ -232,11 +232,10 @@ pub use logical_materialization::{
 pub use logical_orchestration::{
     AdmitLogicalWorkflowRun, AdmitLogicalWorkflowRunBuilder, AdmittedLogicalWorkflowJob,
     AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    LOGICAL_ORCHESTRATION_SCHEMA,
-    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
-    ResolveAuthenticatedWorkflowDispatchSource,
+    LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ResolveAuthenticatedWorkflowDispatchSource,
 };
 pub use logical_run_finalization::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,

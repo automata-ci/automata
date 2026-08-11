@@ -4104,10 +4104,10 @@ impl GithubJobExecutor {
         );
         let Some(()) = reconcile_cancelled_operation(initialized, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
-        }
+        };
         let environment = add_command_file_environment(&execution.environment, &command_paths)?;
         let command = self.build_phase_command(attempt_id, &execution, environment)?;
-        let output = match endpoint
+        let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error);
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
