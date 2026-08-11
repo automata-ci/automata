@@ -73,7 +73,7 @@ impl WorkflowDispatchApiBackend for OperationalWorkflowDispatchBackend {
             .service
             .dispatch_from_durable_source(dispatch)
             .await
-            .map_err(classify_dispatch_error)?;
+            .map_err(|error| classify_dispatch_error(&error))?;
         WorkflowDispatchApiOutcome::new(
             result.receipt().run_id(),
             result.receipt().run_number(),
@@ -82,7 +82,7 @@ impl WorkflowDispatchApiBackend for OperationalWorkflowDispatchBackend {
     }
 }
 
-fn classify_dispatch_error(error: GithubWorkflowDispatchError) -> WorkflowDispatchApiBackendError {
+fn classify_dispatch_error(error: &GithubWorkflowDispatchError) -> WorkflowDispatchApiBackendError {
     match error {
         GithubWorkflowDispatchError::DurableSourceNotFound => {
             WorkflowDispatchApiBackendError::NotFound

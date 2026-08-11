@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fmt::{self, Write as _},
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, AtomicUsize, Ordering},

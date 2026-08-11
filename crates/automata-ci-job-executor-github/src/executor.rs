@@ -4851,33 +4851,6 @@ struct DecodedCommandFiles {
     artifacts: ArtifactDeclarationCommandFile,
 }
 
-fn decoded_step_commands(
-    parsed: Vec<ParsedCommandFile>,
-) -> Result<CompletedStepCommands, ExecutorAdapterError> {
-    let parsed: [ParsedCommandFile; COMMAND_FILE_KINDS.len()] = parsed
-        .try_into()
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-    let [
-        ParsedCommandFile::Environment(environment),
-        ParsedCommandFile::Output(output),
-        ParsedCommandFile::Path(path),
-        ParsedCommandFile::State(state),
-        ParsedCommandFile::StepSummary(summary),
-    ] = parsed
-    else {
-        return Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Internal,
-        ));
-    };
-    Ok(CompletedStepCommands::new(
-        environment,
-        output,
-        path,
-        state,
-        summary,
-    ))
-}
-
 #[derive(Default)]
 struct ExecutionAttachments {
     by_step: BTreeMap<String, RetainedStepAttachments>,

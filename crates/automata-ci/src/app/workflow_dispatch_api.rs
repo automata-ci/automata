@@ -577,12 +577,12 @@ mod tests {
 
     use super::*;
 
-    const REPOSITORY_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const REPOSITORY_ID: &str = "aaaaaaaa-1111-4111-8111-111111111111";
     const WORKFLOW_ID: &str = "22222222-2222-4222-8222-222222222222";
     const OPERATION_ID: &str = "33333333-3333-4333-8333-333333333333";
     const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-    const PATH: &str = "/api/v1/repositories/11111111-1111-4111-8111-111111111111/workflows/22222222-2222-4222-8222-222222222222/dispatches";
+    const PATH: &str = "/api/v1/repositories/aaaaaaaa-1111-4111-8111-111111111111/workflows/22222222-2222-4222-8222-222222222222/dispatches";
 
     #[derive(Debug)]
     struct FixedClock;
@@ -794,6 +794,8 @@ mod tests {
 
     #[tokio::test]
     async fn transport_and_target_bounds_fail_closed() {
+        let uppercase_repository_id = REPOSITORY_ID.to_ascii_uppercase();
+        assert_ne!(uppercase_repository_id, REPOSITORY_ID);
         let cases = [
             (
                 PATH.to_owned(),
@@ -820,7 +822,7 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (
-                PATH.replace(REPOSITORY_ID, &REPOSITORY_ID.to_uppercase()),
+                PATH.replace(REPOSITORY_ID, &uppercase_repository_id),
                 "application/json",
                 valid_body(),
                 StatusCode::BAD_REQUEST,

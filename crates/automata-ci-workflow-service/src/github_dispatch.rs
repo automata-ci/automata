@@ -313,7 +313,7 @@ impl GithubWorkflowDispatchService {
         if let Some(display_title) = request.display_title {
             dispatch = dispatch.with_display_title(display_title);
         }
-        self.dispatch(dispatch).await
+        Box::pin(self.dispatch(dispatch)).await
     }
 
     /// Validates the exact source contract and inputs, publishes canonical

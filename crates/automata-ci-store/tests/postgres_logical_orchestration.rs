@@ -2,20 +2,14 @@
 mod common;
 mod github_manifest_fixture;
 
-use automata_ci_auth::{
-    human::{PrincipalId, TenantId},
-    management::{ManagementActor, ManagementRevision},
-    session::SessionId,
-    time::UnixTimestamp,
-};
 use automata_ci_core::{
-    JobAuthorityProfile, OperationId, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
-    BindLogicalActivationPreparation, ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
+    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation,
+    ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
     EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
@@ -31,8 +25,7 @@ use automata_ci_store::{
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, ResolveAuthenticatedWorkflowDispatchSource, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderRepositoryVisibility, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
