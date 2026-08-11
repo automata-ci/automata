@@ -33,6 +33,10 @@ pub enum PodmanConfigurationError {
     /// The immutable service-proxy image was absent or failed local verification.
     #[error("configured service proxy helper is not locally available and verified")]
     ServiceProxyUnavailable,
+    /// `BuildKit` was configured without the attempt API or its exact local
+    /// image/runtime probe failed.
+    #[error("configured BuildKit runtime is not locally available and verified")]
+    BuildKitUnavailable,
 }
 
 /// Rejected explicit local state root.

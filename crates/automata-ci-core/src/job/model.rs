@@ -105,6 +105,7 @@ pub struct JobExecutionContext {
     git_ref: String,
     workspace: String,
     actor: Option<String>,
+    triggering_actor: Option<String>,
     run_id_alias: Option<RunIdAlias>,
     run_number: Option<u64>,
     run_attempt: Option<u32>,
@@ -127,6 +128,7 @@ impl JobExecutionContext {
             git_ref: git_ref.into(),
             workspace: workspace.into(),
             actor: None,
+            triggering_actor: None,
             run_id_alias: None,
             run_number: None,
             run_attempt: None,
@@ -139,6 +141,13 @@ impl JobExecutionContext {
     #[must_use]
     pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
         self.actor = Some(actor.into());
+        self
+    }
+
+    /// Attaches the current initiator while retaining the original run actor.
+    #[must_use]
+    pub fn with_triggering_actor(mut self, actor: impl Into<String>) -> Self {
+        self.triggering_actor = Some(actor.into());
         self
     }
 
@@ -185,6 +194,12 @@ impl JobExecutionContext {
     #[must_use]
     pub fn actor(&self) -> Option<&str> {
         self.actor.as_deref()
+    }
+
+    /// Returns the actor that initiated this physical attempt when available.
+    #[must_use]
+    pub fn triggering_actor(&self) -> Option<&str> {
+        self.triggering_actor.as_deref()
     }
 
     /// Returns the stable provider-compatible run alias when present.
@@ -496,6 +511,9 @@ fn validate_execution_context(context: &JobExecutionContext) -> Result<(), JobVa
     if let Some(actor) = &context.actor {
         validate_bounded_text(actor, "execution.actor")?;
     }
+    if let Some(actor) = &context.triggering_actor {
+        validate_bounded_text(actor, "execution.triggering_actor")?;
+    }
     if context.run_number == Some(0) {
         return Err(JobValidationError::ZeroRunNumber);
     }
@@ -561,7 +579,13 @@ fn validate_bounded_text(value: &str, field: &'static str) -> Result<(), JobVali
     Ok(())
 }
 
-fn canonical_git_ref(value: &str) -> bool {
+/// Returns whether a full Git ref obeys Git's portable canonical name grammar.
+///
+/// This validates general `refs/...` names. Product operations that accept a
+/// narrower namespace, such as manual dispatch, must additionally constrain
+/// the allowed prefix.
+#[must_use]
+pub fn canonical_git_ref(value: &str) -> bool {
     value.starts_with("refs/")
         && value != "refs/"
         && !value.ends_with(['/', '.'])

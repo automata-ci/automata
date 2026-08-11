@@ -33,6 +33,8 @@ fn configured_human_auth_args() -> automata_ci::cli::ServerArgs {
         "server",
         "--results-public-url",
         "https://results.example.test/",
+        "--runner-public-url",
+        "https://runner.example.test/",
         "--external-url",
         "https://ci.example.test/",
         "--github-client-id",
@@ -598,6 +600,8 @@ fn built_in_secret_provider_is_opt_in_and_loads_a_rotation_keyring() {
         "server",
         "--results-public-url",
         "https://results.example.test/",
+        "--runner-public-url",
+        "https://runner.example.test/",
         "--secret-encryption-key-source",
         &active_source,
         "--secret-encryption-key-id",
@@ -645,6 +649,57 @@ fn built_in_secret_provider_is_opt_in_and_loads_a_rotation_keyring() {
 }
 
 #[test]
+fn managed_secret_delivery_requires_one_exact_https_runner_origin() {
+    let arguments = [
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--secret-encryption-key-source",
+        "env:AUTOMATA_TEST_SECRET_KEK",
+    ];
+    let cli = Cli::try_parse_from(arguments).expect("server syntax");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::MissingRunnerPublicEndpoint)
+    ));
+
+    for invalid in [
+        "http://runner.example.test/",
+        "https://runner.example.test/private",
+        "https://identity@runner.example.test/",
+    ] {
+        let cli = Cli::try_parse_from(
+            arguments
+                .into_iter()
+                .chain(["--runner-public-url", invalid]),
+        )
+        .expect("runner URL syntax");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidRunnerPublicEndpoint)
+        ));
+    }
+
+    let cli = Cli::try_parse_from(
+        arguments
+            .into_iter()
+            .chain(["--runner-public-url", "https://runner.example.test:9443/"]),
+    )
+    .expect("runner URL syntax");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(ServerConfig::from_args(&args).is_ok());
+}
+
+#[test]
 fn built_in_secret_key_sources_are_redacted_exact_length_and_unique() {
     let marker = "AUTOMATA_SENSITIVE_OLD_SECRET_KEY";
     let versioned = VersionedSecretSource::from_str(&format!("old-key=env:{marker}"))
@@ -662,6 +717,8 @@ fn built_in_secret_key_sources_are_redacted_exact_length_and_unique() {
         "server",
         "--results-public-url",
         "https://results.example.test/",
+        "--runner-public-url",
+        "https://runner.example.test/",
         "--secret-encryption-key-source",
         &short_source,
     ])

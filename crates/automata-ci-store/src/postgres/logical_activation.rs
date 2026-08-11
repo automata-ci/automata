@@ -19,13 +19,37 @@ use crate::{
     LogicalActivationPublicationReceipt, LogicalActivationRepository, LogicalActivationStoreError,
     LogicalWorkflowInvocationId, MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS, ObjectKey,
     PublishLogicalJobActivation, RenewLogicalJobActivation, RenewedLogicalJobActivation,
-    RepositoryId, SelectedLogicalJobOrchestration, StoreError, TenantScope,
-    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
+    RepositoryId, ReusableWorkflowPermissionSnapshot, ReusableWorkflowRuntimeStoreError,
+    SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicyPin,
+    WorkflowRuntimePolicyRevision,
 };
 
 #[allow(clippy::too_many_lines)] // The trait transaction keeps its security-relevant lock order visible.
 #[async_trait]
 impl LogicalActivationRepository for PostgresStore {
+    async fn reusable_workflow_permission_snapshot(
+        &self,
+        tenant: &TenantScope,
+        run_id: RunId,
+        invocation_id: LogicalWorkflowInvocationId,
+    ) -> Result<Option<ReusableWorkflowPermissionSnapshot>, LogicalActivationStoreError> {
+        super::reusable_workflow_runtime::load_published_permission_snapshot(
+            self,
+            tenant,
+            run_id,
+            invocation_id,
+        )
+        .await
+        .map_err(|error| match error {
+            ReusableWorkflowRuntimeStoreError::Store(error) => {
+                LogicalActivationStoreError::Store(error)
+            }
+            _ => LogicalActivationStoreError::Store(StoreError::corrupt_data(
+                "reusable permission lookup returned an invalid state",
+            )),
+        })
+    }
+
     async fn renew_logical_job_activation(
         &self,
         request: RenewLogicalJobActivation,
@@ -898,7 +922,9 @@ async fn lock_active_activation_graph(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND marker.root_invocation_id = $2
+               AND automata_workflow_plan_v2_invocation_published(
+                   marker.run_id, $2
+               )
         FROM workflow_plan_v2_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
@@ -967,7 +993,9 @@ fn claim_target_query() -> &'static str {
            job.logical_key, job.source_order,
            job.execution_kind, job.created_at_ms,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_id_alias, run.run_number, run.run_attempt,
+           run.triggering_actor,
+           run.public_run_id_alias AS run_id_alias,
+           run.run_number, run.run_attempt,
            invocation.plan_digest, invocation.plan_object_key,
            invocation.plan_size_bytes, invocation.plan_media_type,
            run.event_digest, run.event_object_key, run.event_size_bytes,
@@ -1209,10 +1237,12 @@ async fn decode_claimed(
     let workflow_name: String = row.try_get("workflow_name").map_err(operation_error)?;
     let git_ref: String = row.try_get("git_ref").map_err(operation_error)?;
     let actor: Option<String> = row.try_get("actor").map_err(operation_error)?;
+    let triggering_actor: Option<String> =
+        row.try_get("triggering_actor").map_err(operation_error)?;
     let run_id_alias: i64 = row.try_get("run_id_alias").map_err(operation_error)?;
     let run_number: i64 = row.try_get("run_number").map_err(operation_error)?;
     let run_attempt: i32 = row.try_get("run_attempt").map_err(operation_error)?;
-    let execution = LogicalActivationExecutionContext::new(
+    let mut execution = LogicalActivationExecutionContext::new(
         WorkflowId::from_uuid(workflow_id),
         workflow_name,
         git_ref,
@@ -1228,6 +1258,11 @@ async fn decode_claimed(
             .map_err(|_| StoreError::corrupt_data("invalid durable workflow run attempt"))?,
     )
     .map_err(|_| StoreError::corrupt_data("invalid durable activation execution metadata"))?;
+    if let Some(triggering_actor) = triggering_actor {
+        execution = execution
+            .with_triggering_actor(triggering_actor)
+            .map_err(|_| StoreError::corrupt_data("invalid durable triggering actor"))?;
+    }
     let plan = decode_admission_object(
         row,
         "plan_digest",

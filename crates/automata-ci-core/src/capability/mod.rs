@@ -21,6 +21,8 @@ pub use matching::{RequirementMismatch, RequirementMismatches, ResourceKind};
 pub use platform::{Architecture, IsolationLevel, OperatingSystem, RunnerPlatform};
 pub use requirement::{RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunnerRequirements};
 pub use resource::{
-    ContainerCapabilities, ResourceCapacity, ResourceRequirements, SandboxCapabilities,
+    ContainerCapabilities, JobResourceAllocation, JobResourcePolicy, ResourceAllocationError,
+    ResourceCapacity, ResourcePolicyError, ResourceQuantityError, ResourceRequirements,
+    SandboxCapabilities, parse_cpu_quantity, parse_storage_quantity,
 };
 pub use selector::{RunnerGroup, RunnerLabel, SelectorError};

@@ -31,6 +31,7 @@
 mod changed_files;
 mod checks_publisher;
 mod processor;
+mod schedule;
 mod service;
 mod worker;
 
@@ -57,6 +58,15 @@ pub use service::{
     GithubDeliverySourceCredentialValueError, GithubServerServiceCredentialRelease,
 };
 
+pub use schedule::{
+    GithubScheduleClock, GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
+    GithubScheduleServiceConfig, GithubScheduleServiceConfigurationError,
+    GithubScheduleServiceError, GithubScheduleServicePass, GithubScheduleSourceCredential,
+    GithubScheduleSourceCredentialProvider, GithubScheduleSourceCredentialProviderError,
+    GithubScheduleSourceCredentialRequest, GithubScheduleSourceCredentialValueError,
+    SystemGithubScheduleClock,
+};
+
 pub use worker::{
     GithubDeliveryClaimSnapshot, GithubDeliveryEventWorkflowRequest, GithubDeliverySourceAuthority,
     GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
@@ -78,13 +88,15 @@ use automata_ci_github::{
     VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
-    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubCheckHeadSha,
-    GithubProviderWebhookVerifierFingerprint, GithubServerServiceRevision,
+    AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
+    AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEventKind,
+    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubProviderWebhookVerifierFingerprint,
+    GithubRepositoryDispatchEvidenceRepository, GithubServerServiceRevision,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
+    ProviderConnectionId, ProviderDeliveryIdentity, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, TenantScope,
 };
 use bytes::Bytes;
 use http::HeaderMap;
@@ -122,6 +134,7 @@ pub struct GithubDeliveryConnection {
     repository_visibility: ProviderRepositoryVisibility,
     repository_owner: Box<str>,
     repository_name: Box<str>,
+    default_branch_ref: Option<Box<str>>,
 }
 
 impl GithubDeliveryConnection {
@@ -158,7 +171,25 @@ impl GithubDeliveryConnection {
             repository_visibility,
             repository_owner,
             repository_name,
+            default_branch_ref: None,
         })
+    }
+
+    /// Binds the configured full default-branch ref used by custom dispatches.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-branch, control-bearing, empty, or excessive full ref.
+    pub fn with_default_branch_ref(
+        mut self,
+        default_branch_ref: impl Into<Box<str>>,
+    ) -> Result<Self, GithubDeliveryConfigurationError> {
+        let default_branch_ref = default_branch_ref.into();
+        if !valid_default_branch_ref(&default_branch_ref) {
+            return Err(GithubDeliveryConfigurationError::InvalidDefaultBranchRef);
+        }
+        self.default_branch_ref = Some(default_branch_ref);
+        Ok(self)
     }
 
     /// Returns the authenticated tenant scope bound to this connection.
@@ -209,6 +240,12 @@ impl GithubDeliveryConnection {
         &self.repository_name
     }
 
+    /// Returns the configured full default-branch ref when dispatch is enabled.
+    #[must_use]
+    pub fn default_branch_ref(&self) -> Option<&str> {
+        self.default_branch_ref.as_deref()
+    }
+
     fn matches_selected(
         &self,
         push: &VerifiedGithubPush,
@@ -230,7 +267,12 @@ impl GithubDeliveryConnection {
             event.installation_id().get(),
             event.repository(),
             signed_repository_owner_id,
-        )
+        ) && match event {
+            VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
+                self.default_branch_ref() == Some(dispatch.git_ref())
+            }
+            _ => true,
+        }
     }
 
     fn matches_repository(
@@ -273,6 +315,7 @@ impl fmt::Debug for GithubDeliveryConnection {
             .field("repository_visibility", &self.repository_visibility)
             .field("repository_owner", &"[redacted]")
             .field("repository_name", &"[redacted]")
+            .field("default_branch_ref", &"[redacted]")
             .finish()
     }
 }
@@ -292,6 +335,9 @@ pub enum GithubDeliveryConfigurationError {
     /// The configured owner or repository name is not canonical.
     #[error("the configured GitHub repository identity is invalid")]
     InvalidRepositoryIdentity,
+    /// The configured default branch is not a bounded full branch ref.
+    #[error("the configured GitHub default-branch ref is invalid")]
+    InvalidDefaultBranchRef,
     /// More than one entry used the same server-owned connection identity.
     #[error("the GitHub delivery connection identity is duplicated")]
     DuplicateConnectionId,
@@ -354,6 +400,34 @@ impl AcceptedGithubDelivery {
     }
 }
 
+/// Durable pre-resolution receipt for one authenticated custom dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedGithubRepositoryDispatch {
+    receipt: PendingGithubRepositoryDispatchReceipt,
+    request_digest: Sha256Digest,
+    raw_event: AdmissionObject,
+}
+
+impl AcceptedGithubRepositoryDispatch {
+    /// Returns the exact manifest and least-authority pins accepted durably.
+    #[must_use]
+    pub const fn receipt(&self) -> &PendingGithubRepositoryDispatchReceipt {
+        &self.receipt
+    }
+
+    /// Returns the canonical digest of all verified request evidence.
+    #[must_use]
+    pub const fn request_digest(&self) -> Sha256Digest {
+        self.request_digest
+    }
+
+    /// Returns the immutable descriptor of the authenticated raw JSON.
+    #[must_use]
+    pub const fn raw_event(&self) -> &AdmissionObject {
+        &self.raw_event
+    }
+}
+
 /// Verified GitHub webhook ingress backed by immutable object and inbox ports.
 pub struct GithubDeliveryIngress {
     verifier: GithubWebhookVerifier,
@@ -363,6 +437,7 @@ pub struct GithubDeliveryIngress {
     connection_by_selector: BTreeMap<(ProviderInstallationId, ProviderRepositoryId), usize>,
     objects: Arc<dyn ImmutableBlobStore>,
     deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+    repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
     clock: Arc<dyn GithubDeliveryClock>,
 }
 
@@ -380,9 +455,59 @@ impl GithubDeliveryIngress {
     pub fn new(
         verifier: GithubWebhookVerifier,
         verifier_revision: GithubServerServiceRevision,
+        connections: Vec<GithubDeliveryConnection>,
+        objects: Arc<dyn ImmutableBlobStore>,
+        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+        clock: Arc<dyn GithubDeliveryClock>,
+    ) -> Result<Self, GithubDeliveryConfigurationError> {
+        Self::build(
+            verifier,
+            verifier_revision,
+            connections,
+            objects,
+            deliveries,
+            None,
+            clock,
+        )
+    }
+
+    /// Constructs an ingress with durable custom-dispatch pre-resolution.
+    ///
+    /// The dedicated repository-dispatch port is narrow: it persists signed
+    /// event evidence and authority pins but cannot expose credentials or make
+    /// provider API calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded registry errors as [`Self::new`].
+    pub fn new_with_repository_dispatch(
+        verifier: GithubWebhookVerifier,
+        verifier_revision: GithubServerServiceRevision,
+        connections: Vec<GithubDeliveryConnection>,
+        objects: Arc<dyn ImmutableBlobStore>,
+        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+        clock: Arc<dyn GithubDeliveryClock>,
+    ) -> Result<Self, GithubDeliveryConfigurationError> {
+        Self::build(
+            verifier,
+            verifier_revision,
+            connections,
+            objects,
+            deliveries,
+            Some(repository_dispatches),
+            clock,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        verifier: GithubWebhookVerifier,
+        verifier_revision: GithubServerServiceRevision,
         mut connections: Vec<GithubDeliveryConnection>,
         objects: Arc<dyn ImmutableBlobStore>,
         deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+        repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
         clock: Arc<dyn GithubDeliveryClock>,
     ) -> Result<Self, GithubDeliveryConfigurationError> {
         if connections.is_empty() {
@@ -437,6 +562,7 @@ impl GithubDeliveryIngress {
             connection_by_selector,
             objects,
             deliveries,
+            repository_dispatches,
             clock,
         })
     }
@@ -576,6 +702,98 @@ impl GithubDeliveryIngress {
         headers: &HeaderMap,
         raw_body: Bytes,
     ) -> Result<AcceptedGithubDelivery, GithubDeliveryIngressError> {
+        let selected = self.authenticate_and_select_event(headers, raw_body)?;
+        if matches!(
+            &selected.event,
+            VerifiedGithubWebhook::RepositoryDispatch(_)
+        ) {
+            return Err(GithubDeliveryIngressError::InvariantViolation);
+        }
+        let connection = self.selected_connection(selected.connection_index)?;
+        let event_coordinates = authenticated_event_coordinates(&selected.event)?;
+        let prepared = self
+            .persist_authenticated_event(headers, &selected, connection)
+            .await?;
+        let request = AcceptManifestPinnedGithubDelivery::new_authenticated_event_v1(
+            prepared.delivery,
+            selected.signed_repository_owner_id,
+            connection.repository_owner_id,
+            event_coordinates.event,
+            event_coordinates.head_sha,
+            self.verifier_fingerprint,
+            self.verifier_revision,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let receipt = self
+            .deliveries
+            .accept_manifest_pinned_github_delivery(request)
+            .await
+            .map_err(|error| GithubDeliveryIngressError::from_subject_store(&error))?;
+        Ok(AcceptedGithubDelivery {
+            receipt,
+            request_digest: prepared.request_digest,
+            raw_event: prepared.raw_event,
+        })
+    }
+
+    /// Authenticates and durably pins one custom repository dispatch.
+    ///
+    /// No mutable branch lookup occurs at ingress. The accepted row carries
+    /// the exact default-branch ref and least-authority selector; a claimed
+    /// worker must bind an immutable commit before it can create a run.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the dedicated store is absent, the event is not a
+    /// repository dispatch, or its signed default branch differs from the
+    /// connection's configured full ref. Other errors match [`Self::accept`].
+    pub async fn accept_repository_dispatch(
+        &self,
+        headers: &HeaderMap,
+        raw_body: Bytes,
+    ) -> Result<AcceptedGithubRepositoryDispatch, GithubDeliveryIngressError> {
+        let repository_dispatches = self
+            .repository_dispatches
+            .as_ref()
+            .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        let selected = self.authenticate_and_select_event(headers, raw_body)?;
+        let VerifiedGithubWebhook::RepositoryDispatch(dispatch) = &selected.event else {
+            return Err(GithubDeliveryIngressError::InvariantViolation);
+        };
+        let connection = self.selected_connection(selected.connection_index)?;
+        let event = GithubAuthenticatedEventV1::new(
+            GithubAuthenticatedEventKind::RepositoryDispatch,
+            dispatch.git_ref(),
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let prepared = self
+            .persist_authenticated_event(headers, &selected, connection)
+            .await?;
+        let request = AcceptManifestPinnedGithubRepositoryDispatch::new(
+            prepared.delivery,
+            selected.signed_repository_owner_id,
+            connection.repository_owner_id,
+            event,
+            self.verifier_fingerprint,
+            self.verifier_revision,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let receipt = repository_dispatches
+            .accept_manifest_pinned_github_repository_dispatch(request)
+            .await
+            .map_err(|error| GithubDeliveryIngressError::from_subject_store(&error))?;
+        Ok(AcceptedGithubRepositoryDispatch {
+            receipt,
+            request_digest: prepared.request_digest,
+            raw_event: prepared.raw_event,
+        })
+    }
+
+    fn authenticate_and_select_event(
+        &self,
+        headers: &HeaderMap,
+        raw_body: Bytes,
+    ) -> Result<SelectedAuthenticatedGithubEvent, GithubDeliveryIngressError> {
         let event = self
             .verifier
             .authenticate(headers, raw_body)
@@ -593,19 +811,37 @@ impl GithubDeliveryIngress {
             .get(&(installation_id, repository_id))
             .copied()
             .ok_or(GithubDeliveryIngressError::ConfiguredIdentityMismatch)?;
-        let connection = self
-            .connections
-            .get(connection_index)
-            .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        let connection = self.selected_connection(connection_index)?;
         if !connection.matches_selected_event(&event, signed_repository_owner_id) {
             return Err(GithubDeliveryIngressError::ConfiguredIdentityMismatch);
         }
+        Ok(SelectedAuthenticatedGithubEvent {
+            event,
+            connection_index,
+            signed_repository_owner_id,
+        })
+    }
 
+    fn selected_connection(
+        &self,
+        index: usize,
+    ) -> Result<&GithubDeliveryConnection, GithubDeliveryIngressError> {
+        self.connections
+            .get(index)
+            .ok_or(GithubDeliveryIngressError::InvariantViolation)
+    }
+
+    async fn persist_authenticated_event(
+        &self,
+        headers: &HeaderMap,
+        selected: &SelectedAuthenticatedGithubEvent,
+        connection: &GithubDeliveryConnection,
+    ) -> Result<PreparedAuthenticatedGithubEvent, GithubDeliveryIngressError> {
         let accepted_at = self.clock.now();
         if accepted_at.get() < 0 {
             return Err(GithubDeliveryIngressError::InvalidTrustedTime);
         }
-        let repository_visibility = provider_visibility(event.repository().visibility());
+        let repository_visibility = provider_visibility(selected.event.repository().visibility());
         let repository = ProviderRepositoryCoordinates::new(
             connection.repository_id,
             repository_visibility,
@@ -618,23 +854,23 @@ impl GithubDeliveryIngress {
             connection.connection_id,
             connection.installation_id,
             repository,
-            event.delivery_id(),
+            selected.event.delivery_id(),
         )
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let event_coordinates = authenticated_event_coordinates(&event)?;
         let request_digest = canonical_event_v1_request_digest(
             headers,
-            &event,
+            &selected.event,
             &identity,
-            signed_repository_owner_id,
+            selected.signed_repository_owner_id,
         )?;
-        let body_digest = Sha256Digest::from_bytes(*event.body_sha256().as_bytes());
+        let body_digest = Sha256Digest::from_bytes(*selected.event.body_sha256().as_bytes());
         let object_key = format!("{RAW_EVENT_V1_OBJECT_KEY_PREFIX}/{body_digest}.json");
         let blob_key = BlobKey::new(object_key.clone())
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         let media_type = MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE)
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let payload = BlobPayload::from_bytes(blob_key, media_type, event.raw_body().clone());
+        let payload =
+            BlobPayload::from_bytes(blob_key, media_type, selected.event.raw_body().clone());
         if payload.descriptor().digest() != body_digest {
             return Err(GithubDeliveryIngressError::InvariantViolation);
         }
@@ -642,12 +878,11 @@ impl GithubDeliveryIngress {
             .put_if_absent(payload)
             .await
             .map_err(|error| GithubDeliveryIngressError::RawObject { kind: error.kind() })?;
-
         let raw_event = AdmissionObject::new_event(
             body_digest,
             ObjectKey::new(object_key)
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
-            u64::try_from(event.raw_body().len())
+            u64::try_from(selected.event.raw_body().len())
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
             GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
         )
@@ -655,27 +890,24 @@ impl GithubDeliveryIngress {
         let delivery =
             AcceptProviderDelivery::new(identity, request_digest, raw_event.clone(), accepted_at)
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let request = AcceptManifestPinnedGithubDelivery::new_authenticated_event_v1(
+        Ok(PreparedAuthenticatedGithubEvent {
             delivery,
-            signed_repository_owner_id,
-            connection.repository_owner_id,
-            event_coordinates.event,
-            event_coordinates.head_sha,
-            self.verifier_fingerprint,
-            self.verifier_revision,
-        )
-        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let receipt = self
-            .deliveries
-            .accept_manifest_pinned_github_delivery(request)
-            .await
-            .map_err(|error| GithubDeliveryIngressError::from_subject_store(&error))?;
-        Ok(AcceptedGithubDelivery {
-            receipt,
             request_digest,
             raw_event,
         })
     }
+}
+
+struct SelectedAuthenticatedGithubEvent {
+    event: VerifiedGithubWebhook,
+    connection_index: usize,
+    signed_repository_owner_id: ProviderRepositoryOwnerId,
+}
+
+struct PreparedAuthenticatedGithubEvent {
+    delivery: AcceptProviderDelivery,
+    request_digest: Sha256Digest,
+    raw_event: AdmissionObject,
 }
 
 impl fmt::Debug for GithubDeliveryIngress {
@@ -690,6 +922,10 @@ impl fmt::Debug for GithubDeliveryIngress {
             .field("selector_count", &self.connection_by_selector.len())
             .field("objects", &"[immutable blob store]")
             .field("deliveries", &"[provider delivery repository]")
+            .field(
+                "repository_dispatches",
+                &self.repository_dispatches.as_ref().map(|_| "[configured]"),
+            )
             .field("clock", &self.clock)
             .finish()
     }
@@ -972,6 +1208,30 @@ fn validate_repository_component(value: &str) -> Result<(), GithubDeliveryConfig
         return Err(GithubDeliveryConfigurationError::InvalidRepositoryIdentity);
     }
     Ok(())
+}
+
+fn valid_default_branch_ref(value: &str) -> bool {
+    let Some(branch) = value.strip_prefix("refs/heads/") else {
+        return false;
+    };
+    value.len() <= 1_024
+        && !(branch.is_empty()
+            || branch == "@"
+            || branch.starts_with(['-', '/', '.'])
+            || branch.ends_with(['/', '.'])
+            || branch.contains("..")
+            || branch.contains("@{")
+            || branch.contains("//")
+            || branch.split('/').any(|component| {
+                component.is_empty()
+                    || component.starts_with('.')
+                    || component.as_bytes().ends_with(b".lock")
+            })
+            || branch.chars().any(|character| {
+                character.is_control()
+                    || character.is_whitespace()
+                    || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+            }))
 }
 
 fn has_ascii_case_insensitive_suffix(value: &str, suffix: &str) -> bool {

@@ -4,6 +4,7 @@ mod composition;
 mod config;
 mod context;
 mod files;
+mod managed_secret_delivery;
 mod metrics;
 mod profile_admission;
 mod resource_metrics;

@@ -13,19 +13,19 @@ use automata_ci_core::{
     ResourceCapacity, RunId, RunValueTemplates, RunnerCapabilities, RunnerFeature, RunnerGroup,
     RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
     RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxCapabilities, SandboxFeature,
-    SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel,
-    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, UnixMillis, ValueSource,
-    ValueTemplate, VolumeMount, WorkflowId,
+    SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation,
+    StepAnnotationLevel, StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol,
+    UnixMillis, ValueSource, ValueTemplate, VolumeMount, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobResultMessage, JobRuntimeAuthorities, JobRuntimeAuthority,
     JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
-    LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch, MessageHeader,
-    NegotiatedSession, NoWork, OperationAck, RemoteErrorCode, RunnerHello, RunnerSlotOrdinal,
-    RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
-    SessionDisposition, SessionResume,
+    LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
+    ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, NoWork, OperationAck,
+    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential,
+    RuntimeAuthorityEndpoint, RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
+    ServerHello, ServerTiming, ServerToRunner, SessionDisposition, SessionResume,
 };
 use uuid::Uuid;
 
@@ -110,11 +110,7 @@ pub fn runner_messages() -> Vec<(&'static str, RunnerToServer)> {
 
 pub fn server_messages() -> Vec<(&'static str, ServerToRunner)> {
     let attempt_id = attempt_id(30);
-    let runner_id = runner_id(1);
-    let lease = active_lease(attempt_id, runner_id);
-    let guard = lease.guard();
-    let job = rich_job();
-    let authorities = runtime_authorities(&job, &lease);
+    let guard = active_lease(attempt_id, runner_id(1)).guard();
     vec![
         (
             "hello",
@@ -143,13 +139,7 @@ pub fn server_messages() -> Vec<(&'static str, ServerToRunner)> {
         ),
         (
             "lease_offer",
-            ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
-                command_header(55, 1),
-                slot(),
-                lease,
-                job,
-                authorities,
-            ))),
+            ServerToRunner::LeaseOffer(Box::new(lease_offer_with_job(rich_job()))),
         ),
         (
             "lease_renewal",
@@ -295,6 +285,10 @@ fn environment_profile() -> EnvironmentProfile {
 }
 
 pub fn rich_job() -> JobIrEnvelope {
+    rich_job_with_requirements(rich_requirements())
+}
+
+pub fn rich_job_with_requirements(requirements: RunnerRequirements) -> JobIrEnvelope {
     let step_environment = rich_environment();
     let container = rich_container("ghcr.io/example/build@sha256:0123456789abcdef")
         .with_credentials(ContainerCredentials::new(
@@ -305,7 +299,7 @@ pub fn rich_job() -> JobIrEnvelope {
         job_id(21),
         run_id(20),
         "verify",
-        rich_requirements(),
+        requirements,
         JobInstanceIdentity::new("verify", 0, 1, Sha256Digest::from_bytes([0xb6; 32]))
             .expect("valid instance"),
         false,
@@ -351,6 +345,35 @@ pub fn rich_job() -> JobIrEnvelope {
         .with_run_attempt(2),
         job,
     )
+}
+
+pub fn lease_offer_with_job(job: JobIrEnvelope) -> LeaseOffer {
+    let lease = active_lease(attempt_id(30), runner_id(1));
+    let authorities = runtime_authorities(&job, &lease);
+    LeaseOffer::new(command_header(55, 1), slot(), lease, job, authorities)
+}
+
+pub fn managed_secret_overlay(lease: &Lease) -> ManagedSecretBindingOverlay {
+    ManagedSecretBindingOverlay::new(
+        lease,
+        [
+            (
+                "DATABASE_TOKEN".to_owned(),
+                SecretBinding::new("00000000-0000-4000-8000-000000000001")
+                    .expect("valid grant")
+                    .with_version_id("00000000-0000-4000-8000-000000000011")
+                    .expect("valid version"),
+            ),
+            (
+                "REGISTRY_TOKEN".to_owned(),
+                SecretBinding::new("00000000-0000-4000-8000-000000000002")
+                    .expect("valid grant")
+                    .with_version_id("00000000-0000-4000-8000-000000000012")
+                    .expect("valid version"),
+            ),
+        ],
+    )
+    .expect("valid managed-secret overlay")
 }
 
 fn rich_requirements() -> RunnerRequirements {

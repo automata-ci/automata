@@ -26,7 +26,8 @@ use automata_ci_runner_runtime::{
 };
 use automata_ci_runner_spool::{FileSpool, FileSpoolOptions};
 use automata_ci_runner_transport::{
-    HyperRunnerControlClient, RunnerControlClient, TransportLimits,
+    HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
+    RunnerEphemeralClient, TransportLimits,
 };
 #[cfg(not(target_os = "linux"))]
 use automata_ci_sandbox_podman::PodmanLaunchTrust;
@@ -49,6 +50,7 @@ mod podman_process_trust;
 #[cfg(target_os = "linux")]
 use podman_process_trust::PodmanProcessTrust;
 
+use super::managed_secret_delivery::ManagedSecretJobExecutor;
 #[cfg(not(target_os = "linux"))]
 use super::state::RuntimeMountSnapshot;
 use super::{
@@ -328,7 +330,7 @@ fn mark_admitted_composition_ready(config: &RunnerProductConfig, composition: &R
     }
 }
 
-fn compose(
+fn compose_podman(
     config: &RunnerProductConfig,
     prepared: &PreparedProvider,
     cancellation: &crate::podman_probe::ProbeCancellation,
@@ -344,7 +346,17 @@ fn compose(
         .metrics()
         .map(|_| RunnerMetrics::new(config.inventory().max_parallel_jobs(), runner_cgroup))
         .transpose()
-        .map_err(RunnerProductError::MetricsConfiguration)?;
+        .map_err(RunnerProductError::MetricsConfiguration)
+}
+
+fn compose_with_provider(
+    config: &RunnerProductConfig,
+    provider: Arc<dyn automata_ci_execution::SandboxProvider>,
+    metrics: Option<RunnerMetrics>,
+    cancellation: &crate::podman_probe::ProbeCancellation,
+    service_proxy_configured: bool,
+    revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
+) -> Result<Option<RunnerComposition>, RunnerProductError> {
     let protocol_limits = ProtocolLimits::default();
     let tls = load_client_tls(config.tls())?;
     let transport = match &metrics {
@@ -367,6 +379,11 @@ fn compose(
         transport = metrics.instrument_control(transport);
     }
     let control = Arc::new(TransportControlClientAdapter::new(transport));
+    let ephemeral: Arc<dyn RunnerEphemeralClient> = Arc::new(HyperRunnerEphemeralClient::new(
+        config.control_endpoint(),
+        &tls,
+        TransportLimits::default(),
+    )?);
 
     let journal_options = metrics
         .as_ref()
@@ -406,7 +423,7 @@ fn compose(
         }
     };
     after_admitted_value(runtime_inventory, |runtime_inventory| {
-        let executor = build_executor(config, provider)?;
+        let executor = build_executor(config, provider, ephemeral)?;
         let runtime_config = RunnerRuntimeConfig::new(
             runtime_inventory,
             protocol_limits,
@@ -447,7 +464,8 @@ fn build_admitted_runtime_inventory(
     config: &RunnerProductConfig,
     provider: &dyn automata_ci_execution::SandboxProvider,
     cancellation: &crate::podman_probe::ProbeCancellation,
-    podman_options: &PodmanOptions,
+    service_proxy_configured: bool,
+    revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
 ) -> Result<Option<RunnerCapabilities>, RunnerProductError> {
     let admission = admit_configured_environment_profiles(config, provider, cancellation);
     after_profile_admission(admission, || {
@@ -727,6 +745,7 @@ fn build_windows_provider(
 fn build_executor(
     config: &RunnerProductConfig,
     provider: Arc<dyn automata_ci_execution::SandboxProvider>,
+    ephemeral: Arc<dyn RunnerEphemeralClient>,
 ) -> Result<Arc<dyn JobExecutor>, RunnerProductError> {
     let blobs = build_object_store(config)?;
     let action_preparer = build_action_preparer(config, Arc::clone(&blobs))?;
@@ -753,22 +772,27 @@ fn build_executor(
         config.executor().maximum_output_bytes(),
         config.executor().runner_root().clone(),
     )?;
-    Ok(Arc::new(GithubJobExecutor::new(
+    let executor = Arc::new(GithubJobExecutor::new(
         executor_config,
         GithubJobExecutorPorts::new(
             provider,
             environments,
             action_preparer,
             job_content,
-            // JobIR currently carries only opaque references, not job-scoped
-            // values. Fail closed until the control protocol provides a
-            // credential authority instead of inventing runner-global data.
+            // The reusable base stays secretless. ManagedSecretJobExecutor
+            // replaces this port only on one verified execution.
             Arc::new(NoSecrets),
             contexts,
             toolchain,
             Arc::new(DeterministicOperationIds),
             Arc::new(SystemExecutionClock),
         ),
+    ));
+    Ok(Arc::new(ManagedSecretJobExecutor::new(
+        config.runner_id(),
+        executor,
+        ephemeral,
+        Arc::new(automata_ci_auth::secret::SystemSecureRandom),
     )))
 }
 

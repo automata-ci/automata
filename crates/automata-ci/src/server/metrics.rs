@@ -815,6 +815,53 @@ impl ControlSemanticMetrics {
                     .get_or_create(&RunnerTransportByteLabels { route, direction });
             }
         }
+        let route = "ephemeral_secrets";
+        self.preinitialize_transport_request(route, "cancelled", "cancelled");
+        for (stage, outcomes) in [
+            (
+                "head",
+                &[
+                    "http_version",
+                    "method",
+                    "not_found",
+                    "unsupported_media_type",
+                    "length_required",
+                    "invalid_content_length",
+                    "body_too_large",
+                ][..],
+            ),
+            (
+                "authentication",
+                &["untrusted", "expired", "unavailable", "timeout"][..],
+            ),
+            (
+                "body",
+                &["too_large", "invalid", "transport", "timeout"][..],
+            ),
+            (
+                "application",
+                &[
+                    "forbidden",
+                    "conflict",
+                    "unavailable",
+                    "internal",
+                    "timeout",
+                ][..],
+            ),
+            ("response", &["too_large", "success"][..]),
+        ] {
+            for outcome in outcomes {
+                self.preinitialize_transport_request(route, stage, outcome);
+            }
+        }
+        self.runner_transport_in_flight
+            .get_or_create(&RunnerTransportRouteLabels { route })
+            .set(0);
+        for direction in ["request", "response"] {
+            let _ = self
+                .runner_transport_bytes
+                .get_or_create(&RunnerTransportByteLabels { route, direction });
+        }
     }
 
     fn preinitialize_transport_request(
@@ -2275,6 +2322,7 @@ const fn runner_transport_route(route: RunnerTransportRoute) -> &'static str {
         RunnerTransportRoute::Unknown => "unknown",
         RunnerTransportRoute::Handshake => "handshake",
         RunnerTransportRoute::Sync => "sync",
+        RunnerTransportRoute::EphemeralSecrets => "ephemeral_secrets",
     }
 }
 
@@ -2393,7 +2441,7 @@ mod tests {
             .exporter()
             .encode_openmetrics()
             .expect("OpenMetrics exposition");
-        assert_eq!(openmetrics_histogram_label_sets(exposition.as_str()), 137);
+        assert_eq!(openmetrics_histogram_label_sets(exposition.as_str()), 143);
     }
 
     fn openmetrics_histogram_label_sets(exposition: &str) -> usize {

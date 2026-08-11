@@ -545,6 +545,7 @@ fn event_name(event: &EventName) -> &str {
         EventName::Push => "push",
         EventName::PullRequest => "pull_request",
         EventName::MergeGroup => "merge_group",
+        EventName::RepositoryDispatch => "repository_dispatch",
         EventName::WorkflowDispatch => "workflow_dispatch",
         EventName::Schedule => "schedule",
         EventName::WorkflowCall => "workflow_call",
@@ -561,6 +562,9 @@ fn reject_unsupported_trigger(
             context.reject_extensions(filter.extensions());
         }
         TriggerConfiguration::MergeGroup(filter) => {
+            context.reject_extensions(filter.extensions());
+        }
+        TriggerConfiguration::RepositoryDispatch(filter) => {
             context.reject_extensions(filter.extensions());
         }
         TriggerConfiguration::Preserved(node) => context.unsupported(

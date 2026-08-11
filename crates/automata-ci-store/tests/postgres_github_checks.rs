@@ -118,6 +118,23 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
     .await?;
     sqlx::query(
         r"
+        CREATE TABLE github_schedule_check_evidence (
+            github_check_subject_id UUID PRIMARY KEY,
+            schedule_fire_id UUID NOT NULL,
+            tenant_id TEXT NOT NULL,
+            repository_id UUID NOT NULL,
+            provider_connection_id UUID NOT NULL,
+            checks_authority_id UUID NOT NULL,
+            checks_authority_identity_digest BYTEA NOT NULL,
+            checks_authority_app_configuration_revision BIGINT NOT NULL,
+            checks_authority_policy_revision BIGINT NOT NULL
+        )
+        ",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
         CREATE FUNCTION checks_test_pin_authority() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN

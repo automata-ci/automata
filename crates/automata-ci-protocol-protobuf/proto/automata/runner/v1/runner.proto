@@ -171,6 +171,11 @@ message ResourceCapacity {
   uint32 gpu_count = 4;
 }
 
+message JobResourceAllocation {
+  ResourceCapacity requests = 1;
+  ResourceCapacity limits = 2;
+}
+
 enum IsolationLevel {
   ISOLATION_LEVEL_UNSPECIFIED = 0;
   ISOLATION_LEVEL_PROCESS = 1;
@@ -223,6 +228,8 @@ message RunnerRequirements {
   repeated string container_features = 9;
   repeated string features = 10;
   optional EnvironmentProfile environment_profile = 11;
+  // Present when a workflow selected explicit requests and limits.
+  optional JobResourceAllocation resource_allocation = 12;
 }
 
 message LeaseRequest {
@@ -268,6 +275,25 @@ message LeaseOffer {
   Lease lease = 3;
   JobIrEnvelope job = 4;
   JobRuntimeAuthorities runtime_authorities = 5;
+  ManagedSecretBindingOverlay managed_secret_bindings = 6;
+}
+
+message ManagedSecretBindingOverlayEntry {
+  string canonical_name = 1;
+  string grant_id = 2;
+  string version_id = 3;
+}
+
+// Value-free binding locators committed to one exact leased attempt. Secret
+// values and delivery credentials are forbidden from this durable message.
+message ManagedSecretBindingOverlay {
+  uint32 schema_version = 1;
+  bytes attempt_id = 2;
+  bytes lease_id = 3;
+  uint64 fencing_token = 4;
+  // Canonical map: strictly ascending and duplicate-free by canonical name.
+  repeated ManagedSecretBindingOverlayEntry bindings = 5;
+  bytes sha256_digest = 6;
 }
 
 // Short-lived bearer material is sent only over the authenticated runner
@@ -380,6 +406,8 @@ message JobExecutionContext {
   JobContentReference runtime_context = 8;
   // Stable positive numeric alias for the internal UUID run identity.
   optional uint64 run_id_alias = 9;
+  // Current attempt initiator; actor remains the original run actor on reruns.
+  optional string triggering_actor = 10;
 }
 
 message ExpressionDialect {

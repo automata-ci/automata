@@ -401,6 +401,8 @@ impl AuthenticatedGithubWebhook {
                 .map(crate::VerifiedGithubWebhook::PullRequest),
             "merge_group" => crate::webhook_event::normalize_merge_group(self)
                 .map(crate::VerifiedGithubWebhook::MergeGroup),
+            "repository_dispatch" => crate::webhook_event::normalize_repository_dispatch(self)
+                .map(crate::VerifiedGithubWebhook::RepositoryDispatch),
             _ => Err(GithubWebhookError::UnsupportedEvent),
         }
     }

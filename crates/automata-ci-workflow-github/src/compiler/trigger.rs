@@ -3,11 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use automata_ci_core::{ContextValue, PlanSourceSpan, WorkflowEventProvenance, WorkflowInputKey};
 
 use crate::{
-    EventName, GithubChangedFilesV1, GithubEventMetadataV1, GithubWorkflowDispatchContract,
-    GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputDefinition,
-    GithubWorkflowDispatchInputType, GithubWorkflowDispatchInputValue,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MergeGroupFilter, PushPullRequestFilter, ScalarResolution,
-    SourceSpan, Spanned, TriggerConfiguration, YamlMappingEntry, YamlNode,
+    EventName, GithubChangedFilesV1, GithubCronExpression, GithubEventMetadataV1,
+    GithubScheduleError, GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
+    GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
+    GithubWorkflowDispatchInputValue, MAX_GITHUB_SCHEDULE_ENTRIES,
+    MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES, MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MergeGroupFilter, PushPullRequestFilter,
+    RepositoryDispatchFilter, ScalarResolution, SourceSpan, Spanned, TriggerConfiguration,
+    YamlMappingEntry, YamlNode, validate_github_schedule_timezone,
 };
 
 use super::{CompileContext, CompiledEvent, CompiledWorkflowDispatch, WorkflowNotSelectedReason};
@@ -69,6 +72,10 @@ pub(super) fn validate_configuration(
             validate_merge_group_filter(filter, trigger_span, context);
             None
         }
+        TriggerConfiguration::RepositoryDispatch(filter) => {
+            validate_repository_dispatch_filter(filter, trigger_span, context);
+            None
+        }
         TriggerConfiguration::WorkflowDispatch(Some(configuration)) => {
             compile_workflow_dispatch_contract(configuration, context)
         }
@@ -113,6 +120,9 @@ pub(super) fn event_matches(
         "push" => push_matches(event, configuration, metadata, trigger_span, context),
         "pull_request" => pull_request_matches(configuration, metadata, trigger_span, context),
         "merge_group" => merge_group_matches(configuration, metadata, trigger_span, context),
+        "repository_dispatch" => {
+            repository_dispatch_matches(configuration, metadata, trigger_span, context)
+        }
         "workflow_dispatch" => {
             workflow_dispatch_matches(workflow_dispatch_contract, metadata, trigger_span, context)
         }
@@ -126,6 +136,77 @@ pub(super) fn event_matches(
             }
         }
     }
+}
+
+fn repository_dispatch_matches(
+    configuration: &TriggerConfiguration,
+    metadata: Option<&GithubEventMetadataV1>,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> TriggerSelection {
+    let event_type = match metadata {
+        Some(GithubEventMetadataV1::RepositoryDispatch { event_type }) => event_type.as_str(),
+        Some(_) => {
+            metadata_mismatch("repository_dispatch", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+        None => {
+            missing_metadata("repository_dispatch", trigger_span, context);
+            return TriggerSelection::Rejected;
+        }
+    };
+    if !valid_repository_dispatch_type(event_type) {
+        context.semantic(
+            "github.compile.invalid_repository_dispatch_metadata",
+            "repository_dispatch metadata requires a non-empty custom event type of at most 100 characters",
+            trigger_span.clone(),
+        );
+        return TriggerSelection::Rejected;
+    }
+    let selected = match configuration {
+        TriggerConfiguration::Empty => true,
+        TriggerConfiguration::RepositoryDispatch(filter) => {
+            !filter.types_configured()
+                || filter
+                    .types()
+                    .iter()
+                    .any(|configured| configured.value() == event_type)
+        }
+        _ => false,
+    };
+    if selected {
+        TriggerSelection::Selected(None)
+    } else {
+        TriggerSelection::NotSelected(WorkflowNotSelectedReason::EventFiltersNotMatched)
+    }
+}
+
+fn validate_repository_dispatch_filter(
+    filter: &RepositoryDispatchFilter,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) {
+    if filter.types_configured() && filter.types().is_empty() {
+        context.semantic(
+            "github.compile.empty_event_filter",
+            "`on.repository_dispatch.types` must contain at least one custom event type",
+            trigger_span.clone(),
+        );
+    }
+    for event_type in filter.types() {
+        if !valid_repository_dispatch_type(event_type.value()) {
+            context.semantic(
+                "github.compile.invalid_repository_dispatch_type",
+                "`on.repository_dispatch.types` values must contain between 1 and 100 characters",
+                event_type.span().clone(),
+            );
+        }
+    }
+}
+
+fn valid_repository_dispatch_type(value: &str) -> bool {
+    let character_count = value.chars().count();
+    character_count > 0 && character_count <= 100 && !value.chars().any(char::is_control)
 }
 
 fn merge_group_matches(
@@ -839,6 +920,15 @@ fn validate_schedule(configuration: &YamlNode, context: &mut CompileContext<'_>)
             configuration.span().clone(),
         );
     }
+    if entries.len() > MAX_GITHUB_SCHEDULE_ENTRIES {
+        context.semantic(
+            "github.compile.too_many_schedule_entries",
+            format!(
+                "`on.schedule` must not contain more than {MAX_GITHUB_SCHEDULE_ENTRIES} entries"
+            ),
+            configuration.span().clone(),
+        );
+    }
 
     for entry in entries {
         validate_schedule_entry(entry, context);
@@ -855,17 +945,17 @@ fn validate_schedule_entry(entry: &YamlNode, context: &mut CompileContext<'_>) {
         return;
     };
     let mut cron_count = 0_u8;
+    let mut timezone_count = 0_u8;
     for field in fields {
         match mapping_key(field) {
             Some("cron") => {
                 cron_count = cron_count.saturating_add(1);
                 validate_cron_scalar(field.value(), context);
             }
-            Some("timezone") => context.unsupported(
-                "github.compile.schedule_timezone_requires_scheduler_support",
-                "timezone-aware schedules require scheduler timezone and daylight-saving semantics",
-                field.value().span().clone(),
-            ),
+            Some("timezone") => {
+                timezone_count = timezone_count.saturating_add(1);
+                validate_schedule_timezone(field.value(), context);
+            }
             Some(name) => context.unsupported(
                 "github.compile.schedule_configuration",
                 format!("`on.schedule[].{name}` is not supported by this frontend version"),
@@ -885,6 +975,13 @@ fn validate_schedule_entry(entry: &YamlNode, context: &mut CompileContext<'_>) {
             entry.span().clone(),
         );
     }
+    if cron_count > 1 || timezone_count > 1 {
+        context.semantic(
+            "github.compile.duplicate_schedule_field",
+            "each `on.schedule` entry must contain exactly one `cron` and at most one `timezone`",
+            entry.span().clone(),
+        );
+    }
 }
 
 fn validate_cron_scalar(node: &YamlNode, context: &mut CompileContext<'_>) {
@@ -897,16 +994,48 @@ fn validate_cron_scalar(node: &YamlNode, context: &mut CompileContext<'_>) {
         return;
     };
     let cron = scalar.decoded();
-    if cron.len() > MAX_CANDIDATE_BYTES {
+    if cron.len() > MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES {
         context.semantic(
             "github.compile.schedule_cron_too_long",
-            "schedule cron expressions must not exceed 4096 bytes",
+            format!(
+                "schedule cron expressions must not exceed {MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES} bytes"
+            ),
             node.span().clone(),
         );
-    } else if cron.split_ascii_whitespace().count() != 5 {
+    } else if let Err(error) = GithubCronExpression::parse(cron) {
+        let (code, message) = match error {
+            GithubScheduleError::IntervalTooShort => (
+                "github.compile.schedule_interval_too_short",
+                "GitHub schedules must not run more frequently than every five minutes",
+            ),
+            _ => (
+                "github.compile.invalid_schedule_cron",
+                "GitHub schedule cron expressions must use supported POSIX five-field syntax",
+            ),
+        };
+        context.semantic(code, message, node.span().clone());
+    }
+}
+
+fn validate_schedule_timezone(node: &YamlNode, context: &mut CompileContext<'_>) {
+    let Some(timezone) = node
+        .as_scalar()
+        .filter(|scalar| !scalar.is_null())
+        .map(crate::YamlScalar::decoded)
+    else {
         context.semantic(
-            "github.compile.invalid_schedule_cron",
-            "GitHub schedule cron expressions must contain exactly five fields",
+            "github.compile.invalid_schedule_timezone",
+            "`on.schedule[].timezone` must be a non-null IANA timezone identifier",
+            node.span().clone(),
+        );
+        return;
+    };
+    if timezone.len() > MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES
+        || validate_github_schedule_timezone(timezone).is_err()
+    {
+        context.semantic(
+            "github.compile.invalid_schedule_timezone",
+            "`on.schedule[].timezone` must name an available bounded IANA timezone",
             node.span().clone(),
         );
     }

@@ -10,11 +10,12 @@ use automata_ci_core::{
     JobIrEnvelope, JobIrVersion, JobPermissionRequest, JobResult, JobRuntimeContext,
     JobSecretExposure, JobSource, Located, LogicalJobKind, LogicalJobTemplate,
     LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate,
-    OperatingSystem, OperationId, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, RunId,
-    RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    StepJobTemplate, StrategyContext, UnixMillis, ValueTemplate, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowPlan, WorkflowSourceProvenance, WorkflowStepKey,
+    OperatingSystem, OperationId, OutputSensitivity, PlanSourceLocation, PlanSourceOrigin,
+    PlanSourceSpan, RunId, RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, StepJobTemplate, StrategyContext, UnixMillis, ValueTemplate,
+    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
+    WorkflowSourceProvenance, WorkflowStepKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
@@ -24,12 +25,12 @@ use automata_ci_store::{
     ClaimLogicalRunFinalization, ClaimNextLogicalInstanceMaterialization,
     ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization,
     ClaimedLogicalJobActivation, CommitLogicalInstanceMaterialization, CommitLogicalInstanceResult,
-    CommitLogicalJobResult, CommitLogicalRunFinalization,
+    CommitLogicalJobResult, CommitLogicalRunFinalization, CompleteReusableWorkflowCall,
     ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
     ConsumedLogicalJobOrchestrationAuthority, ConsumedSelectedLogicalInstanceMaterialization,
-    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    EnsureGithubServerServiceAuthority, EvaluatedReusableWorkflowOutput, GithubCheckHeadSha,
+    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -50,11 +51,13 @@ use automata_ci_store::{
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    RoutingDocument, RunReconciliationRepository as _, RunnableAttemptRepository as _,
-    RunnableScanLimit, RunnableScanRequest, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
+    PublishReusableWorkflowCall, ReusableCallOutputMapping, ReusableWorkflowOperationId,
+    ReusableWorkflowRuntimeRepository as _, ReusableWorkflowRuntimeStoreError, RoutingDocument,
+    RunReconciliationRepository as _, RunnableAttemptRepository as _, RunnableScanLimit,
+    RunnableScanRequest, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
+    RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _, WorkflowConcurrency,
-    WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowSnapshotId,
+    WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowRuntimePolicyPin, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
@@ -68,6 +71,7 @@ struct Fixture {
     manifest: GithubProviderManifest,
     clock_origin_ms: i64,
     command: AdmitLogicalWorkflowRun,
+    invocation_id: LogicalWorkflowInvocationId,
     logical_job_id: LogicalWorkflowJobId,
     plan: WorkflowPlan,
     plan_bytes: Vec<u8>,
@@ -109,6 +113,542 @@ struct DurableAttemptSafety {
     reason: String,
     schema: i32,
     classified_at: i64,
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One proof crosses all four child-job lifecycle boundaries.
+async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_closed() -> TestResult {
+    run_with_database(|database| async move {
+        let mut fixture = fixture(&database, "materialization-reusable-child", 70_000).await?;
+        seed_tenant(&database, &fixture.tenant).await?;
+        admit_authenticated_fixture(&database, &mut fixture, true).await?;
+
+        let (publication, child_invocation_id, child_job_id) =
+            planned_reusable_child(&database, &fixture).await?;
+        let ready_call = database
+            .store()
+            .next_reusable_workflow_call()
+            .await?
+            .ok_or("planned reusable call was not selected for autonomous publication")?;
+        assert_eq!(ready_call.child_invocation_id(), child_invocation_id);
+        assert_eq!(
+            ready_call.permissions().digest(),
+            publication.permission_digest()
+        );
+        let publication_receipt = database
+            .store()
+            .publish_reusable_workflow_call(publication.clone())
+            .await
+            .map_err(|error| format!("reusable publication failed: {error:?}"))?;
+        assert!(!publication_receipt.is_replay());
+        assert_eq!(
+            publication_receipt.child_invocation_id(),
+            child_invocation_id
+        );
+        assert!(
+            reusable_child_oidc_permission_authorized(
+                &database,
+                fixture.command.run_id(),
+                child_invocation_id,
+            )
+            .await?
+        );
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_permission_grants
+            SET permission_level = 'read'
+            WHERE run_id = $1
+              AND invocation_id = $2
+              AND permission_name = 'id-token'
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        assert!(
+            !reusable_child_oidc_permission_authorized(
+                &database,
+                fixture.command.run_id(),
+                child_invocation_id,
+            )
+            .await?
+        );
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_permission_grants
+            SET permission_level = 'write'
+            WHERE run_id = $1
+              AND invocation_id = $2
+              AND permission_name = 'id-token'
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+
+        fixture.invocation_id = child_invocation_id;
+        fixture.logical_job_id = child_job_id;
+
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_call_publications
+            SET child_graph_sealed_at_ms = NULL
+            WHERE run_id = $1 AND child_invocation_id = $2
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .claim_next_logical_job_orchestration(ClaimNextLogicalJobOrchestration::new(
+                    LogicalWorkSelectionId::from_uuid(Uuid::from_u128(70_090))?,
+                    LogicalActivationWorkerId::from_uuid(Uuid::from_u128(70_091))?,
+                    UnixMillis::new(database_now_ms(&database).await?),
+                    60_000,
+                )?,)
+                .await?,
+            LogicalJobOrchestrationSelectionOutcome::Idle
+        ));
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_call_publications
+            SET child_graph_sealed_at_ms = published_at_ms
+            WHERE run_id = $1 AND child_invocation_id = $2
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_call_publications
+            SET permission_digest = $3
+            WHERE run_id = $1 AND child_invocation_id = $2
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .bind([0x99_u8; 32].as_slice())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .claim_next_logical_job_orchestration(ClaimNextLogicalJobOrchestration::new(
+                    LogicalWorkSelectionId::from_uuid(Uuid::from_u128(70_092))?,
+                    LogicalActivationWorkerId::from_uuid(Uuid::from_u128(70_093))?,
+                    UnixMillis::new(database_now_ms(&database).await?),
+                    60_000,
+                )?,)
+                .await?,
+            LogicalJobOrchestrationSelectionOutcome::Idle
+        ));
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_plan_v2_reusable_call_publications
+            SET permission_digest = $3
+            WHERE run_id = $1 AND child_invocation_id = $2
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .bind([0x2d_u8; 32].as_slice())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+
+        assert_activation_idle_reconciliation_rejected(&database, 70_094).await?;
+        let activation = claim_activation(&database, &fixture, 70_100).await?;
+        assert_eq!(activation.claim().invocation_id(), child_invocation_id);
+        let prepared = prepared_instance(
+            &fixture,
+            &activation,
+            0,
+            1,
+            [0x75; 32],
+            JobAuthorityProfile::Standard,
+        );
+        database
+            .store()
+            .publish_logical_job_activation(PublishLogicalJobActivation::new(
+                activation.claim().clone(),
+                true,
+                vec![prepared.activated.clone()],
+                UnixMillis::new(database_now_ms(&database).await?),
+            )?)
+            .await?;
+
+        assert_materialization_idle_reconciliation_rejected(&database, 70_194).await?;
+        let selected = select_materialization(&database, 70_200, 70_201).await?;
+        assert_eq!(
+            selected.authority().claim().target().invocation_id(),
+            child_invocation_id
+        );
+        assert_eq!(
+            selected.authority().claim().target().logical_job_id(),
+            child_job_id
+        );
+        let materialized = database
+            .store()
+            .commit_logical_instance_materialization(CommitLogicalInstanceMaterialization::new(
+                selected.authority(),
+                &prepared.encoded,
+                &prepared.envelope,
+                &prepared.runtime_encoded,
+                &prepared.runtime_context,
+                UnixMillis::new(database_now_ms(&database).await?),
+            )?)
+            .await?;
+        assert!(!materialized.is_replay());
+        let materialized_child: bool = sqlx::query_scalar(
+            r"
+            SELECT EXISTS (
+                SELECT 1
+                FROM workflow_plan_v2_materialization_claims AS materialization
+                JOIN workflow_plan_v2_instances AS instance
+                  ON instance.id = materialization.instance_id
+                WHERE materialization.instance_id = $1
+                  AND materialization.state = 'materialized'
+                  AND instance.invocation_id = $2
+                  AND instance.logical_job_id = $3
+            )
+            ",
+        )
+        .bind(prepared.activated.id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .bind(child_job_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert!(materialized_child);
+
+        let session = open_v5_runner(&database, &fixture.tenant, 70_300).await?;
+        let terminal_at = database_now_ms(&database).await?;
+        let result = successful_job_result(materialized.attempt_id(), terminal_at);
+        let result_bytes = serde_json::to_vec(&result)?;
+        seed_successful_terminal_result(
+            &database,
+            &session,
+            materialized.attempt_id(),
+            &result_bytes,
+            terminal_at,
+            70_400,
+        )
+        .await?;
+        let instance_observed_at = database_now_ms(&database).await?;
+        let instance_claimed = match database
+            .store()
+            .claim_logical_instance_result(ClaimLogicalInstanceResult::new(
+                LogicalInstanceResultTarget::new(
+                    TenantScope::from_authenticated_tenant_id(&fixture.tenant)?,
+                    materialized.attempt_id(),
+                )?,
+                LogicalInstanceResultWorkerId::from_uuid(Uuid::from_u128(70_500))?,
+                UnixMillis::new(instance_observed_at),
+                UnixMillis::new(instance_observed_at + 60_000),
+            )?)
+            .await?
+        {
+            LogicalInstanceResultClaimOutcome::Claimed(claimed) => claimed,
+            other => return Err(format!("child instance result was not ready: {other:?}").into()),
+        };
+        let instance_result = database
+            .store()
+            .commit_logical_instance_result(CommitLogicalInstanceResult::new(
+                &instance_claimed,
+                &result_bytes,
+                &result,
+                &prepared.encoded,
+                &prepared.envelope,
+                UnixMillis::new(instance_observed_at + 1_000),
+            )?)
+            .await?;
+        wait_until_database_after(&database, instance_result.finalized_at().get()).await?;
+
+        let job_observed_at = database_now_ms(&database).await?;
+        let job_claimed = match database
+            .store()
+            .claim_logical_job_result(ClaimLogicalJobResult::new(
+                LogicalJobResultTarget::new(
+                    TenantScope::from_authenticated_tenant_id(&fixture.tenant)?,
+                    fixture.command.run_id(),
+                    child_invocation_id,
+                    child_job_id,
+                )?,
+                LogicalJobResultWorkerId::from_uuid(Uuid::from_u128(70_600))?,
+                UnixMillis::new(job_observed_at),
+                UnixMillis::new(job_observed_at + 60_000),
+            )?)
+            .await?
+        {
+            LogicalJobResultClaimOutcome::Claimed(claimed) => claimed,
+            other => return Err(format!("child logical result was not ready: {other:?}").into()),
+        };
+        let job_result = database
+            .store()
+            .commit_logical_job_result(CommitLogicalJobResult::new(
+                &job_claimed,
+                &fixture.plan_bytes,
+                &fixture.plan,
+                UnixMillis::new(job_observed_at + 1_000),
+            )?)
+            .await?;
+        wait_until_database_after(&database, job_result.finalized_at().get()).await?;
+
+        let ready_completion = database
+            .store()
+            .next_reusable_workflow_completion()
+            .await?
+            .ok_or("finalized reusable child was not selected for autonomous completion")?;
+        assert_eq!(
+            ready_completion.publication().child_invocation_id(),
+            child_invocation_id
+        );
+
+        let rejected_completion = CompleteReusableWorkflowCall::new(
+            publication.clone(),
+            ReusableWorkflowOperationId::from_uuid(Uuid::from_u128(70_081))?,
+            fixture.command.plan().digest(),
+            Sha256Digest::from_bytes([0x34; 32]),
+            vec![
+                EvaluatedReusableWorkflowOutput::new(
+                    WorkflowOutputKey::new("callee-public")?,
+                    OutputSensitivity::Public,
+                    Some("published".to_owned()),
+                )?,
+                EvaluatedReusableWorkflowOutput::new(
+                    WorkflowOutputKey::new("callee-secret")?,
+                    OutputSensitivity::Public,
+                    Some("must-not-map".to_owned()),
+                )?,
+            ],
+            UnixMillis::new(database_now_ms(&database).await?),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .complete_reusable_workflow_call(rejected_completion)
+                .await,
+            Err(ReusableWorkflowRuntimeStoreError::Conflict)
+        ));
+
+        let completion = CompleteReusableWorkflowCall::new(
+            publication.clone(),
+            ReusableWorkflowOperationId::from_uuid(Uuid::from_u128(70_082))?,
+            fixture.command.plan().digest(),
+            Sha256Digest::from_bytes([0x35; 32]),
+            vec![
+                EvaluatedReusableWorkflowOutput::new(
+                    WorkflowOutputKey::new("callee-public")?,
+                    OutputSensitivity::Public,
+                    Some("published".to_owned()),
+                )?,
+                EvaluatedReusableWorkflowOutput::new(
+                    WorkflowOutputKey::new("callee-secret")?,
+                    OutputSensitivity::SecretDerived,
+                    None,
+                )?,
+            ],
+            UnixMillis::new(database_now_ms(&database).await?),
+        )?;
+        let completion_receipt = database
+            .store()
+            .complete_reusable_workflow_call(completion.clone())
+            .await
+            .map_err(|error| format!("reusable completion failed: {error:?}"))?;
+        assert!(!completion_receipt.is_replay());
+        let completion_replay = database
+            .store()
+            .complete_reusable_workflow_call(completion)
+            .await
+            .map_err(|error| format!("reusable completion replay failed: {error:?}"))?;
+        assert!(completion_replay.is_replay());
+        assert_eq!(
+            completion_replay.outputs_digest(),
+            completion_receipt.outputs_digest()
+        );
+        let parent_outputs: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r"
+            SELECT output_name, sensitivity, public_value
+            FROM workflow_plan_v2_job_result_outputs
+            WHERE logical_job_id = $1
+            ORDER BY output_name
+            ",
+        )
+        .bind(publication.caller_logical_job_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(
+            parent_outputs,
+            vec![
+                (
+                    "parent-public".to_owned(),
+                    "public".to_owned(),
+                    Some("published".to_owned()),
+                ),
+                (
+                    "parent-secret".to_owned(),
+                    "secret_derived".to_owned(),
+                    None,
+                ),
+            ]
+        );
+        let completion_rows: (i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*)::BIGINT
+                 FROM workflow_plan_v2_reusable_call_results
+                 WHERE run_id = $1 AND child_invocation_id = $2),
+                (SELECT count(*)::BIGINT
+                 FROM workflow_plan_v2_job_results
+                 WHERE logical_job_id = $3)
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .bind(publication.caller_logical_job_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(completion_rows, (1, 1));
+        Ok(())
+    })
+    .await
+}
+
+async fn assert_activation_idle_reconciliation_rejected(
+    database: &TestDatabase,
+    namespace: u128,
+) -> TestResult {
+    let observed_at = database_now_ms(database).await?;
+    let selection_id = Uuid::from_u128(namespace);
+    let owner_id = Uuid::from_u128(namespace + 1);
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_activation_work_selections (
+            selection_id, owner_id, requested_at_ms, duration_ms, outcome
+        ) VALUES ($1, $2, $3, 60000, 'selecting')
+        ",
+    )
+    .bind(selection_id)
+    .bind(owner_id)
+    .bind(observed_at)
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        r"
+        UPDATE workflow_plan_v2_activation_work_selections
+        SET outcome = 'idle', claimed_at_ms = $2, expires_at_ms = $2 + duration_ms
+        WHERE selection_id = $1
+        ",
+    )
+    .bind(selection_id)
+    .bind(observed_at)
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a published ready child must invalidate an activation idle receipt");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("workflow_activation_selection_receipt_exact")
+    );
+    transaction.rollback().await?;
+    Ok(())
+}
+
+async fn reusable_child_oidc_permission_authorized(
+    database: &TestDatabase,
+    run_id: RunId,
+    invocation_id: LogicalWorkflowInvocationId,
+) -> TestResult<bool> {
+    Ok(sqlx::query_scalar(
+        r"
+        SELECT automata_reusable_workflow_oidc_permission_authorized($1, $2)
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(invocation_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?)
+}
+
+async fn assert_materialization_idle_reconciliation_rejected(
+    database: &TestDatabase,
+    namespace: u128,
+) -> TestResult {
+    let observed_at = database_now_ms(database).await?;
+    let selection_id = Uuid::from_u128(namespace);
+    let owner_id = Uuid::from_u128(namespace + 1);
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_materialization_work_selections (
+            selection_id, owner_id, requested_at_ms, duration_ms, outcome
+        ) VALUES ($1, $2, $3, 60000, 'selecting')
+        ",
+    )
+    .bind(selection_id)
+    .bind(owner_id)
+    .bind(observed_at)
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        r"
+        UPDATE workflow_plan_v2_materialization_work_selections
+        SET outcome = 'idle', claimed_at_ms = $2, expires_at_ms = $2 + duration_ms
+        WHERE selection_id = $1
+        ",
+    )
+    .bind(selection_id)
+    .bind(observed_at)
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a published ready child must invalidate a materialization idle receipt");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("workflow_materialization_selection_receipt_exact")
+    );
+    transaction.rollback().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1322,6 +1862,7 @@ async fn fixture_with_concurrency(
         manifest,
         clock_origin_ms,
         command,
+        invocation_id,
         logical_job_id,
         plan,
         plan_bytes,
@@ -1434,6 +1975,281 @@ async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     .execute(database.pool())
     .await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // The exact phase-one ledger is one atomic fixture.
+async fn planned_reusable_child(
+    database: &TestDatabase,
+    fixture: &Fixture,
+) -> TestResult<(
+    PublishReusableWorkflowCall,
+    LogicalWorkflowInvocationId,
+    LogicalWorkflowJobId,
+)> {
+    let run_id = fixture.command.run_id();
+    let parent_invocation_id = fixture.command.root_invocation_id();
+    let caller_job_id = fixture.logical_job_id;
+    let child_invocation_id =
+        LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(fixture.namespace + 7))?;
+    let child_job_id = LogicalWorkflowJobId::from_uuid(Uuid::from_u128(fixture.namespace + 8))?;
+    let root_catalog_id = Uuid::from_u128(fixture.namespace + 70);
+    let child_catalog_id = Uuid::from_u128(fixture.namespace + 71);
+    let planned_at = database_now_ms(database).await?;
+
+    sqlx::query("ALTER TABLE workflow_plan_v2_jobs DISABLE TRIGGER USER")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE workflow_plan_v2_jobs SET execution_kind = 'reusable_workflow' WHERE id = $1",
+    )
+    .bind(caller_job_id.as_uuid())
+    .execute(database.pool())
+    .await?;
+    sqlx::query("ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER")
+        .execute(database.pool())
+        .await?;
+
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+            tenant_id, repository_id, run_id, root_invocation_id,
+            expansion_digest, catalog_entry_count, invocation_count,
+            expanded_job_count, maximum_depth, planned_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,2,2,2,1,$6)
+        ",
+    )
+    .bind(&fixture.tenant)
+    .bind(fixture.command.repository().id().as_uuid())
+    .bind(run_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind([0x20_u8; 32].as_slice())
+    .bind(planned_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+            run_id, catalog_entry_id, workflow_path, source_revision,
+            source_digest, source_object_key, source_size_bytes,
+            source_media_type, plan_digest, plan_object_key, plan_size_bytes,
+            plan_media_type, plan_schema, invocation_contract_digest,
+            descriptor_digest, logical_job_count, reusable_call_count,
+            created_at_ms
+        )
+        SELECT run.id, $2, workflow.path, encode(run.head_sha, 'hex'),
+               snapshot.source_digest, snapshot.source_object_key,
+               snapshot.source_size_bytes, snapshot.source_media_type,
+               run.plan_digest, run.plan_object_key, run.plan_size_bytes,
+               run.plan_media_type, run.plan_schema, NULL, $3, 1, 1, $4
+        FROM workflow_runs AS run
+        JOIN workflow_definitions AS workflow ON workflow.id = run.workflow_id
+        JOIN workflow_snapshots AS snapshot ON snapshot.id = run.snapshot_id
+        WHERE run.id = $1
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(root_catalog_id)
+    .bind([0x21_u8; 32].as_slice())
+    .bind(planned_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+            run_id, catalog_entry_id, workflow_path, source_revision,
+            source_digest, source_object_key, source_size_bytes,
+            source_media_type, plan_digest, plan_object_key, plan_size_bytes,
+            plan_media_type, plan_schema, invocation_contract_digest,
+            descriptor_digest, logical_job_count, reusable_call_count,
+            created_at_ms
+        )
+        SELECT run.id, $2, '.github/workflows/child.yml',
+               encode(run.head_sha, 'hex'), snapshot.source_digest,
+               snapshot.source_object_key, snapshot.source_size_bytes,
+               snapshot.source_media_type, run.plan_digest,
+               run.plan_object_key, run.plan_size_bytes, run.plan_media_type,
+               run.plan_schema, $3, $4, 1, 0, $5
+        FROM workflow_runs AS run
+        JOIN workflow_snapshots AS snapshot ON snapshot.id = run.snapshot_id
+        WHERE run.id = $1
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(child_catalog_id)
+    .bind([0x22_u8; 32].as_slice())
+    .bind([0x23_u8; 32].as_slice())
+    .bind(planned_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+            run_id, invocation_id, parent_invocation_id,
+            caller_logical_job_id, catalog_entry_id, depth, call_path,
+            workflow_path, source_digest, plan_digest, call_reference_digest,
+            input_bindings_digest, secret_bindings_digest,
+            output_contract_digest, permission_digest, descriptor_digest,
+            input_binding_count, secret_binding_count, output_count,
+            permission_grant_count, dependency_count, created_at_ms
+        )
+        SELECT catalog.run_id, $2, NULL, NULL, catalog.catalog_entry_id, 0,
+               ARRAY[catalog.workflow_path], catalog.workflow_path,
+               catalog.source_digest, catalog.plan_digest, NULL,
+               $3, $4, $5, $6, $7, 0, 0, 0, 1, 0, $8
+        FROM workflow_plan_v2_reusable_workflow_catalog AS catalog
+        WHERE catalog.run_id = $1 AND catalog.catalog_entry_id = $9
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind([0x24_u8; 32].as_slice())
+    .bind([0x25_u8; 32].as_slice())
+    .bind([0x26_u8; 32].as_slice())
+    .bind([0x27_u8; 32].as_slice())
+    .bind([0x28_u8; 32].as_slice())
+    .bind(planned_at)
+    .bind(root_catalog_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+            run_id, invocation_id, parent_invocation_id,
+            caller_logical_job_id, catalog_entry_id, depth, call_path,
+            workflow_path, source_digest, plan_digest, call_reference_digest,
+            input_bindings_digest, secret_bindings_digest,
+            output_contract_digest, permission_digest, descriptor_digest,
+            input_binding_count, secret_binding_count, output_count,
+            permission_grant_count, dependency_count, created_at_ms
+        )
+        SELECT catalog.run_id, $2, $3, $4, catalog.catalog_entry_id, 1,
+               ARRAY[$5, catalog.workflow_path], catalog.workflow_path,
+               catalog.source_digest, catalog.plan_digest, $6,
+               $7, $8, $9, $10, $11, 0, 0, 2, 1, 0, $12
+        FROM workflow_plan_v2_reusable_workflow_catalog AS catalog
+        WHERE catalog.run_id = $1 AND catalog.catalog_entry_id = $13
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(child_invocation_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind(caller_job_id.as_uuid())
+    .bind(fixture.command.workflow_path())
+    .bind([0x29_u8; 32].as_slice())
+    .bind([0x2a_u8; 32].as_slice())
+    .bind([0x2b_u8; 32].as_slice())
+    .bind([0x2c_u8; 32].as_slice())
+    .bind([0x2d_u8; 32].as_slice())
+    .bind([0x2e_u8; 32].as_slice())
+    .bind(planned_at)
+    .bind(child_catalog_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+            run_id, invocation_id, logical_job_id, logical_key,
+            source_order, execution_kind, descriptor_digest
+        ) VALUES
+            ($1,$2,$3,'build',0,'reusable_workflow',$4),
+            ($1,$5,$6,'build',0,'steps',$7)
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind(caller_job_id.as_uuid())
+    .bind([0x2f_u8; 32].as_slice())
+    .bind(child_invocation_id.as_uuid())
+    .bind(child_job_id.as_uuid())
+    .bind([0x30_u8; 32].as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+            run_id, invocation_id, default_level, permission_digest
+        ) VALUES ($1,$2,'read',$3), ($1,$4,'read',$5)
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind([0x27_u8; 32].as_slice())
+    .bind(child_invocation_id.as_uuid())
+    .bind([0x2d_u8; 32].as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_permission_grants (
+            run_id, invocation_id, permission_name, permission_level
+        ) VALUES
+            ($1,$2,'id-token','write'),
+            ($1,$3,'id-token','write')
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(parent_invocation_id.as_uuid())
+    .bind(child_invocation_id.as_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_reusable_outputs (
+            run_id, invocation_id, output_key, sensitivity, source_order
+        ) VALUES
+            ($1,$2,'callee-public','public',0),
+            ($1,$2,'callee-secret','secret_derived',1)
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .bind(child_invocation_id.as_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let tenant = TenantScope::from_authenticated_tenant_id(&fixture.tenant)?;
+    let runtime_policy = WorkflowRuntimePolicyPin::new(
+        tenant.clone(),
+        fixture.command.repository().id(),
+        fixture.manifest.runtime_policy_revision(),
+        fixture.manifest.runtime_policy_digest(),
+    );
+    let publication = PublishReusableWorkflowCall::new(
+        tenant,
+        fixture.command.repository().id(),
+        run_id,
+        parent_invocation_id,
+        caller_job_id,
+        child_invocation_id,
+        ReusableWorkflowOperationId::from_uuid(Uuid::from_u128(fixture.namespace + 80))?,
+        Sha256Digest::from_bytes([0x31; 32]),
+        true,
+        Sha256Digest::from_bytes([0x32; 32]),
+        runtime_context_object(
+            format!("materialization/{}/reusable-context.pb", fixture.namespace),
+            0x33,
+        ),
+        Sha256Digest::from_bytes([0x2d; 32]),
+        vec![
+            ReusableCallOutputMapping::new(
+                WorkflowOutputKey::new("parent-public")?,
+                WorkflowOutputKey::new("callee-public")?,
+                OutputSensitivity::Public,
+            ),
+            ReusableCallOutputMapping::new(
+                WorkflowOutputKey::new("parent-secret")?,
+                WorkflowOutputKey::new("callee-secret")?,
+                OutputSensitivity::SecretDerived,
+            ),
+        ],
+        runtime_policy,
+        UnixMillis::new(database_now_ms(database).await?),
+    )?;
+    Ok((publication, child_invocation_id, child_job_id))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1757,7 +2573,7 @@ fn prepared_instance(
 ) -> PreparedInstance {
     let job_id = deterministic_job_id(
         fixture.command.run_id(),
-        fixture.command.root_invocation_id(),
+        fixture.invocation_id,
         fixture.logical_job_id,
         matrix_index,
         matrix_total,
@@ -1876,7 +2692,7 @@ fn target(
     LogicalInstanceMaterializationTarget::new(
         TenantScope::from_authenticated_tenant_id(&fixture.tenant).expect("tenant"),
         fixture.command.run_id(),
-        fixture.command.root_invocation_id(),
+        fixture.invocation_id,
         fixture.logical_job_id,
         instance_id,
     )

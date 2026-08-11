@@ -37,9 +37,9 @@ use automata_ci_runner_auth::{DurableRunnerMachineAuthenticator, RunnerMachineAu
 use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_runner_control::{
     ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
-    LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, RandomControlIdGenerator,
-    RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts, RunnerIdentityPorts,
-    RunnerLeasePorts, RunnerRegistrationAuthorizer, RunnerSessionFenceResolver,
+    LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
+    RandomControlIdGenerator, RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts,
+    RunnerIdentityPorts, RunnerLeasePorts, RunnerRegistrationAuthorizer, RunnerSessionFenceResolver,
     StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
 };
 use automata_ci_runner_transport::{
@@ -49,26 +49,29 @@ use automata_ci_runner_transport::{
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
-    BuiltinSecretCleanupRepository, ControlPlaneMaintenanceRepository, ControlPlaneStateRepository,
-    CurrentRunnerSessionRepository, HumanWorkflowReadRepository, LogicalActivationPreparationStore,
-    LogicalActivationRepository, LogicalActivationWorkerId, LogicalInstanceResultRepository,
-    LogicalInstanceResultWorkerId, LogicalJobResultRepository, LogicalJobResultWorkerId,
-    LogicalMaterializationRepository, LogicalMaterializationWorkerId,
+    BuiltinSecretCleanupRepository, ConformanceReadRepository, ControlPlaneMaintenanceRepository,
+    ControlPlaneStateRepository, CurrentRunnerSessionRepository, HumanWorkflowReadRepository,
+    LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
+    LogicalInstanceResultRepository, LogicalInstanceResultWorkerId, LogicalJobResultRepository,
+    LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
-    PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
-    PostgresStoreError, ProductBootstrapRepository as _, RepositoryPublicationRepository,
+    ManagedSecretAuthorityRepository, PostgresSecretCustodyRepository,
+    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
+    ProtectedEnvironmentRepository,
+    ProductBootstrapRepository as _, RepositoryPublicationRepository,
     RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
-    RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
-    RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
-    RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
-    SecretMutationRecoveryRepository,
+    ReusableWorkflowRuntimeRepository, RunnerCapabilityReadiness, RunnerCommandOutbox,
+    RunnerControlTransactionRepository, RunnerLeaseOfferRepository, RunnerLeaseRequestRepository,
+    RunnerOperationReceiptRepository, RunnerSessionRepository, SecretCleanupWorkerId,
+    SecretCustodyKeySet, SecretCustodyRepository, SecretMutationRecoveryRepository, TenantScope,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
     GithubAutonomousWorkflowPhaseExecutor, GithubWorkflowDispatchService,
     GithubWorkflowPlanVerifier, LogicalResultProjectionService, LogicalRunFinalizationService,
-    SystemAdmissionClock, WorkflowAdmissionObserver, WorkflowAdmissionService,
+    ReusableWorkflowRuntimeService, SystemAdmissionClock, WorkflowAdmissionObserver,
+    WorkflowAdmissionService,
 };
 use axum::Router;
 use bytes::Bytes;
@@ -93,6 +96,7 @@ use super::{
     SystemMaintenanceClock,
 };
 use crate::app::{
+    conformance_api::conformance_api_router,
     github_auth::{
         GithubAuthHttpState, GithubProviderOrigin, GithubSetupHttpState,
         OperationalGithubAuthBackend, router as github_auth_router,
@@ -115,6 +119,9 @@ use crate::app::{
 
 use super::human_auth::HumanAuthRuntime;
 use super::installation_setup::InstallationSetupService;
+use super::managed_secret_delivery::{
+    LeasedManagedSecretBindingIssuer, ManagedSecretRunnerHandler,
+};
 use super::secret_cleanup::{
     BuiltinSecretCleanupLoop, BuiltinSecretCleanupPorts, SecretCleanupClock,
     SystemSecretCleanupClock,
@@ -146,6 +153,7 @@ pub(crate) struct ProductionComponents {
     pub(crate) logical_run_finalization: LogicalRunFinalizationService,
     pub(crate) logical_result_projection: LogicalResultProjectionService,
     pub(crate) autonomous_workflow: AutonomousWorkflowService,
+    pub(crate) reusable_workflow_runtime: ReusableWorkflowRuntimeService,
     pub(crate) secret_cleanup_loop: Option<BuiltinSecretCleanupLoop>,
     pub(crate) secret_mutation_recovery_loop: Option<SecretMutationRecoveryLoop>,
     pub(crate) state_sampler: ControlPlaneStateSampler,
@@ -169,6 +177,7 @@ impl fmt::Debug for ProductionComponents {
             .field("logical_run_finalization", &self.logical_run_finalization)
             .field("logical_result_projection", &self.logical_result_projection)
             .field("autonomous_workflow", &"[CONFIGURED]")
+            .field("reusable_workflow_runtime", &self.reusable_workflow_runtime)
             .field("secret_cleanup_loop", &self.secret_cleanup_loop)
             .field(
                 "secret_mutation_recovery_loop",
@@ -271,6 +280,13 @@ impl ProductionComponents {
             logical_activation_worker,
             logical_materialization_worker,
         );
+        let reusable_workflow_repository: Arc<dyn ReusableWorkflowRuntimeRepository> =
+            store.clone();
+        let reusable_workflow_runtime = ReusableWorkflowRuntimeService::with_limits(
+            reusable_workflow_repository,
+            Arc::clone(&blob_store),
+            ProtocolLimits::default(),
+        );
         let github_oidc = build_github_oidc_product(config.github_oidc(), store.as_ref()).await?;
         let capability_readiness = if github_oidc.operationally_ready() {
             RunnerCapabilityReadiness::unavailable().with_github_oidc()
@@ -318,6 +334,9 @@ impl ProductionComponents {
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
+        let managed_secret_tenant =
+            TenantScope::from_authenticated_tenant_id(human.effective_tenant.as_str().to_owned())
+                .map_err(|_| ServerCompositionError::InvalidSecretManagement)?;
         let github_provider = build_github_provider_runtime(
             github_provider_config,
             Arc::clone(&store),
@@ -416,8 +435,18 @@ impl ProductionComponents {
         let transactions: Arc<dyn RunnerControlTransactionRepository> = store.clone();
         let receipts: Arc<dyn RunnerOperationReceiptRepository> = store.clone();
         let lease_requests: Arc<dyn RunnerLeaseRequestRepository> = store.clone();
-        let command_outbox: Arc<dyn RunnerCommandOutbox> = store;
+        let command_outbox: Arc<dyn RunnerCommandOutbox> = store.clone();
         let authorizer: Arc<dyn RunnerRegistrationAuthorizer> = authenticator.clone();
+        let managed_secret_binding_issuer: Option<Arc<dyn ManagedSecretBindingIssuer>> =
+            if secret_build.delivery_provider.is_some() {
+                let repository: Arc<dyn ProtectedEnvironmentRepository> = store.clone();
+                Some(Arc::new(LeasedManagedSecretBindingIssuer::new(
+                    repository,
+                    managed_secret_tenant,
+                )))
+            } else {
+                None
+            };
 
         let control_config = RunnerControlConfig::default();
         let ports = RunnerControlPorts::new(
@@ -434,6 +463,11 @@ impl ProductionComponents {
             control_ids,
         )
         .with_runtime_authority_issuer(runtime_authority_issuer);
+        let ports = if let Some(issuer) = managed_secret_binding_issuer {
+            ports.with_managed_secret_binding_issuer(issuer)
+        } else {
+            ports
+        };
         let handler: Arc<dyn RunnerControlHandler> = Arc::new(
             DurableRunnerControlHandler::new(ports, control_config)
                 .with_observer(Arc::new(metrics.clone())),
@@ -448,6 +482,26 @@ impl ProductionComponents {
             TransportLimits::default(),
         )?
         .with_observer(Arc::new(metrics.clone()));
+        let runner_server = if let Some(provider) = secret_build.delivery_provider {
+            let repository: Arc<dyn ManagedSecretAuthorityRepository> = store.clone();
+            let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+            let handler = ManagedSecretRunnerHandler::new(
+                repository,
+                provider,
+                Arc::clone(&secret_build.custody),
+                clock,
+            )
+            .ok_or(ServerCompositionError::InvalidSecretManagement)?;
+            runner_server.with_ephemeral_handler(
+                config
+                    .runner_public_authority
+                    .clone()
+                    .ok_or(ServerCompositionError::InvalidSecretManagement)?,
+                Arc::new(handler),
+            )
+        } else {
+            runner_server
+        };
 
         let (secret_cleanup_loop, secret_mutation_recovery_loop) = secret_management
             .map_or((None, None), |runtime| {
@@ -460,6 +514,7 @@ impl ProductionComponents {
             logical_run_finalization,
             logical_result_projection,
             autonomous_workflow,
+            reusable_workflow_runtime,
             secret_cleanup_loop,
             secret_mutation_recovery_loop,
             state_sampler,
@@ -850,6 +905,7 @@ struct SecretManagementComposition {
 struct SecretManagementBuild {
     runtime: Option<SecretManagementComposition>,
     custody: Arc<SecretCustodyVerifier>,
+    delivery_provider: Option<Arc<dyn SecretProvider>>,
 }
 
 fn build_builtin_secret_registry(
@@ -877,6 +933,7 @@ async fn build_secret_management(
         return Ok(SecretManagementBuild {
             runtime: None,
             custody,
+            delivery_provider: None,
         });
     };
     let configured_keys = SecretCustodyKeySet::new(
@@ -905,6 +962,7 @@ async fn build_secret_management(
         store.postgres_pool().clone(),
         key_provider,
     ));
+    let delivery_provider = Arc::clone(&provider);
     let providers = build_builtin_secret_registry(provider)?;
     let management_repository: Arc<dyn RepositorySecretManagementRepository> = repository.clone();
     let read_repository: Arc<dyn RepositorySecretManagementReadRepository> = repository.clone();
@@ -957,6 +1015,7 @@ async fn build_secret_management(
             recovery_loop,
         }),
         custody,
+        delivery_provider: Some(delivery_provider),
     })
 }
 
@@ -1383,7 +1442,7 @@ mod setup_page_composition_tests {
 async fn build_human_api(
     config: &ServerConfig,
     store: Arc<PostgresStore>,
-    _blob_store: Arc<dyn ImmutableBlobStore>,
+    blob_store: Arc<dyn ImmutableBlobStore>,
     _metrics: &ControlPlaneMetrics,
     secret_management: Option<&SecretManagementComposition>,
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
@@ -1522,6 +1581,13 @@ async fn build_human_api(
         publication_reads,
         publications,
         Arc::clone(runtime.clock()),
+    ));
+    let conformance_reads: Arc<dyn HumanWorkflowReadRepository> = store.clone();
+    let conformance_deliveries: Arc<dyn ConformanceReadRepository> = store.clone();
+    router = router.merge(conformance_api_router(
+        conformance_reads,
+        conformance_deliveries,
+        blob_store,
     ));
     if let Some(secret_management) = secret_management {
         router = router.merge(repository_secret_api_router(

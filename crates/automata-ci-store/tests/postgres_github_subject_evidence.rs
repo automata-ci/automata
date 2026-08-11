@@ -4,26 +4,33 @@ mod github_manifest_fixture;
 
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey};
 use automata_ci_store::{
-    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, CompleteProviderDelivery,
-    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
+    AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
+    AcceptProviderDelivery, AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
+    AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery,
+    CompleteProviderDelivery, EnsureGithubServerServiceAuthority, GithubAuthenticatedEventKind,
+    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
     GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRepository as _,
     GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    GithubSubjectEvidenceStoreError, LogicalWorkflowAdmissionRepository as _,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryDispatchEvidenceRepository as _, GithubRepositoryDispatchResolution,
+    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository as _,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubSubjectEvidenceRepository as _, GithubSubjectEvidenceStoreError,
+    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryState,
     ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RejectProviderDelivery, StartGithubCheckProjection, StoreError, TenantScope,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowOutcome, ProviderDeliveryWorkflowSourceState, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
+    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery,
+    ResolveGithubRepositoryDispatch, StartGithubCheckProjection, StoreError, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
@@ -268,6 +275,149 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
             .expect_err("delivery evidence must be immutable"),
             "github_provider_delivery_evidence_immutable",
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn repository_dispatch_resolution_is_claim_fenced_atomic_and_exactly_replayed() -> TestResult
+{
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-repository-dispatch",
+            0x180,
+            ProviderRepositoryVisibility::Private,
+            100,
+        )
+        .await?;
+        let request = repository_dispatch_acceptance(
+            &fixture,
+            "delivery-repository-dispatch",
+            fixture.activated_at.get(),
+            0x31,
+        );
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_repository_dispatch(request)
+            .await?;
+        assert_eq!(
+            accepted.evidence().event(),
+            &GithubAuthenticatedEventV1::new(
+                GithubAuthenticatedEventKind::RepositoryDispatch,
+                "refs/heads/main",
+            )?
+        );
+        assert!(accepted.evidence().private_source_authority().is_some());
+        let before_resolution: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM provider_delivery_inbox),
+                (SELECT count(*) FROM github_repository_dispatch_pending_evidence),
+                (SELECT count(*) FROM github_provider_delivery_evidence),
+                (SELECT count(*) FROM github_check_subjects),
+                (SELECT count(*) FROM github_check_projection_outbox)
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(before_resolution, (1, 1, 0, 0, 0));
+
+        let exact_replay = database
+            .store()
+            .accept_manifest_pinned_github_repository_dispatch(repository_dispatch_acceptance(
+                &fixture,
+                "delivery-repository-dispatch",
+                fixture.activated_at.get(),
+                0x31,
+            ))
+            .await?;
+        assert_eq!(exact_replay, accepted);
+
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x181, 60_000).await?;
+        let resolution = GithubRepositoryDispatchResolution::new(
+            GithubCheckHeadSha::new(HEAD_SHA)?,
+            GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
+        );
+        let resolve = ResolveGithubRepositoryDispatch::new(
+            accepted.evidence().clone(),
+            claim,
+            resolution,
+            claim.claimed_at(),
+        )?;
+        let resolved = database
+            .store()
+            .resolve_github_repository_dispatch(resolve)
+            .await?;
+        assert_eq!(resolved.repository_dispatch_resolution(), Some(resolution));
+        assert_eq!(resolved.check_head_sha().as_bytes(), HEAD_SHA);
+        assert_eq!(
+            resolved.private_source_authority(),
+            accepted.evidence().private_source_authority()
+        );
+        let after_resolution: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM provider_delivery_inbox),
+                (SELECT count(*) FROM github_repository_dispatch_pending_evidence),
+                (SELECT count(*) FROM github_provider_delivery_evidence),
+                (SELECT count(*) FROM github_check_subjects),
+                (SELECT count(*) FROM github_check_projection_outbox)
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(after_resolution, (1, 1, 1, 1, 1));
+        assert_eq!(
+            database
+                .store()
+                .load_manifest_pinned_github_delivery_evidence(
+                    &fixture.tenant,
+                    accepted.delivery_id(),
+                )
+                .await?,
+            resolved
+        );
+
+        let resolution_replay = database
+            .store()
+            .resolve_github_repository_dispatch(ResolveGithubRepositoryDispatch::new(
+                accepted.evidence().clone(),
+                claim,
+                resolution,
+                claim.claimed_at(),
+            )?)
+            .await?;
+        assert_eq!(resolution_replay, resolved);
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT (SELECT count(*) FROM github_check_subjects), \
+                        (SELECT count(*) FROM github_check_projection_outbox)",
+            )
+            .fetch_one(database.pool())
+            .await?,
+            (1, 1)
+        );
+
+        let changed_resolution = GithubRepositoryDispatchResolution::new(
+            GithubCheckHeadSha::new([8; 20])?,
+            GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
+        );
+        assert!(matches!(
+            database
+                .store()
+                .resolve_github_repository_dispatch(ResolveGithubRepositoryDispatch::new(
+                    accepted.evidence().clone(),
+                    claim,
+                    changed_resolution,
+                    claim.claimed_at(),
+                )?)
+                .await,
+            Err(GithubSubjectEvidenceStoreError::ReplayConflict)
+        ));
         Ok(())
     })
     .await
@@ -562,6 +712,223 @@ async fn admitted_delivery_completion_preserves_linked_check() -> TestResult {
             linked,
             "admitted delivery completion must leave run finalization authoritative"
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestResult {
+    run_with_database(|database| async move {
+        const BUILD_PATH: &str = ".github/workflows/build.yml";
+        const BROKEN_PATH: &str = ".github/workflows/broken.yaml";
+        const SKIPPED_PATH: &str = ".github/workflows/docs.yml";
+        let fixture = bootstrap_all_direct(
+            &database,
+            "subject-evidence-all-direct",
+            0x248,
+            ProviderRepositoryVisibility::Public,
+            100,
+        )
+        .await?;
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-all-direct",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                20,
+            ))
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x249, 60_000).await?;
+        let inventory = ProviderDeliveryWorkflowInventory::new(
+            fixture.manifest.digest(),
+            "0909090909090909090909090909090909090909",
+            Sha256Digest::from_bytes([0x55; 32]),
+            vec![
+                ProviderDeliveryWorkflowInventoryEntry::new(
+                    SKIPPED_PATH,
+                    ProviderDeliveryWorkflowSourceState::Ready(Sha256Digest::from_bytes(
+                        [0x33; 32],
+                    )),
+                )?,
+                ProviderDeliveryWorkflowInventoryEntry::new(
+                    BUILD_PATH,
+                    ProviderDeliveryWorkflowSourceState::Ready(Sha256Digest::from_bytes(
+                        [0x31; 32],
+                    )),
+                )?,
+                ProviderDeliveryWorkflowInventoryEntry::new(
+                    BROKEN_PATH,
+                    ProviderDeliveryWorkflowSourceState::Oversized,
+                )?,
+            ],
+        )?;
+        let registered = database
+            .store()
+            .register_provider_delivery_workflow_inventory(
+                RegisterProviderDeliveryWorkflowInventory::new(
+                    claim.claim(),
+                    inventory.clone(),
+                    claim.claimed_at(),
+                )?,
+            )
+            .await?;
+        assert_eq!(registered.inventory(), &inventory);
+        assert!(registered.outcomes().is_empty());
+
+        let command = logical_command_at_path(
+            &fixture,
+            "logical-all-direct-build",
+            0x62,
+            21,
+            0x2_800,
+            claim.claimed_at(),
+            BUILD_PATH,
+            [0x31; 32],
+        );
+        let run_id = command.run_id();
+        database
+            .store()
+            .admit_authenticated_github_delivery(command, claim, claim.claimed_at())
+            .await?;
+
+        let admitted = ProviderDeliveryWorkflowOutcome::new(
+            BUILD_PATH,
+            ProviderDeliveryWorkflowConclusion::Admitted { run_id },
+        )?;
+        let failed = ProviderDeliveryWorkflowOutcome::new(
+            BROKEN_PATH,
+            ProviderDeliveryWorkflowConclusion::Failed {
+                failure_kind: ProviderDeliveryFailureKind::new("github.workflow.source_oversized")?,
+            },
+        )?;
+        let skipped = ProviderDeliveryWorkflowOutcome::new(
+            SKIPPED_PATH,
+            ProviderDeliveryWorkflowConclusion::Skipped {
+                reason: ProviderDeliveryFailureKind::new("github.workflow.not_selected")?,
+            },
+        )?;
+        for outcome in [&admitted, &failed] {
+            assert_eq!(
+                database
+                    .store()
+                    .record_provider_delivery_workflow_progress(
+                        RecordProviderDeliveryWorkflowProgress::new(
+                            claim.claim(),
+                            inventory.digest(),
+                            outcome.clone(),
+                            claim.claimed_at(),
+                        )?,
+                    )
+                    .await?,
+                *outcome
+            );
+        }
+
+        let incomplete = CompleteProviderDelivery::new(
+            claim.claim(),
+            vec![admitted.clone(), failed.clone()],
+            claim.claimed_at(),
+        )?;
+        assert!(
+            database
+                .store()
+                .complete_provider_delivery(incomplete)
+                .await
+                .is_err(),
+            "completion must wait for every durable inventory path"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM provider_delivery_inbox WHERE id = $1"
+            )
+            .bind(accepted.delivery_id().as_uuid())
+            .fetch_one(database.pool())
+            .await?,
+            "claimed"
+        );
+
+        database
+            .store()
+            .record_provider_delivery_workflow_progress(
+                RecordProviderDeliveryWorkflowProgress::new(
+                    claim.claim(),
+                    inventory.digest(),
+                    skipped.clone(),
+                    claim.claimed_at(),
+                )?,
+            )
+            .await?;
+        let replay = database
+            .store()
+            .register_provider_delivery_workflow_inventory(
+                RegisterProviderDeliveryWorkflowInventory::new(
+                    claim.claim(),
+                    inventory,
+                    claim.claimed_at(),
+                )?,
+            )
+            .await?;
+        assert_eq!(replay.outcomes().len(), 3);
+        let completion = CompleteProviderDelivery::new(
+            claim.claim(),
+            replay.outcomes().to_vec(),
+            claim.claimed_at(),
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .complete_provider_delivery(completion)
+                .await?
+                .state(),
+            ProviderDeliveryState::Completed
+        );
+
+        assert_pre_admission_terminal_check(
+            &database,
+            accepted.check_subject_id().as_uuid(),
+            claim.claimed_at(),
+            "failure",
+            "workflow_failure",
+        )
+        .await?;
+        let checks: Vec<(String, Option<Uuid>, String, Option<String>)> = sqlx::query_as(
+            r"
+            SELECT subject_key, workflow_run_id, desired_state, desired_conclusion
+            FROM github_check_subjects
+            WHERE provider_delivery_id = $1
+              AND subject_key <> '.github/workflows'
+            ORDER BY subject_key
+            ",
+        )
+        .bind(accepted.delivery_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(
+            checks,
+            vec![
+                (
+                    BROKEN_PATH.to_owned(),
+                    None,
+                    "completed".to_owned(),
+                    Some("failure".to_owned()),
+                ),
+                (
+                    BUILD_PATH.to_owned(),
+                    Some(run_id.as_uuid()),
+                    "in_progress".to_owned(),
+                    None,
+                ),
+            ]
+        );
+        assert_fanout_evidence_is_sealed_after_completion(&database, accepted.delivery_id())
+            .await?;
         Ok(())
     })
     .await
@@ -1234,6 +1601,33 @@ async fn bootstrap(
 ) -> TestResult<Fixture> {
     let fixture =
         bootstrap_manifest_only(database, tenant_id, connection_id, visibility, at).await?;
+    ensure_fixture_authorities(database, fixture, at).await
+}
+
+async fn bootstrap_all_direct(
+    database: &TestDatabase,
+    tenant_id: &str,
+    connection_id: u128,
+    visibility: ProviderRepositoryVisibility,
+    at: i64,
+) -> TestResult<Fixture> {
+    let fixture = bootstrap_manifest_only_with_selection(
+        database,
+        tenant_id,
+        connection_id,
+        visibility,
+        at,
+        GithubProviderWorkflowSelection::all_direct(),
+    )
+    .await?;
+    ensure_fixture_authorities(database, fixture, at).await
+}
+
+async fn ensure_fixture_authorities(
+    database: &TestDatabase,
+    fixture: Fixture,
+    at: i64,
+) -> TestResult<Fixture> {
     database
         .store()
         .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
@@ -1260,15 +1654,37 @@ async fn bootstrap_manifest_only(
     visibility: ProviderRepositoryVisibility,
     at: i64,
 ) -> TestResult<Fixture> {
+    bootstrap_manifest_only_with_selection(
+        database,
+        tenant_id,
+        connection_id,
+        visibility,
+        at,
+        GithubProviderWorkflowSelection::exact(automata_ci_store::GithubCheckSubjectKey::new(
+            ".github/workflows/ci.yml",
+        )?),
+    )
+    .await
+}
+
+async fn bootstrap_manifest_only_with_selection(
+    database: &TestDatabase,
+    tenant_id: &str,
+    connection_id: u128,
+    visibility: ProviderRepositoryVisibility,
+    at: i64,
+    selection: GithubProviderWorkflowSelection,
+) -> TestResult<Fixture> {
     let tenant = TenantScope::from_authenticated_tenant_id(tenant_id)?;
     let connection = ProviderConnectionId::from_uuid(Uuid::from_u128(connection_id))?;
-    let manifest = manifest(
+    let manifest = manifest_with_selection(
         tenant.clone(),
         connection,
         visibility,
         ManifestRevisions::new(1, 1, 1, 1),
         [7; 32],
         [6; 32],
+        selection,
     );
     let bootstrapped = database
         .store()
@@ -1336,8 +1752,31 @@ fn manifest(
     spki: [u8; 32],
     verifier: [u8; 32],
 ) -> GithubProviderManifest {
+    manifest_with_selection(
+        tenant,
+        connection,
+        visibility,
+        revisions,
+        spki,
+        verifier,
+        GithubProviderWorkflowSelection::exact(
+            automata_ci_store::GithubCheckSubjectKey::new(".github/workflows/ci.yml")
+                .expect("workflow path"),
+        ),
+    )
+}
+
+fn manifest_with_selection(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    visibility: ProviderRepositoryVisibility,
+    revisions: ManifestRevisions,
+    spki: [u8; 32],
+    verifier: [u8; 32],
+    selection: GithubProviderWorkflowSelection,
+) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(revisions.policy);
-    GithubProviderManifest::new(
+    GithubProviderManifest::new_with_workflow_selection(
         tenant,
         connection,
         ProviderInstallationId::new(INSTALLATION_ID).expect("installation"),
@@ -1357,6 +1796,7 @@ fn manifest(
         runtime_policy.runner_policy,
         runtime_policy.revision,
         runtime_policy.semantic_digest,
+        selection,
         GithubCheckName::new("Automata CI").expect("Check name"),
         GithubProviderOrigins::github_dot_com(),
         GithubProviderManifestLimits::github_dot_com_ci(),
@@ -1408,6 +1848,53 @@ fn acceptance(
         accepted_at,
         digest_byte,
     )
+}
+
+fn repository_dispatch_acceptance(
+    fixture: &Fixture,
+    delivery_key: &str,
+    accepted_at: i64,
+    digest_byte: u8,
+) -> AcceptManifestPinnedGithubRepositoryDispatch {
+    let identity = ProviderDeliveryIdentity::new(
+        fixture.tenant.clone(),
+        "github",
+        fixture.connection,
+        ProviderInstallationId::new(INSTALLATION_ID).expect("installation"),
+        ProviderRepositoryCoordinates::new(
+            ProviderRepositoryId::new(REPOSITORY_ID).expect("repository"),
+            fixture.manifest.repository_visibility(),
+            "automata-ci/automata",
+        )
+        .expect("repository coordinates"),
+        delivery_key,
+    )
+    .expect("delivery identity");
+    AcceptManifestPinnedGithubRepositoryDispatch::new(
+        AcceptProviderDelivery::new(
+            identity,
+            Sha256Digest::from_bytes([digest_byte; 32]),
+            AdmissionObject::new_event(
+                Sha256Digest::from_bytes([digest_byte.wrapping_add(1); 32]),
+                ObjectKey::new(format!("github/events/{delivery_key}")).expect("event object key"),
+                512,
+                "application/vnd.automata.github-authenticated-event.v1+json",
+            )
+            .expect("event object"),
+            UnixMillis::new(accepted_at),
+        )
+        .expect("delivery"),
+        ProviderRepositoryOwnerId::new(OWNER_ID).expect("signed owner"),
+        ProviderRepositoryOwnerId::new(OWNER_ID).expect("configured owner"),
+        GithubAuthenticatedEventV1::new(
+            GithubAuthenticatedEventKind::RepositoryDispatch,
+            "refs/heads/main",
+        )
+        .expect("repository dispatch event"),
+        fixture.manifest.webhook_verifier_fingerprint(),
+        fixture.manifest.webhook_verifier_revision(),
+    )
+    .expect("repository dispatch acceptance")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1557,6 +2044,88 @@ async fn assert_pre_admission_terminal_check(
     Ok(state)
 }
 
+async fn assert_fanout_evidence_is_sealed_after_completion(
+    database: &TestDatabase,
+    delivery_id: ProviderDeliveryId,
+) -> TestResult {
+    for statement in [
+        "UPDATE provider_delivery_workflow_inventories \
+         SET registered_at_ms = registered_at_ms WHERE inbox_id = $1",
+        "UPDATE provider_delivery_workflow_inventory_entries \
+         SET ordinal = ordinal WHERE inbox_id = $1",
+        "UPDATE provider_delivery_workflow_progress \
+         SET recorded_at_ms = recorded_at_ms WHERE inbox_id = $1",
+        "DELETE FROM provider_delivery_workflow_progress WHERE inbox_id = $1",
+    ] {
+        let error = sqlx::query(statement)
+            .bind(delivery_id.as_uuid())
+            .execute(database.pool())
+            .await
+            .expect_err("fan-out evidence is append-only");
+        assert_constraint(&error, "provider_delivery_workflow_progress_immutable");
+    }
+
+    let late_inventory = sqlx::query(
+        r"
+        INSERT INTO provider_delivery_workflow_inventories
+        SELECT * FROM provider_delivery_workflow_inventories WHERE inbox_id = $1
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .execute(database.pool())
+    .await
+    .expect_err("completed delivery rejects a late inventory");
+    assert_constraint(
+        &late_inventory,
+        "provider_delivery_workflow_inventory_live_authority",
+    );
+
+    let late_entry = sqlx::query(
+        r"
+        INSERT INTO provider_delivery_workflow_inventory_entries (
+            inbox_id, tenant_id, ordinal, workflow_path, source_state, source_digest
+        )
+        SELECT inbox_id, tenant_id, 4, '.github/workflows/late.yml', 'empty', NULL
+        FROM provider_delivery_workflow_inventories WHERE inbox_id = $1
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .execute(database.pool())
+    .await
+    .expect_err("completed delivery rejects a late inventory entry");
+    assert_constraint(
+        &late_entry,
+        "provider_delivery_workflow_inventory_entry_live_authority",
+    );
+
+    let late_progress = sqlx::query(
+        r"
+        INSERT INTO provider_delivery_workflow_progress (
+            inbox_id, tenant_id, workflow_path, inventory_digest,
+            outcome_kind, run_id, failure_kind, recorded_at_ms
+        )
+        SELECT inbox_id, tenant_id, '.github/workflows/late.yml', inventory_digest,
+               'skipped', NULL, 'github.workflow.not_selected', registered_at_ms
+        FROM provider_delivery_workflow_inventories WHERE inbox_id = $1
+        ",
+    )
+    .bind(delivery_id.as_uuid())
+    .execute(database.pool())
+    .await
+    .expect_err("completed delivery rejects late workflow progress");
+    assert_constraint(
+        &late_progress,
+        "provider_delivery_workflow_progress_live_authority",
+    );
+
+    let truncate = sqlx::query("TRUNCATE provider_delivery_workflow_progress")
+        .execute(database.pool())
+        .await
+        .expect_err("fan-out evidence rejects truncation");
+    assert_constraint(&truncate, "provider_delivery_workflow_progress_immutable");
+    Ok(())
+}
+
 async fn complete_admitted_delivery(
     database: &TestDatabase,
     claim: AuthenticatedGithubDeliveryClaim,
@@ -1663,6 +2232,29 @@ fn logical_command(
     namespace: u128,
     admitted_at: UnixMillis,
 ) -> AdmitLogicalWorkflowRun {
+    logical_command_at_path(
+        fixture,
+        idempotency_key,
+        request_digest_byte,
+        event_digest_byte,
+        namespace,
+        admitted_at,
+        ".github/workflows/ci.yml",
+        [0x31; 32],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn logical_command_at_path(
+    fixture: &Fixture,
+    idempotency_key: &str,
+    request_digest_byte: u8,
+    event_digest_byte: u8,
+    namespace: u128,
+    admitted_at: UnixMillis,
+    workflow_path: &str,
+    source_digest: [u8; 32],
+) -> AdmitLogicalWorkflowRun {
     let workflow_id = WorkflowId::from_uuid(Uuid::from_u128(namespace + 1));
     let snapshot_id = WorkflowSnapshotId::from_uuid(Uuid::from_u128(namespace + 2));
     let run_id = RunId::from_uuid(Uuid::from_u128(namespace + 3));
@@ -1679,7 +2271,7 @@ fn logical_command(
     )
     .expect("logical job");
     let source = AdmissionObject::new(
-        Sha256Digest::from_bytes([0x31; 32]),
+        Sha256Digest::from_bytes(source_digest),
         ObjectKey::new(format!("logical/{namespace}/source")).expect("source object key"),
         768,
         "application/yaml",
@@ -1712,7 +2304,7 @@ fn logical_command(
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        workflow_path,
         "Automata CI",
         "refs/heads/main",
         snapshot_id,

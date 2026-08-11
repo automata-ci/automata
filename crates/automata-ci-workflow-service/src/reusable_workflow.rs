@@ -194,6 +194,106 @@ pub struct GithubReusableWorkflowCatalog {
 }
 
 impl GithubReusableWorkflowCatalog {
+    /// Recompiles only local workflows reachable from the supplied root plan.
+    ///
+    /// Candidate files may contain unrelated direct workflows; they never enter
+    /// the catalog or its replay digest. Missing, cyclic, remote, invalid, or
+    /// over-limit reachable calls fail before admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed expansion error for any invalid reachable edge.
+    pub fn compile_reachable(
+        repository: impl Into<String>,
+        revision: impl Into<String>,
+        root_plan: &WorkflowPlan,
+        sources: impl IntoIterator<Item = RepositoryWorkflowSource>,
+    ) -> Result<Self, ReusableWorkflowExpansionError> {
+        let repository = repository.into();
+        let revision = revision.into();
+        validate_coordinate(&repository)?;
+        validate_exact_revision(&revision)?;
+        let PlanSourceOrigin::Repository {
+            path: root_path, ..
+        } = root_plan.source().origin()
+        else {
+            return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
+        };
+        validate_plan_origin(root_plan, &repository, &revision, root_path)?;
+
+        let mut available = BTreeMap::new();
+        for source in sources {
+            let path = canonical_workflow_path(source.path())?;
+            if source.source().is_empty()
+                || source.source().len() > MAX_REUSABLE_WORKFLOW_SOURCE_BYTES
+            {
+                continue;
+            }
+            if available.insert(path.clone(), source.source).is_some() {
+                return Err(ReusableWorkflowExpansionError::DuplicateCatalogPath(path));
+            }
+        }
+        let mut pending = root_plan
+            .jobs()
+            .iter()
+            .filter_map(|job| match job.execution() {
+                LogicalJobKind::ReusableWorkflow(call) => Some(call.reference().value().clone()),
+                LogicalJobKind::Steps(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut entries = BTreeMap::new();
+        while let Some(reference) = pending.pop() {
+            let path = resolve_local_reference(&reference)?;
+            if path == *root_path {
+                return Err(ReusableWorkflowExpansionError::Cycle(path));
+            }
+            if entries.contains_key(&path) {
+                continue;
+            }
+            if entries.len() + 1 >= MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES {
+                return Err(ReusableWorkflowExpansionError::CatalogLimitExceeded);
+            }
+            let source = available
+                .get(&path)
+                .ok_or_else(|| ReusableWorkflowExpansionError::MissingCatalogPath(path.clone()))?;
+            let plan = compile_github_source(
+                &repository,
+                &revision,
+                &path,
+                source,
+                automata_ci_core::WorkflowEventProvenance::new("github", "workflow_call")
+                    .with_commit_sha(&revision),
+                false,
+            )?;
+            if plan.logical().invocation().is_none() {
+                return Err(ReusableWorkflowExpansionError::MissingInvocationContract(
+                    path,
+                ));
+            }
+            pending.extend(plan.jobs().iter().filter_map(|job| match job.execution() {
+                LogicalJobKind::ReusableWorkflow(call) => Some(call.reference().value().clone()),
+                LogicalJobKind::Steps(_) => None,
+            }));
+            let source_digest = digest(source);
+            let plan_digest = digest_plan(&plan)?;
+            entries.insert(
+                path.clone(),
+                CatalogedReusableWorkflow {
+                    path,
+                    source: source.clone(),
+                    source_digest,
+                    plan,
+                    plan_digest,
+                },
+            );
+        }
+        Ok(Self {
+            repository,
+            revision,
+            entries,
+        })
+    }
+
     /// Recompiles and binds all supplied sources to one repository revision.
     ///
     /// # Errors
@@ -419,6 +519,38 @@ pub struct ExpandedReusableOutput {
     sensitivity: OutputSensitivity,
 }
 
+/// One caller-visible output name bound to an exact callee workflow output.
+///
+/// This mapping is deliberately distinct from the callee's invocation
+/// contract.  The contract says what the callee may produce; this row says
+/// which of those values the parent logical call job exposes to `needs`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpandedReusableOutputMapping {
+    parent_key: String,
+    child_key: String,
+    sensitivity: OutputSensitivity,
+}
+
+impl ExpandedReusableOutputMapping {
+    /// Returns the output key exposed by the parent call job.
+    #[must_use]
+    pub fn parent_key(&self) -> &str {
+        &self.parent_key
+    }
+
+    /// Returns the declared callee workflow-output key supplying the value.
+    #[must_use]
+    pub fn child_key(&self) -> &str {
+        &self.child_key
+    }
+
+    /// Returns the sensitivity retained by the parent call job.
+    #[must_use]
+    pub const fn sensitivity(&self) -> OutputSensitivity {
+        self.sensitivity
+    }
+}
+
 impl ExpandedReusableOutput {
     /// Returns the exported output key.
     #[must_use]
@@ -489,6 +621,7 @@ pub struct ReusableWorkflowInvocationExpansion {
     inputs: Vec<ExpandedReusableInput>,
     secrets: Vec<ExpandedReusableSecret>,
     outputs: Vec<ExpandedReusableOutput>,
+    caller_outputs: Vec<ExpandedReusableOutputMapping>,
     jobs: Vec<ExpandedReusableJob>,
 }
 
@@ -547,7 +680,11 @@ impl ReusableWorkflowInvocationExpansion {
         &self.inputs
     }
 
-    /// Returns name-only secret edges in callee contract order.
+    /// Returns name-only secret edges in canonical target-name order.
+    ///
+    /// An inherited edge can name a secret that the callee did not declare in
+    /// `on.workflow_call.secrets`, matching the provider's direct-call
+    /// inheritance contract.
     #[must_use]
     pub fn secrets(&self) -> &[ExpandedReusableSecret] {
         &self.secrets
@@ -557,6 +694,14 @@ impl ReusableWorkflowInvocationExpansion {
     #[must_use]
     pub fn outputs(&self) -> &[ExpandedReusableOutput] {
         &self.outputs
+    }
+
+    /// Returns caller-visible output mappings in the parent declaration order.
+    ///
+    /// The root invocation has no caller and therefore returns an empty slice.
+    #[must_use]
+    pub fn caller_outputs(&self) -> &[ExpandedReusableOutputMapping] {
+        &self.caller_outputs
     }
 
     /// Returns deterministic source-ordered logical jobs.
@@ -871,6 +1016,7 @@ fn expand_reusable_workflow(
             secrets: Vec::new(),
             available_secret_names: request.root_secret_names.clone(),
             outputs: root_outputs,
+            caller_outputs: Vec::new(),
             root: true,
         },
         &mut active_paths,
@@ -903,6 +1049,7 @@ struct InvocationRequest<'a> {
     secrets: Vec<ExpandedReusableSecret>,
     available_secret_names: BTreeSet<String>,
     outputs: Vec<ExpandedReusableOutput>,
+    caller_outputs: Vec<ExpandedReusableOutputMapping>,
     root: bool,
 }
 
@@ -947,6 +1094,7 @@ fn expand_invocation(
             inputs: request.inputs,
             secrets: request.secrets,
             outputs: request.outputs,
+            caller_outputs: request.caller_outputs,
             jobs,
         });
 
@@ -973,7 +1121,7 @@ fn expand_invocation(
         })?;
         let inputs = validate_inputs(call, contract)?;
         let secrets = validate_secrets(call, contract, &request.available_secret_names)?;
-        validate_call_outputs(job.outputs(), contract)?;
+        let caller_outputs = validate_call_outputs(job.outputs(), contract)?;
         let available_secret_names = secrets
             .iter()
             .map(|binding| binding.target.clone())
@@ -1016,6 +1164,7 @@ fn expand_invocation(
                 secrets,
                 available_secret_names,
                 outputs,
+                caller_outputs,
                 root: false,
             },
             active_paths,
@@ -1189,66 +1338,67 @@ fn validate_secrets(
             }
         }
         ReusableSecretForwarding::Inherit(_) => {
-            for definition in contract.secrets() {
-                let target = definition.key().value().as_str();
-                if available.contains(target) {
-                    supplied.insert(target, target.to_owned());
-                }
+            for source in available {
+                supplied.insert(source.as_str(), source.clone());
             }
         }
     }
 
-    contract
-        .secrets()
-        .iter()
-        .filter_map(|definition| {
-            let target = definition.key().value().as_str();
-            if let Some(source) = supplied.get(target) {
-                Some(Ok(ExpandedReusableSecret {
-                    target: target.to_owned(),
-                    source: source.clone(),
-                }))
-            } else if definition.required() {
-                Some(Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
-                    target.to_owned(),
-                )))
-            } else {
-                None
-            }
+    for definition in contract.secrets() {
+        let target = definition.key().value().as_str();
+        if definition.required() && !supplied.contains_key(target) {
+            return Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
+                target.to_owned(),
+            ));
+        }
+    }
+
+    Ok(supplied
+        .into_iter()
+        .map(|(target, source)| ExpandedReusableSecret {
+            target: target.to_owned(),
+            source,
         })
-        .collect()
+        .collect())
 }
 
 fn validate_call_outputs(
     call_outputs: &[automata_ci_core::LogicalJobOutputDefinition],
     contract: &WorkflowInvocationContract,
-) -> Result<(), ReusableWorkflowExpansionError> {
+) -> Result<Vec<ExpandedReusableOutputMapping>, ReusableWorkflowExpansionError> {
     let outputs = contract
         .outputs()
         .iter()
         .map(|output| (output.key().value().as_str(), output))
         .collect::<BTreeMap<_, _>>();
-    for output in call_outputs {
-        let LogicalJobOutputSource::InvocationOutput(source) = output.source() else {
-            return Err(ReusableWorkflowExpansionError::UnknownOutput(
-                output.key().value().as_str().to_owned(),
-            ));
-        };
-        let key = source.value().as_str();
-        let Some(callee) = outputs.get(key) else {
-            return Err(ReusableWorkflowExpansionError::UnknownOutput(
-                key.to_owned(),
-            ));
-        };
-        if output.sensitivity() == OutputSensitivity::Public
-            && callee.sensitivity() == OutputSensitivity::SecretDerived
-        {
-            return Err(ReusableWorkflowExpansionError::OutputSensitivityReduction(
-                key.to_owned(),
-            ));
-        }
-    }
-    Ok(())
+    call_outputs
+        .iter()
+        .map(|output| {
+            let LogicalJobOutputSource::InvocationOutput(source) = output.source() else {
+                return Err(ReusableWorkflowExpansionError::UnknownOutput(
+                    output.key().value().as_str().to_owned(),
+                ));
+            };
+            let key = source.value().as_str();
+            let Some(callee) = outputs.get(key) else {
+                return Err(ReusableWorkflowExpansionError::UnknownOutput(
+                    key.to_owned(),
+                ));
+            };
+            if output.sensitivity() == OutputSensitivity::Public
+                && callee.sensitivity() == OutputSensitivity::SecretDerived
+            {
+                return Err(ReusableWorkflowExpansionError::OutputSensitivityReduction(
+                    key.to_owned(),
+                ));
+            }
+            Ok(ExpandedReusableOutputMapping {
+                parent_key: output.key().value().as_str().to_owned(),
+                child_key: key.to_owned(),
+                sensitivity: output.sensitivity(),
+            })
+        })
+        .collect()
 }
 
 fn contract_outputs(contract: &WorkflowInvocationContract) -> Vec<ExpandedReusableOutput> {
@@ -1561,6 +1711,18 @@ fn expansion_digest(
         hash_u64(&mut hasher, invocation.outputs.len())?;
         for output in &invocation.outputs {
             hash_part(&mut hasher, output.key.as_bytes());
+            hash_part(
+                &mut hasher,
+                match output.sensitivity {
+                    OutputSensitivity::Public => b"public",
+                    OutputSensitivity::SecretDerived => b"secret_derived",
+                },
+            );
+        }
+        hash_u64(&mut hasher, invocation.caller_outputs.len())?;
+        for output in &invocation.caller_outputs {
+            hash_part(&mut hasher, output.parent_key.as_bytes());
+            hash_part(&mut hasher, output.child_key.as_bytes());
             hash_part(
                 &mut hasher,
                 match output.sensitivity {

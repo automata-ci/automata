@@ -1,18 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use async_trait::async_trait;
 use automata_ci_auth::management::ManagementActor;
 use automata_ci_core::{
     MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, UnixMillis, WorkflowId,
-    WorkflowJobKey,
+    WorkflowJobKey, canonical_git_ref,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim,
-    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, Sha256Digest, StoreError,
-    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    JobCredentialRequirements, LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId,
+    Sha256Digest, StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 
 /// Relational logical-orchestration schema installed for phase-one admission.
@@ -85,6 +88,7 @@ pub struct AdmittedLogicalWorkflowJob {
     source_order: u16,
     kind: LogicalWorkflowJobKind,
     prerequisites: Vec<LogicalWorkflowJobId>,
+    credential_requirements: JobCredentialRequirements,
 }
 
 impl AdmittedLogicalWorkflowJob {
@@ -117,7 +121,18 @@ impl AdmittedLogicalWorkflowJob {
             source_order,
             kind,
             prerequisites,
+            credential_requirements: JobCredentialRequirements::default(),
         })
+    }
+
+    /// Binds immutable deployment and exact static context references.
+    #[must_use]
+    pub fn with_credential_requirements(
+        mut self,
+        credential_requirements: JobCredentialRequirements,
+    ) -> Self {
+        self.credential_requirements = credential_requirements;
+        self
     }
 
     /// Returns the durable logical-job identity.
@@ -149,6 +164,12 @@ impl AdmittedLogicalWorkflowJob {
     pub fn prerequisites(&self) -> &[LogicalWorkflowJobId] {
         &self.prerequisites
     }
+
+    /// Returns the value-free credential requirements retained at admission.
+    #[must_use]
+    pub const fn credential_requirements(&self) -> &JobCredentialRequirements {
+        &self.credential_requirements
+    }
 }
 
 /// Current authenticated human authority for one exact control-plane manual
@@ -158,7 +179,7 @@ impl AdmittedLogicalWorkflowJob {
 /// digests are bound alongside the exact repository, workflow, ref, and
 /// operation identity, while [`ManagementActor`] is reauthorized inside the
 /// admission transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AuthenticatedWorkflowDispatchClaim {
     actor: ManagementActor,
     repository_id: RepositoryId,
@@ -168,6 +189,17 @@ pub struct AuthenticatedWorkflowDispatchClaim {
     operation_id: OperationId,
     event_digest: Sha256Digest,
     base_context_digest: Sha256Digest,
+}
+
+impl fmt::Debug for AuthenticatedWorkflowDispatchClaim {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedWorkflowDispatchClaim")
+            .field("repository_id", &self.repository_id)
+            .field("workflow_id", &self.workflow_id)
+            .field("operation_id", &self.operation_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthenticatedWorkflowDispatchClaim {
@@ -192,7 +224,7 @@ impl AuthenticatedWorkflowDispatchClaim {
         let git_ref = git_ref.into();
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
-        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+        if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
         for (value, field) in [
@@ -267,7 +299,7 @@ impl AuthenticatedWorkflowDispatchClaim {
 
 /// Authenticated lookup for one exact, previously signed-GitHub-admitted
 /// workflow source used by a control-plane manual dispatch.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolveAuthenticatedWorkflowDispatchSource {
     actor: ManagementActor,
     repository_id: RepositoryId,
@@ -275,6 +307,16 @@ pub struct ResolveAuthenticatedWorkflowDispatchSource {
     git_ref: String,
     commit_sha: String,
     commit_sha_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for ResolveAuthenticatedWorkflowDispatchSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolveAuthenticatedWorkflowDispatchSource")
+            .field("repository_id", &self.repository_id)
+            .field("workflow_id", &self.workflow_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ResolveAuthenticatedWorkflowDispatchSource {
@@ -293,7 +335,7 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let git_ref = git_ref.into();
         validate_text(&git_ref, "Git ref")?;
-        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+        if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
         if repository_id.as_uuid().is_nil() || workflow_id.as_uuid().is_nil() {
@@ -349,7 +391,7 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
 }
 
 /// Exact immutable source proven by a prior authenticated GitHub admission.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AuthenticatedWorkflowDispatchSource {
     repository: AdmissionRepository,
     workflow_id: WorkflowId,
@@ -357,6 +399,16 @@ pub struct AuthenticatedWorkflowDispatchSource {
     git_ref: String,
     commit_sha: String,
     source: AdmissionObject,
+}
+
+impl fmt::Debug for AuthenticatedWorkflowDispatchSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedWorkflowDispatchSource")
+            .field("repository_id", &self.repository.id())
+            .field("workflow_id", &self.workflow_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthenticatedWorkflowDispatchSource {
@@ -381,7 +433,7 @@ impl AuthenticatedWorkflowDispatchSource {
         if workflow_id.as_uuid().is_nil() {
             return Err(LogicalWorkflowAdmissionValueError::NilUuid("workflow ID"));
         }
-        if git_ref.strip_prefix("refs/").is_none_or(str::is_empty) {
+        if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
         decode_commit_sha(&commit_sha)?;
@@ -457,6 +509,7 @@ pub struct AdmitLogicalWorkflowRun {
     display_title: Option<String>,
     commit_subject: Option<String>,
     concurrency: Option<crate::WorkflowConcurrency>,
+    reusable_workflows: Option<crate::AdmittedReusableWorkflowExpansion>,
     jobs: Vec<AdmittedLogicalWorkflowJob>,
     admitted_at: UnixMillis,
 }
@@ -516,6 +569,7 @@ impl AdmitLogicalWorkflowRun {
                 display_title: None,
                 commit_subject: None,
                 concurrency: None,
+                reusable_workflows: None,
                 jobs,
                 admitted_at,
             },
@@ -654,6 +708,12 @@ impl AdmitLogicalWorkflowRun {
         self.concurrency.as_ref()
     }
 
+    /// Returns the exact reusable-workflow catalog and expansion, when needed.
+    #[must_use]
+    pub const fn reusable_workflows(&self) -> Option<&crate::AdmittedReusableWorkflowExpansion> {
+        self.reusable_workflows.as_ref()
+    }
+
     /// Returns source-ordered logical jobs.
     #[must_use]
     pub fn jobs(&self) -> &[AdmittedLogicalWorkflowJob] {
@@ -700,6 +760,16 @@ impl AdmitLogicalWorkflowRunBuilder {
     #[must_use]
     pub fn concurrency(mut self, concurrency: Option<crate::WorkflowConcurrency>) -> Self {
         self.command.concurrency = concurrency;
+        self
+    }
+
+    /// Binds a complete exact-source reusable-workflow expansion.
+    #[must_use]
+    pub fn reusable_workflows(
+        mut self,
+        reusable_workflows: Option<crate::AdmittedReusableWorkflowExpansion>,
+    ) -> Self {
+        self.command.reusable_workflows = reusable_workflows;
         self
     }
 
@@ -767,6 +837,31 @@ impl AdmitLogicalWorkflowRunBuilder {
             ));
         }
         validate_graph(&command.jobs)?;
+        let has_reusable_calls = command
+            .jobs
+            .iter()
+            .any(|job| job.kind() == LogicalWorkflowJobKind::ReusableWorkflow);
+        if has_reusable_calls != command.reusable_workflows.is_some() {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidReusableExpansion);
+        }
+        if let Some(expansion) = &command.reusable_workflows {
+            let root = expansion.invocations().first();
+            if expansion.catalog().is_empty()
+                || expansion.invocations().is_empty()
+                || expansion.job_count() == 0
+                || root.is_none_or(|root| {
+                    root.id() != command.root_invocation_id
+                        || root.parent_id().is_some()
+                        || root.caller_job_id().is_some()
+                        || root.depth() != 0
+                        || root.workflow_path() != command.workflow_path
+                        || root.source_digest() != command.source.digest()
+                        || root.plan_digest() != command.plan.digest()
+                })
+            {
+                return Err(LogicalWorkflowAdmissionValueError::InvalidReusableExpansion);
+            }
+        }
         Ok(command)
     }
 }
@@ -892,6 +987,16 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
         observed_at: UnixMillis,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError>;
 
+    /// Commits one exact scheduled GitHub invocation while its durable fire
+    /// claim is live, or validates the immutable run evidence on replay.
+    async fn admit_scheduled_github_workflow(
+        &self,
+        _command: AdmitLogicalWorkflowRun,
+        _claim: crate::GithubScheduleFireClaim,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
+    }
+
     /// Commits one manual dispatch authorized by an Automata human session, or
     /// validates its exact immutable evidence and current authority on replay.
     ///
@@ -963,6 +1068,9 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The logical graph contained a dependency cycle.
     #[error("logical workflow admission dependency graph is cyclic")]
     CyclicDependency,
+    /// Reusable call jobs and their immutable expansion disagree.
+    #[error("reusable workflow expansion is absent or inconsistent")]
+    InvalidReusableExpansion,
 }
 
 /// Durable current logical-admission failure.
@@ -1026,6 +1134,15 @@ fn decode_commit_sha(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmissionVal
             Ok((high << 4) | low)
         })
         .collect()
+}
+
+fn canonical_workflow_dispatch_ref(value: &str) -> bool {
+    canonical_git_ref(value)
+        && ["refs/heads/", "refs/tags/"].iter().any(|prefix| {
+            value
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| !suffix.is_empty())
+        })
 }
 
 fn validate_graph(

@@ -81,6 +81,9 @@ pub(super) fn validate_server_message(
                 .runtime_authorities()
                 .ok_or(MessageValidationError::MissingRuntimeAuthorities)?
                 .validate_for(offer.job(), offer.lease())?;
+            if let Some(overlay) = offer.managed_secret_bindings() {
+                overlay.validate_for(offer.lease())?;
+            }
             Ok(())
         }
         ServerToRunner::LeaseRenewal(renewal) => renewal.header().validate_reply(),
@@ -923,4 +926,7 @@ pub enum MessageValidationError {
     /// A runtime-authority bundle violates schema, bounds, or execution binding.
     #[error(transparent)]
     RuntimeAuthority(#[from] super::RuntimeAuthorityError),
+    /// A managed-secret overlay violates canonical form, digest, or lease binding.
+    #[error(transparent)]
+    ManagedSecretBindingOverlay(#[from] super::ManagedSecretBindingOverlayError),
 }

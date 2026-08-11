@@ -11,12 +11,17 @@ use automata_ci_key_management::{
     EnvelopeCodec, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
 use automata_ci_store::{
-    BeginGithubServerServiceMint, ClaimNextGithubServerServiceMaintenance,
+    AdmissionObject, BeginGithubServerServiceMint, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
-    GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
+    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryName, GithubScheduleClaimFence, GithubScheduleDiscoveryClaim,
+    GithubScheduleRegistryId, GithubScheduleWorkerId, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
     GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
@@ -24,11 +29,12 @@ use automata_ci_store::{
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
-    GithubServerServiceWorkerId, ProtectedGithubServerServiceCredential, ProviderConnectionId,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
+    GithubServerServiceWorkerId, ObjectKey, ProtectedGithubServerServiceCredential,
+    ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
     ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest, TenantScope,
+    WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -436,7 +442,10 @@ fn connection_id() -> ProviderConnectionId {
 }
 
 fn repository_id() -> RepositoryId {
-    RepositoryId::from_uuid(Uuid::from_u128(0x30))
+    github_provider_repository_id(
+        &tenant(),
+        ProviderRepositoryId::new(13).expect("provider repository ID"),
+    )
 }
 
 fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAuthorityIdentity {
@@ -820,7 +829,12 @@ fn durable_adapters_with_compatible(
 
 #[test]
 fn registry_is_bounded_unique_and_implements_both_delivery_ports() {
-    fn assert_ports<T: GithubChecksCredentialProvider + GithubDeliverySourceCredentialProvider>() {}
+    fn assert_ports<
+        T: GithubChecksCredentialProvider
+            + GithubDeliverySourceCredentialProvider
+            + GithubScheduleSourceCredentialProvider,
+    >() {
+    }
     assert_ports::<GithubProviderCredentialAdapters>();
 
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
@@ -836,6 +850,54 @@ fn registry_is_bounded_unique_and_implements_both_delivery_ports() {
         GithubProviderCredentialAdapters::with_handoffs(fake, &[checks.clone(), checks]),
         Err(GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry)
     ));
+}
+
+#[tokio::test]
+async fn scheduled_private_discovery_uses_its_own_oidc_consumer_action() {
+    let private = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x67);
+    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
+    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&private));
+    let manifest = schedule_manifest(ProviderRepositoryVisibility::Private);
+    let selector = GithubServerServiceAuthoritySelector::from_identity(&private);
+    let request = GithubScheduleSourceCredentialRequest::new(
+        schedule_discovery_claim(),
+        &manifest,
+        &selector,
+        UnixMillis::new(OBSERVED_AT),
+    )
+    .expect("private scheduled discovery request");
+    assert_eq!(
+        adapters
+            .acquire_private_schedule_source(request)
+            .await
+            .expect_err("the fake authority rejects after recording the exact request"),
+        GithubScheduleSourceCredentialProviderError::Rejected
+    );
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].consumer().action(),
+        GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+    );
+    assert_ne!(
+        requests[0].consumer().action(),
+        GithubServerServiceAction::FetchPrivateRepositoryRevision
+    );
+}
+
+#[test]
+fn public_scheduled_discovery_cannot_construct_a_private_oidc_handoff() {
+    let private = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x68);
+    let manifest = schedule_manifest(ProviderRepositoryVisibility::Public);
+    assert!(
+        GithubScheduleSourceCredentialRequest::new(
+            schedule_discovery_claim(),
+            &manifest,
+            &GithubServerServiceAuthoritySelector::from_identity(&private),
+            UnixMillis::new(OBSERVED_AT),
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

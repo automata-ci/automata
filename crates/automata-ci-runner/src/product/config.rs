@@ -29,7 +29,7 @@ use super::files::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -419,6 +419,7 @@ impl PodmanProductConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorProductConfig {
     resources: ResourceLimits,
+    resource_capacity: ResourceCapacity,
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
@@ -437,6 +438,12 @@ impl ExecutorProductConfig {
     #[must_use]
     pub const fn resources(&self) -> ResourceLimits {
         self.resources
+    }
+
+    /// Returns every configured per-job resource dimension.
+    #[must_use]
+    pub const fn resource_capacity(&self) -> ResourceCapacity {
+        self.resource_capacity
     }
 
     /// Returns the job sandbox egress policy.
@@ -807,6 +814,11 @@ impl RawRunnerProductConfig {
         if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {
             return Err(RunnerProductConfigError::UnsupportedSchema);
         }
+        let kubernetes_selected = match (&self.podman, &self.kubernetes) {
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            _ => return Err(RunnerProductConfigError::InvalidSandboxProvider),
+        };
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
         let tls = self.tls.validate()?;
         let spool = self.spool.validate()?;
@@ -1142,7 +1154,9 @@ impl RawInventory {
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         let resources = self.resources_per_job.validate()?;
-        if resources.execution != executor.resources() {
+        if resources.capacity != executor.resource_capacity()
+            || resources.execution != executor.resources()
+        {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
         let mut environments = BTreeMap::new();
@@ -1305,6 +1319,8 @@ struct RawResources {
     cpu_millis: u32,
     memory_bytes: u64,
     ephemeral_disk_bytes: u64,
+    #[serde(default)]
+    gpu_count: u16,
     pids: u32,
 }
 
@@ -1315,13 +1331,6 @@ struct ValidatedResources {
 
 impl RawResources {
     fn validate(self) -> Result<ValidatedResources, RunnerProductConfigError> {
-        // The current rootless-Podman adapter enforces CPU, memory, and PID
-        // limits, but it has no proven per-sandbox storage quota. Advertising
-        // a nonzero disk capacity would let the scheduler place work against a
-        // limit that the runner cannot enforce.
-        if self.ephemeral_disk_bytes != 0 {
-            return Err(RunnerProductConfigError::InvalidInventory);
-        }
         let execution = ResourceLimits::new(self.memory_bytes, self.cpu_millis, self.pids)
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         Ok(ValidatedResources {
@@ -1329,7 +1338,7 @@ impl RawResources {
                 self.cpu_millis,
                 self.memory_bytes,
                 self.ephemeral_disk_bytes,
-                0,
+                self.gpu_count,
             ),
             execution,
         })
@@ -1531,6 +1540,98 @@ impl RawPodmanProductConfig {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKubernetesProductConfig {
+    namespace: String,
+    guest_image: String,
+    network_isolation_verified: bool,
+    #[serde(default)]
+    ephemeral_storage_enforcement_verified: bool,
+    process_limit_enforcement: u32,
+    #[serde(default)]
+    gpu_resource_name: Option<String>,
+    node_selector: BTreeMap<String, String>,
+    #[serde(default)]
+    runtime_class_name: Option<String>,
+    #[serde(default = "default_kubernetes_run_as")]
+    run_as_user: i64,
+    #[serde(default = "default_kubernetes_run_as")]
+    run_as_group: i64,
+    #[serde(default = "default_kubernetes_operation_timeout_seconds")]
+    operation_timeout_seconds: u64,
+    #[serde(default = "default_kubernetes_readiness_timeout_seconds")]
+    readiness_timeout_seconds: u64,
+}
+
+impl RawKubernetesProductConfig {
+    fn validate(
+        self,
+        executor: &ExecutorProductConfig,
+    ) -> Result<KubernetesProductConfig, RunnerProductConfigError> {
+        if !self.network_isolation_verified
+            || executor.network() != NetworkPolicy::Disabled
+            || executor.privilege() != SandboxPrivilegePolicy::Unprivileged
+            || self.process_limit_enforcement != executor.resources().pids()
+            || executor.resources().memory_bytes()
+                < automata_ci_sandbox_kubernetes::MINIMUM_KUBERNETES_SANDBOX_MEMORY_BYTES
+        {
+            return Err(RunnerProductConfigError::InvalidKubernetes);
+        }
+        let guest_image = ImmutableImage::new(self.guest_image)
+            .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        let mut adapter = automata_ci_sandbox_kubernetes::KubernetesSandboxConfig::new(
+            self.namespace,
+            guest_image,
+            automata_ci_sandbox_kubernetes::VerifiedNetworkIsolation,
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_timeouts(
+            Duration::from_secs(self.operation_timeout_seconds),
+            Duration::from_secs(self.readiness_timeout_seconds),
+        )
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_run_as(self.run_as_user, self.run_as_group)
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?
+        .with_verified_process_limit(
+            automata_ci_sandbox_kubernetes::VerifiedProcessLimitEnforcement::new(
+                self.process_limit_enforcement,
+            )
+            .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?,
+        )
+        .with_node_selector(self.node_selector)
+        .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        if self.ephemeral_storage_enforcement_verified {
+            adapter = adapter.with_verified_ephemeral_storage(
+                automata_ci_sandbox_kubernetes::VerifiedEphemeralStorageEnforcement,
+            );
+        }
+        if let Some(resource_name) = self.gpu_resource_name {
+            adapter = adapter
+                .with_gpu_resource_name(resource_name)
+                .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        }
+        if let Some(runtime_class_name) = self.runtime_class_name {
+            adapter = adapter
+                .with_runtime_class_name(runtime_class_name)
+                .map_err(|_| RunnerProductConfigError::InvalidKubernetes)?;
+        }
+        Ok(KubernetesProductConfig { adapter })
+    }
+}
+
+const fn default_kubernetes_run_as() -> i64 {
+    65_532
+}
+
+const fn default_kubernetes_operation_timeout_seconds() -> u64 {
+    30
+}
+
+const fn default_kubernetes_readiness_timeout_seconds() -> u64 {
+    300
+}
+
 fn validate_service_proxy_image(value: String) -> Result<ImmutableImage, ()> {
     let repository = value
         .rsplit_once("@sha256:")
@@ -1595,8 +1696,14 @@ impl RawExecutorProductConfig {
         let resources = self
             .resources
             .validate()
-            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?
-            .execution;
+            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
+        if !allow_extended_resources
+            && (validated_resources.capacity.ephemeral_disk_bytes() != 0
+                || validated_resources.capacity.gpu_count() != 0)
+        {
+            return Err(RunnerProductConfigError::InvalidExecutor);
+        }
+        let resources = validated_resources.execution;
         let network = match self.network {
             RawNetworkPolicy::Disabled => NetworkPolicy::Disabled,
             RawNetworkPolicy::PrivateEgress => NetworkPolicy::PrivateEgress,
@@ -1661,6 +1768,7 @@ impl RawExecutorProductConfig {
         .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
         Ok(ExecutorProductConfig {
             resources,
+            resource_capacity: validated_resources.capacity,
             network,
             root_filesystem,
             privilege,

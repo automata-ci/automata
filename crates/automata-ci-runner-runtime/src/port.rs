@@ -11,7 +11,7 @@ use automata_ci_core::{
     RunnerSessionId, UnixMillis,
 };
 use automata_ci_execution::SandboxEnvironment;
-use automata_ci_protocol::JobRuntimeAuthorities;
+use automata_ci_protocol::{JobRuntimeAuthorities, ManagedSecretBindingOverlay};
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
     DurableContentRef, ProviderFailureOutcome, ProviderOperationKind, SandboxIdentity,
@@ -77,6 +77,7 @@ pub struct ExecutionRequest {
     lease: Lease,
     job: JobIrEnvelope,
     runtime_authorities: JobRuntimeAuthorities,
+    managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
     job_content: DurableContentRef,
     environment: SandboxEnvironment,
     recovery_lifecycle: JobLifecycle,
@@ -109,6 +110,7 @@ impl ExecutionRequest {
             lease,
             job,
             runtime_authorities,
+            managed_secret_bindings: None,
             job_content,
             environment,
             recovery_lifecycle,
@@ -146,6 +148,28 @@ impl ExecutionRequest {
         &self.runtime_authorities
     }
 
+    /// Attaches the value-free binding overlay durably accepted with this lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an overlay bound to different attempt, lease, or fence coordinates.
+    pub fn with_managed_secret_bindings(
+        mut self,
+        overlay: ManagedSecretBindingOverlay,
+    ) -> Result<Self, ExecutorError> {
+        overlay
+            .validate_for(&self.lease)
+            .map_err(|_| ExecutorError::new(ExecutorErrorKind::InvalidJob))?;
+        self.managed_secret_bindings = Some(overlay);
+        Ok(self)
+    }
+
+    /// Returns the exact value-free overlay, if the durable command carried one.
+    #[must_use]
+    pub const fn managed_secret_bindings(&self) -> Option<&ManagedSecretBindingOverlay> {
+        self.managed_secret_bindings.as_ref()
+    }
+
     /// Returns the durable protected `JobIR` content identity.
     #[must_use]
     pub const fn job_content(&self) -> &DurableContentRef {
@@ -180,6 +204,13 @@ impl fmt::Debug for ExecutionRequest {
             .field("attempt_id", &self.lease.attempt_id())
             .field("guard", &self.lease.guard())
             .field("job_content", &self.job_content)
+            .field(
+                "managed_secret_binding_count",
+                &self
+                    .managed_secret_bindings
+                    .as_ref()
+                    .map_or(0, |overlay| overlay.bindings().len()),
+            )
             .field("environment", &self.environment)
             .field("recovery_lifecycle", &self.recovery_lifecycle)
             .field("recovered_sandbox", &self.recovered_sandbox)

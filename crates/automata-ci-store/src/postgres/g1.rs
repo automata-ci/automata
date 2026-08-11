@@ -48,11 +48,19 @@ use crate::{
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v3";
+const LEGACY_LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-rpc-response-metadata:v1";
+
+fn is_lease_offer_command_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        LEASE_OFFER_COMMAND_KIND | LEGACY_LEASE_OFFER_COMMAND_KIND
+    )
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RunnerCommandEnvelopeMetadata {
@@ -3560,7 +3568,7 @@ impl LockedReplayPublicationEvidence {
                 "lease-offer publication has a mismatched command fence",
             ));
         }
-        if !self.request_kind_is_lease_request || command.kind != LEASE_OFFER_COMMAND_KIND {
+        if !self.request_kind_is_lease_request || !is_lease_offer_command_kind(&command.kind) {
             return Err(StoreError::corrupt_data(
                 "lease-offer publication has mismatched command authority metadata",
             ));
@@ -4122,7 +4130,9 @@ async fn load_generic_receipt(
             StoreError::corrupt_data("lease-request receipt lost its offer publication")
         })?;
         if publication.request() != request
-            || publication.command().request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
+            || !is_lease_offer_command_kind(
+                publication.command().request().kind().as_str(),
+            )
             || matches!(expectation,
                 ReceiptOfferExpectation::Exact(Some(expected))
                 if expected.session() != publication.command().request().session()
@@ -4185,7 +4195,9 @@ async fn insert_generic_receipt(
     let lease_offer_completion = match (lease_offer_publication, lease_offer_fallback) {
         (Some(publication), Some(fallback)) => {
             if publication.request() != &request
-                || publication.command().request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
+                || !is_lease_offer_command_kind(
+                    publication.command().request().kind().as_str(),
+                )
             {
                 return Err(StoreError::corrupt_data(
                     "lease-request response has a mismatched offer publication",

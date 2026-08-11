@@ -12,7 +12,7 @@ use std::{
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
     ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
+    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext, SecretBinding,
     MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
     MAX_STEP_ATTACHMENT_TEXT_BYTES, OutputSensitivity, RuntimeBoolean, RuntimePositiveInteger,
     RuntimeTimeoutTemplate, SemanticStep, ShellTemplate, StepAnnotation, StepAnnotationLevel,
@@ -21,11 +21,11 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
-    ImmutableImage, NetworkPolicy, ProviderError, ProviderErrorKind, RootFilesystemPolicy,
-    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxProvider, SandboxSpec,
-    SandboxState, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServicePort, ServiceTransportProtocol, TargetPath,
-    TargetPlatform,
+    ImmutableImage, NetworkPolicy, ProviderError, ProviderErrorKind, ResourceLimits,
+    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle, SandboxProvider,
+    SandboxSpec, SandboxState, ServiceContainerBindings, ServiceContainerSpec,
+    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
+    ServiceTransportProtocol, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
@@ -48,7 +48,8 @@ use automata_ci_runner_journal::{
 };
 use automata_ci_runner_runtime::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
-    ExecutionEvents, ExecutionRequest, ExecutorError, ExecutorFuture, JobExecutor,
+    ExecutionEvents, ExecutionRequest, ExecutorError, ExecutorErrorKind, ExecutorFuture,
+    JobExecutor,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -59,7 +60,8 @@ use crate::{
     GithubStepSnapshot, GithubToolchain, JobContentPort, LocalActionPreparationRequest,
     OperationPurpose, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
     PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedKeyValue,
-    PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretPort,
+    PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretCustodyAcknowledger,
+    SecretPort,
     environment::{EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue},
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
@@ -160,6 +162,8 @@ pub struct GithubJobExecutor {
     completed_steps: GithubCompletedStepApplicator,
     workflow_command_limits: WorkflowCommandLimits,
     workflow_command_policy: WorkflowCommandPolicy,
+    custody_acknowledger: Option<Arc<dyn SecretCustodyAcknowledger>>,
+    managed_secret_bindings: Option<BTreeMap<String, SecretBinding>>,
 }
 
 /// An admitted execution request paired with its verified immutable context.
@@ -258,6 +262,8 @@ impl GithubJobExecutor {
             completed_steps: GithubCompletedStepApplicator::default(),
             workflow_command_limits: WorkflowCommandLimits::default(),
             workflow_command_policy: WorkflowCommandPolicy::default(),
+            custody_acknowledger: None,
+            managed_secret_bindings: None,
         }
     }
 
@@ -277,6 +283,78 @@ impl GithubJobExecutor {
         self.workflow_command_limits = workflow_command_limits;
         self.workflow_command_policy = workflow_command_policy;
         self
+    }
+
+    /// Produces one execution-local executor with non-durable secret custody.
+    ///
+    /// The original executor remains secretless. The supplied custody object is
+    /// shared only by this returned executor and is never cloned by value; its
+    /// acknowledgement is invoked after every exact runtime binding is masked
+    /// and before any user-observable execution work begins.
+    #[must_use]
+    pub fn with_secret_custody(
+        &self,
+        secrets: Arc<dyn SecretPort>,
+        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
+    ) -> Self {
+        Self {
+            config: self.config.clone(),
+            ports: GithubJobExecutorPorts::new(
+                Arc::clone(&self.ports.provider),
+                Arc::clone(&self.ports.environments),
+                Arc::clone(&self.ports.actions),
+                Arc::clone(&self.ports.content),
+                secrets,
+                Arc::clone(&self.ports.contexts),
+                Arc::clone(&self.ports.toolchain),
+                Arc::clone(&self.ports.operation_ids),
+                Arc::clone(&self.ports.clock),
+            ),
+            local_actions: self.local_actions.clone(),
+            expressions: self.expressions,
+            command_files: self.command_files,
+            completed_steps: self.completed_steps,
+            workflow_command_limits: self.workflow_command_limits,
+            workflow_command_policy: self.workflow_command_policy,
+            custody_acknowledger: Some(acknowledger),
+            managed_secret_bindings: None,
+        }
+    }
+
+    /// Produces one execution-local executor with an ephemeral binding overlay.
+    ///
+    /// The immutable runtime-context blob must remain secretless. These
+    /// value-free bindings are layered only in memory after that blob is
+    /// verified, then every installed value is masked before acknowledgement.
+    #[must_use]
+    pub fn with_managed_secret_custody(
+        &self,
+        secrets: Arc<dyn SecretPort>,
+        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
+        bindings: BTreeMap<String, SecretBinding>,
+    ) -> Self {
+        let mut executor = self.with_secret_custody(secrets, acknowledger);
+        executor.managed_secret_bindings = Some(bindings);
+        executor
+    }
+
+    /// Loads and verifies the immutable runtime context before private delivery.
+    ///
+    /// It returns only value-free secret binding locators. Callers must still
+    /// use [`Self::with_secret_custody`] before executing a context with
+    /// bindings, so the executor can mask and acknowledge its installed values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized executor failure when immutable content is missing,
+    /// inconsistent, oversized, or not a valid runtime context.
+    pub async fn verified_runtime_context(
+        &self,
+        job: &JobIrEnvelope,
+    ) -> Result<JobRuntimeContext, ExecutorError> {
+        self.hydrate_runtime_context(job)
+            .await
+            .map_err(ExecutorError::from)
     }
 
     async fn hydrate_runtime_context(
@@ -361,6 +439,12 @@ impl GithubJobExecutor {
         {
             return Err(AdmissionRejection::InvalidJob);
         }
+        self.validate_provider_admission(job)?;
+        validate_action_step_admission(job, &workspace)?;
+        Ok(environment)
+    }
+
+    fn validate_provider_admission(&self, job: &JobIrEnvelope) -> Result<(), AdmissionRejection> {
         let capabilities = self.ports.provider.capabilities();
         for required in [
             SandboxCapability::WholeJob,
@@ -371,6 +455,7 @@ impl GithubJobExecutor {
             SandboxCapability::CopyFrom,
             SandboxCapability::EnvironmentInjection,
             SandboxCapability::ResourceLimits,
+            SandboxCapability::ProcessLimits,
         ] {
             if !capabilities.supports(required) {
                 return Err(AdmissionRejection::CapabilityChanged);
@@ -462,6 +547,7 @@ impl GithubJobExecutor {
         else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
+        let runtime_context = self.apply_managed_secret_bindings(runtime_context)?;
         if request.job().job().authority_profile() == JobAuthorityProfile::CredentialFree
             && (!request.runtime_authorities().as_slice().is_empty()
                 || !runtime_context.secrets().is_empty()
@@ -476,6 +562,19 @@ impl GithubJobExecutor {
                 return self.cancelled_job_result(attempt_id, &masker);
             }
             return Err(invalid_job());
+        }
+        self.register_runtime_context_secret_masks(&runtime_context, &mut masker)?;
+        if cancellation.is_cancelled() {
+            return self.cancelled_job_result(attempt_id, &masker);
+        }
+        if let Some(acknowledger) = &self.custody_acknowledger {
+            acknowledger
+                .acknowledge(cancellation.token())
+                .await
+                .map_err(map_executor_error)?;
+            if cancellation.is_cancelled() {
+                return self.cancelled_job_result(attempt_id, &masker);
+            }
         }
         let request = HydratedExecutionRequest::new(&request, &runtime_context);
         let workspace = cancellation_dominant(
@@ -1572,6 +1671,13 @@ impl GithubJobExecutor {
             cancellation,
         )?;
         let call_path = ActionCallPath::top(index);
+        posts.record_occurrence(
+            call_path.clone(),
+            PostActionOccurrence {
+                definition: definition.clone(),
+                identity: identity.clone(),
+            },
+        )?;
         let invocation =
             cancellation_dominant(call_path.invocation_id(step.id().as_str()), cancellation)?;
         let input_environment = cancellation_dominant(inputs.environment(), cancellation)?;
@@ -1586,13 +1692,7 @@ impl GithubJobExecutor {
                     invocation: invocation.clone(),
                     javascript: javascript.clone(),
                     paths: action_paths.clone(),
-                    identity: identity.clone(),
-                    inputs: inputs.values().to_vec(),
-                    action_environment: Vec::new(),
-                    input_environment: input_environment.clone(),
                     phase: cancellation_dominant(phase_ordinal(index, 3), cancellation)?,
-                    timeout,
-                    continue_on_error,
                 },
             )?;
         }
@@ -1701,6 +1801,15 @@ impl GithubJobExecutor {
         }
         let loaded = (*occurrence.loaded).clone();
         let reference = occurrence.reference.clone();
+        let identity =
+            ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
+        posts.record_occurrence(
+            call_path.clone(),
+            PostActionOccurrence {
+                definition: loaded.definition.clone(),
+                identity: identity.clone(),
+            },
+        )?;
         match loaded.definition.execution() {
             PreparedActionExecution::Javascript(javascript) => {
                 let Some(pre) = javascript.pre() else {
@@ -1740,8 +1849,6 @@ impl GithubJobExecutor {
                         cancellation,
                     )?;
                 }
-                let identity =
-                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
                 let invocation = cancellation_dominant(
                     call_path.invocation_id(top_step.id().as_str()),
                     cancellation,
@@ -1768,16 +1875,10 @@ impl GithubJobExecutor {
                             invocation: invocation.clone(),
                             javascript: javascript.as_ref().clone(),
                             paths: loaded.paths.clone(),
-                            identity: identity.clone(),
-                            inputs: inputs.values().to_vec(),
-                            action_environment: action_environment.to_vec(),
-                            input_environment: input_environment.clone(),
                             phase: cancellation_dominant(
                                 action_phase(budget, call_path.is_top(), top_index, 3),
                                 cancellation,
                             )?,
-                            timeout: deadline.timeout,
-                            continue_on_error,
                         },
                     )?;
                 }
@@ -1897,8 +1998,6 @@ impl GithubJobExecutor {
                         cancellation,
                     )?;
                 }
-                let identity =
-                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
                 self.run_preloaded_composite_pre(
                     request,
                     event,
@@ -2318,6 +2417,13 @@ impl GithubJobExecutor {
                 }
                 let identity =
                     ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
+                posts.record_occurrence(
+                    call_path.clone(),
+                    PostActionOccurrence {
+                        definition: loaded.definition.clone(),
+                        identity: identity.clone(),
+                    },
+                )?;
                 let invocation = cancellation_dominant(
                     call_path.invocation_id(top_step.id().as_str()),
                     cancellation,
@@ -2603,7 +2709,7 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         deadline: ActionDeadline,
-        post_failure_continued: bool,
+        _post_failure_continued: bool,
         call_path: &ActionCallPath,
         lifecycle: JavascriptPrePostState,
     ) -> Result<CommandOutcome, ExecutorAdapterError> {
@@ -2648,13 +2754,7 @@ impl GithubJobExecutor {
                     invocation: invocation.clone(),
                     javascript: javascript.clone(),
                     paths: action_paths.clone(),
-                    identity: identity.clone(),
-                    inputs: inputs.values().to_vec(),
-                    action_environment: action_environment.to_vec(),
-                    input_environment: input_environment.clone(),
                     phase: post_phase,
-                    timeout: deadline.timeout,
-                    continue_on_error: post_failure_continued,
                 },
             )?;
         }
@@ -3153,6 +3253,7 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
         }
+        posts.record_composite_steps(call_path.clone(), child_records.clone())?;
         let base = cancellation_dominant(
             self.context(
                 request,
@@ -3404,6 +3505,238 @@ impl GithubJobExecutor {
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn resolve_post_templates<'a>(
+        &self,
+        request: &HydratedExecutionRequest<'_>,
+        top_step: &automata_ci_core::StepIr,
+        context: &'a crate::GithubContextSnapshot,
+        commands: &JobCommandState,
+        posts: &PostRegistry,
+        call_path: &ActionCallPath,
+        post: &RegisteredPost,
+        status: GithubStatus,
+        masker: &mut SecretMasker,
+        budget: &mut ActionExecutionBudget,
+    ) -> Result<ResolvedPostTemplates<'a>, ExecutorAdapterError> {
+        let SemanticStep::Action {
+            reference,
+            inputs: supplied,
+        } = top_step.kind()
+        else {
+            return Err(invalid_job());
+        };
+        let builder = EnvironmentBuilder::new(
+            &self.expressions,
+            self.ports.secrets.as_ref(),
+            request.environment().default_environment(),
+        );
+        let top_environment = builder.phase_expression_values(
+            context,
+            commands,
+            request.job().job().environment(),
+            top_step.environment(),
+            masker,
+        )?;
+        let top_context =
+            environment_expression_context(context.expression(), &top_environment, status)?;
+        let top_path = call_path.prefix(1)?;
+        let mut occurrence = posts.occurrence(&top_path)?;
+        if &occurrence.identity.reference != reference {
+            return Err(invalid_job());
+        }
+        let mut continue_on_error = vec![DeferredPostContinue::Runtime {
+            value: top_step.continue_on_error().clone(),
+            context: top_context.clone(),
+        }];
+
+        if call_path.depth() == 1 {
+            if !self.evaluate_registered_post_condition(post, &occurrence, &top_context)? {
+                return Ok(ResolvedPostTemplates::Skipped);
+            }
+            let timeout = self.resolve_registered_post_timeout(top_step, &top_context)?;
+            let supplied =
+                Self::resolve_post_source_inputs(&builder, supplied, &top_context, masker, budget)?;
+            let inputs =
+                builder.resolve_action_inputs(&occurrence.definition, &supplied, &top_context)?;
+            Self::charge_action_inputs(&inputs, budget)?;
+            return Ok(ResolvedPostTemplates::Execute(Box::new(
+                ResolvedPostExecution {
+                    identity: occurrence.identity,
+                    action_environment: Vec::new(),
+                    input_environment: inputs.environment()?,
+                    timeout,
+                    continue_on_error,
+                },
+            )));
+        }
+
+        let timeout = self.resolve_registered_post_timeout(top_step, &top_context)?;
+        let supplied =
+            Self::resolve_post_source_inputs(&builder, supplied, &top_context, masker, budget)?;
+        let mut inputs =
+            builder.resolve_action_inputs(&occurrence.definition, &supplied, &top_context)?;
+        Self::charge_action_inputs(&inputs, budget)?;
+        let mut expression_environment = top_environment;
+        let mut action_environment = Vec::new();
+        let mut parent_path = top_path;
+
+        for depth in 1..call_path.depth() {
+            let PreparedActionExecution::Composite(composite) = occurrence.definition.execution()
+            else {
+                return Err(invalid_job());
+            };
+            let child_index = call_path.index_at(depth)?;
+            let Some(PreparedCompositeStep::Uses(step)) = composite.steps().get(child_index) else {
+                return Err(invalid_job());
+            };
+            let steps = posts.composite_steps_value(&parent_path, commands)?;
+            let parent_context = action_expression_context(
+                context.expression(),
+                inputs.values(),
+                Some(steps.clone()),
+                &occurrence.identity,
+                &expression_environment,
+                status,
+            )?;
+            let child_environment = Self::resolve_composite_values(
+                &builder,
+                step.environment(),
+                &parent_context,
+                budget,
+            )?;
+            expression_environment.extend(child_environment.clone());
+            action_environment.extend(child_environment);
+            let child_context = action_expression_context(
+                context.expression(),
+                inputs.values(),
+                Some(steps),
+                &occurrence.identity,
+                &expression_environment,
+                status,
+            )?;
+            continue_on_error.push(DeferredPostContinue::Composite {
+                value: step.metadata().continue_on_error().clone(),
+                context: child_context.clone(),
+            });
+            let child_path = call_path.prefix(depth + 1)?;
+            let child_occurrence = posts.occurrence(&child_path)?;
+            if &child_occurrence.identity.reference != step.reference() {
+                return Err(invalid_job());
+            }
+            let final_occurrence = depth + 1 == call_path.depth();
+            if final_occurrence
+                && !self.evaluate_registered_post_condition(
+                    post,
+                    &child_occurrence,
+                    &child_context,
+                )?
+            {
+                return Ok(ResolvedPostTemplates::Skipped);
+            }
+            let supplied =
+                Self::resolve_composite_value_map(&builder, step.inputs(), &child_context, budget)?;
+            let child_inputs = builder.resolve_action_inputs(
+                &child_occurrence.definition,
+                &supplied,
+                &child_context,
+            )?;
+            Self::charge_action_inputs(&child_inputs, budget)?;
+            if final_occurrence {
+                return Ok(ResolvedPostTemplates::Execute(Box::new(
+                    ResolvedPostExecution {
+                        identity: child_occurrence.identity,
+                        action_environment,
+                        input_environment: child_inputs.environment()?,
+                        timeout,
+                        continue_on_error,
+                    },
+                )));
+            }
+            occurrence = child_occurrence;
+            inputs = child_inputs;
+            parent_path = child_path;
+        }
+        Err(invalid_job())
+    }
+
+    fn evaluate_registered_post_condition(
+        &self,
+        post: &RegisteredPost,
+        occurrence: &PostActionOccurrence,
+        context: &dyn GithubEvaluationContext,
+    ) -> Result<bool, ExecutorAdapterError> {
+        let PreparedActionExecution::Javascript(javascript) = occurrence.definition.execution()
+        else {
+            return Err(invalid_job());
+        };
+        if javascript.as_ref() != &post.javascript
+            || occurrence.identity.runtime_step_id != post.runtime_step_id
+            || occurrence.identity.action_path != post.paths.directory
+        {
+            return Err(invalid_job());
+        }
+        self.expressions
+            .evaluate_condition(post.javascript.post_condition(), context)
+            .map_err(|_| invalid_job())
+    }
+
+    fn resolve_registered_post_timeout(
+        &self,
+        step: &automata_ci_core::StepIr,
+        context: &dyn GithubEvaluationContext,
+    ) -> Result<Duration, ExecutorAdapterError> {
+        let seconds = self.resolve_runtime_timeout(step.timeout(), context)?;
+        self.step_timeout(seconds, None)
+    }
+
+    fn resolve_post_source_inputs(
+        builder: &EnvironmentBuilder<'_>,
+        sources: &BTreeMap<String, ValueSource>,
+        context: &dyn GithubEvaluationContext,
+        masker: &mut SecretMasker,
+        budget: &mut ActionExecutionBudget,
+    ) -> Result<BTreeMap<String, ResolvedEnvironmentValue>, ExecutorAdapterError> {
+        sources
+            .iter()
+            .map(|(name, source)| {
+                let value = builder.resolve_source_value(source, context, masker)?;
+                budget.charge_derived(value.expose().len())?;
+                Ok((name.clone(), value))
+            })
+            .collect()
+    }
+
+    fn charge_action_inputs(
+        inputs: &ResolvedActionInputs,
+        budget: &mut ActionExecutionBudget,
+    ) -> Result<(), ExecutorAdapterError> {
+        for (_, value) in inputs.values() {
+            budget.charge_derived(value.expose().len())?;
+        }
+        Ok(())
+    }
+
+    fn resolve_post_continue_on_error(
+        &self,
+        policies: &[DeferredPostContinue<'_>],
+    ) -> Result<bool, ExecutorAdapterError> {
+        for policy in policies.iter().rev() {
+            let continued = match policy {
+                DeferredPostContinue::Runtime { value, context } => {
+                    self.resolve_runtime_boolean(value, context)?
+                }
+                DeferredPostContinue::Composite { value, context } => {
+                    self.resolve_prepared_boolean(value, context)?
+                }
+            };
+            if continued {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn run_posts(
         &self,
         request: &HydratedExecutionRequest<'_>,
@@ -3421,12 +3754,13 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &CleanupCancellation<'_>,
     ) -> Result<(), ExecutorAdapterError> {
+        let mut post_budget = ActionExecutionBudget::new();
         while !posts.is_empty() {
             if stop_posts_if_cancelled(cancellation, status, conclusion) {
                 posts.clear();
                 break;
             }
-            let Some(post) = posts.pop_last() else {
+            let Some((call_path, post)) = posts.pop_last() else {
                 break;
             };
             let Some(context) = reconcile_post_operation(
@@ -3444,56 +3778,6 @@ impl GithubJobExecutor {
                 status,
                 conclusion,
             )?
-            else {
-                posts.clear();
-                break;
-            };
-            let Some(expression) = reconcile_post_operation(
-                action_expression_context(
-                    context.expression(),
-                    &post.inputs,
-                    None,
-                    &post.identity,
-                    &post.action_environment,
-                    *status,
-                ),
-                cancellation,
-                status,
-                conclusion,
-            )?
-            else {
-                posts.clear();
-                break;
-            };
-            let Some(condition) = reconcile_post_operation(
-                self.expressions
-                    .evaluate_condition(post.javascript.post_condition(), &expression)
-                    .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)),
-                cancellation,
-                status,
-                conclusion,
-            )?
-            else {
-                posts.clear();
-                break;
-            };
-            if !condition {
-                continue;
-            }
-            if stop_posts_if_cancelled(cancellation, status, conclusion) {
-                posts.clear();
-                break;
-            }
-            let Some(entry) = post.javascript.post() else {
-                continue;
-            };
-            let node = self
-                .ports
-                .toolchain
-                .node(post.javascript.runtime())
-                .cloned()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported));
-            let Some(node) = reconcile_post_operation(node, cancellation, status, conclusion)?
             else {
                 posts.clear();
                 break;
@@ -3517,6 +3801,45 @@ impl GithubJobExecutor {
                 posts.clear();
                 break;
             };
+            let templates = self.resolve_post_templates(
+                request,
+                step,
+                &context,
+                commands,
+                posts,
+                &call_path,
+                &post,
+                *status,
+                masker,
+                &mut post_budget,
+            );
+            let Some(templates) =
+                reconcile_post_operation(templates, cancellation, status, conclusion)?
+            else {
+                posts.clear();
+                break;
+            };
+            let ResolvedPostTemplates::Execute(templates) = templates else {
+                continue;
+            };
+            if stop_posts_if_cancelled(cancellation, status, conclusion) {
+                posts.clear();
+                break;
+            }
+            let Some(entry) = post.javascript.post() else {
+                continue;
+            };
+            let node = self
+                .ports
+                .toolchain
+                .node(post.javascript.runtime())
+                .cloned()
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported));
+            let Some(node) = reconcile_post_operation(node, cancellation, status, conclusion)?
+            else {
+                posts.clear();
+                break;
+            };
             let state = commands
                 .post_action_environment(&post.invocation)
                 .into_iter()
@@ -3533,10 +3856,10 @@ impl GithubJobExecutor {
                     step,
                     &context,
                     commands,
-                    &post.action_environment,
-                    &post.input_environment,
+                    &templates.action_environment,
+                    &templates.input_environment,
                     &post.paths,
-                    &post.identity,
+                    &templates.identity,
                     state,
                     masker,
                 ),
@@ -3575,7 +3898,7 @@ impl GithubJobExecutor {
                 arguments: vec![entry],
                 working_directory: paths.workspace.clone(),
                 environment,
-                timeout: post.timeout.min(remaining),
+                timeout: templates.timeout.min(remaining),
             };
             if stop_posts_if_cancelled(cancellation, status, conclusion) {
                 posts.clear();
@@ -3604,10 +3927,19 @@ impl GithubJobExecutor {
             let stop_reason = cancellation.stop_reason(*conclusion);
             let effective_outcome = stop_reason.map_or(outcome, PostStopReason::outcome);
             if effective_outcome != CommandOutcome::Success {
-                let mapped = stop_reason.map_or_else(
-                    || map_continue(effective_outcome.conclusion(), post.continue_on_error),
-                    |reason| reason.outcome().conclusion(),
-                );
+                let mapped = if let Some(reason) = stop_reason {
+                    reason.outcome().conclusion()
+                } else {
+                    let continued =
+                        self.resolve_post_continue_on_error(&templates.continue_on_error);
+                    let Some(continued) =
+                        reconcile_post_operation(continued, cancellation, status, conclusion)?
+                    else {
+                        posts.clear();
+                        break;
+                    };
+                    map_continue(effective_outcome.conclusion(), continued)
+                };
                 if let Some(record) = records
                     .iter_mut()
                     .find(|record| record.step_id.as_str() == post.top_step_id)
@@ -3958,7 +4290,7 @@ impl GithubJobExecutor {
                 workspace.clone(),
                 self.config.network(),
                 self.config.root_filesystem(),
-                self.config.resources(),
+                self.sandbox_resources(request)?,
             )
             .with_privilege(self.config.privilege())
             .with_services(service_specs.clone());
@@ -4003,6 +4335,25 @@ impl GithubJobExecutor {
             .attach(&handle, &cancellation)
             .map_err(|error| map_provider_error(&error))?;
         Ok(ObtainedSandbox { endpoint, services })
+    }
+
+    fn sandbox_resources(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<ResourceLimits, ExecutorAdapterError> {
+        let allocation = request
+            .job()
+            .job()
+            .requirements()
+            .resource_allocation()
+            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
+        let limits = allocation.limits();
+        ResourceLimits::new(
+            limits.memory_bytes(),
+            limits.cpu_millis(),
+            self.config.resources().pids(),
+        )
+        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
 
     fn prepare_attempt_directories(
@@ -4774,6 +5125,10 @@ impl fmt::Debug for GithubJobExecutor {
             .field("completed_steps", &self.completed_steps)
             .field("workflow_command_limits", &self.workflow_command_limits)
             .field("workflow_command_policy", &self.workflow_command_policy)
+            .field(
+                "custody_acknowledger",
+                &self.custody_acknowledger.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -5157,13 +5512,7 @@ struct RegisteredPost {
     invocation: ActionInvocationId,
     javascript: crate::PreparedJavascriptAction,
     paths: ActionPaths,
-    identity: ActionIdentity,
-    inputs: Vec<(String, ResolvedEnvironmentValue)>,
-    action_environment: Vec<(String, ResolvedEnvironmentValue)>,
-    input_environment: Vec<(String, ResolvedEnvironmentValue)>,
     phase: u32,
-    timeout: Duration,
-    continue_on_error: bool,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -5191,6 +5540,25 @@ impl ActionCallPath {
         self.0.len() == 1
     }
 
+    fn depth(&self) -> usize {
+        self.0.len()
+    }
+
+    fn prefix(&self, depth: usize) -> Result<Self, ExecutorAdapterError> {
+        if depth == 0 || depth > self.0.len() {
+            return Err(invalid_job());
+        }
+        Ok(Self(self.0[..depth].to_vec()))
+    }
+
+    fn index_at(&self, depth: usize) -> Result<usize, ExecutorAdapterError> {
+        self.0
+            .get(depth)
+            .copied()
+            .ok_or_else(invalid_job)
+            .and_then(|index| usize::try_from(index).map_err(|_| invalid_job()))
+    }
+
     fn invocation_id(&self, top_step_id: &str) -> Result<ActionInvocationId, ExecutorAdapterError> {
         let value = if self.0.len() == 1 {
             format!("{top_step_id}-{}", self.0[0])
@@ -5211,6 +5579,8 @@ impl ActionCallPath {
 struct PostRegistry {
     registration_order: Vec<u32>,
     top_level: BTreeMap<u32, BTreeMap<ActionCallPath, RegisteredPost>>,
+    occurrences: BTreeMap<ActionCallPath, PostActionOccurrence>,
+    composite_steps: BTreeMap<ActionCallPath, Vec<CompositeChildResult>>,
 }
 
 impl PostRegistry {
@@ -5235,16 +5605,63 @@ impl PostRegistry {
         Ok(())
     }
 
-    fn pop_last(&mut self) -> Option<RegisteredPost> {
+    fn record_occurrence(
+        &mut self,
+        path: ActionCallPath,
+        occurrence: PostActionOccurrence,
+    ) -> Result<(), ExecutorAdapterError> {
+        match self.occurrences.entry(path) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(occurrence);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &occurrence => {
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(invalid_job()),
+        }
+    }
+
+    fn record_composite_steps(
+        &mut self,
+        path: ActionCallPath,
+        steps: Vec<CompositeChildResult>,
+    ) -> Result<(), ExecutorAdapterError> {
+        if self.composite_steps.insert(path, steps).is_some() {
+            return Err(invalid_job());
+        }
+        Ok(())
+    }
+
+    fn occurrence(
+        &self,
+        path: &ActionCallPath,
+    ) -> Result<PostActionOccurrence, ExecutorAdapterError> {
+        self.occurrences.get(path).cloned().ok_or_else(invalid_job)
+    }
+
+    fn composite_steps_value(
+        &self,
+        path: &ActionCallPath,
+        commands: &JobCommandState,
+    ) -> Result<GithubValue, ExecutorAdapterError> {
+        let steps = self
+            .composite_steps
+            .get(path)
+            .map_or(&[][..], Vec::as_slice);
+        composite_steps_value(steps, commands)
+    }
+
+    fn pop_last(&mut self) -> Option<(ActionCallPath, RegisteredPost)> {
         while let Some(top_index) = self.registration_order.last().copied() {
             let posts = self.top_level.get_mut(&top_index)?;
-            if let Some((_, post)) = posts.pop_last() {
+            if let Some((path, post)) = posts.pop_last() {
                 if posts.is_empty() {
                     self.top_level.remove(&top_index);
                     let removed = self.registration_order.pop();
                     debug_assert_eq!(removed, Some(top_index));
                 }
-                return Some(post);
+                return Some((path, post));
             }
             self.top_level.remove(&top_index);
             let removed = self.registration_order.pop();
@@ -5260,7 +5677,15 @@ impl PostRegistry {
     fn clear(&mut self) {
         self.registration_order.clear();
         self.top_level.clear();
+        self.occurrences.clear();
+        self.composite_steps.clear();
     }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct PostActionOccurrence {
+    definition: PreparedActionDefinition,
+    identity: ActionIdentity,
 }
 
 #[derive(Clone)]
@@ -5400,7 +5825,7 @@ enum ActionLoadError {
     Executor(ExecutorAdapterError),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct ActionIdentity {
     runtime_step_id: String,
     reference: ActionReference,
@@ -5526,7 +5951,6 @@ impl ActionExecutionBudget {
 #[derive(Clone, Copy)]
 struct ActionDeadline {
     deadline: Instant,
-    timeout: Duration,
 }
 
 impl ActionDeadline {
@@ -5535,7 +5959,6 @@ impl ActionDeadline {
             deadline: Instant::now()
                 .checked_add(timeout)
                 .unwrap_or_else(Instant::now),
-            timeout,
         }
     }
 
@@ -5545,6 +5968,7 @@ impl ActionDeadline {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
 struct CompositeChildResult {
     id: Option<String>,
     runtime_step_id: String,
@@ -5568,10 +5992,70 @@ impl CompositeChildResult {
     }
 }
 
+#[derive(Clone)]
 struct ActionExpressionContext<'a> {
     base: &'a dyn GithubEvaluationContext,
     named: BTreeMap<String, GithubValue>,
     status: GithubStatus,
+}
+
+#[derive(Clone)]
+struct EnvironmentExpressionContext<'a> {
+    base: &'a dyn GithubEvaluationContext,
+    environment: GithubValue,
+    status: GithubStatus,
+}
+
+impl fmt::Debug for EnvironmentExpressionContext<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentExpressionContext")
+            .field("environment", &"[REDACTED]")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GithubEvaluationContext for EnvironmentExpressionContext<'_> {
+    fn named_value(&self, name: &str) -> Option<GithubValue> {
+        if name.eq_ignore_ascii_case("env") {
+            Some(self.environment.clone())
+        } else {
+            self.base.named_value(name)
+        }
+    }
+
+    fn status(&self) -> GithubStatus {
+        self.status
+    }
+
+    fn functions(&self) -> &dyn GithubExpressionFunctionProvider {
+        self.base.functions()
+    }
+}
+
+enum DeferredPostContinue<'a> {
+    Runtime {
+        value: RuntimeBoolean,
+        context: EnvironmentExpressionContext<'a>,
+    },
+    Composite {
+        value: PreparedBoolean,
+        context: ActionExpressionContext<'a>,
+    },
+}
+
+struct ResolvedPostExecution<'a> {
+    identity: ActionIdentity,
+    action_environment: Vec<(String, ResolvedEnvironmentValue)>,
+    input_environment: Vec<(String, ResolvedEnvironmentValue)>,
+    timeout: Duration,
+    continue_on_error: Vec<DeferredPostContinue<'a>>,
+}
+
+enum ResolvedPostTemplates<'a> {
+    Skipped,
+    Execute(Box<ResolvedPostExecution<'a>>),
 }
 
 impl fmt::Debug for ActionExpressionContext<'_> {
@@ -5893,15 +6377,7 @@ fn action_expression_context<'a>(
     );
     upsert_github_value(&mut github, "action_ref", GithubValue::string(revision));
     let github = github_object(github)?;
-
-    let mut env = match base.named_value("env") {
-        Some(GithubValue::Object(value)) => value.entries().to_vec(),
-        Some(_) | None => Vec::new(),
-    };
-    for (name, value) in environment {
-        upsert_github_value(&mut env, name, GithubValue::string(value.expose()));
-    }
-    let env = github_object(env)?;
+    let env = expression_environment_value(base, environment)?;
     Ok(ActionExpressionContext {
         base,
         named: BTreeMap::from([
@@ -5912,6 +6388,32 @@ fn action_expression_context<'a>(
         ]),
         status,
     })
+}
+
+fn environment_expression_context<'a>(
+    base: &'a dyn GithubEvaluationContext,
+    environment: &[(String, ResolvedEnvironmentValue)],
+    status: GithubStatus,
+) -> Result<EnvironmentExpressionContext<'a>, ExecutorAdapterError> {
+    Ok(EnvironmentExpressionContext {
+        base,
+        environment: expression_environment_value(base, environment)?,
+        status,
+    })
+}
+
+fn expression_environment_value(
+    base: &dyn GithubEvaluationContext,
+    environment: &[(String, ResolvedEnvironmentValue)],
+) -> Result<GithubValue, ExecutorAdapterError> {
+    let mut values = match base.named_value("env") {
+        Some(GithubValue::Object(value)) => value.entries().to_vec(),
+        Some(_) | None => Vec::new(),
+    };
+    for (name, value) in environment {
+        upsert_github_value(&mut values, name, GithubValue::string(value.expose()));
+    }
+    github_object(values)
 }
 
 fn upsert_github_value(values: &mut Vec<(String, GithubValue)>, name: &str, value: GithubValue) {
@@ -6135,6 +6637,29 @@ const fn conclusion_text(conclusion: JobConclusion) -> &'static str {
         JobConclusion::TimedOut => "timed_out",
         JobConclusion::Skipped => "skipped",
     }
+}
+
+fn validate_action_step_admission(
+    job: &JobIrEnvelope,
+    workspace: &TargetPath,
+) -> Result<(), AdmissionRejection> {
+    for step in job.job().steps() {
+        match step.kind() {
+            SemanticStep::Action {
+                reference: ActionReference::Repository { .. },
+                ..
+            }
+            | SemanticStep::Run { .. } => {}
+            SemanticStep::Action { reference, .. }
+                if matches!(reference, ActionReference::Local { .. }) =>
+            {
+                CheckedOutLocalActionPreparer::definition_paths(workspace, reference)
+                    .map_err(|_| AdmissionRejection::InvalidJob)?;
+            }
+            SemanticStep::Action { .. } => return Err(AdmissionRejection::InvalidJob),
+        }
+    }
+    Ok(())
 }
 
 fn validate_service_admission(
@@ -6848,6 +7373,20 @@ fn map_port_error(kind: PortErrorKind) -> ExecutorAdapterError {
         PortErrorKind::ResourceExhausted => ExecutorAdapterErrorKind::ResourceExhausted,
         PortErrorKind::Unsupported => ExecutorAdapterErrorKind::Unsupported,
         PortErrorKind::Internal => ExecutorAdapterErrorKind::Internal,
+    };
+    ExecutorAdapterError::new(kind)
+}
+
+const fn map_executor_error(error: ExecutorError) -> ExecutorAdapterError {
+    let kind = match error.kind() {
+        ExecutorErrorKind::InvalidJob => ExecutorAdapterErrorKind::InvalidJob,
+        ExecutorErrorKind::Unsupported => ExecutorAdapterErrorKind::Unsupported,
+        ExecutorErrorKind::ResourceExhausted => ExecutorAdapterErrorKind::ResourceExhausted,
+        ExecutorErrorKind::PermissionDenied => ExecutorAdapterErrorKind::PermissionDenied,
+        ExecutorErrorKind::Unavailable => ExecutorAdapterErrorKind::Unavailable,
+        ExecutorErrorKind::TimedOut => ExecutorAdapterErrorKind::TimedOut,
+        ExecutorErrorKind::Cancelled => ExecutorAdapterErrorKind::Cancelled,
+        ExecutorErrorKind::Internal => ExecutorAdapterErrorKind::Internal,
     };
     ExecutorAdapterError::new(kind)
 }

@@ -19,10 +19,10 @@ use automata_ci_core::{
     ActionReference, AttemptId, ContainerSpec, ContextValue, EnvironmentProfile,
     EnvironmentProfileId, FencingToken, JobAuthorityProfile, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle,
-    JobOutputDefinition, JobPermissionRequest, JobRuntimeContext, JobSource, Lease, LeaseId,
-    OperationId, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext,
-    UnixMillis, ValueSource, ValueTemplate, WorkflowId,
+    JobOutputDefinition, JobPermissionRequest, JobResourceAllocation, JobRuntimeContext, JobSource,
+    Lease, LeaseId, OperationId, ResourceCapacity, RunId, RunValueTemplates, RunnerId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, StrategyContext, UnixMillis, ValueSource, ValueTemplate, WorkflowId,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
@@ -49,8 +49,8 @@ use automata_ci_job_executor_github::{
     GithubContextRequest, GithubContextSnapshot, GithubExecutionPhase, GithubJobExecutor,
     GithubJobExecutorConfig, GithubJobExecutorPorts, ImmutableSandboxEnvironmentCatalog,
     JobContentPort, PortError, PortErrorKind, PreparedAction, PreparedActionDefinition,
-    PreparedActionExecution, PreparedInput, PreparedJavascriptAction, PreparedValue, SecretPort,
-    StaticGithubToolchain,
+    PreparedActionExecution, PreparedInput, PreparedJavascriptAction, PreparedValue,
+    SecretCustodyAcknowledger, SecretPort, StaticGithubToolchain,
 };
 use automata_ci_protocol::{
     JobRuntimeAuthorities, JobRuntimeAuthority, ProtocolLimits, RunnerSlotOrdinal,
@@ -200,6 +200,26 @@ impl Fixture {
                 WorkflowCommandLimits::default(),
                 policy,
             ),
+            provider,
+            endpoint_state,
+            events,
+            environment,
+        }
+    }
+
+    pub fn with_custody_acknowledger(
+        self,
+        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
+    ) -> Self {
+        let Self {
+            executor,
+            provider,
+            endpoint_state,
+            events,
+            environment,
+        } = self;
+        Self {
+            executor: executor.with_secret_custody(Arc::new(FakeSecrets), acknowledger),
             provider,
             endpoint_state,
             events,
@@ -1503,6 +1523,7 @@ impl FakeProvider {
             network,
             filesystem,
             SandboxCapability::ResourceLimits,
+            SandboxCapability::ProcessLimits,
             SandboxCapability::Administrator,
         ];
         if environment.workspace().platform() == TargetPlatform::Windows {
@@ -1730,7 +1751,7 @@ struct FakeSecrets;
 
 impl SecretPort for FakeSecrets {
     fn resolve(&self, reference: &str) -> Result<SharedSensitiveString, PortError> {
-        if reference == "test-token" {
+        if matches!(reference, "test-token" | "secret/deploy-key") {
             SecretString::new(SECRET)
                 .map(|secret| SharedSensitiveString::from_secret(Arc::new(secret)))
                 .map_err(|_| PortError::new(PortErrorKind::Internal))
@@ -1776,7 +1797,7 @@ impl FakeContexts {
         request: GithubContextRequest<'_>,
         cancellation: Option<EvaluationCancellation>,
     ) -> Result<GithubContextSnapshot, PortError> {
-        let github = GithubObject::new(vec![
+        let mut github_values = vec![
             (
                 "repository".to_owned(),
                 GithubValue::string(request.job().source().repository()),
@@ -1797,8 +1818,10 @@ impl FakeContexts {
                 "server_url".to_owned(),
                 GithubValue::string("https://github.com"),
             ),
-        ])
-        .map_err(|_| PortError::new(PortErrorKind::Internal))?;
+        ];
+        github_values.extend(phase_context_values(request.phase()));
+        let github = GithubObject::new(github_values)
+            .map_err(|_| PortError::new(PortErrorKind::Internal))?;
         let mut steps = Vec::with_capacity(request.steps().len());
         for step in request.steps() {
             let runtime_id = RuntimeStepId::new(step.id())
@@ -2092,6 +2115,25 @@ impl GithubExpressionFunctionProvider for CancellingEvaluationContext {
         }
         self.inner.functions().call(name, arguments)
     }
+}
+
+fn phase_context_values(phase: GithubExecutionPhase) -> [(String, GithubValue); 3] {
+    let name = match phase {
+        GithubExecutionPhase::Job => "job",
+        GithubExecutionPhase::Run => "run",
+        GithubExecutionPhase::ActionPre => "action_pre",
+        GithubExecutionPhase::ActionMain => "action_main",
+        GithubExecutionPhase::ActionPost => "action_post",
+    };
+    let post = phase == GithubExecutionPhase::ActionPost;
+    [
+        ("phase".to_owned(), GithubValue::string(name)),
+        (
+            "phase_timeout".to_owned(),
+            GithubValue::number(if post { 1.0 } else { 2.0 }),
+        ),
+        ("continue_post".to_owned(), GithubValue::Boolean(post)),
+    ]
 }
 
 const fn conclusion_text(conclusion: automata_ci_core::JobConclusion) -> &'static str {

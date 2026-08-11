@@ -16,9 +16,24 @@ evidence and close runs with complete job-result graphs. Admission remains
 asynchronous: its durable receipt is not a job-completion signal, and the full
 runner, provider, and service-image acceptance gate remains separate.
 
-Current component tests also cover typed `workflow_dispatch` inputs and the
-base runtime context. The external dispatch route and complete repository
-variable and secret-reference hydration are still product work.
+The authenticated CLI control-plane API composes typed `workflow_dispatch`
+inputs with the base runtime context and durable admission. It requires an
+exact repository, workflow, branch or tag ref, and commit whose source was
+already captured by an authenticated GitHub admission. Immutable dispatch
+evidence and an authority-bound request digest protect replay; normal GitHub
+webhook ingress does not produce `workflow_dispatch` events.
+
+The composed endpoint is
+`POST /api/v1/repositories/{repository_id}/workflows/{workflow_id}/dispatches`.
+It accepts canonical internal target UUIDs plus `git_ref`, `commit_sha`,
+`operation_id`, and bounded boolean/string `inputs`; actor and source fields
+come only from authenticated server state. A new admission returns `201`, and
+an exact replay returns the same run with `200`.
+
+A first-party CLI command, browser form, mutable branch/tag resolution, and
+complete repository variable and secret-reference hydration remain product
+work. Scheduled workflow synthesis is a separate unsupported control-plane
+surface.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
 - API documentation: run `cargo doc -p automata-ci-workflow-service --open` from a source checkout.

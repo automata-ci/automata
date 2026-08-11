@@ -100,6 +100,9 @@ pub enum JournalInvariantError {
     /// Runtime-authority content is empty, oversized, or has the wrong kind.
     #[error("protected runtime authority has the wrong kind or exceeds its size limit")]
     InvalidRuntimeAuthorityContent,
+    /// A value-free secret overlay is malformed or names another lease fence.
+    #[error("managed-secret binding overlay is invalid for the offered lease")]
+    InvalidManagedSecretBindings,
     /// Terminal-result content is empty, oversized, or has the wrong kind.
     #[error("terminal-result content reference has the wrong kind or exceeds its size limit")]
     InvalidTerminalResultContent,

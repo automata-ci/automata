@@ -816,7 +816,9 @@ async fn lock_run(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND marker.root_invocation_id = $2
+               AND automata_workflow_plan_v2_invocation_published(
+                   marker.run_id, $2
+               )
         FROM workflow_plan_v2_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
@@ -1096,7 +1098,9 @@ fn instance_query() -> &'static str {
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_id_alias, run.run_number, run.run_attempt,
+           run.triggering_actor,
+           run.public_run_id_alias AS run_id_alias,
+           run.run_number, run.run_attempt,
            run.requested_log_visibility,
            run.event_digest, run.event_object_key, run.event_size_bytes,
            run.event_media_type,
@@ -1196,7 +1200,9 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
            run.workflow_id, run.workflow_name, run.git_ref, run.actor,
-           run.run_id_alias, run.run_number, run.run_attempt,
+           run.triggering_actor,
+           run.public_run_id_alias AS run_id_alias,
+           run.run_number, run.run_attempt,
            run.requested_log_visibility,
            run.event_digest, run.event_object_key, run.event_size_bytes,
            run.event_media_type,
@@ -3420,7 +3426,7 @@ fn decode_descriptor(
         false,
     )?;
     let event = decode_admission_object(row)?;
-    let execution = LogicalActivationExecutionContext::new(
+    let mut execution = LogicalActivationExecutionContext::new(
         WorkflowId::from_uuid(row.try_get("workflow_id").map_err(operation_error)?),
         row.try_get("workflow_name").map_err(operation_error)?,
         row.try_get("git_ref").map_err(operation_error)?,
@@ -3445,6 +3451,14 @@ fn decode_descriptor(
         .map_err(|_| StoreError::corrupt_data("invalid durable run attempt"))?,
     )
     .map_err(|_| StoreError::corrupt_data("invalid materialization execution metadata"))?;
+    if let Some(triggering_actor) = row
+        .try_get::<Option<String>, _>("triggering_actor")
+        .map_err(operation_error)?
+    {
+        execution = execution
+            .with_triggering_actor(triggering_actor)
+            .map_err(|_| StoreError::corrupt_data("invalid durable triggering actor"))?;
+    }
     let authority_profile = parse_authority_profile(
         &row.try_get::<String, _>("authority_profile")
             .map_err(operation_error)?,
