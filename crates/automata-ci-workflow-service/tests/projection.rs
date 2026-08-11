@@ -23,8 +23,8 @@ use automata_ci_store::{
     WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
-    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    CompileWorkflowRequest, GithubEventMetadataV1, GithubWorkflowCompiler, GithubWorkflowFrontend,
+    ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionFailure,
@@ -346,7 +346,7 @@ fn service(repository: Arc<ControllableRepository>) -> WorkflowAdmissionService 
 fn concurrency_request(tenant: &str, group: &str) -> WorkflowAdmissionRequest {
     let source = format!(
         r"name: Queue contract
-on: workflow_dispatch
+on: push
 concurrency:
   group: {group}
   cancel-in-progress: ${{{{ github.ref == 'refs/heads/main' }}}}
@@ -369,13 +369,16 @@ jobs:
     let parsed =
         GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, &source));
     assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
-        parsed.plan().expect("parsed plan"),
-        WorkflowEventProvenance::new("github", "workflow_dispatch")
-            .with_delivery_id(support::DELIVERY)
-            .with_commit_sha(support::REVISION)
-            .with_git_ref(support::GIT_REF),
-    ));
+    let compiled = GithubWorkflowCompiler::new().compile(
+        CompileWorkflowRequest::new(
+            parsed.plan().expect("parsed plan"),
+            WorkflowEventProvenance::new("github", "push")
+                .with_delivery_id(support::DELIVERY)
+                .with_commit_sha(support::REVISION)
+                .with_git_ref(support::GIT_REF),
+        )
+        .with_event_metadata_v1(GithubEventMetadataV1::push(false)),
+    );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     let base_context = JobRuntimeContext::new_base(
         ContextValue::empty_object(),
@@ -394,7 +397,7 @@ jobs:
         .expect("repository"),
         ".github/workflows/queue.yml",
         Bytes::from(source),
-        Bytes::from_static(b"{}"),
+        Bytes::from_static(b"{\"deleted\":false}"),
         compiled.into_parts().0.expect("compiled plan"),
         base_context,
         WorkflowAdmissionIdempotency::operation(automata_ci_core::OperationId::new()),

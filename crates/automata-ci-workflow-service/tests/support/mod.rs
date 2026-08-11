@@ -35,23 +35,20 @@ pub fn ci_request_at_path(
     request_from_compilation(
         tenant,
         workflow_path,
-        Bytes::from_static(b"{}"),
+        Bytes::from_static(b"{\"deleted\":false}"),
         idempotency,
-        compile_ci_at_path(workflow_path, "workflow_dispatch", None),
+        compile_ci_at_path(
+            workflow_path,
+            "push",
+            Some(GithubEventMetadataV1::push(false)),
+        ),
     )
 }
 
 pub fn push_request(tenant: &str) -> WorkflowAdmissionRequest {
-    request_from_compilation(
+    ci_request(
         tenant,
-        WORKFLOW_PATH,
-        Bytes::from_static(b"{\"deleted\":false}"),
         WorkflowAdmissionIdempotency::provider_delivery(DELIVERY).expect("delivery"),
-        compile_ci_at_path(
-            WORKFLOW_PATH,
-            "push",
-            Some(GithubEventMetadataV1::push(false)),
-        ),
     )
 }
 
