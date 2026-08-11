@@ -94,11 +94,11 @@ jobs:
             exit 1
           }
           release_date="${changelog_headings[0]#"## [${version}] - "}"
-          [[ "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] &&
-            [[ "$(date --date="$release_date" +%F 2>/dev/null)" == "$release_date" ]] || {
+          if [[ ! "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+            [[ "$(date --date="$release_date" +%F 2>/dev/null)" != "$release_date" ]]; then
             printf 'error: changelog release date must be a valid YYYY-MM-DD date\n' >&2
             exit 1
-          }
+          fi
           grep -Fx \
             "[Unreleased]: https://github.com/automata-ci/automata/compare/v${version}...HEAD" \
             CHANGELOG.md >/dev/null || {
@@ -1164,11 +1164,12 @@ jobs:
             find target/release-handoff-download -mindepth 1 -maxdepth 1 \
               -print0
           )
-          (( ${#downloaded[@]} == 1 )) && \
-            [[ "${downloaded[0]}" == "$handoff" && -f "$handoff" && ! -L "$handoff" ]] || {
+          if (( ${#downloaded[@]} != 1 )) || \
+            ! [[ "${downloaded[0]}" == "$handoff" && \
+              -f "$handoff" && ! -L "$handoff" ]]; then
             printf 'error: handoff download contains an unexpected entry set\n' >&2
             exit 1
-          }
+          fi
           python3 scripts/ci/release-handoff.py verify-handoff \
             --handoff "$handoff" \
             --handoff-sha256 "$HANDOFF_SHA256" \
@@ -1477,12 +1478,12 @@ jobs:
             mapfile -d '' -t entries < <(
               find "$directory" -mindepth 1 -maxdepth 1 -print0
             )
-            (( ${#entries[@]} == 1 )) && \
-              [[ "${entries[0]}" == "$expected" && \
-                -f "$expected" && ! -L "$expected" ]] || {
+            if (( ${#entries[@]} != 1 )) || \
+              ! [[ "${entries[0]}" == "$expected" && \
+                -f "$expected" && ! -L "$expected" ]]; then
               printf 'error: prepared artifact contains an unexpected entry set\n' >&2
               exit 1
-            }
+            fi
           done
           [[ "${HANDOFF_ARTIFACT_DIGEST#sha256:}" == "$HANDOFF_SHA256" && \
             "$(sha256sum "$handoff" | awk '{print $1}')" == "$HANDOFF_SHA256" ]] || {
@@ -1778,11 +1779,12 @@ jobs:
             find target/release-handoff-download -mindepth 1 -maxdepth 1 \
               -print0
           )
-          (( ${#downloaded[@]} == 1 )) && \
-            [[ "${downloaded[0]}" == "$handoff" && -f "$handoff" && ! -L "$handoff" ]] || {
+          if (( ${#downloaded[@]} != 1 )) || \
+            ! [[ "${downloaded[0]}" == "$handoff" && \
+              -f "$handoff" && ! -L "$handoff" ]]; then
             printf 'error: handoff download contains an unexpected entry set\n' >&2
             exit 1
-          }
+          fi
           python3 scripts/ci/release-handoff.py verify-handoff \
             --handoff "$handoff" \
             --handoff-sha256 "$HANDOFF_SHA256" \

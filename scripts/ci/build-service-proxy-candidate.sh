@@ -73,7 +73,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-podman build \
+env -u SOURCE_DATE_EPOCH podman build \
   --build-arg "AUTOMATA_CREATED=${created}" \
   --build-arg "AUTOMATA_REVISION=${revision}" \
   --build-arg "AUTOMATA_SERVICE_PROXY_BINARY_SHA256=${binary_sha256}" \
