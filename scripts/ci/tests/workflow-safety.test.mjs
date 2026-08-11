@@ -301,16 +301,36 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
-test("pull requests retain the distribution gate when renderer reproduction is skipped", () => {
+test("frontend CI retains the production-source coverage gate", () => {
   const ci = source(".github/workflows/ci.yml");
-  const renderer = section(ci, "\n  renderer:", "\n  dist:");
+  const frontend = section(ci, "\n  frontend:", "\n  renderer:");
+
+  assert.match(
+    frontend,
+    /- name: Enforce frontend coverage thresholds\n        run: npm run test:coverage/,
+  );
+  assert.equal(
+    (frontend.match(/npm run test:coverage/g) ?? []).length,
+    1,
+    "the frontend job must run the coverage threshold gate exactly once",
+  );
+});
+
+test("distribution build overlaps validation while the final gate retains every prerequisite", () => {
+  const ci = source(".github/workflows/ci.yml");
+  const renderer = section(ci, "\n  renderer:", "\n  dist_build:");
+  const distBuild = section(ci, "\n  dist_build:", "\n  dist:");
   const dist = ci.slice(ci.indexOf("\n  dist:"));
 
   assert.match(renderer, /if: \$\{\{ github\.event_name != 'pull_request' \}\}/);
+  assert.doesNotMatch(distBuild, /\n    needs:/);
+  assert.match(distBuild, /name: Build static Linux distribution/);
+  assert.match(distBuild, /name: Upload bootstrap distribution/);
   assert.match(
     dist,
-    /needs:\n      - verify\n      - rust_tests\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
   );
+  assert.match(dist, /needs\.dist_build\.result == 'success'/);
   assert.match(dist, /needs\.verify\.result == 'success'/);
   assert.match(dist, /needs\.rust_tests\.result == 'success'/);
   assert.match(dist, /needs\.renderer_tests\.result == 'success'/);

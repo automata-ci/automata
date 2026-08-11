@@ -33,7 +33,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 8);
+    assert_eq!(plan.workflow().jobs().len(), 9);
     assert_eq!(
         plan.workflow()
             .jobs()
@@ -48,6 +48,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
             "postgres_integrations",
             "frontend",
             "renderer",
+            "dist_build",
             "dist",
         ]
     );
@@ -92,6 +93,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
             .expect("distribution condition")
             .value(),
         r"${{ !cancelled()
+    && needs.dist_build.result == 'success'
     && needs.verify.result == 'success'
     && needs.rust_tests.result == 'success'
     && needs.renderer_tests.result == 'success'
