@@ -81,6 +81,12 @@ profile. Every `uses:` action, including JavaScript, composite, local,
 repository, and container actions, fails closed. Job containers, service
 containers, administrator profiles, and parallel native jobs are unsupported.
 
+The Windows CI gate exercises the production composition through the shipped
+`automata-runner run` process against ephemeral mTLS control-plane and loopback
+S3 fixtures. It verifies session establishment, a credential-free lease,
+runtime-context hydration, native shell execution, log and result publication,
+sandbox cleanup, and a subsequent released-slot poll.
+
 ## Job boundary
 
 On Linux, workload environment values are sent to Podman through a bounded

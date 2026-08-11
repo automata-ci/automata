@@ -383,6 +383,11 @@ jobs:
             --test windows_run_steps
           cargo test --locked -p automata-ci-job-executor-github --test windows_native_e2e native_provider_runs_powershell_then_cmd_with_command_file_propagation -- --nocapture
 
+      - name: Test shipped Windows runner process
+        env:
+          AUTOMATA_RUNNER_WINDOWS_E2E_REQUIRE_STANDALONE_PWSH: "1"
+        run: cargo test --locked -p automata-ci-runner --test windows_runner_process_e2e -- --nocapture
+
       - name: Smoke test Windows preview and passive diagnostics
         shell: pwsh
         run: |
