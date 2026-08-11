@@ -125,7 +125,14 @@ The first audit identified these implementation owners:
 
 - [ ] Define an explicit CLI session-custody interface.
 - [ ] Define an explicit service secret-custody interface.
-- [ ] Define a secure bounded-file input interface.
+- [x] Define a secure bounded-file input interface.
+
+  Evidence: `crates/automata-ci/src/server/secure_file.rs` owns the
+  owner-private bounded-read seam behind `SecretSource::File`. The Unix
+  behavior moved verbatim, and a platform without a reviewed adapter returns
+  the typed `SecureFileError::Unavailable` with no ordinary-file fallback.
+  Native `cargo check`, `cargo clippy --all-targets`, and the `--lib` and
+  `server_config` suites match the pre-change baseline exactly.
 - [ ] Define certificate and private-key loading interfaces.
 - [ ] Define durable atomic-file replacement behavior.
 - [ ] Define Windows service shutdown and preshutdown behavior.

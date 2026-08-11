@@ -18,6 +18,7 @@ mod secret_cleanup;
 mod secret_custody;
 mod secret_management;
 mod secret_mutation_recovery;
+mod secure_file;
 mod state_metrics;
 mod static_registration;
 mod workflow_dispatch;

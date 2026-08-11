@@ -7,9 +7,6 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-#[cfg(unix)]
-use std::{fs::File, io::Read as _, path::Component};
-
 use thiserror::Error;
 use url::Url;
 use zeroize::Zeroizing;
@@ -25,7 +22,10 @@ use automata_ci_store::{
 
 use crate::cli::{DatabaseTransport, ServerArgs};
 
-use super::{github_oidc::GithubOidcConfig, github_provider_config::GithubProviderConfig};
+use super::{
+    github_oidc::GithubOidcConfig, github_provider_config::GithubProviderConfig,
+    secure_file::SecureFileError,
+};
 
 const MAX_SOURCE_REFERENCE_BYTES: usize = 4_096;
 const MAX_ENVIRONMENT_NAME_BYTES: usize = 255;
@@ -1144,88 +1144,15 @@ fn positive_seconds(seconds: u64) -> Result<Duration, ServerConfigError> {
     Ok(Duration::from_secs(seconds))
 }
 
-#[cfg(unix)]
 fn read_bounded_file(
     path: &Path,
     maximum_bytes: usize,
 ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
-    use std::ffi::OsString;
-
-    use rustix::{
-        fd::OwnedFd,
-        fs::{FileType, Mode, OFlags, fstat, openat},
-    };
-
-    if !path.is_absolute() || maximum_bytes == 0 {
-        return Err(SecretLoadError::FileSecurity);
-    }
-    let mut components = Vec::<OsString>::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Prefix(_) => {}
-            Component::Normal(value) => components.push(value.to_os_string()),
-            Component::CurDir | Component::ParentDir => {
-                return Err(SecretLoadError::FileSecurity);
-            }
-        }
-    }
-    let (file_name, parents) = components
-        .split_last()
-        .ok_or(SecretLoadError::FileSecurity)?;
-    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-    let mut directory: OwnedFd = rustix::fs::open("/", directory_flags, Mode::empty())
-        .map_err(|_| SecretLoadError::FileSecurity)?;
-    for component in parents {
-        directory = openat(&directory, component, directory_flags, Mode::empty())
-            .map_err(|_| SecretLoadError::FileSecurity)?;
-        let metadata = fstat(&directory).map_err(|_| SecretLoadError::FileSecurity)?;
-        if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory {
-            return Err(SecretLoadError::FileSecurity);
-        }
-    }
-    let file = openat(
-        &directory,
-        file_name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(|_| SecretLoadError::FileSecurity)?;
-    let metadata = fstat(&file).map_err(|_| SecretLoadError::FileSecurity)?;
-    let permission_bits = metadata.st_mode & 0o777;
-    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
-        || metadata.st_uid != rustix::process::geteuid().as_raw()
-        || permission_bits & 0o400 == 0
-        || permission_bits & 0o077 != 0
-    {
-        return Err(SecretLoadError::FileSecurity);
-    }
-    let received = u64::try_from(metadata.st_size).unwrap_or(u64::MAX);
-    if received > u64::try_from(maximum_bytes).unwrap_or(u64::MAX) {
-        return Err(SecretLoadError::TooLarge {
-            maximum: maximum_bytes,
-        });
-    }
-    let capacity = usize::try_from(received).unwrap_or(maximum_bytes);
-    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity.min(maximum_bytes)));
-    let take_limit = u64::try_from(maximum_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    File::from(file)
-        .take(take_limit)
-        .read_to_end(&mut bytes)
-        .map_err(SecretLoadError::File)?;
-    if bytes.len() > maximum_bytes {
-        return Err(SecretLoadError::TooLarge {
-            maximum: maximum_bytes,
-        });
-    }
-    Ok(bytes)
-}
-
-#[cfg(not(unix))]
-fn read_bounded_file(
-    _path: &Path,
-    _maximum_bytes: usize,
-) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
-    Err(SecretLoadError::FileSecurity)
+    super::secure_file::read_owner_private(path, maximum_bytes).map_err(|error| match error {
+        SecureFileError::Insecure => SecretLoadError::FileSecurity,
+        #[cfg(not(unix))]
+        SecureFileError::Unavailable => SecretLoadError::FileSecurity,
+        SecureFileError::TooLarge { maximum } => SecretLoadError::TooLarge { maximum },
+        SecureFileError::Read(error) => SecretLoadError::File(error),
+    })
 }
