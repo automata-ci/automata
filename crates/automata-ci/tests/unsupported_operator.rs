@@ -93,6 +93,8 @@ fn assert_unsupported(arguments: &[&str], expected: &str) {
         .collect::<Vec<_>>();
     let output = Command::new(env!("CARGO_BIN_EXE_automata"))
         .args(&arguments)
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
         .env_remove("RUST_LOG")
         .output()
         .expect("operator command must start");
