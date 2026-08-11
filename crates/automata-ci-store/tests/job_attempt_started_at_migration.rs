@@ -1,10 +1,8 @@
 #[allow(dead_code)]
 mod common;
 
-use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, UnixMillis};
-use automata_ci_store::{
-    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, StableRunnerSlot,
-};
+use automata_ci_core::{AttemptId, AttemptNumber, JobId, LeaseId, UnixMillis};
+use automata_ci_store::{AcquireLease, InternalAttemptRepository as _, StableRunnerSlot};
 use sqlx::migrate::Migrate as _;
 
 use common::{TestResult, run_with_unmigrated_database, seed_control_plane};
@@ -59,15 +57,14 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
         let seed = seed_control_plane(database.pool(), 1).await?;
         let attempt_id = AttemptId::new();
         let queued_at = database_now(database.pool()).await?;
-        database
-            .store()
-            .insert_queued(QueuedAttempt::new(
-                attempt_id,
-                seed.job_id,
-                AttemptNumber::new(1)?,
-                queued_at,
-            ))
-            .await?;
+        insert_legacy_queued_attempt(
+            database.pool(),
+            attempt_id,
+            seed.job_id,
+            AttemptNumber::new(1)?,
+            queued_at,
+        )
+        .await?;
         let lease_observed_at = database_now(database.pool()).await?;
         let lease = database
             .store()
@@ -134,19 +131,51 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
 
         let never_leased = AttemptId::new();
         let never_leased_queued_at = checked_add_millis(requeued_at, 1)?;
-        database
-            .store()
-            .insert_queued(QueuedAttempt::new(
-                never_leased,
-                seed.job_id,
-                AttemptNumber::new(2)?,
-                never_leased_queued_at,
-            ))
-            .await?;
+        insert_legacy_queued_attempt(
+            database.pool(),
+            never_leased,
+            seed.job_id,
+            AttemptNumber::new(2)?,
+            never_leased_queued_at,
+        )
+        .await?;
         assert_eq!(started_at(database.pool(), never_leased).await?, None);
         Ok(())
     })
     .await
+}
+
+async fn insert_legacy_queued_attempt(
+    pool: &sqlx::PgPool,
+    attempt_id: AttemptId,
+    job_id: JobId,
+    attempt_number: AttemptNumber,
+    queued_at: UnixMillis,
+) -> TestResult {
+    sqlx::query(
+        r"
+        INSERT INTO job_attempts (
+            id, job_id, attempt_number, lifecycle, fencing_token,
+            lease_failures, queued_at_ms, changed_at_ms,
+            secret_exposure_class, raw_log_disposition,
+            requested_log_visibility, effective_log_visibility,
+            output_safety_reason, output_safety_schema, classified_at_ms
+        ) VALUES (
+            $1, $2, $3, 'queued', 0,
+            0, $4, $4,
+            'readable_secret', 'suppress_user_output',
+            'private', 'private',
+            'repository_policy', 1, $4
+        )
+        ",
+    )
+    .bind(attempt_id.as_uuid())
+    .bind(job_id.as_uuid())
+    .bind(i32::try_from(attempt_number.get())?)
+    .bind(queued_at.get())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {

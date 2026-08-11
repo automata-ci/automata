@@ -289,28 +289,46 @@ async fn seed_control_plane_with_optional_concurrency(
     .bind(vec![7_u8; 32])
     .execute(pool)
     .await?;
-    sqlx::query(
-        r"
-        INSERT INTO workflow_runs (
-            id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-            concurrency_group_key, concurrency_queue_policy
+    if let Some((group, queue_policy)) = concurrency {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runs (
+                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
+                event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+                concurrency_group_key, concurrency_queue_policy
+            ) VALUES (
+                $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
+                $6, $7
+            )
+            ",
         )
-        VALUES (
-            $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
-            $6, $7
+        .bind(run_id)
+        .bind(repository_id)
+        .bind(workflow_id)
+        .bind(snapshot_id)
+        .bind(vec![9_u8; 20])
+        .bind(group)
+        .bind(queue_policy)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runs (
+                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
+                event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            )
+            VALUES ($1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1)
+            ",
         )
-        ",
-    )
-    .bind(run_id)
-    .bind(repository_id)
-    .bind(workflow_id)
-    .bind(snapshot_id)
-    .bind(vec![9_u8; 20])
-    .bind(concurrency.map(|(group, _)| group))
-    .bind(concurrency.map(|(_, policy)| policy))
-    .execute(pool)
-    .await?;
+        .bind(run_id)
+        .bind(repository_id)
+        .bind(workflow_id)
+        .bind(snapshot_id)
+        .bind(vec![9_u8; 20])
+        .execute(pool)
+        .await?;
+    }
     sqlx::query(
         r"
         INSERT INTO jobs (
