@@ -35,7 +35,7 @@ wit_sha256 = "d59593c5b09a51c61b687508750b00c1cd723071d98844e82578cbbdc08eb3b8"
 ssr_bundle_sha256 = "1f57947b550465cf11b9f20bb9ff559bb45a288002c01744dc6654f17da64a59"
 
 [ui]
-package_lock_sha256 = "51085a2acccd0b8a8bc47f43e72e6ddfe3e75620b88de421ca8a65c7b434f2aa"
+package_lock_sha256 = "652acb390101ee99971c45d6b3215310e8cbcb6d945e9158fe80f285801f69c4"
 script_public_path = "/assets/entry-client-BvPn0QF2.js"
 stylesheet_public_path = "/assets/entry-client-TWfH3-Gy.css"
 
