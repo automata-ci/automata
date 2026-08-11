@@ -1194,7 +1194,7 @@ async fn claim_single_mint_winner(
     for ordinal in 0..32_u128 {
         let store = database.store().clone();
         let request =
-            fixture.claim_for_at(AuthorityFixture::owner(100 + ordinal), observed_at, 3_000);
+            fixture.claim_for_at(AuthorityFixture::owner(100 + ordinal), observed_at, 60_000);
         tasks.push(tokio::spawn(async move {
             store.claim_github_runtime_authority_mint(request).await
         }));
@@ -1676,11 +1676,25 @@ async fn mint_begin_persists_and_db_authorizes_the_exact_provider_window() -> Te
 #[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
 async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = seed_authority(&database).await?;
-        let stale_claim = claim_single_mint_winner(&database, &fixture).await?;
-        assert_pre_mint_terminal_transitions_rejected(&database, &fixture).await?;
-        let reclaimed = reclaim_and_begin_mint(&database, &fixture, stale_claim).await?;
-        assert_indeterminate_expiry(&database, &fixture, &reclaimed).await?;
+        let contention_fixture = seed_authority(&database).await?;
+        claim_single_mint_winner(&database, &contention_fixture).await?;
+        assert_pre_mint_terminal_transitions_rejected(&database, &contention_fixture).await?;
+
+        // Keep the 32-way lock queue independent of the deliberately short
+        // expiry boundary below. Hosted PostgreSQL can legitimately take more
+        // than three seconds to serve every contender under checkpoint load.
+        let expiry_fixture = seed_authority(&database).await?;
+        let stale_claim = database
+            .store()
+            .claim_github_runtime_authority_mint(expiry_fixture.claim_for_at(
+                AuthorityFixture::owner(199),
+                database_now(&database).await?,
+                3_000,
+            ))
+            .await?
+            .expect("initial short claim");
+        let reclaimed = reclaim_and_begin_mint(&database, &expiry_fixture, stale_claim).await?;
+        assert_indeterminate_expiry(&database, &expiry_fixture, &reclaimed).await?;
         Ok(())
     })
     .await
