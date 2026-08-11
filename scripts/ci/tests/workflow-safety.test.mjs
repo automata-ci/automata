@@ -91,34 +91,78 @@ function releaseJobs() {
   };
 }
 
+function serviceProxyJobs() {
+  const workflow = source(".github/workflows/service-proxy-image.yml");
+  return {
+    candidate: section(workflow, "\n  candidate:", "\n  promotion_verify:"),
+    candidateBuild: section(
+      workflow,
+      "\n  candidate_build:",
+      "\n  candidate:",
+    ),
+    promotionVerify: section(
+      workflow,
+      "\n  promotion_verify:",
+      "\n  promote:",
+    ),
+    promote: workflow.slice(workflow.indexOf("\n  promote:")),
+    validate: section(workflow, "\n  validate:", "\n  candidate_build:"),
+    workflow,
+  };
+}
+
 test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () => {
   const ci = source(".github/workflows/ci.yml");
-  const verify = section(ci, "\n  verify:", "\n  frontend:");
-  const databaseCheck = section(
-    verify,
-    "      - name: Verify isolated PostgreSQL 18 test database",
-    "      - name: Test PostgreSQL invariants",
+  const store = section(ci, "\n  postgres_store:", "\n  postgres_integrations:");
+  const integrations = section(
+    ci,
+    "\n  postgres_integrations:",
+    "\n  frontend:",
   );
-  const databaseTests = section(
-    verify,
-    "      - name: Test PostgreSQL invariants",
-    "      - name: Install cargo-deny",
-  );
+  const storeShard = source("scripts/ci/run-postgres-store-shard.sh");
+  const versionGate = source("scripts/ci/verify-postgres-version.sh");
+  const pinnedPostgres =
+    /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/;
 
+  for (const job of [store, integrations]) {
+    assert.match(job, pinnedPostgres);
+    assert.match(job, /AUTOMATA_TEST_DATABASE_URL:/);
+    assert.match(job, /postgresql-client/);
+    assert.equal(
+      (job.match(/\.\/scripts\/ci\/verify-postgres-version\.sh/g) ?? []).length,
+      1,
+      "each PostgreSQL job must run the exact version gate once",
+    );
+    assert.doesNotMatch(job, /sudo service postgresql|CREATE ROLE|CREATE DATABASE/);
+  }
+  assert.match(versionGate, /AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004/);
+  assert.match(versionGate, /--command='SHOW server_version_num'/);
+  assert.match(versionGate, /\[\[ "\$server_version" != "\$expected_version" \]\]/);
+
+  assert.match(store, /matrix:\n        shard: \[1, 2, 3, 4\]/);
   assert.match(
-    verify,
-    /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/,
+    store,
+    /\.\/scripts\/ci\/run-postgres-store-shard\.sh "\$\{\{ matrix\.shard \}\}" 4/,
   );
-  assert.match(verify, /postgresql-client/);
-  assert.doesNotMatch(verify, /sudo service postgresql|CREATE ROLE|CREATE DATABASE/);
-  assert.match(databaseCheck, /server_version/);
-  assert.match(databaseCheck, /"180004"/);
-  assert.match(databaseTests, /AUTOMATA_TEST_DATABASE_URL/);
-  assert.doesNotMatch(
-    databaseTests,
-    /--workspace|--all-targets|automata-ci-results-github --tests/,
+  assert.doesNotMatch(store, /^\s+cargo test /m);
+  assert.match(
+    storeShard,
+    /cargo metadata --format-version 1 --no-deps --locked/,
   );
-  assert.equal((databaseTests.match(/^\s+cargo test /gm) ?? []).length, 7);
+  assert.match(
+    storeShard,
+    /package\["name"\] == "automata-ci-store"/,
+  );
+  assert.match(storeShard, /target\["kind"\] != \["test"\]/);
+  assert.match(storeShard, /source\.count\("#\[ignore"\)/);
+  assert.match(
+    storeShard,
+    /sorted\(weighted_targets, key=lambda item: \(-item\[1\], item\[0\]\)\)/,
+  );
+  assert.match(storeShard, /cargo_targets\+=\(--test "\$target"\)/);
+  assert.match(storeShard, /cargo test \\\n  -p automata-ci-store \\\n  "\$\{cargo_targets\[@\]\}"/);
+  assert.doesNotMatch(storeShard, /--tests|--workspace|--all-targets/);
+  assert.equal((storeShard.match(/^cargo test /gm) ?? []).length, 1);
 
   const broadDatabasePackages = new Set([
     "automata-ci-auth-postgres",
@@ -126,12 +170,19 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
     "automata-ci-secret-postgres",
     "automata-ci-store",
   ]);
-  for (const packageName of broadDatabasePackages) {
+  const broadIntegrationPackages = new Set([
+    "automata-ci-auth-postgres",
+    "automata-ci-runner-auth-postgres",
+    "automata-ci-secret-postgres",
+  ]);
+  const expectedCommands = [];
+  for (const packageName of broadIntegrationPackages) {
     const command =
       `cargo test -p ${packageName} --tests --all-features --locked ` +
       "-- --ignored --test-threads=1";
+    expectedCommands.push(command);
     assert.equal(
-      databaseTests.split(command).length - 1,
+      integrations.split(command).length - 1,
       1,
       `${packageName} database suite must run exactly once`,
     );
@@ -145,13 +196,22 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
       const command =
         `cargo test -p ${packageName} --test ${target} ` +
         "--all-features --locked -- --ignored --test-threads=1";
+      expectedCommands.push(command);
       assert.equal(
-        databaseTests.split(command).length - 1,
+        integrations.split(command).length - 1,
         1,
         `the database-only ${packageName}/${target} suite must run exactly once`,
       );
     }
   }
+  const actualCommands = (integrations.match(/^\s+cargo test .+$/gm) ?? []).map(
+    (command) => command.trim(),
+  );
+  assert.deepEqual(
+    actualCommands.sort(),
+    expectedCommands.sort(),
+    "PostgreSQL integration CI must contain only the inventoried database commands",
+  );
 
   const ignored = ignoredRustSuites();
   const broadExternalSuites = ignored.filter(({ reason, relativePath }) => {
@@ -238,10 +298,17 @@ test("pull requests retain the distribution gate when renderer reproduction is s
   const dist = ci.slice(ci.indexOf("\n  dist:"));
 
   assert.match(renderer, /if: \$\{\{ github\.event_name != 'pull_request' \}\}/);
-  assert.match(dist, /needs:\n      - verify\n      - frontend\n      - renderer/);
   assert.match(
     dist,
-    /if: \$\{\{ !cancelled\(\) && needs\.verify\.result == 'success' && needs\.frontend\.result == 'success' && \(needs\.renderer\.result == 'success' \|\| \(github\.event_name == 'pull_request' && needs\.renderer\.result == 'skipped'\)\) \}\}/,
+    /needs:\n      - verify\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+  );
+  assert.match(dist, /needs\.verify\.result == 'success'/);
+  assert.match(dist, /needs\.postgres_store\.result == 'success'/);
+  assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);
+  assert.match(dist, /needs\.frontend\.result == 'success'/);
+  assert.match(
+    dist,
+    /needs\.renderer\.result == 'success'[\s\S]+github\.event_name == 'pull_request'[\s\S]+needs\.renderer\.result == 'skipped'/,
   );
 });
 
@@ -263,6 +330,200 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     /group: publish-runner-profile-\$\{\{ inputs\.operation \}\}/,
   );
   assert.match(promote, /environment: profile-promotion/);
+});
+
+test("service-proxy publication is GitHub-hosted, two-phase, and least-privileged", () => {
+  const {
+    candidate,
+    candidateBuild,
+    promote,
+    promotionVerify,
+    validate,
+    workflow,
+  } = serviceProxyJobs();
+
+  assert.match(
+    workflow,
+    /group: publish-service-proxy-\$\{\{ inputs\.operation \}\}/,
+  );
+  assert.doesNotMatch(workflow, /runs-on: (?:self-hosted|\[[^\]]*self-hosted)/);
+  for (const job of [
+    validate,
+    candidateBuild,
+    candidate,
+    promotionVerify,
+    promote,
+  ]) {
+    assert.match(job, /runs-on: ubuntu-24\.04/);
+  }
+  assert.match(candidateBuild, /permissions:\n      contents: read/);
+  assert.doesNotMatch(
+    candidateBuild,
+    /packages:|id-token:|attestations:|environment:/,
+  );
+  assert.match(candidate, /artifact-metadata: write/);
+  assert.match(candidate, /attestations: write/);
+  assert.match(candidate, /id-token: write/);
+  assert.match(candidate, /packages: write/);
+  assert.match(candidate, /needs: \[validate, candidate_build\]/);
+  assert.match(
+    promotionVerify,
+    /permissions:\n      attestations: read\n      contents: read/,
+  );
+  assert.doesNotMatch(
+    promotionVerify,
+    /packages: write|id-token: write|attestations: write|environment:/,
+  );
+  assert.match(promote, /needs: \[validate, promotion_verify\]/);
+  assert.match(promote, /environment: service-proxy-promotion/);
+  assert.match(
+    promote,
+    /permissions:\n      contents: read\n      packages: write/,
+  );
+  assert.doesNotMatch(promote, /id-token: write|attestations: write/);
+  assert.match(validate, /service-proxy-publication\.py validate-request/);
+  assert.match(validate, /--confirmed-digest "\$CONFIRMED_DIGEST"/);
+});
+
+test("service-proxy candidates bind exact default-branch source and public digest", () => {
+  const { candidate, candidateBuild } = serviceProxyJobs();
+  const policy = source("scripts/ci/service-proxy-publication.py");
+
+  assert.match(candidateBuild, /ref: \$\{\{ needs\.validate\.outputs\.candidate_commit \}\}/);
+  assert.match(candidateBuild, /fetch-depth: 0/);
+  assert.match(candidateBuild, /fetch --force --no-tags/);
+  assert.match(candidateBuild, /merge-base --is-ancestor "\$CANDIDATE_COMMIT" "\$remote_ref"/);
+  assert.match(candidateBuild, /merge-base --is-ancestor "\$GITHUB_SHA" "\$remote_ref"/);
+  assert.match(candidateBuild, /scripts\/ci\/build-static-musl\.sh/);
+  assert.match(candidateBuild, /scripts\/ci\/prepare-service-proxy-context\.sh/);
+  assert.equal(
+    (candidateBuild.match(/scripts\/ci\/build-service-proxy-candidate\.sh/g) ?? [])
+      .length,
+    2,
+  );
+  assert.match(candidateBuild, /cmp --[\s\S]+service-proxy-publication-reproduction/);
+  assert.match(candidateBuild, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(candidateBuild, /archive: false/);
+  assert.match(candidateBuild, /artifact service digest differs from candidate bytes/);
+  assert.doesNotMatch(candidateBuild, /actions\/attest@|skopeo copy|GHCR_TOKEN/);
+  assert.match(candidate, /Download same-run raw candidate by artifact ID/);
+  assert.match(candidate, /needs\.candidate_build\.outputs\.candidate_artifact_id/);
+  assert.match(candidate, /skip-decompress: true/);
+  assert.match(candidate, /digest-mismatch: error/);
+  assert.match(candidate, /find "\$CANDIDATE_DOWNLOAD" -mindepth 1 -maxdepth 1 -print0/);
+  assert.match(candidate, /artifact-service and producer digests differ/);
+  assert.match(candidate, /downloaded candidate bytes differ from both digests/);
+  assert.match(candidate, /--source-directory "\$CANDIDATE_SOURCE_DIRECTORY"/);
+  assert.match(
+    policy,
+    /add_argument\("--source-directory", required=True, type=pathlib\.Path\)/,
+  );
+  assert.doesNotMatch(policy, /add_argument\("--context"/);
+  assert.doesNotMatch(
+    candidate,
+    /build-static-musl|prepare-service-proxy-context|build-service-proxy-candidate|verify-service-proxy-image/,
+  );
+  assert.match(candidate, /Refuse an existing candidate transport tag/);
+  assert.match(candidate, /skopeo copy --all --preserve-digests/);
+  assert.match(candidate, /oci-archive:\$\{OCI_ARCHIVE\}/);
+  assert.match(candidate, /Require anonymously readable exact review candidate/);
+  assert.match(candidate, /make the GHCR package public/);
+  assert.equal(
+    (candidate.match(/uses: actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d/g) ?? [])
+      .length,
+    3,
+  );
+  assert.match(candidate, /predicate-type: https:\/\/cyclonedx\.org\/bom/);
+  assert.match(
+    candidate,
+    /predicate-type: https:\/\/github\.com\/automata-ci\/automata\/attestations\/service-proxy-source-identity\/v1/,
+  );
+  assert.match(candidate, /Upload proposed reviewed lock/);
+  assert.match(
+    policy,
+    /candidate-\{candidate_commit\}-[\s\S]+run-\{arguments\.run_id\}-attempt-\{arguments\.run_attempt\}/,
+  );
+});
+
+test("service-proxy promotion verifies reviewed evidence before tag-only binding", () => {
+  const { promote, promotionVerify } = serviceProxyJobs();
+  const freshness = section(
+    promote,
+    "      - name: Require current default-branch identities immediately before mutation",
+    "      - name: Sign in to GHCR only for tag mutation",
+  );
+  const immutableTag = section(
+    promote,
+    "      - name: Refuse moving the immutable v1 tag",
+    "      - name: Bind stable tags to the locked digest without rebuilding",
+  );
+  const binding = section(
+    promote,
+    "      - name: Bind stable tags to the locked digest without rebuilding",
+    "      - name: Remove registry credentials before public postcondition",
+  );
+
+  assert.match(promotionVerify, /--config "docker:\/\/\$\{LOCKED_IMAGE\}"/);
+  assert.match(promotionVerify, /--signer-workflow "\$SIGNER_WORKFLOW"/);
+  assert.match(promotionVerify, /--signer-digest "\$PUBLISHER_COMMIT"/);
+  assert.match(promotionVerify, /--source-digest "\$PUBLISHER_COMMIT"/);
+  assert.match(promotionVerify, /--source-ref "\$SOURCE_REF"/);
+  assert.match(promotionVerify, /--deny-self-hosted-runners/);
+  assert.match(
+    promotionVerify,
+    /--predicate-type https:\/\/slsa\.dev\/provenance\/v1/,
+  );
+  assert.equal(
+    (promotionVerify.match(/gh attestation verify "\$\{common\[@\]\}"/g) ?? [])
+      .length,
+    3,
+  );
+  assert.match(
+    promotionVerify,
+    /service-proxy-publication\.py verify-attestations/,
+  );
+  assert.match(
+    promotionVerify,
+    /service-proxy-publication\.py verify-image-config/,
+  );
+  assert.match(promotionVerify, /Require public exact locked image/);
+  assert.match(promotionVerify, /verify-service-proxy-image\.sh/);
+  assert.match(promotionVerify, /podman pull --authfile "\$ANONYMOUS_AUTH_FILE"/);
+  assert.doesNotMatch(promotionVerify, /login ghcr\.io|skopeo copy/);
+  assert.doesNotMatch(
+    promote,
+    /gh attestation|verify-attestations|verify-image-config|verify-service-proxy-image|podman (?:pull|run)/,
+  );
+  assert.match(freshness, /env[\s\S]+-u GH_TOKEN[\s\S]+-u GITHUB_TOKEN/);
+  assert.match(freshness, /ls-remote --exit-code --refs/);
+  assert.match(freshness, /--expected-sha "\$GITHUB_SHA"/);
+  assert.match(freshness, /for commit in "\$CANDIDATE_COMMIT" "\$PUBLISHER_COMMIT"/);
+  assert.match(immutableTag, /"\$\{IMAGE\}:v1"/);
+  assert.match(immutableTag, /refusing to move immutable v1 from/);
+  assert.match(binding, /skopeo copy --all --preserve-digests/);
+  assert.match(binding, /"docker:\/\/\$\{LOCKED_IMAGE\}" "docker:\/\/\$\{IMAGE\}:v1"/);
+  assert.match(binding, /"docker:\/\/\$\{LOCKED_IMAGE\}" "docker:\/\/\$\{IMAGE\}:latest"/);
+  assert.doesNotMatch(promote, /(?:docker|podman|buildah) build|buildx/);
+  assert.ok(
+    promote.indexOf("Require current default-branch identities immediately before mutation") <
+      promote.indexOf("Sign in to GHCR only for tag mutation"),
+  );
+  assert.match(promote, /Verify anonymous promoted identities/);
+  assert.match(promote, /"\$\{IMAGE\}:v1"[\s\S]+"\$\{IMAGE\}:latest"/);
+});
+
+test("service-proxy publication policy unit tests remain in the CI Node lane", () => {
+  const result = spawnSync(
+    "python3",
+    [
+      path.join(
+        repositoryRoot,
+        "scripts/ci/tests/service-proxy-publication.test.py",
+      ),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
 test("release publication is globally serialized and fails early on registry capacity", () => {

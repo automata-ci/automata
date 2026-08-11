@@ -1,0 +1,11 @@
+{
+  "binary_sha256": null,
+  "candidate_commit": null,
+  "containerfile_sha256": null,
+  "image": null,
+  "publisher_commit": null,
+  "sbom_sha256": null,
+  "schema_version": 1,
+  "source_identity_sha256": null,
+  "source_provenance_sha256": null
+}

@@ -1,0 +1,862 @@
+name: Publish service proxy image
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Build a review candidate or promote the exact reviewed lock
+        required: true
+        type: choice
+        options:
+          - build-candidate
+          - promote-locked
+      candidate_commit:
+        description: For candidate builds, the full 40-character default-branch commit
+        required: false
+        type: string
+      locked_digest:
+        description: For promotion, paste the reviewed sha256 digest from service-proxy-lock.json
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-service-proxy-${{ inputs.operation }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/automata-ci/automata-service-proxy
+  LOCK_PATH: images/service-proxy/service-proxy-lock.json
+
+jobs:
+  validate:
+    name: Validate publication request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      candidate_commit: ${{ steps.request.outputs.candidate_commit }}
+      locked_digest: ${{ steps.request.outputs.locked_digest }}
+      locked_image: ${{ steps.request.outputs.locked_image }}
+      publisher_commit: ${{ steps.request.outputs.publisher_commit }}
+    steps:
+      - name: Check out trusted publisher source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate request and reviewed lock
+        id: request
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CONFIRMED_DIGEST: ${{ inputs.locked_digest }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$GITHUB_SHA" ]]
+          git diff --quiet
+          git diff --cached --quiet
+          python3 scripts/ci/service-proxy-publication.py validate-request \
+            --operation "$OPERATION" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --dispatch-ref "$DISPATCH_REF" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --confirmed-digest "$CONFIRMED_DIGEST" \
+            --lock "$LOCK_PATH" \
+            --github-output "$GITHUB_OUTPUT"
+
+  candidate_build:
+    name: Build credential-free unpublished candidate
+    if: ${{ inputs.operation == 'build-candidate' }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    outputs:
+      candidate_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      candidate_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      candidate_filename: ${{ steps.handoff.outputs.candidate_filename }}
+      candidate_sha256: ${{ steps.handoff.outputs.candidate_sha256 }}
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_ARCHIVE: ${{ github.workspace }}/target/service-proxy-candidate-source/target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+      CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
+      CANDIDATE_SOURCE_DIRECTORY: ${{ github.workspace }}/target/service-proxy-candidate-source
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          path: target/service-proxy-candidate-source
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.candidate_commit }}
+
+      - name: Require exact live default-branch candidate source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          actual_commit="$(
+            git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+              rev-parse --verify 'HEAD^{commit}'
+          )"
+          [[ "$actual_commit" == "$CANDIDATE_COMMIT" ]] || {
+            printf 'error: candidate checkout resolved to %s, expected %s\n' \
+              "$actual_commit" "$CANDIDATE_COMMIT" >&2
+            exit 1
+          }
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --quiet
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --cached --quiet
+
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          remote_ref="refs/remotes/review/${DEFAULT_BRANCH}"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+              -c core.askPass= \
+              -c credential.helper= \
+              -c http.extraHeader= \
+              fetch --force --no-tags "$remote_url" \
+                "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+            merge-base --is-ancestor "$CANDIDATE_COMMIT" "$remote_ref" || {
+              printf 'error: candidate commit is not on the current default branch\n' >&2
+              exit 1
+            }
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+            merge-base --is-ancestor "$GITHUB_SHA" "$remote_ref" || {
+              printf 'error: publisher commit is not on the current default branch\n' >&2
+              exit 1
+            }
+
+          version="$(
+            "$CANDIDATE_SOURCE_DIRECTORY/scripts/ci/workspace-version.sh"
+          )"
+          created="$(
+            git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+              show -s --format=%cI "$CANDIDATE_COMMIT"
+          )"
+          source_date_epoch="$(
+            git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+              show -s --format=%ct "$CANDIDATE_COMMIT"
+          )"
+          {
+            printf 'AUTOMATA_BUILD_GIT_SHA=%s\n' "$CANDIDATE_COMMIT"
+            printf 'AUTOMATA_EXPECTED_GIT_SHA=%s\n' "$CANDIDATE_COMMIT"
+            printf 'AUTOMATA_EXPECTED_VERSION=%s\n' "$version"
+            printf 'AUTOMATA_RELEASE_BUILD=1\n'
+            printf 'CANDIDATE_CREATED=%s\n' "$created"
+            printf 'CANDIDATE_SOURCE_DATE_EPOCH=%s\n' "$source_date_epoch"
+            printf 'SOURCE_DATE_EPOCH=%s\n' "$source_date_epoch"
+          } >> "$GITHUB_ENV"
+
+      - name: Install static and image build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils musl-tools podman
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Install pinned SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Build exact static service-proxy inputs
+        run: |
+          cd -- "$CANDIDATE_SOURCE_DIRECTORY"
+          ./scripts/ci/build-static-musl.sh
+          ./scripts/ci/verify-service-proxy-static.sh
+          ./scripts/ci/generate-sboms.sh
+          ./scripts/ci/prepare-third-party-license-sources.sh
+          ./scripts/ci/generate-third-party-licenses.sh
+
+      - name: Build and reproduce digest-bound OCI candidate
+        env:
+          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman
+        run: |
+          cd -- "$CANDIDATE_SOURCE_DIRECTORY"
+          ./scripts/ci/prepare-service-proxy-context.sh \
+            target/service-proxy-context \
+            "$AUTOMATA_EXPECTED_VERSION" \
+            "$CANDIDATE_COMMIT" \
+            "$CANDIDATE_CREATED" \
+            "$CANDIDATE_SOURCE_DATE_EPOCH"
+          env -u GITHUB_OUTPUT \
+            ./scripts/ci/build-service-proxy-candidate.sh \
+              target/service-proxy-context \
+              target/service-proxy-publication
+          env -u GITHUB_OUTPUT \
+            ./scripts/ci/build-service-proxy-candidate.sh \
+              target/service-proxy-context \
+              target/service-proxy-publication-reproduction
+          cmp -- \
+            target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
+            target/service-proxy-publication-reproduction/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+
+      - name: Record exact unpublished handoff bytes
+        id: handoff
+        run: |
+          expected_name=automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
+          [[ "$CANDIDATE_ARCHIVE" == \
+            "$CANDIDATE_SOURCE_DIRECTORY/target/service-proxy-publication/${expected_name}" ]]
+          [[ -f "$CANDIDATE_ARCHIVE" && ! -L "$CANDIDATE_ARCHIVE" ]]
+          candidate_sha256="$(sha256sum "$CANDIDATE_ARCHIVE" | awk '{print $1}')"
+          [[ "$candidate_sha256" =~ ^[0-9a-f]{64}$ ]]
+          {
+            printf 'candidate_filename=%s\n' "$expected_name"
+            printf 'candidate_sha256=%s\n' "$candidate_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload raw unpublished candidate
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          if-no-files-found: error
+          name: service-proxy-unpublished-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_ARCHIVE }}
+          retention-days: 90
+
+      - name: Verify uploaded candidate identity
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          CANDIDATE_SHA256: ${{ steps.handoff.outputs.candidate_sha256 }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || {
+            printf 'error: candidate upload returned an invalid artifact ID\n' >&2
+            exit 1
+          }
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact_digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "$artifact_digest" == "$CANDIDATE_SHA256" ]] || {
+            printf 'error: artifact service digest differs from candidate bytes\n' >&2
+            exit 1
+          }
+
+  candidate:
+    name: Publish immutable public review candidate
+    if: ${{ inputs.operation == 'build-candidate' }}
+    needs: [validate, candidate_build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
+      CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
+      CANDIDATE_DOWNLOAD: ${{ github.workspace }}/target/service-proxy-candidate-download
+      CANDIDATE_SOURCE_DIRECTORY: ${{ github.workspace }}/target/service-proxy-candidate-source
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/service-proxy-docker-config
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-registry-auth.json
+      REVIEW_DIRECTORY: ${{ github.workspace }}/target/service-proxy-review
+    steps:
+      - name: Check out trusted publisher source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out exact candidate source without executing it
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          path: target/service-proxy-candidate-source
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.candidate_commit }}
+
+      - name: Download same-run raw candidate by artifact ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate_build.outputs.candidate_artifact_id }}
+          digest-mismatch: error
+          path: ${{ env.CANDIDATE_DOWNLOAD }}
+          skip-decompress: true
+
+      - name: Verify exact raw candidate handoff
+        id: handoff
+        env:
+          ARTIFACT_DIGEST: ${{ needs.candidate_build.outputs.candidate_artifact_digest }}
+          CANDIDATE_FILENAME: ${{ needs.candidate_build.outputs.candidate_filename }}
+          CANDIDATE_SHA256: ${{ needs.candidate_build.outputs.candidate_sha256 }}
+        run: |
+          [[ "$CANDIDATE_FILENAME" == \
+            automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact_digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "$artifact_digest" == "$CANDIDATE_SHA256" ]] || {
+            printf 'error: artifact-service and producer digests differ\n' >&2
+            exit 1
+          }
+          candidate_archive="$CANDIDATE_DOWNLOAD/$CANDIDATE_FILENAME"
+          mapfile -d '' -t downloaded < <(
+            find "$CANDIDATE_DOWNLOAD" -mindepth 1 -maxdepth 1 -print0
+          )
+          if (( ${#downloaded[@]} != 1 )) || \
+            ! [[ "${downloaded[0]}" == "$candidate_archive" && \
+              -f "$candidate_archive" && ! -L "$candidate_archive" ]]; then
+            printf 'error: candidate download contains an unexpected entry set\n' >&2
+            exit 1
+          fi
+          actual_sha256="$(sha256sum "$candidate_archive" | awk '{print $1}')"
+          [[ "$actual_sha256" == "$CANDIDATE_SHA256" ]] || {
+            printf 'error: downloaded candidate bytes differ from both digests\n' >&2
+            exit 1
+          }
+          printf 'candidate_archive=%s\n' "$candidate_archive" >> "$GITHUB_OUTPUT"
+
+      - name: Validate candidate with trusted publisher policy
+        id: candidate
+        env:
+          CANDIDATE_ARCHIVE: ${{ steps.handoff.outputs.candidate_archive }}
+        run: |
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$GITHUB_SHA" ]]
+          git diff --quiet
+          git diff --cached --quiet
+          [[ "$(git -C "$CANDIDATE_SOURCE_DIRECTORY" \
+            rev-parse --verify 'HEAD^{commit}')" == "$CANDIDATE_COMMIT" ]]
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --quiet
+          git -C "$CANDIDATE_SOURCE_DIRECTORY" diff --cached --quiet
+          python3 scripts/ci/service-proxy-publication.py prepare-candidate \
+            --candidate "$CANDIDATE_ARCHIVE" \
+            --source-directory "$CANDIDATE_SOURCE_DIRECTORY" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --publisher-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$REVIEW_DIRECTORY" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install image publication tooling
+        run: |
+          install -d -m 0700 -- \
+            "$DOCKER_CONFIG" "$(dirname -- "$REGISTRY_AUTH_FILE")"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+
+      - name: Revalidate live default-branch ancestry before publication
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          remote_ref="refs/remotes/review/${DEFAULT_BRANCH}"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -c core.askPass= -c credential.helper= -c http.extraHeader= \
+              fetch --force --no-tags "$remote_url" \
+                "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"
+          for commit in "$CANDIDATE_COMMIT" "$GITHUB_SHA"; do
+            git merge-base --is-ancestor "$commit" "$remote_ref" || {
+              printf 'error: publication commit left the live default branch: %s\n' \
+                "$commit" >&2
+              exit 1
+            }
+          done
+
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" |
+            skopeo login --authfile "$REGISTRY_AUTH_FILE" \
+              --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+
+      - name: Refuse an existing candidate transport tag
+        env:
+          CANDIDATE_TAG: ${{ steps.candidate.outputs.candidate_tag }}
+        run: |
+          error_file="$RUNNER_TEMP/service-proxy-candidate-tag-error.txt"
+          set +e
+          skopeo inspect --authfile "$REGISTRY_AUTH_FILE" \
+            --raw "docker://${CANDIDATE_TAG}" >/dev/null 2> "$error_file"
+          inspect_status=$?
+          set -e
+          if (( inspect_status == 0 )); then
+            printf 'error: unique candidate transport tag already exists: %s\n' \
+              "$CANDIDATE_TAG" >&2
+            exit 1
+          fi
+          grep -Eiq 'manifest unknown|name unknown|not found|404' "$error_file" || {
+            printf 'error: unable to prove candidate transport tag is absent\n' >&2
+            cat "$error_file" >&2
+            exit 1
+          }
+
+      - name: Push exact candidate without manifest conversion
+        env:
+          CANDIDATE_TAG: ${{ steps.candidate.outputs.candidate_tag }}
+          EXPECTED_DIGEST: ${{ steps.candidate.outputs.image_digest }}
+          OCI_ARCHIVE: ${{ steps.candidate.outputs.oci_archive }}
+        run: |
+          skopeo copy --all --preserve-digests \
+            --authfile "$REGISTRY_AUTH_FILE" \
+            "oci-archive:${OCI_ARCHIVE}" "docker://${CANDIDATE_TAG}"
+          manifest="$RUNNER_TEMP/service-proxy-candidate-manifest.json"
+          skopeo inspect --authfile "$REGISTRY_AUTH_FILE" \
+            --raw "docker://${CANDIDATE_TAG}" > "$manifest"
+          actual="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]] || {
+            printf 'error: pushed candidate resolves to %s, expected %s\n' \
+              "$actual" "$EXPECTED_DIGEST" >&2
+            exit 1
+          }
+
+      - name: Require anonymously readable exact review candidate
+        env:
+          CANDIDATE_TAG: ${{ steps.candidate.outputs.candidate_tag }}
+          EXACT_IMAGE: ${{ steps.candidate.outputs.exact_image }}
+          EXPECTED_DIGEST: ${{ steps.candidate.outputs.image_digest }}
+        run: |
+          install -m 0600 /dev/null "$ANONYMOUS_AUTH_FILE"
+          printf '{"auths":{}}\n' > "$ANONYMOUS_AUTH_FILE"
+          for reference in "$CANDIDATE_TAG" "$EXACT_IMAGE"; do
+            manifest="$RUNNER_TEMP/service-proxy-public-candidate.json"
+            if ! skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+              --raw "docker://${reference}" > "$manifest"; then
+              printf 'error: candidate must be public for digest review: %s\n' \
+                "$reference" >&2
+              printf 'make the GHCR package public, then dispatch a new candidate\n' >&2
+              exit 1
+            fi
+            actual="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+            [[ "$actual" == "$EXPECTED_DIGEST" ]] || {
+              printf 'error: public candidate resolves to %s, expected %s\n' \
+                "$actual" "$EXPECTED_DIGEST" >&2
+              exit 1
+            }
+          done
+
+      - name: Attest candidate build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-service-proxy
+          subject-digest: ${{ steps.candidate.outputs.image_digest }}
+          push-to-registry: true
+
+      - name: Attest exact canonical CycloneDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-service-proxy
+          subject-digest: ${{ steps.candidate.outputs.image_digest }}
+          predicate-type: https://cyclonedx.org/bom
+          predicate-path: ${{ steps.candidate.outputs.sbom }}
+          push-to-registry: true
+
+      - name: Attest exact service-proxy source identity
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ghcr.io/automata-ci/automata-service-proxy
+          subject-digest: ${{ steps.candidate.outputs.image_digest }}
+          predicate-type: https://github.com/automata-ci/automata/attestations/service-proxy-source-identity/v1
+          predicate-path: ${{ steps.candidate.outputs.source_identity }}
+          push-to-registry: true
+
+      - name: Upload proposed reviewed lock
+        id: upload-lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          if-no-files-found: error
+          name: service-proxy-review-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.candidate.outputs.proposed_lock }}
+          retention-days: 90
+
+      - name: Verify proposed lock artifact identity
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload-lock.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.upload-lock.outputs.artifact-id }}
+          PROPOSED_LOCK: ${{ steps.candidate.outputs.proposed_lock }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          lock_sha256="$(sha256sum "$PROPOSED_LOCK" | awk '{print $1}')"
+          [[ "sha256:${lock_sha256}" == "$ARTIFACT_DIGEST" ]] || {
+            printf 'error: proposed lock upload differs from reviewed bytes\n' >&2
+            exit 1
+          }
+
+      - name: Record immutable review identity
+        env:
+          CANDIDATE_TAG: ${{ steps.candidate.outputs.candidate_tag }}
+          EXACT_IMAGE: ${{ steps.candidate.outputs.exact_image }}
+          PROPOSED_LOCK: ${{ steps.candidate.outputs.proposed_lock }}
+        run: |
+          {
+            printf '## Service-proxy candidate ready for review\n\n'
+            printf -- '- Exact image: %s\n' "$EXACT_IMAGE"
+            printf -- '- Candidate source commit: %s\n' "$CANDIDATE_COMMIT"
+            printf -- '- Trusted publisher commit: %s\n' "$GITHUB_SHA"
+            printf -- '- Transport-only tag: %s\n\n' "$CANDIDATE_TAG"
+            printf 'Review and test the exact digest image, then commit this lock unchanged:\n\n'
+            cat "$PROPOSED_LOCK"
+            printf '\nDispatch promote-locked from the default branch and paste the locked digest.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign out of GHCR
+        if: ${{ always() }}
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          skopeo logout --authfile "$REGISTRY_AUTH_FILE" \
+            ghcr.io >/dev/null 2>&1 || true
+          rm -f -- \
+            "$REGISTRY_AUTH_FILE" \
+            "$ANONYMOUS_AUTH_FILE" \
+            "$DOCKER_CONFIG/config.json"
+
+  promotion_verify:
+    name: Verify reviewed image without write credentials
+    if: ${{ inputs.operation == 'promote-locked' }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      attestations: read
+      contents: read
+    env:
+      ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
+      CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
+      DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/service-proxy-docker-config
+      LOCKED_DIGEST: ${{ needs.validate.outputs.locked_digest }}
+      LOCKED_IMAGE: ${{ needs.validate.outputs.locked_image }}
+      PUBLISHER_COMMIT: ${{ needs.validate.outputs.publisher_commit }}
+      SOURCE_REF: refs/heads/${{ github.event.repository.default_branch }}
+    steps:
+      - name: Check out reviewed default-branch source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install read-only image verification tooling
+        run: |
+          install -d -m 0700 -- \
+            "$DOCKER_CONFIG" "$(dirname -- "$ANONYMOUS_AUTH_FILE")"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends podman skopeo
+
+      - name: Require current reviewed default-branch identities
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$GITHUB_SHA" ]]
+          git diff --quiet
+          git diff --cached --quiet
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          remote_ref="refs/remotes/promotion/${DEFAULT_BRANCH}"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -c core.askPass= -c credential.helper= -c http.extraHeader= \
+              fetch --force --no-tags "$remote_url" \
+                "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"
+          [[ "$(git rev-parse --verify "${remote_ref}^{commit}")" == "$GITHUB_SHA" ]] || {
+            printf 'error: reviewed lock is not the current default-branch head\n' >&2
+            exit 1
+          }
+          for commit in "$CANDIDATE_COMMIT" "$PUBLISHER_COMMIT"; do
+            git merge-base --is-ancestor "$commit" "$remote_ref" || {
+              printf 'error: reviewed commit left the live default branch: %s\n' \
+                "$commit" >&2
+              exit 1
+            }
+          done
+          expected_ref="refs/heads/${DEFAULT_BRANCH}"
+          remote_head="$RUNNER_TEMP/service-proxy-default-branch-head"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -c core.askPass= -c credential.helper= -c http.extraHeader= \
+              ls-remote --exit-code --refs "$remote_url" "$expected_ref" \
+              > "$remote_head"
+          python3 scripts/ci/service-proxy-publication.py verify-remote-head \
+            --remote-output "$remote_head" \
+            --expected-ref "$expected_ref" \
+            --expected-sha "$GITHUB_SHA"
+
+      - name: Require public exact locked image and capture its configuration
+        run: |
+          install -m 0600 /dev/null "$ANONYMOUS_AUTH_FILE"
+          printf '{"auths":{}}\n' > "$ANONYMOUS_AUTH_FILE"
+          manifest="$RUNNER_TEMP/service-proxy-locked-public.json"
+          if ! skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+            --raw "docker://${LOCKED_IMAGE}" > "$manifest"; then
+            printf 'error: locked image must be anonymously readable: %s\n' \
+              "$LOCKED_IMAGE" >&2
+            exit 1
+          fi
+          actual="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$actual" == "$LOCKED_DIGEST" ]] || {
+            printf 'error: anonymous image resolves to %s, expected %s\n' \
+              "$actual" "$LOCKED_DIGEST" >&2
+            exit 1
+          }
+          skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+            --config "docker://${LOCKED_IMAGE}" \
+            > "$RUNNER_TEMP/service-proxy-locked-config.json"
+
+      - name: Verify hosted provenance, SBOM, and source identity
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/service-proxy-image.yml
+        run: |
+          common=(
+            "oci://${LOCKED_IMAGE}"
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$SIGNER_WORKFLOW"
+            --signer-digest "$PUBLISHER_COMMIT"
+            --source-ref "$SOURCE_REF"
+            --source-digest "$PUBLISHER_COMMIT"
+            --deny-self-hosted-runners
+            --limit 100
+          )
+          provenance_results="$RUNNER_TEMP/service-proxy-provenance-attestations.json"
+          gh attestation verify "${common[@]}" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --format json > "$provenance_results"
+          sbom_results="$RUNNER_TEMP/service-proxy-sbom-attestations.json"
+          gh attestation verify "${common[@]}" \
+            --predicate-type https://cyclonedx.org/bom \
+            --format json > "$sbom_results"
+          identity_results="$RUNNER_TEMP/service-proxy-identity-attestations.json"
+          gh attestation verify "${common[@]}" \
+            --predicate-type \
+              https://github.com/automata-ci/automata/attestations/service-proxy-source-identity/v1 \
+            --format json > "$identity_results"
+          python3 scripts/ci/service-proxy-publication.py verify-attestations \
+            --lock "$LOCK_PATH" \
+            --provenance-results "$provenance_results" \
+            --identity-results "$identity_results" \
+            --sbom-results "$sbom_results" \
+            --identity-output "$RUNNER_TEMP/service-proxy-verified-identity.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify every image label and isolated runtime invariant
+        run: |
+          python3 scripts/ci/service-proxy-publication.py verify-image-config \
+            --config "$RUNNER_TEMP/service-proxy-locked-config.json" \
+            --identity "$RUNNER_TEMP/service-proxy-verified-identity.json"
+          podman pull --authfile "$ANONYMOUS_AUTH_FILE" "$LOCKED_IMAGE"
+          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME=podman \
+            ./scripts/ci/verify-service-proxy-image.sh \
+              "$LOCKED_IMAGE" \
+              "${{ steps.evidence.outputs.version }}" \
+              "${{ steps.evidence.outputs.candidate_commit }}" \
+              "${{ steps.evidence.outputs.created }}"
+
+  promote:
+    name: Bind protected stable service-proxy tags
+    if: ${{ inputs.operation == 'promote-locked' }}
+    needs: [validate, promotion_verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: service-proxy-promotion
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ANONYMOUS_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-anonymous-auth.json
+      CANDIDATE_COMMIT: ${{ needs.validate.outputs.candidate_commit }}
+      LOCKED_DIGEST: ${{ needs.validate.outputs.locked_digest }}
+      LOCKED_IMAGE: ${{ needs.validate.outputs.locked_image }}
+      PUBLISHER_COMMIT: ${{ needs.validate.outputs.publisher_commit }}
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/target/task-tmp/service-proxy-registry-auth.json
+    steps:
+      - name: Check out reviewed default-branch source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install tag publication tooling
+        run: |
+          install -d -m 0700 -- "$(dirname -- "$REGISTRY_AUTH_FILE")"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+
+      - name: Reverify public exact locked image
+        run: |
+          install -m 0600 /dev/null "$ANONYMOUS_AUTH_FILE"
+          printf '{"auths":{}}\n' > "$ANONYMOUS_AUTH_FILE"
+          manifest="$RUNNER_TEMP/service-proxy-locked-public.json"
+          skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+            --raw "docker://${LOCKED_IMAGE}" > "$manifest" || {
+              printf 'error: locked image is no longer anonymously readable\n' >&2
+              exit 1
+          }
+          actual="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$actual" == "$LOCKED_DIGEST" ]]
+
+      - name: Require current default-branch identities immediately before mutation
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "$GITHUB_SHA" ]]
+          git diff --quiet
+          git diff --cached --quiet
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          remote_ref="refs/remotes/promotion/${DEFAULT_BRANCH}"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -c core.askPass= -c credential.helper= -c http.extraHeader= \
+              fetch --force --no-tags "$remote_url" \
+                "+refs/heads/${DEFAULT_BRANCH}:${remote_ref}"
+          [[ "$(git rev-parse --verify "${remote_ref}^{commit}")" == "$GITHUB_SHA" ]] || {
+            printf 'error: default branch moved after review approval\n' >&2
+            exit 1
+          }
+          for commit in "$CANDIDATE_COMMIT" "$PUBLISHER_COMMIT"; do
+            git merge-base --is-ancestor "$commit" "$remote_ref" || {
+              printf 'error: reviewed commit left the live default branch: %s\n' \
+                "$commit" >&2
+              exit 1
+            }
+          done
+          expected_ref="refs/heads/${DEFAULT_BRANCH}"
+          remote_head="$RUNNER_TEMP/service-proxy-default-branch-head"
+          env \
+            -u GH_TOKEN \
+            -u GITHUB_TOKEN \
+            -u GIT_ASKPASS \
+            -u SSH_ASKPASS \
+            GIT_TERMINAL_PROMPT=0 \
+            git -c core.askPass= -c credential.helper= -c http.extraHeader= \
+              ls-remote --exit-code --refs "$remote_url" "$expected_ref" \
+              > "$remote_head"
+          python3 scripts/ci/service-proxy-publication.py verify-remote-head \
+            --remote-output "$remote_head" \
+            --expected-ref "$expected_ref" \
+            --expected-sha "$GITHUB_SHA"
+
+      - name: Sign in to GHCR only for tag mutation
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" |
+            skopeo login --authfile "$REGISTRY_AUTH_FILE" \
+              --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+
+      - name: Refuse moving the immutable v1 tag
+        run: |
+          stable="${IMAGE}:v1"
+          manifest="$RUNNER_TEMP/service-proxy-v1-current.json"
+          error_file="$RUNNER_TEMP/service-proxy-v1-error.txt"
+          set +e
+          skopeo inspect --authfile "$REGISTRY_AUTH_FILE" \
+            --raw "docker://${stable}" > "$manifest" 2> "$error_file"
+          inspect_status=$?
+          set -e
+          if (( inspect_status == 0 )); then
+            current="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+            [[ "$current" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: refusing to move immutable v1 from %s to %s\n' \
+                "$current" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+            printf 'bind_v1=false\n' >> "$GITHUB_ENV"
+          elif grep -Eiq \
+            'manifest unknown|name unknown|not found|404' "$error_file"; then
+            printf 'bind_v1=true\n' >> "$GITHUB_ENV"
+          else
+            printf 'error: unable to inspect existing immutable v1 tag\n' >&2
+            cat "$error_file" >&2
+            exit 1
+          fi
+
+      - name: Bind stable tags to the locked digest without rebuilding
+        run: |
+          if [[ "$bind_v1" == true ]]; then
+            skopeo copy --all --preserve-digests \
+              --authfile "$REGISTRY_AUTH_FILE" \
+              "docker://${LOCKED_IMAGE}" "docker://${IMAGE}:v1"
+          fi
+          skopeo copy --all --preserve-digests \
+            --authfile "$REGISTRY_AUTH_FILE" \
+            "docker://${LOCKED_IMAGE}" "docker://${IMAGE}:latest"
+          for tagged in "${IMAGE}:v1" "${IMAGE}:latest"; do
+            manifest="$RUNNER_TEMP/service-proxy-promoted-manifest.json"
+            skopeo inspect --authfile "$REGISTRY_AUTH_FILE" \
+              --raw "docker://${tagged}" > "$manifest"
+            promoted="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+            [[ "$promoted" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: promoted %s resolves to %s, expected %s\n' \
+                "$tagged" "$promoted" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+          done
+
+      - name: Remove registry credentials before public postcondition
+        run: |
+          skopeo logout --authfile "$REGISTRY_AUTH_FILE" \
+            ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$REGISTRY_AUTH_FILE"
+
+      - name: Verify anonymous promoted identities
+        run: |
+          for reference in \
+            "$LOCKED_IMAGE" \
+            "${IMAGE}:v1" \
+            "${IMAGE}:latest"; do
+            manifest="$RUNNER_TEMP/service-proxy-public-promoted.json"
+            skopeo inspect --authfile "$ANONYMOUS_AUTH_FILE" \
+              --raw "docker://${reference}" > "$manifest" || {
+              printf 'error: promoted service proxy is not public: %s\n' \
+                "$reference" >&2
+              exit 1
+            }
+            public_digest="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+            [[ "$public_digest" == "$LOCKED_DIGEST" ]] || {
+              printf 'error: public %s resolves to %s, expected %s\n' \
+                "$reference" "$public_digest" "$LOCKED_DIGEST" >&2
+              exit 1
+            }
+          done
+
+      - name: Record promoted identity
+        run: |
+          {
+            printf '## Service-proxy promotion complete\n\n'
+            printf -- '- Exact image: %s\n' "$LOCKED_IMAGE"
+            printf -- '- Stable tags: %s, %s\n' \
+              "${IMAGE}:v1" "${IMAGE}:latest"
+            printf -- '- Candidate source commit: %s\n' "$CANDIDATE_COMMIT"
+            printf -- '- Reviewed lock commit: %s\n' "$GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign out of GHCR
+        if: ${{ always() }}
+        run: |
+          skopeo logout --authfile "$REGISTRY_AUTH_FILE" \
+            ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$REGISTRY_AUTH_FILE" "$ANONYMOUS_AUTH_FILE"
