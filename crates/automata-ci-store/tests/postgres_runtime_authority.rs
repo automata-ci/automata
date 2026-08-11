@@ -816,12 +816,20 @@ impl AuthorityFixture {
         owner: GithubRuntimeAuthorityWorkerId,
         duration_millis: i64,
     ) -> ClaimGithubRuntimeAuthorityMint {
-        let requested_at = self.identity.requested_at();
+        self.claim_for_at(owner, self.identity.requested_at(), duration_millis)
+    }
+
+    fn claim_for_at(
+        &self,
+        owner: GithubRuntimeAuthorityWorkerId,
+        observed_at: UnixMillis,
+        duration_millis: i64,
+    ) -> ClaimGithubRuntimeAuthorityMint {
         ClaimGithubRuntimeAuthorityMint::new(
             self.identity.clone(),
             owner,
-            requested_at,
-            UnixMillis::new(requested_at.get() + duration_millis),
+            observed_at,
+            UnixMillis::new(observed_at.get() + duration_millis),
         )
         .expect("mint claim")
     }
@@ -1181,10 +1189,12 @@ async fn claim_single_mint_winner(
     database: &TestDatabase,
     fixture: &AuthorityFixture,
 ) -> TestResult<ClaimedGithubRuntimeAuthorityMint> {
+    let observed_at = database_now(database).await?;
     let mut tasks = Vec::new();
     for ordinal in 0..32_u128 {
         let store = database.store().clone();
-        let request = fixture.claim_for(AuthorityFixture::owner(100 + ordinal), 3_000);
+        let request =
+            fixture.claim_for_at(AuthorityFixture::owner(100 + ordinal), observed_at, 3_000);
         tasks.push(tokio::spawn(async move {
             store.claim_github_runtime_authority_mint(request).await
         }));
@@ -1259,9 +1269,14 @@ async fn reclaim_and_begin_mint(
     stale_claim: ClaimedGithubRuntimeAuthorityMint,
 ) -> TestResult<ClaimedGithubRuntimeAuthorityMint> {
     tokio::time::sleep(Duration::from_millis(3_100)).await;
+    let observed_at = database_now(database).await?;
     let reclaimed = database
         .store()
-        .claim_github_runtime_authority_mint(fixture.claim(AuthorityFixture::owner(200), 100, 200))
+        .claim_github_runtime_authority_mint(fixture.claim_for_at(
+            AuthorityFixture::owner(200),
+            observed_at,
+            5_000,
+        ))
         .await?
         .expect("expired pre-mint claim is reclaimable");
     assert_eq!(reclaimed.attempt(), 2);
@@ -1315,10 +1330,10 @@ async fn assert_indeterminate_expiry(
     assert!(
         database
             .store()
-            .claim_github_runtime_authority_mint(fixture.claim(
+            .claim_github_runtime_authority_mint(fixture.claim_for_at(
                 AuthorityFixture::owner(201),
-                200,
-                300,
+                database_now(database).await?,
+                5_000,
             ))
             .await?
             .is_none()
