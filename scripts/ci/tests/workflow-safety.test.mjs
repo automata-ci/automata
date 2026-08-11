@@ -247,7 +247,12 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".github/workflows/ci.yml");
   const verify = section(ci, "\n  verify:", "\n  rust_tests:");
-  const rustTests = section(ci, "\n  rust_tests:", "\n  postgres_store:");
+  const rustTests = section(ci, "\n  rust_tests:", "\n  renderer_tests:");
+  const rendererTests = section(
+    ci,
+    "\n  renderer_tests:",
+    "\n  postgres_store:",
+  );
   const shellContracts = section(
     verify,
     "      - name: Lint workflows and shell scripts",
@@ -261,11 +266,19 @@ test("CI executes documentation and committed script contract suites", () => {
 
   assert.match(
     rustTests,
-    /cargo test --workspace --all-targets --all-features --locked/,
+    /cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked/,
   );
   assert.match(
     rustTests,
-    /cargo test --workspace --doc --all-features --locked/,
+    /cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
+  );
+  assert.match(
+    rendererTests,
+    /cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked/,
+  );
+  assert.match(
+    rendererTests,
+    /cargo test -p automata-ci-ui-renderer --doc --all-features --locked/,
   );
   assert.match(shellContracts, /renderer-preflight\.test\.sh/);
   assert.match(shellContracts, /renderer-provenance\.test\.sh/);
@@ -296,10 +309,11 @@ test("pull requests retain the distribution gate when renderer reproduction is s
   assert.match(renderer, /if: \$\{\{ github\.event_name != 'pull_request' \}\}/);
   assert.match(
     dist,
-    /needs:\n      - verify\n      - rust_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+    /needs:\n      - verify\n      - rust_tests\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
   );
   assert.match(dist, /needs\.verify\.result == 'success'/);
   assert.match(dist, /needs\.rust_tests\.result == 'success'/);
+  assert.match(dist, /needs\.renderer_tests\.result == 'success'/);
   assert.match(dist, /needs\.postgres_store\.result == 'success'/);
   assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);
   assert.match(dist, /needs\.frontend\.result == 'success'/);

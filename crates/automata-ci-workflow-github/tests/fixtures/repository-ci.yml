@@ -137,8 +137,33 @@ jobs:
         run: |
           trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
           df -h -- "$GITHUB_WORKSPACE"
-          cargo test --workspace --all-targets --all-features --locked
-          cargo test --workspace --doc --all-features --locked
+          cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked
+          cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
+
+  renderer_tests:
+    name: Rust renderer tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Test Rust renderer
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked
+          cargo test -p automata-ci-ui-renderer --doc --all-features --locked
 
   postgres_store:
     name: PostgreSQL Store invariants (${{ matrix.shard }}/4)
@@ -314,6 +339,7 @@ jobs:
       ${{ !cancelled()
           && needs.verify.result == 'success'
           && needs.rust_tests.result == 'success'
+          && needs.renderer_tests.result == 'success'
           && needs.postgres_store.result == 'success'
           && needs.postgres_integrations.result == 'success'
           && needs.frontend.result == 'success'
@@ -323,6 +349,7 @@ jobs:
     needs:
       - verify
       - rust_tests
+      - renderer_tests
       - postgres_store
       - postgres_integrations
       - frontend
