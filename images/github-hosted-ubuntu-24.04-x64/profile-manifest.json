@@ -7,7 +7,7 @@
     "compatibility_label": "ubuntu-24.04"
   },
   "base_image": "docker.io/library/ubuntu@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467",
-  "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:5f18efe2d685f8492e999a0a9872dd4546092803889846f77a79eb667dd150a5",
+  "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd",
   "execution": {
     "workspace": "/__w",
     "keepalive": ["/bin/sleep", "infinity"],

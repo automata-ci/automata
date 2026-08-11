@@ -19,8 +19,8 @@ use automata_ci_runner_spool::ContentProtector as _;
 
 const RUNNER_ID: &str = "6e561f8b-9098-418d-b573-d82f5c73006e";
 const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
-const PROFILE_DIGEST: &str = "58a64e8076d0aec6c8047fc7ecb20cb80420d924ba7f5f91ed634976113b896a";
-const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:5f18efe2d685f8492e999a0a9872dd4546092803889846f77a79eb667dd150a5";
+const PROFILE_DIGEST: &str = "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4";
+const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd";
 const SERVICE_PROXY_IMAGE: &str = "registry.example.test/automata/service-proxy@sha256:4d7a838e047d65bbf708d4fc315db9b3b91ae73c0d50459b519089c0713ff34b";
 
 #[test]

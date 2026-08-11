@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile_id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
-  "profile_manifest_sha256": "58a64e8076d0aec6c8047fc7ecb20cb80420d924ba7f5f91ed634976113b896a",
+  "profile_manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4",
   "containerfile_sha256": "bc8b63271fdcf14f426c1743e4c240f51064f1bd5739ddd24427670b422d41ad",
-  "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:5f18efe2d685f8492e999a0a9872dd4546092803889846f77a79eb667dd150a5"
+  "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd"
 }
