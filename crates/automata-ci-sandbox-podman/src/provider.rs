@@ -49,7 +49,7 @@ const SERVICE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_SERVICE_PROCESS_ENVIRONMENT_BYTES: usize = 48 * 1024;
 const MAX_SERVICE_PROXY_PORTS: usize = 128;
 const SERVICE_PROXY_IMAGE_FORMAT: &str =
-    "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy-version\" }}";
+    "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy.protocol-version\" }}";
 const SERVICE_PROXY_IMAGE_VERSION: &str = "1";
 const SERVICE_PROXY_CONFIG_FORMAT: &str =
     "{{.ImageName}}\n{{.Pod}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}";

@@ -593,7 +593,7 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
                 && inspect == "inspect"
                 && format == "--format"
                 && template
-                    == "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy-version\" }}" =>
+                    == "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy.protocol-version\" }}" =>
         {
             let digest = reference.rsplit_once('@').map(|(_, value)| value).unwrap_or_default();
             Some(CommandOutput::success(
