@@ -154,6 +154,11 @@ fn logical_fixture(namespace: u128, database_epoch: UnixMillis) -> LogicalFixtur
         vec![logical_job],
         database_epoch,
     )
+    .base_context(admission_object(
+        format!("runtime-authority/{namespace}/base-context"),
+        0x15,
+        "application/vnd.automata.job-runtime-context.protobuf",
+    ))
     .build()
     .expect("logical admission");
     LogicalFixture {
@@ -272,7 +277,7 @@ fn retime_logical_admission(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
-    Ok(AdmitLogicalWorkflowRun::builder(
+    let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         command.idempotency().clone(),
         command.request_digest(),
@@ -292,8 +297,11 @@ fn retime_logical_admission(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    )
-    .build()?)
+    );
+    if let Some(base_context) = command.base_context() {
+        builder = builder.base_context(base_context.clone());
+    }
+    Ok(builder.build()?)
 }
 
 fn namespace_id(manifest: &GithubProviderManifest, suffix: u128) -> u128 {
@@ -473,11 +481,7 @@ async fn claim_activation(
         .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
             preparation.descriptor().clone(),
             preparation.claim().clone(),
-            admission_object(
-                format!("{}/base-context", fixture.tenant),
-                0x51,
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
+            preparation.descriptor().base_context().clone(),
             admission_object(
                 format!("{}/needs-context", fixture.tenant),
                 0x52,
@@ -622,15 +626,19 @@ fn prepare_instance(
         vec![step],
     );
     let execution = claimed.execution();
-    let job_execution = JobExecutionContext::new(
+    let mut job_execution = JobExecutionContext::new(
         execution.workflow_name(),
         execution.git_ref(),
         workspace,
         content_reference(claimed.event()),
         activation_reference(&runtime),
     )
+    .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
     .with_run_attempt(execution.run_attempt());
+    if let Some(actor) = execution.actor() {
+        job_execution = job_execution.with_actor(actor);
+    }
     let envelope = JobIrEnvelope::new(
         execution.workflow_id(),
         JobSource::new(
