@@ -20,24 +20,16 @@ import {
   hasForbiddenDisplayCharacter,
   hasVisibleDisplayCharacter,
 } from "../unicode";
+import { isRunStatusFilter } from "../runFilters";
+import type { RunStatusFilter } from "../runFilters";
 
 const HEAD_REF_PREFIX = "refs/heads/";
 const TAG_REF_PREFIX = "refs/tags/";
 const REF_PREFIX = "refs/";
-const MAX_GIT_REF_BYTES = 1_024;
 const RUN_LIST_KEYS = new Set(["view", "workflow", "status", "branch"]);
 const RUN_DETAIL_KEYS = new Set(["view", "run"]);
 const JOB_LOG_KEYS = new Set(["view", "run", "job", "q"]);
-const REPOSITORY_SETTINGS_KEYS = new Set(["view"]);
-const REPOSITORY_SECRETS_KEYS = new Set(["view"]);
-const REPOSITORY_DIRECTORY_KEYS = new Set(["view"]);
-
-const statusOptions = [
-  { value: "all", label: "All statuses" },
-  { value: "queued", label: "Queued" },
-  { value: "in_progress", label: "In progress" },
-  { value: "completed", label: "Completed" },
-] as const;
+const VIEW_ONLY_KEYS = new Set(["view"]);
 
 export function previewRepositoryDirectory(
   empty = false,
@@ -77,7 +69,7 @@ export function previewRepositoryDirectory(
 export function isPreviewRepositoryDirectoryStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
-  return hasExactUniqueKeys(searchParameters, REPOSITORY_DIRECTORY_KEYS);
+  return hasOnlyUniqueKeys(searchParameters, VIEW_ONLY_KEYS);
 }
 
 export function previewRunList(
@@ -140,7 +132,7 @@ export function isPreviewRunListStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
   if (
-    !hasExactUniqueKeys(searchParameters, RUN_LIST_KEYS) ||
+    !hasOnlyUniqueKeys(searchParameters, RUN_LIST_KEYS) ||
     !isBoundedBranchValue(searchParameters.get("branch"))
   ) {
     return false;
@@ -150,21 +142,21 @@ export function isPreviewRunListStateSupported(
   return (
     (workflow === null ||
       previewWorkflows.some(({ id }) => id === workflow)) &&
-    (status === null || statusOptions.some(({ value }) => value === status))
+    (status === null || isRunStatusFilter(status))
   );
 }
 
 export function isPreviewRunDetailStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
-  return hasExactUniqueKeys(searchParameters, RUN_DETAIL_KEYS);
+  return hasOnlyUniqueKeys(searchParameters, RUN_DETAIL_KEYS);
 }
 
 export function isPreviewJobLogStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
   return (
-    hasExactUniqueKeys(searchParameters, JOB_LOG_KEYS) &&
+    hasOnlyUniqueKeys(searchParameters, JOB_LOG_KEYS) &&
     isBoundedQueryValue(searchParameters.get("q"))
   );
 }
@@ -172,13 +164,13 @@ export function isPreviewJobLogStateSupported(
 export function isPreviewRepositorySettingsStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
-  return hasExactUniqueKeys(searchParameters, REPOSITORY_SETTINGS_KEYS);
+  return hasOnlyUniqueKeys(searchParameters, VIEW_ONLY_KEYS);
 }
 
 export function isPreviewRepositorySecretsStateSupported(
   searchParameters: URLSearchParams,
 ): boolean {
-  return hasExactUniqueKeys(searchParameters, REPOSITORY_SECRETS_KEYS);
+  return hasOnlyUniqueKeys(searchParameters, VIEW_ONLY_KEYS);
 }
 
 export function previewRepositorySettings(): RepositorySettingsPageModel {
@@ -369,7 +361,7 @@ export function previewJobLog(
   };
 }
 
-function hasExactUniqueKeys(
+function hasOnlyUniqueKeys(
   searchParameters: URLSearchParams,
   allowedKeys: ReadonlySet<string>,
 ): boolean {
@@ -404,7 +396,7 @@ function isBoundedBranchValue(value: string | null): boolean {
   const canonical = trimmed.startsWith(REF_PREFIX)
     ? trimmed
     : `${HEAD_REF_PREFIX}${trimmed}`;
-  return utf8ByteLength(canonical) <= MAX_GIT_REF_BYTES;
+  return utf8ByteLength(canonical) <= RENDER_REQUEST_LIMITS.shortTextLength;
 }
 
 function canonicalSourceRef(run: PreviewRunSample["run"]): string | null {
@@ -491,13 +483,14 @@ function selectedWorkflow(requestedWorkflowId: string | null): string | null {
     : null;
 }
 
-function selectedStatus(requestedStatus: string | null): string {
-  return statusOptions.some((option) => option.value === requestedStatus)
-    ? (requestedStatus ?? "all")
-    : "all";
+function selectedStatus(requestedStatus: string | null): RunStatusFilter {
+  return isRunStatusFilter(requestedStatus) ? requestedStatus : "all";
 }
 
-function matchesStatus(run: PreviewRunSample["run"], status: string): boolean {
+function matchesStatus(
+  run: PreviewRunSample["run"],
+  status: RunStatusFilter,
+): boolean {
   if (status === "queued") {
     return run.status.tone === "queued";
   }

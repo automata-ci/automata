@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import type { RoleListPageModel } from "../models";
+import { AuthorizationMutationFields } from "../components/AuthorizationMutationFields";
 import { Pagination } from "../components/Pagination";
 import { enforceRbacDisplayNameValidity } from "../components/rbacInputConstraints";
 import {
   RbacManagement,
-  RbacMutationFields,
   RbacTableRegion,
 } from "../components/RbacManagement";
 
@@ -29,10 +29,7 @@ export function RoleListPage({ model, shellUtility }: RoleListPageProps) {
             <h2 id="create-role-heading">Create custom role</h2>
           </div>
           <form action={model.create.action} className="rbac-native-form" method="post">
-            <RbacMutationFields
-              csrfToken={model.create.csrfToken}
-              expectedAuthorizationRevision={model.create.expectedAuthorizationRevision}
-            />
+            <AuthorizationMutationFields capability={model.create} />
             <label>
               Policy name
               <input

@@ -3,6 +3,7 @@ use std::{fmt, future::Future, pin::Pin};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use thiserror::Error;
+use url::Url;
 
 use crate::{
     human::{ProviderId, TenantId},
@@ -367,9 +368,8 @@ impl LoginTransactionFlow {
         {
             return Err(LoginTransactionValueError::InvalidDeviceUserCode);
         }
-        if !verification_uri.starts_with("https://")
-            || verification_uri.len() > MAX_VERIFICATION_URI_LENGTH
-            || verification_uri.chars().any(char::is_control)
+        if verification_uri.len() > MAX_VERIFICATION_URI_LENGTH
+            || !valid_verification_uri(&verification_uri)
         {
             return Err(LoginTransactionValueError::InvalidVerificationUri);
         }
@@ -438,6 +438,20 @@ impl LoginTransactionFlow {
             )),
         }
     }
+}
+
+fn valid_verification_uri(value: &str) -> bool {
+    if value.contains('\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    let Ok(uri) = Url::parse(value) else {
+        return false;
+    };
+    uri.scheme() == "https"
+        && uri.host_str().is_some()
+        && uri.username().is_empty()
+        && uri.password().is_none()
+        && uri.fragment().is_none()
 }
 
 impl fmt::Debug for LoginTransactionFlow {

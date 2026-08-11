@@ -153,10 +153,14 @@ impl ProviderCapabilities {
     pub fn new(
         values: impl IntoIterator<Item = ProviderCapability>,
     ) -> Result<Self, ProviderCapabilityError> {
-        let mut values: Vec<_> = values.into_iter().collect();
-        if values.len() > MAX_PROVIDER_CAPABILITIES {
-            return Err(ProviderCapabilityError::TooMany);
+        let mut bounded = Vec::with_capacity(MAX_PROVIDER_CAPABILITIES);
+        for value in values {
+            if bounded.len() == MAX_PROVIDER_CAPABILITIES {
+                return Err(ProviderCapabilityError::TooMany);
+            }
+            bounded.push(value);
         }
+        let mut values = bounded;
         values.sort_unstable();
         if values.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ProviderCapabilityError::Duplicate);

@@ -333,3 +333,18 @@ fn capabilities_are_unique_and_lease_dependencies_are_explicit() {
     assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
     assert_eq!(error.retry_after_seconds(), Some(30));
 }
+
+#[test]
+fn capability_construction_stops_at_the_cardinality_bound() {
+    let mut yielded = 0;
+    let unbounded = std::iter::from_fn(|| {
+        yielded += 1;
+        Some(ProviderCapability::CreateVersion)
+    });
+
+    assert_eq!(
+        ProviderCapabilities::new(unbounded),
+        Err(ProviderCapabilityError::TooMany)
+    );
+    assert_eq!(yielded, 7);
+}

@@ -192,7 +192,7 @@ impl HyperRunnerControlClient {
             ));
         }
         let admission = timeout(
-            self.transport_limits.admission_timeout(),
+            self.transport_limits.client_admission_timeout(),
             Arc::clone(&self.admission).acquire_owned(),
         )
         .await;

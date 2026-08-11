@@ -458,14 +458,16 @@ fn resolve_scalar(decoded: &str, style: MetadataScalarStyle) -> MetadataScalarKi
 }
 
 fn is_integer(value: &str) -> bool {
-    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
-    if let Some(octal) = unsigned.strip_prefix("0o") {
-        return separated_digits(octal, |character| matches!(character, '0'..='7'));
+    if let Some(octal) = value.strip_prefix("0o") {
+        return digits(octal, |character| matches!(character, '0'..='7'));
     }
-    if let Some(hexadecimal) = unsigned.strip_prefix("0x") {
-        return separated_digits(hexadecimal, |character| character.is_ascii_hexdigit());
+    if let Some(hexadecimal) = value.strip_prefix("0x") {
+        return digits(hexadecimal, |character| character.is_ascii_hexdigit());
     }
-    separated_digits(unsigned, |character| character.is_ascii_digit())
+    digits(
+        value.strip_prefix(['+', '-']).unwrap_or(value),
+        |character| character.is_ascii_digit(),
+    )
 }
 
 fn is_float(value: &str) -> bool {
@@ -489,24 +491,9 @@ fn is_float(value: &str) -> bool {
     if !value.contains(['.', 'e', 'E']) {
         return false;
     }
-    value
-        .chars()
-        .filter(|character| *character != '_')
-        .collect::<String>()
-        .parse::<f64>()
-        .is_ok()
+    value.parse::<f64>().is_ok()
 }
 
-fn separated_digits(value: &str, is_digit: impl Fn(char) -> bool) -> bool {
-    let mut found = false;
-    for character in value.chars() {
-        if character == '_' {
-            continue;
-        }
-        if !is_digit(character) {
-            return false;
-        }
-        found = true;
-    }
-    found
+fn digits(value: &str, is_digit: impl Fn(char) -> bool) -> bool {
+    !value.is_empty() && value.chars().all(is_digit)
 }

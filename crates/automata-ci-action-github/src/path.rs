@@ -24,7 +24,6 @@ pub(crate) fn entry_path(
     if declared.is_empty()
         || declared.len() > MAX_ENTRY_PATH_BYTES
         || declared.starts_with('/')
-        || declared.starts_with("//")
         || declared.ends_with('/')
         || declared.contains('\\')
         || declared.contains("${{")

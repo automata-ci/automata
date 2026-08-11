@@ -906,12 +906,12 @@ fn normalized_yaml_number(node: &YamlNode, context: &mut CompileContext<'_>) -> 
         );
         return None;
     }
-    let mut value = scalar.decoded().replace('_', "");
-    if value.starts_with('+') {
-        value.remove(0);
-    }
+    let value = scalar
+        .decoded()
+        .strip_prefix('+')
+        .unwrap_or(scalar.decoded());
     if value.parse::<f64>().is_ok_and(f64::is_finite) {
-        Some(value)
+        Some(value.to_owned())
     } else {
         context.semantic(
             "github.compile.workflow_call_default_type",
@@ -2563,9 +2563,9 @@ fn normalize_matrix_number(
     value: &ScalarValue,
     context: &mut CompileContext<'_>,
 ) -> Option<String> {
-    let normalized = value.decoded().replace('_', "");
+    let normalized = value.decoded();
     let negative = normalized.starts_with('-');
-    let signed = normalized.strip_prefix(['+', '-']).unwrap_or(&normalized);
+    let signed = normalized.strip_prefix(['+', '-']).unwrap_or(normalized);
     let converted = if let Some(hexadecimal) = signed.strip_prefix("0x") {
         u128::from_str_radix(hexadecimal, 16)
             .ok()

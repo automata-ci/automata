@@ -1,10 +1,13 @@
 import type { ReactNode } from "react";
-import type { DirectBindingListPageModel } from "../models";
+import type {
+  DirectBindingListPageModel,
+  RbacDirectBindingReadOnlyReason,
+} from "../models";
+import { AuthorizationMutationFields } from "../components/AuthorizationMutationFields";
 import { Pagination } from "../components/Pagination";
 import { enforceRbacReasonValidity } from "../components/rbacInputConstraints";
 import {
   RbacManagement,
-  RbacMutationFields,
   RbacScope,
   RbacStatus,
   RbacTableRegion,
@@ -14,6 +17,19 @@ export interface DirectBindingPageProps {
   readonly model: DirectBindingListPageModel;
   readonly shellUtility?: ReactNode;
 }
+
+const readOnlyMessages: Readonly<
+  Record<RbacDirectBindingReadOnlyReason, string>
+> = {
+  "management-unavailable":
+    "Direct binding management is temporarily unavailable.",
+  "not-authorized": "Direct grants aren’t available with your current access.",
+  "options-unavailable": "Direct grant choices are temporarily unavailable.",
+  "options-overflow":
+    "The complete grant choices exceed the browser limit. Narrow tenant resources before granting here.",
+  "no-options":
+    "No active user and role choices are currently available for a direct grant.",
+};
 
 export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProps) {
   return (
@@ -27,13 +43,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
     >
       {model.grant === null ? (
         <p className="rbac-read-only rbac-read-only--standalone" role="note">
-          {model.readOnlyReason === "options-overflow"
-            ? "The complete grant choices exceed the browser limit. Narrow tenant resources before granting here."
-            : model.readOnlyReason === "no-options"
-              ? "No active user and role choices are currently available for a direct grant."
-              : model.readOnlyReason === "not-authorized"
-                ? "Direct grants aren’t available with your current access."
-                : "Direct grant choices are temporarily unavailable."}
+          {readOnlyMessages[model.readOnlyReason]}
         </p>
       ) : (
         <section className="panel rbac-panel" aria-labelledby="grant-binding-heading">
@@ -41,10 +51,7 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
             <h2 id="grant-binding-heading">Grant direct role</h2>
           </div>
           <form action={model.grant.action} className="rbac-native-form" method="post">
-            <RbacMutationFields
-              csrfToken={model.grant.csrfToken}
-              expectedAuthorizationRevision={model.grant.expectedAuthorizationRevision}
-            />
+            <AuthorizationMutationFields capability={model.grant} />
             <label>
               User
               <select name="principal_id" required>
@@ -156,11 +163,8 @@ export function DirectBindingPage({ model, shellUtility }: DirectBindingPageProp
                           className="rbac-inline-revoke"
                           method="post"
                         >
-                          <RbacMutationFields
-                            csrfToken={binding.revoke.csrfToken}
-                            expectedAuthorizationRevision={
-                              binding.revoke.expectedAuthorizationRevision
-                            }
+                          <AuthorizationMutationFields
+                            capability={binding.revoke}
                           />
                           <input
                             name="expected_revision"

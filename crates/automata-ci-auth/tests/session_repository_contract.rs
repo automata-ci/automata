@@ -5,7 +5,7 @@ use automata_ci_auth::{
     login::{
         LoginBindingDigest, LoginBindingDigestKeyId, LoginTransaction, LoginTransactionAccess,
         LoginTransactionBinding, LoginTransactionFlow, LoginTransactionId, LoginTransactionPurpose,
-        LoginTransactionState, LoginTransactionVersion,
+        LoginTransactionState, LoginTransactionValueError, LoginTransactionVersion,
     },
     secret::{SecretBytes, SecretString, SessionToken},
     session::{
@@ -231,4 +231,32 @@ fn installation_setup_device_transactions_have_no_tenant_and_validate_polling() 
     assert!(LoginTransactionId::new("portable-but-not-a-uuid").is_err());
     assert!(LoginTransactionVersion::new(0).is_err());
     assert!(serde_json::from_value::<LoginTransactionVersion>(serde_json::json!(0)).is_err());
+}
+
+#[test]
+fn device_verification_uri_requires_a_credential_free_https_origin() {
+    let flow = |uri| {
+        LoginTransactionFlow::device(
+            binding("device-poll-v1", 9),
+            SecretString::new("ABCD-EFGH").expect("user code"),
+            uri,
+            5_000,
+            UnixTimestamp::from_seconds(110),
+        )
+    };
+
+    assert!(flow("https://github.com/login/device?source=cli").is_ok());
+    for invalid in [
+        "https://",
+        "http://github.com/login/device",
+        "https://user@github.com/login/device",
+        "https://github.com/login/device#code",
+        "https://github.com\\attacker.example",
+    ] {
+        assert_eq!(
+            flow(invalid).unwrap_err(),
+            LoginTransactionValueError::InvalidVerificationUri,
+            "{invalid}"
+        );
+    }
 }

@@ -4,7 +4,7 @@ use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use reqwest::{
     Response, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, HeaderMap, LINK, RETRY_AFTER},
+    header::{ACCEPT, AUTHORIZATION, HeaderMap, RETRY_AFTER},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -13,14 +13,13 @@ use url::Url;
 use crate::{
     config::same_origin,
     endpoint::{GithubHttpEndpoint, authorization_header},
+    pagination, repository_path,
     response::{decode_json, read_json_response},
 };
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
-const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 const MAX_CHECK_NAME_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
-const MAX_LINK_HEADER_BYTES: usize = 16_384;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = i64::MAX as u64;
 const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
@@ -936,7 +935,8 @@ impl GithubHttpEndpoint {
         repository: &RepositoryId,
         tail: &[&str],
     ) -> Result<Url, GithubChecksError> {
-        let (owner, name) = github_repository_components(repository.as_str())?;
+        let (owner, name) =
+            repository_path::split(repository.as_str()).ok_or(GithubChecksError::InvalidRequest)?;
         let mut endpoint = self.trusted.api_base().clone();
         let mut segments = endpoint
             .path_segments_mut()
@@ -993,32 +993,6 @@ impl GithubHttpEndpoint {
         let wire: RunResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
         validate_run(wire)
     }
-}
-
-fn github_repository_components(repository: &str) -> Result<(&str, &str), GithubChecksError> {
-    let mut components = repository.split('/');
-    let owner = components.next().unwrap_or_default();
-    let name = components.next().unwrap_or_default();
-    if components.next().is_some()
-        || !valid_repository_component(owner)
-        || !valid_repository_component(name)
-        || name
-            .get(name.len().saturating_sub(".git".len())..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".git"))
-    {
-        return Err(GithubChecksError::InvalidRequest);
-    }
-    Ok((owner, name))
-}
-
-fn valid_repository_component(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REPOSITORY_COMPONENT_BYTES
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn validate_run(wire: RunResponse) -> Result<ValidatedRun, GithubChecksError> {
@@ -1232,145 +1206,19 @@ fn next_check_run_page(
     identity: &GithubCheckRunIdentity,
     current_page: u64,
 ) -> Result<Option<Url>, GithubChecksError> {
-    let mut total_length = 0_usize;
     let mut next = None;
-    for value in headers.get_all(LINK) {
-        let raw = value
-            .to_str()
-            .map_err(|_| GithubChecksError::InvalidResponse)?;
-        total_length = total_length
-            .checked_add(raw.len())
-            .filter(|length| *length <= MAX_LINK_HEADER_BYTES)
-            .ok_or(GithubChecksError::InvalidResponse)?;
-        for link in split_links(raw)? {
-            let parsed = parse_link(link)?;
-            let page = validate_check_page_url(&parsed.url, trusted, expected_path, identity)?;
-            if parsed.is_next {
-                if next.is_some() || page != current_page.saturating_add(1) {
-                    return Err(GithubChecksError::InvalidResponse);
-                }
-                next = Some(parsed.url);
+    for parsed in
+        pagination::parse_links(headers).map_err(|_| GithubChecksError::InvalidResponse)?
+    {
+        let page = validate_check_page_url(&parsed.url, trusted, expected_path, identity)?;
+        if parsed.is_next {
+            if next.is_some() || page != current_page.saturating_add(1) {
+                return Err(GithubChecksError::InvalidResponse);
             }
+            next = Some(parsed.url);
         }
     }
     Ok(next)
-}
-
-struct ParsedLink {
-    url: Url,
-    is_next: bool,
-}
-
-fn split_links(raw: &str) -> Result<Vec<&str>, GithubChecksError> {
-    let mut links = Vec::new();
-    let mut start = 0;
-    let mut inside_angle = false;
-    let mut inside_quote = false;
-    let mut escaped = false;
-    for (index, character) in raw.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' if inside_quote => escaped = true,
-            '"' if !inside_angle => inside_quote = !inside_quote,
-            '<' if !inside_quote => {
-                if inside_angle {
-                    return Err(GithubChecksError::InvalidResponse);
-                }
-                inside_angle = true;
-            }
-            '>' if !inside_quote => {
-                if !inside_angle {
-                    return Err(GithubChecksError::InvalidResponse);
-                }
-                inside_angle = false;
-            }
-            ',' if !inside_angle && !inside_quote => {
-                links.push(raw[start..index].trim());
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    if inside_angle || inside_quote || escaped {
-        return Err(GithubChecksError::InvalidResponse);
-    }
-    links.push(raw[start..].trim());
-    if links.iter().any(|link| link.is_empty()) {
-        return Err(GithubChecksError::InvalidResponse);
-    }
-    Ok(links)
-}
-
-fn parse_link(raw: &str) -> Result<ParsedLink, GithubChecksError> {
-    let target_end = raw
-        .strip_prefix('<')
-        .and_then(|remainder| remainder.find('>').map(|index| index + 1))
-        .ok_or(GithubChecksError::InvalidResponse)?;
-    let target = &raw[1..target_end];
-    if target
-        .bytes()
-        .any(|byte| byte.is_ascii_control() || byte == b' ')
-    {
-        return Err(GithubChecksError::InvalidResponse);
-    }
-    let url = Url::parse(target).map_err(|_| GithubChecksError::InvalidResponse)?;
-    let suffix = raw
-        .get(target_end + 1..)
-        .ok_or(GithubChecksError::InvalidResponse)?;
-    if suffix.is_empty() {
-        return Ok(ParsedLink {
-            url,
-            is_next: false,
-        });
-    }
-    let parameters = suffix
-        .strip_prefix(';')
-        .ok_or(GithubChecksError::InvalidResponse)?;
-    let mut relations = None;
-    for parameter in parameters.split(';') {
-        let (name, value) = parameter
-            .trim()
-            .split_once('=')
-            .ok_or(GithubChecksError::InvalidResponse)?;
-        let value = parse_link_parameter(value.trim())?;
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(GithubChecksError::InvalidResponse);
-        }
-        if name.eq_ignore_ascii_case("rel") && relations.replace(value).is_some() {
-            return Err(GithubChecksError::InvalidResponse);
-        }
-    }
-    let is_next =
-        relations.is_some_and(|value| value.split_ascii_whitespace().any(|rel| rel == "next"));
-    Ok(ParsedLink { url, is_next })
-}
-
-fn parse_link_parameter(value: &str) -> Result<&str, GithubChecksError> {
-    if let Some(quoted) = value.strip_prefix('"') {
-        let quoted = quoted
-            .strip_suffix('"')
-            .ok_or(GithubChecksError::InvalidResponse)?;
-        if quoted.contains(['"', '\\']) || quoted.chars().any(char::is_control) {
-            return Err(GithubChecksError::InvalidResponse);
-        }
-        return Ok(quoted);
-    }
-    if value.is_empty()
-        || value.contains('"')
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(GithubChecksError::InvalidResponse);
-    }
-    Ok(value)
 }
 
 fn validate_check_page_url(

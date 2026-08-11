@@ -10,6 +10,8 @@ use automata_ci_auth::{
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
+use super::form;
+
 /// Maximum encoded bytes accepted from one RBAC browser form.
 pub(crate) const MAX_RBAC_MANAGEMENT_FORM_BYTES: usize = 8 * 1_024;
 const MAX_FORM_FIELDS: usize = 7;
@@ -615,37 +617,7 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), RbacManagementFormE
 }
 
 fn decode_form_component(value: &[u8]) -> Result<String, RbacManagementFormError> {
-    let mut decoded = Vec::with_capacity(value.len());
-    let mut index = 0_usize;
-    while index < value.len() {
-        match value[index] {
-            b'%' if index + 2 < value.len() => {
-                let high = hex(value[index + 1]).ok_or(RbacManagementFormError)?;
-                let low = hex(value[index + 2]).ok_or(RbacManagementFormError)?;
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(RbacManagementFormError),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| RbacManagementFormError)
-}
-
-const fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
+    form::decode_text(value, value.len()).map_err(|_| RbacManagementFormError)
 }
 
 #[cfg(test)]

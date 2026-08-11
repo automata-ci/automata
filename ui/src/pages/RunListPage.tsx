@@ -16,14 +16,8 @@ import { StatusBadge } from "../components/StatusBadge";
 import { WorkflowNavigation } from "../components/WorkflowNavigation";
 import { enforceBranchFilterValidity } from "../components/textInputConstraints";
 import { durationCopy, formatEventName } from "../presentation/runPresentation";
+import { RUN_STATUS_FILTER_OPTIONS } from "../runFilters";
 import { RENDER_REQUEST_LIMITS } from "../validation/limits";
-
-const STATUS_OPTIONS = [
-  { value: "all", label: "All statuses" },
-  { value: "queued", label: "Queued" },
-  { value: "in_progress", label: "In progress" },
-  { value: "completed", label: "Completed" },
-] as const;
 
 export interface RunListPageProps {
   readonly model: RunListPageModel;
@@ -166,7 +160,7 @@ function RunFilters({
       <label className="select-control" htmlFor="run-status">
         <span className="sr-only">Filter by status</span>
         <select id="run-status" name="status" defaultValue={filters.status}>
-          {STATUS_OPTIONS.map((option) => (
+          {RUN_STATUS_FILTER_OPTIONS.map((option) => (
             <option value={option.value} key={option.value}>
               {option.label}
             </option>

@@ -21,13 +21,14 @@ pub struct TransportLimits {
     concurrent_streams_per_connection: u32,
     tls_handshake_timeout: Duration,
     authentication_timeout: Duration,
-    admission_timeout: Duration,
+    server_admission_timeout: Duration,
     request_body_timeout: Duration,
     handler_timeout: Duration,
     long_poll_timeout: Duration,
     graceful_shutdown_timeout: Duration,
     connection_lifetime: Duration,
     connect_timeout: Duration,
+    client_admission_timeout: Duration,
     total_request_timeout: Duration,
     response_body_timeout: Duration,
     h2_keep_alive_interval: Duration,
@@ -153,7 +154,7 @@ impl TransportLimits {
         if long_poll_timeout < handler_timeout || long_poll_timeout > self.connection_lifetime {
             return Err(ConfigurationError::IncoherentLimits);
         }
-        self.admission_timeout = admission_timeout;
+        self.server_admission_timeout = admission_timeout;
         self.request_body_timeout = request_body_timeout;
         self.handler_timeout = handler_timeout;
         self.long_poll_timeout = long_poll_timeout;
@@ -185,7 +186,7 @@ impl TransportLimits {
             return Err(ConfigurationError::IncoherentLimits);
         }
         self.connect_timeout = connect_timeout;
-        self.admission_timeout = admission_timeout;
+        self.client_admission_timeout = admission_timeout;
         self.total_request_timeout = total_request_timeout;
         self.response_body_timeout = response_body_timeout;
         Ok(self)
@@ -287,8 +288,8 @@ impl TransportLimits {
         self.authentication_timeout
     }
 
-    pub(crate) const fn admission_timeout(self) -> Duration {
-        self.admission_timeout
+    pub(crate) const fn server_admission_timeout(self) -> Duration {
+        self.server_admission_timeout
     }
 
     pub(crate) const fn request_body_timeout(self) -> Duration {
@@ -313,6 +314,10 @@ impl TransportLimits {
 
     pub(crate) const fn connect_timeout(self) -> Duration {
         self.connect_timeout
+    }
+
+    pub(crate) const fn client_admission_timeout(self) -> Duration {
+        self.client_admission_timeout
     }
 
     pub(crate) const fn total_request_timeout(self) -> Duration {
@@ -345,13 +350,14 @@ impl Default for TransportLimits {
             concurrent_streams_per_connection: 64,
             tls_handshake_timeout: Duration::from_secs(10),
             authentication_timeout: Duration::from_secs(5),
-            admission_timeout: Duration::from_secs(1),
+            server_admission_timeout: Duration::from_secs(1),
             request_body_timeout: Duration::from_secs(15),
             handler_timeout: Duration::from_secs(30),
             long_poll_timeout: Duration::from_secs(65),
             graceful_shutdown_timeout: Duration::from_secs(10),
             connection_lifetime: Duration::from_mins(10),
             connect_timeout: Duration::from_secs(10),
+            client_admission_timeout: Duration::from_secs(1),
             total_request_timeout: Duration::from_secs(75),
             response_body_timeout: Duration::from_secs(15),
             h2_keep_alive_interval: Duration::from_secs(30),
@@ -410,6 +416,31 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn client_and_server_admission_timeouts_are_independent() {
+        let server_admission = Duration::from_secs(2);
+        let client_admission = Duration::from_secs(3);
+        let limits = TransportLimits::default()
+            .with_server_request_timeouts(
+                server_admission,
+                Duration::from_secs(15),
+                Duration::from_secs(30),
+                Duration::from_secs(65),
+            )
+            .and_then(|limits| {
+                limits.with_client_timeouts(
+                    Duration::from_secs(10),
+                    client_admission,
+                    Duration::from_secs(75),
+                    Duration::from_secs(15),
+                )
+            })
+            .expect("coherent independent admission limits");
+
+        assert_eq!(limits.server_admission_timeout(), server_admission);
+        assert_eq!(limits.client_admission_timeout(), client_admission);
     }
 
     #[test]

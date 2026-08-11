@@ -23,13 +23,10 @@ use tokio::{
 };
 use url::Url;
 
-use super::{
-    GithubAppCredentialBroker, GithubAppHttpLimits, GithubInstallationId,
-    github_http_client_builder,
-};
+use super::{GithubAppCredentialBroker, github_http_client_builder};
 use crate::{
-    GithubAppCredentialConfig, GithubInstallationTokenIndeterminateReason,
-    GithubInstallationTokenMintOutcome,
+    GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
+    GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
 };
 
 const CLIENT_CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";

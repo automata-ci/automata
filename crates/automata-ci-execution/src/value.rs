@@ -160,6 +160,9 @@ impl ImmutableImage {
         if repository.is_empty()
             || repository.contains('@')
             || !repository.contains('/')
+            || repository
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
             || !repository
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"./:_-".contains(&byte))
@@ -226,6 +229,7 @@ impl TargetPath {
         let valid = value.starts_with('/')
             && value.len() <= MAX_TARGET_PATH_BYTES
             && !value.contains("//")
+            && (value == "/" || !value.ends_with('/'))
             && !value.bytes().any(|byte| byte.is_ascii_control())
             && value
                 .split('/')
@@ -246,8 +250,9 @@ impl TargetPath {
     /// Rejects device/UNC paths, traversal, forward slashes, controls, and
     /// paths beyond the hard bound.
     pub fn windows(value: impl Into<String>) -> Result<Self, ValueError> {
-        let value = value.into();
+        let mut value = value.into();
         let bytes = value.as_bytes();
+        let drive_letter = bytes.first().copied();
         let drive_qualified = bytes.len() >= 3
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
@@ -256,17 +261,26 @@ impl TargetPath {
             && value.len() <= MAX_TARGET_PATH_BYTES
             && !value.contains('/')
             && !value.contains("\\\\")
+            && (value.len() == 3 || !value.ends_with('\\'))
             && !value.bytes().any(|byte| byte.is_ascii_control())
-            && value
-                .split('\\')
-                .skip(1)
-                .all(|component| !matches!(component, "." | ".."));
-        valid
-            .then_some(Self {
-                platform: TargetPlatform::Windows,
-                value,
-            })
-            .ok_or(ValueError::InvalidTargetPath)
+            && value.split('\\').skip(1).all(|component| {
+                !matches!(component, "." | "..")
+                    && !component.ends_with([' ', '.'])
+                    && !component
+                        .bytes()
+                        .any(|byte| matches!(byte, b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'))
+            });
+        if !valid {
+            return Err(ValueError::InvalidTargetPath);
+        }
+        if drive_letter.is_some_and(|letter| letter.is_ascii_lowercase()) {
+            let uppercase = char::from(drive_letter.unwrap_or_default().to_ascii_uppercase());
+            value.replace_range(..1, &uppercase.to_string());
+        }
+        Ok(Self {
+            platform: TargetPlatform::Windows,
+            value,
+        })
     }
 
     /// Returns the filesystem syntax used by this target path.

@@ -48,6 +48,7 @@ use futures::StreamExt as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{
+    form,
     secret_api::{
         MAX_SECRET_INGRESS_BYTES, RepositorySecretApiBackend, RepositorySecretMutationOutcome,
         SecretApiBackendError, SecretIngressValue,
@@ -1334,39 +1335,9 @@ fn decode_component(
     maximum: usize,
 ) -> Result<Zeroizing<Vec<u8>>, RepositorySecretFormError> {
     let mut decoded = Zeroizing::new(Vec::with_capacity(value.len().min(maximum)));
-    let mut index = 0_usize;
-    while index < value.len() {
-        if decoded.len() == maximum {
-            return Err(RepositorySecretFormError::Invalid);
-        }
-        match value[index] {
-            b'%' if index + 2 < value.len() => {
-                let high = hex(value[index + 1]).ok_or(RepositorySecretFormError::Invalid)?;
-                let low = hex(value[index + 2]).ok_or(RepositorySecretFormError::Invalid)?;
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(RepositorySecretFormError::Invalid),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
+    form::decode_into(value, &mut decoded, maximum)
+        .map_err(|_| RepositorySecretFormError::Invalid)?;
     Ok(decoded)
-}
-
-const fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn wipe_body_chunk(chunk: Bytes) {

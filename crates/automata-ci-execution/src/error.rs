@@ -22,8 +22,8 @@ pub enum ValueError {
     /// A path was not a normalized absolute path for its target platform.
     #[error("sandbox target path is invalid for its declared platform")]
     InvalidTargetPath,
-    /// An argv vector contained a nul byte or exceeded a hard bound.
-    #[error("execution argv is empty, oversized, or contains an invalid value")]
+    /// An argv vector contained a nul byte or exceeded a count or byte bound.
+    #[error("execution argv is oversized or contains an invalid value")]
     InvalidExecutionArgv,
     /// An environment name was empty, malformed, or outside its hard bound.
     #[error("execution environment name is invalid")]

@@ -31,8 +31,9 @@ use uuid::Uuid;
 use crate::{
     session::{database_time_milliseconds, validate_caller_time},
     support::{
-        canonical_uuid, is_integrity_violation, timestamp_from_milliseconds,
-        timestamp_to_milliseconds,
+        canonical_uuid, is_integrity_violation, management_revision_from_i64 as revision_from_i64,
+        management_revision_to_i64 as revision_to_i64, tenant_management_lock,
+        tenant_management_read_lock, timestamp_from_milliseconds, timestamp_to_milliseconds,
     },
 };
 
@@ -390,33 +391,6 @@ async fn refresh_actor_time(
     Ok(true)
 }
 
-async fn tenant_management_lock(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-) -> Result<(), ManagementRepositoryError> {
-    // The fixed namespace keeps this mutex disjoint from unrelated advisory
-    // locks. The durable membership locks remain the security boundary with
-    // trigger-driven authorization revision updates.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 731662009))")
-        .bind(tenant_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_database_error)?;
-    Ok(())
-}
-
-async fn tenant_management_read_lock(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-) -> Result<(), ManagementRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 731662009))")
-        .bind(tenant_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_database_error)?;
-    Ok(())
-}
-
 async fn actor_has_permission(
     transaction: &mut Transaction<'_, Postgres>,
     actor: &AuthorizedActor,
@@ -669,7 +643,9 @@ async fn authorize_mutation(
     required_permissions: &[&str],
     descriptor: AuditDescriptor<'_>,
 ) -> Result<MutationAuthorization, ManagementRepositoryError> {
-    tenant_management_lock(transaction, actor.tenant_id().as_str()).await?;
+    tenant_management_lock(transaction, actor.tenant_id().as_str())
+        .await
+        .map_err(map_database_error)?;
     match authenticate_actor(transaction, actor, true).await? {
         ActorAuthentication::Forbidden => Ok(MutationAuthorization::Forbidden),
         ActorAuthentication::Stale(current) => {
@@ -692,7 +668,9 @@ async fn authorize_read(
     actor: &ManagementActor,
     required_permissions: &[&str],
 ) -> Result<ManagementReadOutcome<AuthorizedActor>, ManagementRepositoryError> {
-    tenant_management_read_lock(transaction, actor.tenant_id().as_str()).await?;
+    tenant_management_read_lock(transaction, actor.tenant_id().as_str())
+        .await
+        .map_err(map_database_error)?;
     match authenticate_actor(transaction, actor, false).await? {
         ActorAuthentication::Forbidden => Ok(ManagementReadOutcome::Forbidden),
         ActorAuthentication::Stale(_) => Ok(ManagementReadOutcome::SessionStale),
@@ -880,17 +858,6 @@ async fn principal_has_manager_capability(
     .fetch_one(&mut **transaction)
     .await
     .map_err(map_database_error)
-}
-
-fn revision_to_i64(revision: ManagementRevision) -> Result<i64, ManagementRepositoryError> {
-    i64::try_from(revision.value()).map_err(|_| ManagementRepositoryError::InvalidRequest)
-}
-
-fn revision_from_i64(revision: i64) -> Result<ManagementRevision, ManagementRepositoryError> {
-    u64::try_from(revision)
-        .ok()
-        .and_then(|revision| ManagementRevision::new(revision).ok())
-        .ok_or(ManagementRepositoryError::CorruptData)
 }
 
 fn ensure_revision_can_advance(

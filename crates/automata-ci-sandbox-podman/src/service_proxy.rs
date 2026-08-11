@@ -31,7 +31,7 @@ pub(crate) fn parse_service_address(bytes: &[u8]) -> Option<Ipv4Addr> {
     }
     let address = value.parse::<Ipv4Addr>().ok()?;
     if address.to_string() != value
-        || address.is_unspecified()
+        || address.octets()[0] == 0
         || address.is_loopback()
         || address.is_multicast()
         || address.is_broadcast()
@@ -103,6 +103,7 @@ mod tests {
         for value in [
             b"127.0.0.1\n".as_slice(),
             b"0.0.0.0\n",
+            b"0.1.2.3\n",
             b"224.0.0.1\n",
             b"010.089.0.4\n",
             b"10.89.0.4\nextra\n",

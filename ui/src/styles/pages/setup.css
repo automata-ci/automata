@@ -93,18 +93,3 @@
   color: var(--fg-muted);
   font-size: 13px;
 }
-
-@media (max-width: 767px) {
-  .setup-page__layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .setup-form {
-    padding: 16px;
-  }
-
-  .setup-form__actions > .button {
-    width: 100%;
-    min-height: 40px;
-  }
-}

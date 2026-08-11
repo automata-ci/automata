@@ -98,6 +98,20 @@ fn append_zero_gzip_member(archive: &Bytes, expanded_bytes: u64) -> Bytes {
     Bytes::from(combined)
 }
 
+fn decode_gzip(archive: &Bytes) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(archive.as_ref())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    decoded
+}
+
+fn gzip(bytes: &[u8]) -> Bytes {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    io::copy(&mut Cursor::new(bytes), &mut encoder).unwrap();
+    Bytes::from(encoder.finish().unwrap())
+}
+
 fn valid_global_pax_record(encoded_length: usize) -> Vec<u8> {
     let mut record = format!("{encoded_length} comment=").into_bytes();
     assert!(record.len() < encoded_length);
@@ -151,6 +165,24 @@ fn global_pax_metadata_is_narrowly_allowlisted() {
         )
         .unwrap_err(),
         ActionArchiveError::UnsafePath
+    );
+}
+
+#[test]
+fn undersized_global_pax_record_is_typed_as_malformed() {
+    let malformed = snapshot(&[
+        TestEntry::PaxGlobal(b"1 \n"),
+        TestEntry::File("root/action.yml", ACTION_DEFINITION),
+    ]);
+
+    assert_eq!(
+        inspect_archive(
+            &malformed,
+            &ActionSubpath::root(),
+            ActionBundleLimits::default(),
+        )
+        .unwrap_err(),
+        ActionArchiveError::Malformed
     );
 }
 
@@ -348,6 +380,42 @@ fn concatenated_gzip_zero_tail_is_bounded_at_the_exact_expanded_boundary() {
         )
         .unwrap_err(),
         ActionArchiveError::ResourceLimit
+    );
+}
+
+#[test]
+fn tar_termination_requires_two_complete_zero_blocks() {
+    let archive = build_archive(&[TestEntry::File("root/action.yml", ACTION_DEFINITION)]);
+    let mut decoded = decode_gzip(&archive);
+    assert!(decoded.len() >= 2 * 512);
+    assert!(
+        decoded[decoded.len() - 2 * 512..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+
+    decoded.truncate(decoded.len() - 512);
+    let truncated = snapshot_from_bytes(gzip(&decoded));
+    assert_eq!(
+        inspect_archive(
+            &truncated,
+            &ActionSubpath::root(),
+            ActionBundleLimits::default(),
+        )
+        .unwrap_err(),
+        ActionArchiveError::Malformed
+    );
+
+    decoded.extend_from_slice(&[0; 513]);
+    let unaligned = snapshot_from_bytes(gzip(&decoded));
+    assert_eq!(
+        inspect_archive(
+            &unaligned,
+            &ActionSubpath::root(),
+            ActionBundleLimits::default(),
+        )
+        .unwrap_err(),
+        ActionArchiveError::Malformed
     );
 }
 

@@ -8,7 +8,7 @@ const MAX_KEY_BYTES: usize = 1_048_576;
 /// Invalid public expression-value construction.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubValueError {
-    /// An object key was empty, oversized, or contained a forbidden control.
+    /// An object key exceeded the hard byte ceiling.
     #[error("invalid GitHub expression object key")]
     InvalidKey,
     /// Object keys collide under GitHub's ordinal-ignore-case lookup.
@@ -27,11 +27,11 @@ pub struct GithubObject {
 }
 
 impl GithubObject {
-    /// Creates an object, rejecting keys that collide ignoring ASCII case.
+    /// Creates an object, rejecting oversized or case-insensitively duplicate keys.
     ///
     /// # Errors
     ///
-    /// Returns [`GithubValueError`] for invalid keys, collisions, or size.
+    /// Returns [`GithubValueError`] for oversized keys, collisions, or item count.
     pub fn new(entries: Vec<(String, GithubValue)>) -> Result<Self, GithubValueError> {
         if entries.len() > MAX_CONSTRUCTION_ITEMS {
             return Err(GithubValueError::TooManyItems);

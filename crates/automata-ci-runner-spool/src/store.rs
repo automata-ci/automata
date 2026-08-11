@@ -114,7 +114,6 @@ pub trait RetainedContentSource: Send + Sync {
 #[derive(Debug, Default)]
 struct PublicationState {
     active: u32,
-    abandoned: bool,
 }
 
 #[derive(Debug, Default)]
@@ -162,7 +161,6 @@ impl PublicationPermit<'_> {
         if self.active {
             let mut state = self.gate.lock();
             state.active -= 1;
-            state.abandoned = true;
             self.active = false;
         }
     }
@@ -756,7 +754,7 @@ impl DurableContentStore for FileSpool {
             .observer
             .observe(SpoolEvent::OperationStarted { operation });
         let result = (|| {
-            let mut publications = self.publications.lock();
+            let publications = self.publications.lock();
             if publications.active != 0 {
                 return Err(SpoolError::PublicationsInFlight);
             }
@@ -790,7 +788,6 @@ impl DurableContentStore for FileSpool {
             {
                 Ok(usage) => {
                     memory.usage = usage;
-                    publications.abandoned = false;
                     self.options.observer.observe(SpoolEvent::Reclaimed {
                         objects: u64::from(previous.objects.saturating_sub(usage.objects)),
                         protected_bytes: previous

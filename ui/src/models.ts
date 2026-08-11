@@ -1,3 +1,5 @@
+import type { RunStatusFilter } from "./runFilters";
+
 type StatusTone =
   "neutral" | "queued" | "running" | "success" | "failure" | "warning";
 
@@ -88,7 +90,7 @@ export interface RunListItemModel {
 
 export interface RunFiltersModel {
   readonly action: string;
-  readonly status: string;
+  readonly status: RunStatusFilter;
   readonly branch: string;
   readonly clearHref: string;
 }
@@ -592,7 +594,7 @@ export type RbacDirectBindingReadOnlyReason =
   | "options-overflow"
   | "no-options";
 
-export interface DirectBindingListPageModel {
+interface DirectBindingListPageBaseModel {
   readonly kind: "direct-binding-list";
   readonly shell: ShellModel;
   readonly managementNav: RbacManagementNavigationModel;
@@ -600,10 +602,20 @@ export interface DirectBindingListPageModel {
   readonly summary: string;
   readonly bindings: readonly RbacBindingModel[];
   readonly notice: RbacManagementNotice | null;
-  readonly grant: RbacDirectGrantModel | null;
-  readonly readOnlyReason: RbacDirectBindingReadOnlyReason | null;
   readonly pagination: PaginationModel;
 }
+
+export type DirectBindingListPageModel = DirectBindingListPageBaseModel &
+  (
+    | {
+        readonly grant: RbacDirectGrantModel;
+        readonly readOnlyReason: null;
+      }
+    | {
+        readonly grant: null;
+        readonly readOnlyReason: RbacDirectBindingReadOnlyReason;
+      }
+  );
 
 export type PageModel =
   | SetupPageModel

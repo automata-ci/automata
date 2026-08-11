@@ -56,35 +56,40 @@ pub(crate) fn next_page(
     expected_path: &str,
     kind: PageKind,
 ) -> Result<Option<Url>, GithubEndpointError> {
-    let mut total_length = 0_usize;
     let mut next = None;
+    for parsed in parse_links(headers)? {
+        validate_page_url(&parsed.url, trusted, expected_path, kind)?;
+        if parsed.is_next {
+            if next.is_some() {
+                return Err(GithubEndpointError::InvalidResponse);
+            }
+            next = Some(parsed.url);
+        }
+    }
+    Ok(next)
+}
+
+pub(crate) struct ParsedLink {
+    pub(crate) url: Url,
+    pub(crate) is_next: bool,
+}
+
+pub(crate) fn parse_links(headers: &HeaderMap) -> Result<Vec<ParsedLink>, GithubEndpointError> {
+    let mut total_length = 0_usize;
+    let mut parsed = Vec::new();
     for value in headers.get_all(LINK) {
         let raw = value
             .to_str()
             .map_err(|_| GithubEndpointError::InvalidResponse)?;
         total_length = total_length
             .checked_add(raw.len())
+            .filter(|length| *length <= MAX_LINK_HEADER_BYTES)
             .ok_or(GithubEndpointError::InvalidResponse)?;
-        if total_length > MAX_LINK_HEADER_BYTES {
-            return Err(GithubEndpointError::InvalidResponse);
-        }
         for link in split_links(raw)? {
-            let parsed = parse_link(link)?;
-            validate_page_url(&parsed.url, trusted, expected_path, kind)?;
-            if parsed.is_next {
-                if next.is_some() {
-                    return Err(GithubEndpointError::InvalidResponse);
-                }
-                next = Some(parsed.url);
-            }
+            parsed.push(parse_link(link)?);
         }
     }
-    Ok(next)
-}
-
-struct ParsedLink {
-    url: Url,
-    is_next: bool,
+    Ok(parsed)
 }
 
 fn split_links(raw: &str) -> Result<Vec<&str>, GithubEndpointError> {

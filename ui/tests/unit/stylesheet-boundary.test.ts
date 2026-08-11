@@ -71,6 +71,15 @@ describe("stylesheet entrypoint boundaries", () => {
     expect(emptyState).not.toContain("preview-not-found");
   });
 
+  it("centralizes responsive and preference rules in the conditions layer", () => {
+    for (const path of styleModules()) {
+      if (path.startsWith("styles/conditions/")) {
+        continue;
+      }
+      expect(source(path), path).not.toMatch(/@(container|media)\b/u);
+    }
+  });
+
   it("routes every supported preview page through the application boundary", () => {
     const previewEntry = source("preview.tsx");
 

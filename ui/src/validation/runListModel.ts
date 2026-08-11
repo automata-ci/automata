@@ -22,12 +22,14 @@ import {
   expectIdField,
   expectLiteral,
   expectObject,
+  expectOneOf,
   expectRouteField,
   expectString,
   expectTextField,
   expectUnique,
   invalid,
 } from "./primitives";
+import { RUN_STATUS_FILTER_VALUES } from "../runFilters";
 
 const GIT_REF_PREFIX = "refs/";
 const HEAD_REF_PREFIX = "refs/heads/";
@@ -153,12 +155,7 @@ function validateRunFilters(
     "clearHref",
   ]);
   const action = expectRouteField(filters, "action", path);
-  const selectedStatus = expectString(
-    filters.status,
-    `${path}.status`,
-    RENDER_REQUEST_LIMITS.shortTextLength,
-    1,
-  );
+  expectOneOf(filters.status, `${path}.status`, RUN_STATUS_FILTER_VALUES);
   const branch = expectString(
     filters.branch,
     `${path}.branch`,
@@ -181,9 +178,6 @@ function validateRunFilters(
     );
   }
 
-  if (!["all", "queued", "in_progress", "completed"].includes(selectedStatus)) {
-    invalid(`${path}.status`, "a supported workflow-run status filter");
-  }
   const clearHref = expectRouteField(filters, "clearHref", path);
   return { action, clearHref };
 }

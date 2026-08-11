@@ -291,6 +291,41 @@ fn format_bounds_repeated_placeholders_during_construction() {
 }
 
 #[test]
+fn json_functions_enforce_active_limits_during_construction() {
+    let data = GithubValue::string("\0\0\0\0");
+    let data_context = context([("github", object([("data", data)]))]);
+    let limited = GithubExpressionEvaluator::new(
+        GithubExpressionLimits::new(25, 16, 4).expect("valid limits"),
+    );
+    let error = limited
+        .evaluate(&compile("${{ toJSON(github.data) }}"), &data_context)
+        .expect_err("JSON escaping exceeds the result limit");
+    assert_eq!(
+        error.kind(),
+        GithubExpressionEvaluationErrorKind::ResourceLimit
+    );
+
+    let boundary = GithubExpressionEvaluator::new(
+        GithubExpressionLimits::new(26, 16, 4).expect("valid limits"),
+    );
+    let value = boundary
+        .evaluate(&compile("${{ toJSON(github.data) }}"), &data_context)
+        .expect("exact-limit JSON output succeeds");
+    assert_eq!(value.as_str(), Some(r#""\u0000\u0000\u0000\u0000""#));
+
+    let shallow = GithubExpressionEvaluator::new(
+        GithubExpressionLimits::new(64, 16, 1).expect("valid limits"),
+    );
+    let error = shallow
+        .evaluate(&compile("${{ fromJSON('[1]') }}"), &context([]))
+        .expect_err("nested JSON exceeds the active depth limit");
+    assert_eq!(
+        error.kind(),
+        GithubExpressionEvaluationErrorKind::ResourceLimit
+    );
+}
+
+#[test]
 fn object_and_array_equality_is_by_identity() {
     let shared = object([("value", GithubValue::string("same"))]);
     let independent = object([("value", GithubValue::string("same"))]);

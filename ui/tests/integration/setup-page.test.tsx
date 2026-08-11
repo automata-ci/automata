@@ -101,7 +101,7 @@ describe("installation setup page", () => {
 
   it("has an explicit narrow-screen single-column and full-width action contract", () => {
     const stylesheet = readFileSync(
-      resolve(process.cwd(), "src/styles/pages/setup.css"),
+      resolve(process.cwd(), "src/styles/conditions/responsive.css"),
       "utf8",
     );
 

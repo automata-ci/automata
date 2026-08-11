@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import type { UserDetailPageModel } from "../models";
+import { AuthorizationMutationFields } from "../components/AuthorizationMutationFields";
 import { enforceRbacReasonValidity } from "../components/rbacInputConstraints";
 import {
   RbacManagement,
-  RbacMutationFields,
   RbacScope,
   RbacStatus,
   RbacTableRegion,
@@ -54,12 +54,7 @@ export function UserDetailPage({ model, shellUtility }: UserDetailPageProps) {
             className="rbac-native-form"
             method="post"
           >
-            <RbacMutationFields
-              csrfToken={model.statusUpdate.csrfToken}
-              expectedAuthorizationRevision={
-                model.statusUpdate.expectedAuthorizationRevision
-              }
-            />
+            <AuthorizationMutationFields capability={model.statusUpdate} />
             <input
               name="expected_revision"
               type="hidden"

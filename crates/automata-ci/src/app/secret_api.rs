@@ -30,7 +30,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{Path, Request, State, rejection::PathRejection},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
-    middleware::{self, Next},
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -46,8 +46,6 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 const MUTATION_ID_HEADER: &str = "x-automata-secret-mutation-id";
 const SECRET_NAME_HEADER: &str = "x-automata-secret-name";
 const SECRET_PROVIDER_HEADER: &str = "x-automata-secret-provider";
-const REFERRER_POLICY: &str = "referrer-policy";
-const X_CONTENT_TYPE_OPTIONS: &str = "x-content-type-options";
 
 pub(crate) const REPOSITORY_SECRETS_PATH: &str = "/api/v1/repositories/{repository_id}/secrets";
 pub(crate) const REPOSITORY_SECRET_PATH: &str =
@@ -186,7 +184,7 @@ pub(crate) fn repository_secret_api_router(
             reads,
             clock,
         })
-        .layer(middleware::from_fn(no_store))
+        .layer(middleware::from_fn(super::api_security::no_store))
 }
 
 async fn resolve_github_repository(
@@ -323,15 +321,6 @@ async fn inspect_builtin_secret_provider(
         ) => SecretApiError::NotFound.into_response(),
         Err(error) => repository_error(error).into_response(),
     }
-}
-
-async fn no_store(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    response
 }
 
 async fn list_repository_secrets(

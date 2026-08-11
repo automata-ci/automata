@@ -1,10 +1,10 @@
-use std::fmt::Write as _;
+use std::{cell::Cell, io::Write as _};
 
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 use crate::{
-    GithubExpressionEvaluationError, GithubExpressionEvaluationErrorKind, GithubObject,
-    GithubValue, coercion,
+    GithubExpressionEvaluationError, GithubExpressionEvaluationErrorKind, GithubExpressionLimits,
+    GithubObject, GithubValue, coercion,
 };
 
 pub(crate) fn contains(
@@ -165,117 +165,212 @@ fn append_bounded(
 
 pub(crate) fn from_json(
     arguments: &[GithubValue],
+    limits: GithubExpressionLimits,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 1)?;
     let source = coercion::to_string(&arguments[0]);
     let mut deserializer = serde_json::Deserializer::from_str(&source);
-    let value = JsonValueSeed { depth: 0 }
-        .deserialize(&mut deserializer)
-        .map_err(|_| invalid_operation())?;
+    let budget = JsonBudget::new(limits.collection_items(), limits.value_depth());
+    let value = JsonValueSeed {
+        depth: 0,
+        budget: &budget,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(|_| {
+        if budget.exhausted.get() {
+            resource_limit()
+        } else {
+            invalid_operation()
+        }
+    })?;
     deserializer.end().map_err(|_| invalid_operation())?;
     Ok(value)
 }
 
 pub(crate) fn to_json(
     arguments: &[GithubValue],
+    limits: GithubExpressionLimits,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 1)?;
-    let mut output = String::new();
-    write_json(&arguments[0], 0, &mut output)?;
-    Ok(GithubValue::string(output))
+    let mut output = BoundedJsonWriter::new(limits.result_bytes());
+    write_json(&arguments[0], 0, limits.value_depth(), &mut output)?;
+    String::from_utf8(output.into_bytes())
+        .map(GithubValue::string)
+        .map_err(|_| invalid_operation())
 }
 
 fn write_json(
     value: &GithubValue,
     depth: usize,
-    output: &mut String,
+    maximum_depth: usize,
+    output: &mut BoundedJsonWriter,
 ) -> Result<(), GithubExpressionEvaluationError> {
-    if depth > 50 {
+    if depth >= maximum_depth {
         return Err(resource_limit());
     }
     match value {
-        GithubValue::Null => output.push_str("null"),
-        GithubValue::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
+        GithubValue::Null => output.append("null")?,
+        GithubValue::Boolean(value) => output.append(if *value { "true" } else { "false" })?,
         GithubValue::Number(bits) => {
-            output.push_str(&coercion::to_string(&GithubValue::Number(*bits)));
+            output.append(&coercion::to_string(&GithubValue::Number(*bits)))?;
         }
         GithubValue::String(value) => {
-            output
-                .push_str(&serde_json::to_string(value.as_ref()).map_err(|_| invalid_operation())?);
+            serde_json::to_writer(output, value.as_ref()).map_err(|_| resource_limit())?;
         }
         GithubValue::Array(values) => {
             if values.is_empty() {
-                output.push_str("[]");
+                output.append("[]")?;
             } else {
-                output.push('[');
+                output.append("[")?;
                 for (index, item) in values.iter().enumerate() {
                     if index > 0 {
-                        output.push(',');
+                        output.append(",")?;
                     }
-                    output.push('\n');
+                    output.append("\n")?;
                     write_indent(output, depth + 1)?;
-                    write_json(item, depth + 1, output)?;
+                    write_json(item, depth + 1, maximum_depth, output)?;
                 }
-                output.push('\n');
+                output.append("\n")?;
                 write_indent(output, depth)?;
-                output.push(']');
+                output.append("]")?;
             }
         }
         GithubValue::Object(object) => {
             if object.entries().is_empty() {
-                output.push_str("{}");
+                output.append("{}")?;
             } else {
-                output.push('{');
+                output.append("{")?;
                 for (index, (key, item)) in object.entries().iter().enumerate() {
                     if index > 0 {
-                        output.push(',');
+                        output.append(",")?;
                     }
-                    output.push('\n');
+                    output.append("\n")?;
                     write_indent(output, depth + 1)?;
-                    output.push_str(&serde_json::to_string(key).map_err(|_| invalid_operation())?);
-                    output.push_str(": ");
-                    write_json(item, depth + 1, output)?;
+                    serde_json::to_writer(&mut *output, key).map_err(|_| resource_limit())?;
+                    output.append(": ")?;
+                    write_json(item, depth + 1, maximum_depth, output)?;
                 }
-                output.push('\n');
+                output.append("\n")?;
                 write_indent(output, depth)?;
-                output.push('}');
+                output.append("}")?;
             }
         }
     }
     Ok(())
 }
 
-fn write_indent(output: &mut String, depth: usize) -> Result<(), GithubExpressionEvaluationError> {
-    for _ in 0..depth * 2 {
-        output.write_char(' ').map_err(|_| invalid_operation())?;
+fn write_indent(
+    output: &mut BoundedJsonWriter,
+    depth: usize,
+) -> Result<(), GithubExpressionEvaluationError> {
+    let spaces = depth.checked_mul(2).ok_or_else(resource_limit)?;
+    for _ in 0..spaces {
+        output.append(" ")?;
     }
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct JsonValueSeed {
-    depth: usize,
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    maximum_bytes: usize,
 }
 
-impl<'de> DeserializeSeed<'de> for JsonValueSeed {
+impl BoundedJsonWriter {
+    const fn new(maximum_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            maximum_bytes,
+        }
+    }
+
+    fn append(&mut self, value: &str) -> Result<(), GithubExpressionEvaluationError> {
+        self.write_all(value.as_bytes())
+            .map_err(|_| resource_limit())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::io::Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|next| *next <= self.maximum_bytes)
+            .ok_or_else(|| std::io::Error::other("JSON result limit exceeded"))?;
+        self.bytes.reserve(next - self.bytes.len());
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct JsonBudget {
+    items: Cell<usize>,
+    maximum_items: usize,
+    maximum_depth: usize,
+    exhausted: Cell<bool>,
+}
+
+impl JsonBudget {
+    const fn new(maximum_items: usize, maximum_depth: usize) -> Self {
+        Self {
+            items: Cell::new(0),
+            maximum_items,
+            maximum_depth,
+            exhausted: Cell::new(false),
+        }
+    }
+
+    fn observe(&self, depth: usize) -> bool {
+        let Some(items) = self.items.get().checked_add(1) else {
+            self.exhausted.set(true);
+            return false;
+        };
+        if items > self.maximum_items || depth >= self.maximum_depth {
+            self.exhausted.set(true);
+            return false;
+        }
+        self.items.set(items);
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JsonValueSeed<'budget> {
+    depth: usize,
+    budget: &'budget JsonBudget,
+}
+
+impl<'de> DeserializeSeed<'de> for JsonValueSeed<'_> {
     type Value = GithubValue;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        if self.depth > 50 {
+        if !self.budget.observe(self.depth) {
             return Err(serde::de::Error::custom("JSON value depth limit exceeded"));
         }
-        deserializer.deserialize_any(JsonValueVisitor { depth: self.depth })
+        deserializer.deserialize_any(JsonValueVisitor {
+            depth: self.depth,
+            budget: self.budget,
+        })
     }
 }
 
-struct JsonValueVisitor {
+struct JsonValueVisitor<'budget> {
     depth: usize,
+    budget: &'budget JsonBudget,
 }
 
-impl<'de> Visitor<'de> for JsonValueVisitor {
+impl<'de> Visitor<'de> for JsonValueVisitor<'_> {
     type Value = GithubValue;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -335,14 +430,17 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(65_536));
+        let mut values = Vec::with_capacity(
+            sequence
+                .size_hint()
+                .unwrap_or(0)
+                .min(self.budget.maximum_items),
+        );
         let seed = JsonValueSeed {
             depth: self.depth + 1,
+            budget: self.budget,
         };
         while let Some(value) = sequence.next_element_seed(seed)? {
-            if values.len() == 65_536 {
-                return Err(serde::de::Error::custom("JSON collection limit exceeded"));
-            }
             values.push(value);
         }
         GithubValue::array(values)
@@ -353,14 +451,17 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut values = Vec::with_capacity(mapping.size_hint().unwrap_or(0).min(65_536));
+        let mut values = Vec::with_capacity(
+            mapping
+                .size_hint()
+                .unwrap_or(0)
+                .min(self.budget.maximum_items),
+        );
         let seed = JsonValueSeed {
             depth: self.depth + 1,
+            budget: self.budget,
         };
         while let Some(key) = mapping.next_key::<String>()? {
-            if values.len() == 65_536 {
-                return Err(serde::de::Error::custom("JSON collection limit exceeded"));
-            }
             values.push((key, mapping.next_value_seed(seed)?));
         }
         GithubObject::new(values)

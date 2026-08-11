@@ -260,8 +260,7 @@ pub(super) fn compile_positive_integer_template(
         );
         return None;
     }
-    let normalized = value.decoded().replace('_', "");
-    let Ok(number) = normalized.parse::<u32>() else {
+    let Ok(number) = value.decoded().parse::<u32>() else {
         context.semantic(
             "github.compile.positive_integer_overflow",
             "positive integer does not fit the workflow-plan representation",
@@ -385,12 +384,9 @@ fn compile_policy_program(
 }
 
 fn normalize_number(value: &ScalarValue, context: &mut CompileContext<'_>) -> Option<String> {
-    let mut normalized = value.decoded().replace('_', "");
-    if let Some(unsigned) = normalized.strip_prefix('+') {
-        normalized = unsigned.to_owned();
-    }
+    let normalized = value.decoded().strip_prefix('+').unwrap_or(value.decoded());
     let negative = normalized.starts_with('-');
-    let unsigned = normalized.strip_prefix('-').unwrap_or(&normalized);
+    let unsigned = normalized.strip_prefix('-').unwrap_or(normalized);
     let converted = if let Some(hexadecimal) = unsigned.strip_prefix("0x") {
         u128::from_str_radix(hexadecimal, 16)
             .ok()
@@ -400,7 +396,7 @@ fn normalize_number(value: &ScalarValue, context: &mut CompileContext<'_>) -> Op
             .ok()
             .map(|number| number.to_string())
     } else if normalized.parse::<f64>().is_ok_and(f64::is_finite) {
-        Some(normalized.clone())
+        Some(normalized.to_owned())
     } else {
         None
     };

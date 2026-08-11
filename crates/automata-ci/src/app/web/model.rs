@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Write as _};
+use std::collections::HashSet;
 
 use automata_ci_auth::{
     authorization::{AuthorizationScope, OutputVisibility, RepositoryPublicationPolicy},
@@ -42,6 +42,7 @@ use super::data::{
     RunListPage as RunListData, RunListRequest as RunListRequestData, RunSummary,
     Status as DataStatus, StatusFilter,
 };
+use super::encoding::percent_encode;
 use super::text::{
     forbidden_display_character, has_visible_display_character, is_safe_display_text,
 };
@@ -3053,18 +3054,6 @@ fn encode_path_segment(value: &str) -> String {
 
 fn encode_query_component(value: &str) -> String {
     percent_encode(value.as_bytes())
-}
-
-fn percent_encode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len());
-    for byte in bytes {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(*byte));
-        } else {
-            let _ = write!(&mut encoded, "%{byte:02X}");
-        }
-    }
-    encoded
 }
 
 fn valid_repository(repository: &RepositoryData) -> bool {

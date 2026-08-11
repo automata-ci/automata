@@ -1,3 +1,5 @@
+mod api_security;
+mod form;
 pub(crate) mod github_auth;
 pub mod http;
 pub(crate) mod human_auth;

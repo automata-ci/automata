@@ -9,6 +9,7 @@ use url::Url;
 
 use crate::{
     endpoint::{GithubHttpEndpoint, authorization_header},
+    repository_path,
     response::{JsonResponse, decode_json, read_json_response},
 };
 
@@ -16,7 +17,6 @@ const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const COMPARE_COMMITS_PER_PAGE: usize = 100;
 const GITHUB_COMPARE_FILE_CAP: usize = 300;
 const MAX_ACTIONS_PUSH_COMMITS: usize = 1_000;
-const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 
 /// Largest GitHub Compare JSON file collection that is demonstrably complete.
@@ -399,26 +399,7 @@ fn invalid_evidence() -> CompareFailure {
 }
 
 fn repository_components(repository: &RepositoryId) -> Result<(&str, &str), CompareFailure> {
-    let mut components = repository.as_str().split('/');
-    let owner = components.next().unwrap_or_default();
-    let name = components.next().unwrap_or_default();
-    if components.next().is_some()
-        || !valid_repository_component(owner)
-        || !valid_repository_component(name)
-        || name.to_ascii_lowercase().ends_with(".git")
-    {
-        return Err(invalid_evidence());
-    }
-    Ok((owner, name))
-}
-
-fn valid_repository_component(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REPOSITORY_COMPONENT_BYTES
-        && !matches!(value, "." | "..")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    repository_path::split(repository.as_str()).ok_or_else(invalid_evidence)
 }
 
 fn validate_requested_commits(

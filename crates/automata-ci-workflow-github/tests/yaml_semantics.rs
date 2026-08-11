@@ -42,6 +42,36 @@ fn yaml_1_2_does_not_resolve_on_off_yes_or_no_as_booleans() {
 }
 
 #[test]
+fn yaml_1_2_numeric_resolution_rejects_underscores_and_signed_nondecimal_integers() {
+    let source = "on: push\nenv:\n  UNDERSCORED_INTEGER: 1_000\n  UNDERSCORED_FLOAT: 1.0_0\n  SIGNED_HEX: -0x10\n  INTEGER: 1000\n  HEX: 0x10\n  FLOAT: .5\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
+    let report = support::parse(source);
+    assert!(
+        report.is_accepted(),
+        "diagnostics: {:#?}",
+        report.diagnostics()
+    );
+
+    let env = mapping_value(report.plan().expect("plan").document().root(), "env");
+    let resolutions = env
+        .as_mapping()
+        .expect("env mapping")
+        .iter()
+        .map(|entry| entry.value().as_scalar().expect("value").resolution())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolutions,
+        [
+            ScalarResolution::String,
+            ScalarResolution::String,
+            ScalarResolution::String,
+            ScalarResolution::Integer,
+            ScalarResolution::Integer,
+            ScalarResolution::Float,
+        ]
+    );
+}
+
+#[test]
 fn original_text_is_an_exact_round_trip_artifact() {
     let source = include_str!("fixtures/valid.yml");
     let report = support::parse(source);

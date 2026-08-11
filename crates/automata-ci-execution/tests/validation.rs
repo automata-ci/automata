@@ -88,6 +88,29 @@ fn handles_and_target_paths_are_bounded_platform_typed_and_opaque_in_debug() {
     assert!(!format!("{handle:?}").contains("0123456789abcdef"));
     assert!(TargetPath::posix("/__w/project").is_ok());
     assert!(TargetPath::windows(r"C:\work\project").is_ok());
+    assert_eq!(
+        TargetPath::windows(r"c:\work\project")
+            .expect("lowercase drive is normalized")
+            .as_str(),
+        r"C:\work\project"
+    );
+    for invalid in ["/__w/project/", "/__w//project"] {
+        assert_eq!(
+            TargetPath::posix(invalid),
+            Err(ValueError::InvalidTargetPath)
+        );
+    }
+    for invalid in [
+        r"C:\work\project\",
+        r"C:\work\artifact:stream",
+        r"C:\work\trailing.",
+        r"C:\work\wild*card",
+    ] {
+        assert_eq!(
+            TargetPath::windows(invalid),
+            Err(ValueError::InvalidTargetPath)
+        );
+    }
     assert!(matches!(
         TargetPath::posix("/__w/../host"),
         Err(ValueError::InvalidTargetPath)

@@ -7,6 +7,8 @@ use ring::{digest, hmac};
 use serde::{Deserialize, Deserializer, de};
 use thiserror::Error;
 
+use crate::repository_path::{has_ascii_case_insensitive_suffix, is_valid_component};
+
 /// Maximum exact webhook body accepted by workflow admission.
 pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// Maximum configured GitHub webhook secret size.
@@ -24,7 +26,6 @@ pub const X_GITHUB_EVENT: &str = "x-github-event";
 pub const X_GITHUB_DELIVERY: &str = "x-github-delivery";
 
 const MAX_DELIVERY_ID_BYTES: usize = 128;
-const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 const MAX_GIT_REF_BYTES: usize = 1_024;
 const MAX_GITHUB_PATH_FILTER_COMMITS: usize = 1_000;
 const SHA256_SIGNATURE_PREFIX: &[u8] = b"sha256=";
@@ -986,13 +987,7 @@ fn validate_stored_payload_identity(
 }
 
 fn validate_repository_component(value: &str) -> Result<(), GithubWebhookError> {
-    if value.is_empty()
-        || value.len() > MAX_REPOSITORY_COMPONENT_BYTES
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
+    if !is_valid_component(value) {
         return Err(GithubWebhookError::InvalidPayload);
     }
     Ok(())
@@ -1064,10 +1059,4 @@ fn is_commit_sha(value: &str) -> bool {
         return false;
     }
     true
-}
-
-fn has_ascii_case_insensitive_suffix(value: &str, suffix: &str) -> bool {
-    value
-        .get(value.len().saturating_sub(suffix.len())..)
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }

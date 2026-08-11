@@ -16,6 +16,8 @@ const ACTION_YML: &[u8] = b"action.yml";
 const ACTION_YAML: &[u8] = b"action.yaml";
 const DOCKERFILE: &[u8] = b"Dockerfile";
 const DOCKERFILE_LOWER: &[u8] = b"dockerfile";
+const TAR_BLOCK_BYTES: usize = 512;
+const TAR_BLOCK_BYTES_U64: u64 = TAR_BLOCK_BYTES as u64;
 
 /// Validates a compressed SCM archive and selects one action definition.
 ///
@@ -357,11 +359,14 @@ fn validate_global_pax<R: io::Read>(
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .ok_or(ActionArchiveError::Malformed)?;
+        let record_start = offset
+            .checked_add(space + 1)
+            .ok_or(ActionArchiveError::Malformed)?;
         let end = offset
             .checked_add(length)
-            .filter(|end| *end <= bytes.len())
+            .filter(|end| record_start <= *end && *end <= bytes.len())
             .ok_or(ActionArchiveError::Malformed)?;
-        let record = &bytes[offset + space + 1..end];
+        let record = &bytes[record_start..end];
         let record = record
             .strip_suffix(b"\n")
             .ok_or(ActionArchiveError::Malformed)?;
@@ -385,9 +390,6 @@ fn validate_global_pax<R: io::Read>(
             return Err(ActionArchiveError::UnsafePath);
         }
         offset = end;
-    }
-    if offset != bytes.len() {
-        return Err(ActionArchiveError::Malformed);
     }
     Ok(())
 }
@@ -440,11 +442,26 @@ fn verify_trailing_zeros<R: io::Read>(
     reader: &mut R,
     maximum_bytes: u64,
 ) -> Result<(), ActionArchiveError> {
-    let mut limited = reader.take(maximum_bytes.saturating_add(1));
+    if maximum_bytes < TAR_BLOCK_BYTES_U64 {
+        return Err(ActionArchiveError::ResourceLimit);
+    }
+    let mut second_end_block = [0_u8; TAR_BLOCK_BYTES];
+    reader
+        .read_exact(&mut second_end_block)
+        .map_err(|_| ActionArchiveError::Malformed)?;
+    if second_end_block.iter().any(|byte| *byte != 0) {
+        return Err(ActionArchiveError::Malformed);
+    }
+
+    let maximum_trailing_bytes = maximum_bytes - TAR_BLOCK_BYTES_U64;
+    let mut limited = reader.take(maximum_trailing_bytes.saturating_add(1));
     let copied = io::copy(&mut limited, &mut ZeroPaddingVerifier)
         .map_err(|_| ActionArchiveError::Malformed)?;
-    if copied > maximum_bytes {
+    if copied > maximum_trailing_bytes {
         return Err(ActionArchiveError::ResourceLimit);
+    }
+    if copied % TAR_BLOCK_BYTES_U64 != 0 {
+        return Err(ActionArchiveError::Malformed);
     }
     Ok(())
 }

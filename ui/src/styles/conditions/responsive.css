@@ -178,6 +178,35 @@
   .artifact-list li {
     grid-template-columns: 24px minmax(0, 1fr) auto;
   }
+
+  .repository-secret-provider__body,
+  .repository-secret-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .repository-secret-provider__body form .button,
+  .repository-secret-form-actions .button {
+    width: 100%;
+  }
+
+  .repository-secret-form-grid,
+  .repository-secret-row__controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-page__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-form {
+    padding: 16px;
+  }
+
+  .setup-form__actions > .button {
+    width: 100%;
+    min-height: 40px;
+  }
 }
 
 @media (max-width: 640px) {

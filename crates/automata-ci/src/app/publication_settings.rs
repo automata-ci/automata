@@ -24,8 +24,9 @@ use axum::{
     routing::post,
 };
 
-use crate::app::web::{
-    apply_static_page_headers, error_page_response, error_page_response_with_action,
+use crate::app::{
+    form,
+    web::{apply_static_page_headers, error_page_response, error_page_response_with_action},
 };
 
 pub(crate) const MAX_PUBLICATION_SETTINGS_FORM_BYTES: usize = 4 * 1_024;
@@ -234,41 +235,7 @@ fn parse_audience(value: &str) -> Result<OutputVisibility, PublicationSettingsFo
 }
 
 fn decode_form_component(value: &[u8]) -> Result<String, PublicationSettingsFormError> {
-    let mut decoded = Vec::with_capacity(value.len());
-    let mut index = 0_usize;
-    while index < value.len() {
-        match value[index] {
-            b'%' if index + 2 < value.len() => {
-                let Some(high) = hex(value[index + 1]) else {
-                    return Err(PublicationSettingsFormError);
-                };
-                let Some(low) = hex(value[index + 2]) else {
-                    return Err(PublicationSettingsFormError);
-                };
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(PublicationSettingsFormError),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| PublicationSettingsFormError)
-}
-
-const fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
+    form::decode_text(value, value.len()).map_err(|_| PublicationSettingsFormError)
 }
 
 pub(crate) fn publication_settings_router(

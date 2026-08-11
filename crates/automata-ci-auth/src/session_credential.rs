@@ -918,14 +918,13 @@ fn parse_raw(raw: &str) -> Result<SessionCredential, SessionCredentialServiceErr
 fn generate_session_id(
     random: &dyn SecureRandom,
 ) -> Result<SessionId, SessionCredentialServiceError> {
-    let mut bytes = [0_u8; 16];
+    let mut bytes = Zeroizing::new([0_u8; 16]);
     random
-        .fill(&mut bytes)
+        .fill(bytes.as_mut())
         .map_err(|_| SessionCredentialServiceError::RandomnessUnavailable)?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let id = uuid::Uuid::from_bytes(bytes).hyphenated().to_string();
-    bytes.zeroize();
+    let id = uuid::Uuid::from_bytes(*bytes).hyphenated().to_string();
     SessionId::new(id).map_err(|_| SessionCredentialServiceError::InternalFailure)
 }
 

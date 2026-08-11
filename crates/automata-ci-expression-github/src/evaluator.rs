@@ -367,8 +367,8 @@ impl Tree {
             "cancelled" if arguments.is_empty() => {
                 GithubValue::Boolean(context.status() == GithubStatus::Cancelled)
             }
-            "fromjson" => functions::from_json(&arguments)?,
-            "tojson" => functions::to_json(&arguments)?,
+            "fromjson" => functions::from_json(&arguments, limits)?,
+            "tojson" => functions::to_json(&arguments, limits)?,
             _ => context
                 .functions()
                 .call(&name, &arguments)

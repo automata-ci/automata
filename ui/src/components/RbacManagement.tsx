@@ -78,25 +78,6 @@ export function RbacManagement({
   );
 }
 
-export function RbacMutationFields({
-  csrfToken,
-  expectedAuthorizationRevision,
-}: {
-  readonly csrfToken: string;
-  readonly expectedAuthorizationRevision: string;
-}) {
-  return (
-    <>
-      <input name="csrf_token" type="hidden" value={csrfToken} />
-      <input
-        name="expected_authorization_revision"
-        type="hidden"
-        value={expectedAuthorizationRevision}
-      />
-    </>
-  );
-}
-
 function RbacNotice({ notice }: { readonly notice: RbacManagementNotice }) {
   const message = notice === "saved"
     ? "Access management changes were saved."

@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import type { RoleDetailPageModel } from "../models";
+import { AuthorizationMutationFields } from "../components/AuthorizationMutationFields";
 import { enforceRbacDisplayNameValidity } from "../components/rbacInputConstraints";
 import {
   RbacManagement,
-  RbacMutationFields,
   RbacPermissionStatus,
   RbacTableRegion,
 } from "../components/RbacManagement";
@@ -55,10 +55,7 @@ export function RoleDetailPage({ model, shellUtility }: RoleDetailPageProps) {
               </p>
             ) : (
               <form action={model.update.action} className="rbac-native-form" method="post">
-                <RbacMutationFields
-                  csrfToken={model.update.csrfToken}
-                  expectedAuthorizationRevision={model.update.expectedAuthorizationRevision}
-                />
+                <AuthorizationMutationFields capability={model.update} />
                 <input
                   name="expected_revision"
                   type="hidden"
@@ -92,12 +89,7 @@ export function RoleDetailPage({ model, shellUtility }: RoleDetailPageProps) {
                     className="rbac-native-form"
                     method="post"
                   >
-                    <RbacMutationFields
-                      csrfToken={model.delete.csrfToken}
-                      expectedAuthorizationRevision={
-                        model.delete.expectedAuthorizationRevision
-                      }
-                    />
+                    <AuthorizationMutationFields capability={model.delete} />
                     <input
                       name="expected_revision"
                       type="hidden"
@@ -152,11 +144,8 @@ export function RoleDetailPage({ model, shellUtility }: RoleDetailPageProps) {
                         <RbacPermissionStatus granted={permission.granted} />
                         {permission.update === null ? null : (
                           <form action={permission.update.action} method="post">
-                            <RbacMutationFields
-                              csrfToken={permission.update.csrfToken}
-                              expectedAuthorizationRevision={
-                                permission.update.expectedAuthorizationRevision
-                              }
+                            <AuthorizationMutationFields
+                              capability={permission.update}
                             />
                             <input
                               name="expected_revision"

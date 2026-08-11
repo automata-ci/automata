@@ -1,7 +1,5 @@
 use crate::{CommitFaultInjector, JournalError, StateRoot};
 
-use super::super::CommitStage;
-
 #[derive(Debug)]
 pub(crate) struct PlatformDirectory;
 
@@ -39,7 +37,6 @@ impl PlatformDirectory {
         _bytes: &[u8],
         _faults: &dyn CommitFaultInjector,
     ) -> Result<(), CommitFailure> {
-        let _ = CommitStage::StagingCreated;
         unreachable!()
     }
 }

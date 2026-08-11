@@ -9,6 +9,7 @@ mod config;
 mod endpoint;
 mod pagination;
 mod repository;
+mod repository_path;
 mod response;
 mod webhook;
 

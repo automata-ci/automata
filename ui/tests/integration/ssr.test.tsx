@@ -1585,6 +1585,9 @@ describe("hydration", () => {
     expect(rendered.querySelector("#main-content")?.textContent).not.toContain(
       "Revision",
     );
+    expect(rendered.querySelector(".rbac-read-only")?.textContent).toBe(
+      "Direct binding management is temporarily unavailable.",
+    );
   });
 
   it("renders every RBAC mutation as an exact native POST form", () => {

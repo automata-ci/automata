@@ -50,11 +50,18 @@ pub(crate) struct DecodedRecord {
 
 pub(crate) fn decode_records(
     encoded: &[u8],
+    maximum_records: usize,
     limits: &ProtocolLimits,
 ) -> Result<Vec<DecodedRecord>, RunnerRuntimeError> {
     let mut messages = Vec::new();
+    messages
+        .try_reserve_exact(maximum_records)
+        .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
     let mut remaining = encoded;
     while !remaining.is_empty() {
+        if messages.len() == maximum_records {
+            return Err(RunnerRuntimeError::InvalidDurablePayload);
+        }
         let prefix = remaining
             .get(..LENGTH_PREFIX_BYTES)
             .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
@@ -97,8 +104,9 @@ pub(crate) fn validate_log_segment_records(
     stream_id: LogStreamId,
     limits: &ProtocolLimits,
 ) -> Result<Vec<LogFrame>, RunnerRuntimeError> {
-    let records = decode_records(encoded, limits)?;
-    if records.len() != usize::try_from(segment.frame_count()).unwrap_or(usize::MAX) {
+    let expected_records = usize::try_from(segment.frame_count()).unwrap_or(usize::MAX);
+    let records = decode_records(encoded, expected_records, limits)?;
+    if records.len() != expected_records {
         return Err(RunnerRuntimeError::InvalidDurablePayload);
     }
     let mut frames: Vec<LogFrame> = Vec::new();

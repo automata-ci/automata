@@ -21,17 +21,18 @@ pub(super) fn positive_integer(
     context: &mut DecodeContext<'_>,
 ) -> Option<ScalarValue> {
     let value = scalar_value(node, path, context)?;
-    if !value.contains_expression_candidate() {
-        let normalized = value.decoded.replace('_', "");
-        if value.resolution != ScalarResolution::Integer
-            || normalized.parse::<u64>().map_or(true, |number| number == 0)
-        {
-            context.semantic(
-                "github.expected_positive_integer",
-                format!("`{path}` must be a positive integer or expression"),
-                node.span.clone(),
-            );
-        }
+    if !value.contains_expression_candidate()
+        && (value.resolution != ScalarResolution::Integer
+            || value
+                .decoded
+                .parse::<u64>()
+                .map_or(true, |number| number == 0))
+    {
+        context.semantic(
+            "github.expected_positive_integer",
+            format!("`{path}` must be a positive integer or expression"),
+            node.span.clone(),
+        );
     }
     Some(value)
 }

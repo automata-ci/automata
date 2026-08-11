@@ -16,8 +16,7 @@ use automata_ci_auth::{
     human::TenantId,
     management::{
         DirectBindingRepositoryOption, DirectBindingRoleOption, DirectBindingRunnerGroupOption,
-        ManagementActor, ManagementRepositoryError, ManagementRevision, ProviderRoleMappingId,
-        RoleId, RoleKind,
+        ManagementActor, ManagementRepositoryError, ProviderRoleMappingId, RoleId, RoleKind,
     },
     session::CLI_SESSION_ACTIVATION_LIFETIME_SECONDS,
 };
@@ -26,7 +25,11 @@ use uuid::Uuid;
 
 use crate::{
     session::{database_time_milliseconds, validate_caller_time},
-    support::{canonical_uuid, is_integrity_violation},
+    support::{
+        canonical_uuid, is_integrity_violation, management_revision_from_i64 as revision_from_i64,
+        management_revision_to_i64 as revision_to_i64, tenant_management_lock,
+        tenant_management_read_lock,
+    },
 };
 
 const ACTION_MAPPING_CREATE: &str = "rbac.github_mapping.create";
@@ -356,30 +359,6 @@ async fn refresh_actor_time(
     Ok(true)
 }
 
-async fn tenant_management_lock(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-) -> Result<(), ManagementRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,731662009))")
-        .bind(tenant_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_database_error)?;
-    Ok(())
-}
-
-async fn tenant_management_read_lock(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-) -> Result<(), ManagementRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1,731662009))")
-        .bind(tenant_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_database_error)?;
-    Ok(())
-}
-
 async fn actor_has_permission(
     transaction: &mut Transaction<'_, Postgres>,
     actor: &AuthorizedActor,
@@ -548,7 +527,9 @@ async fn authorize_read(
     actor: &ManagementActor,
     permission: &str,
 ) -> Result<GithubMappingReadOutcome<AuthorizedActor>, ManagementRepositoryError> {
-    tenant_management_read_lock(transaction, actor.tenant_id().as_str()).await?;
+    tenant_management_read_lock(transaction, actor.tenant_id().as_str())
+        .await
+        .map_err(map_database_error)?;
     match authenticate_actor(transaction, actor, false).await? {
         ActorAuthentication::Forbidden => Ok(GithubMappingReadOutcome::Forbidden),
         ActorAuthentication::Stale(_) => Ok(GithubMappingReadOutcome::SessionStale),
@@ -624,7 +605,9 @@ async fn authorize_mutation(
     actor: &ManagementActor,
     descriptor: AuditDescriptor<'_>,
 ) -> Result<MutationAuthorization, ManagementRepositoryError> {
-    tenant_management_lock(transaction, actor.tenant_id().as_str()).await?;
+    tenant_management_lock(transaction, actor.tenant_id().as_str())
+        .await
+        .map_err(map_database_error)?;
     match authenticate_actor(transaction, actor, true).await? {
         ActorAuthentication::Forbidden => Ok(MutationAuthorization::Forbidden),
         ActorAuthentication::Stale(current) => {
@@ -712,17 +695,6 @@ async fn lock_mapping_trigger_revisions(
         return Err(ManagementRepositoryError::CorruptData);
     }
     Ok(())
-}
-
-fn revision_to_i64(revision: ManagementRevision) -> Result<i64, ManagementRepositoryError> {
-    i64::try_from(revision.value()).map_err(|_| ManagementRepositoryError::InvalidRequest)
-}
-
-fn revision_from_i64(revision: i64) -> Result<ManagementRevision, ManagementRepositoryError> {
-    u64::try_from(revision)
-        .ok()
-        .and_then(|revision| ManagementRevision::new(revision).ok())
-        .ok_or(ManagementRepositoryError::CorruptData)
 }
 
 fn map_database_error(error: sqlx::Error) -> ManagementRepositoryError {

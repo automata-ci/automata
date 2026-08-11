@@ -48,6 +48,7 @@ use url::{Position, Url};
 use zeroize::Zeroizing;
 
 use super::{
+    form,
     human_auth::{
         HumanAuthOrigin, PresentedHumanCredential, clear_login_cookie, csrf_set_cookie,
         extract_human_credential, extract_login_binding_cookie, login_set_cookie,
@@ -1296,7 +1297,8 @@ fn decode_bootstrap_token(value: &[u8]) -> Result<SecretString, RequestDocumentE
     let mut decoded = Zeroizing::new(Vec::with_capacity(
         value.len().min(MAX_SETUP_BOOTSTRAP_TOKEN_BYTES),
     ));
-    decode_form_component_into(value, &mut decoded, MAX_SETUP_BOOTSTRAP_TOKEN_BYTES)?;
+    form::decode_into(value, &mut decoded, MAX_SETUP_BOOTSTRAP_TOKEN_BYTES)
+        .map_err(|_| RequestDocumentError::Invalid)?;
     if decoded.is_empty() {
         return Err(RequestDocumentError::Invalid);
     }
@@ -1316,39 +1318,8 @@ fn decode_bounded_form_component(
     maximum: usize,
 ) -> Result<String, RequestDocumentError> {
     let mut decoded = Vec::with_capacity(value.len().min(maximum));
-    decode_form_component_into(value, &mut decoded, maximum)?;
+    form::decode_into(value, &mut decoded, maximum).map_err(|_| RequestDocumentError::Invalid)?;
     String::from_utf8(decoded).map_err(|_| RequestDocumentError::Invalid)
-}
-
-fn decode_form_component_into(
-    value: &[u8],
-    decoded: &mut Vec<u8>,
-    maximum: usize,
-) -> Result<(), RequestDocumentError> {
-    let mut index = 0_usize;
-    while index < value.len() {
-        if decoded.len() == maximum {
-            return Err(RequestDocumentError::Invalid);
-        }
-        match value[index] {
-            b'%' if index + 2 < value.len() => {
-                let high = form_hex(value[index + 1]).ok_or(RequestDocumentError::Invalid)?;
-                let low = form_hex(value[index + 2]).ok_or(RequestDocumentError::Invalid)?;
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(RequestDocumentError::Invalid),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn parse_login_start_request(
@@ -1389,37 +1360,7 @@ async fn parse_login_start_request(
 }
 
 fn decode_form_component(value: &[u8]) -> Result<String, RequestDocumentError> {
-    let mut decoded = Vec::with_capacity(value.len());
-    let mut index = 0_usize;
-    while index < value.len() {
-        match value[index] {
-            b'%' if index + 2 < value.len() => {
-                let high = form_hex(value[index + 1]).ok_or(RequestDocumentError::Invalid)?;
-                let low = form_hex(value[index + 2]).ok_or(RequestDocumentError::Invalid)?;
-                decoded.push((high << 4) | low);
-                index += 3;
-            }
-            b'%' => return Err(RequestDocumentError::Invalid),
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| RequestDocumentError::Invalid)
-}
-
-const fn form_hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
+    form::decode_text(value, value.len()).map_err(|_| RequestDocumentError::Invalid)
 }
 
 fn web_start_response(state: &GithubAuthHttpState, start: &WebLoginStart) -> Response {

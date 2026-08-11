@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { AuthorizationMutationFields } from "../components/AuthorizationMutationFields";
 import { EmptyState } from "../components/EmptyState";
 import { RepositorySettingsNavigation } from "../components/RepositorySettingsNavigation";
 import { Shell } from "../components/Shell";
@@ -157,7 +158,7 @@ function SecretProvider({
         </div>
         {provider.activation === null ? null : (
           <form action={provider.activation.action} method="post">
-            <MutationFields capability={provider.activation} />
+            <AuthorizationMutationFields capability={provider.activation} />
             <input
               name="expected_revision"
               type="hidden"
@@ -186,7 +187,7 @@ function SecretCreateForm({
         <h2 id="create-secret-heading">Create secret</h2>
       </div>
       <form action={capability.action} method="post">
-        <MutationFields capability={capability} />
+        <AuthorizationMutationFields capability={capability} />
         <input name="secret_id" type="hidden" value={capability.secretId} />
         <input name="mutation_id" type="hidden" value={capability.mutationId} />
         <div className="repository-secret-form-grid">
@@ -263,7 +264,7 @@ function SecretRow({
           <div className="repository-secret-row__controls">
             {secret.replace === null ? null : (
               <form action={secret.replace.action} method="post">
-                <MutationFields capability={secret.replace} />
+                <AuthorizationMutationFields capability={secret.replace} />
                 <input name="mutation_id" type="hidden" value={secret.replace.mutationId} />
                 <input name="name" type="hidden" value={secret.name} />
                 <input name="expected_revision" type="hidden" value={secret.revision} />
@@ -278,7 +279,7 @@ function SecretRow({
             )}
             {secret.delete === null ? null : (
               <form action={secret.delete.action} className="repository-secret-delete" method="post">
-                <MutationFields capability={secret.delete} />
+                <AuthorizationMutationFields capability={secret.delete} />
                 <input name="expected_revision" type="hidden" value={secret.revision} />
                 <p>
                   This revokes access immediately and schedules retained
@@ -293,26 +294,6 @@ function SecretRow({
         </details>
       ) : null}
     </li>
-  );
-}
-
-function MutationFields({
-  capability,
-}: {
-  readonly capability: {
-    readonly csrfToken: string;
-    readonly expectedAuthorizationRevision: string;
-  };
-}) {
-  return (
-    <>
-      <input name="csrf_token" type="hidden" value={capability.csrfToken} />
-      <input
-        name="expected_authorization_revision"
-        type="hidden"
-        value={capability.expectedAuthorizationRevision}
-      />
-    </>
   );
 }
 

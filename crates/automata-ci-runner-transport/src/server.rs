@@ -313,7 +313,7 @@ struct RequestState {
 async fn handle_request(request: Request<Incoming>, state: Arc<RequestState>) -> HttpResponse {
     let mut request_observation = RequestObservationGuard::new(Arc::clone(&state.observer));
     let admission = timeout(
-        state.transport_limits.admission_timeout(),
+        state.transport_limits.server_admission_timeout(),
         Arc::clone(&state.admission).acquire_owned(),
     )
     .await;

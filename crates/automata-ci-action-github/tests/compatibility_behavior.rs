@@ -1,6 +1,6 @@
 mod support;
 
-use automata_ci_action_github::{JavascriptRuntime, MetadataDecodeErrorKind};
+use automata_ci_action_github::{JavascriptRuntime, MetadataDecodeErrorKind, MetadataScalarKind};
 use support::decode;
 
 #[test]
@@ -100,4 +100,29 @@ fn every_javascript_runtime_accepted_by_the_baseline_is_modeled() {
         let metadata = decode(&source).unwrap();
         assert_eq!(metadata.javascript().unwrap().runtime(), expected);
     }
+}
+
+#[test]
+fn numeric_scalars_follow_the_yaml_1_2_core_schema() {
+    let metadata = decode(
+        "inputs:\n  underscored-integer: {default: 1_000}\n  underscored-float: {default: 1.0_0}\n  signed-hex: {default: -0x10}\n  integer: {default: 1000}\n  hex: {default: 0x10}\n  float: {default: .5}\nruns:\n  using: node24\n  main: index.js\n",
+    )
+    .unwrap();
+    let kinds = metadata
+        .inputs()
+        .iter()
+        .map(|input| input.default().unwrap().kind())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        kinds,
+        [
+            MetadataScalarKind::String,
+            MetadataScalarKind::String,
+            MetadataScalarKind::String,
+            MetadataScalarKind::Integer,
+            MetadataScalarKind::Integer,
+            MetadataScalarKind::Float,
+        ]
+    );
 }

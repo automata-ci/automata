@@ -40,13 +40,6 @@ use crate::{
     signer::{GithubAppJwtSigner, GithubAppKeyError},
 };
 
-#[cfg(test)]
-#[allow(dead_code)]
-type GithubAppHttpLimits = crate::GithubAppHttpLimits;
-#[cfg(test)]
-#[allow(dead_code)]
-type GithubInstallationId = crate::GithubInstallationId;
-
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const X_GITHUB_API_VERSION: &str = "x-github-api-version";
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_024;

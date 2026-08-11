@@ -1,5 +1,6 @@
 mod codec;
 mod data;
+mod encoding;
 mod live;
 mod model;
 mod routes;

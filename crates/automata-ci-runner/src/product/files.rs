@@ -273,14 +273,12 @@ fn read_file(
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
         return Err(SecureInputError::PathSecurity);
     }
-    let permission_bits = metadata.st_mode & 0o777;
-    let trusted = match trust {
-        FileTrust::OwnerOnly => {
-            metadata.st_uid == rustix::process::geteuid().as_raw()
-                && permission_bits.trailing_zeros() >= 6
-        }
-        FileTrust::Configuration | FileTrust::PublicMaterial => permission_bits & 0o022 == 0,
-    };
+    let trusted = file_is_trusted(
+        metadata.st_uid,
+        metadata.st_mode & 0o777,
+        trust,
+        rustix::process::geteuid().as_raw(),
+    );
     if !trusted {
         return Err(SecureInputError::PathSecurity);
     }
@@ -303,6 +301,21 @@ fn read_file(
     Ok(bytes)
 }
 
+#[cfg(unix)]
+const fn file_is_trusted(
+    owner: u32,
+    permission_bits: u32,
+    trust: FileTrust,
+    effective_uid: u32,
+) -> bool {
+    match trust {
+        FileTrust::OwnerOnly => owner == effective_uid && permission_bits.trailing_zeros() >= 6,
+        FileTrust::Configuration | FileTrust::PublicMaterial => {
+            (owner == 0 || owner == effective_uid) && permission_bits & 0o022 == 0
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn read_file(
     _path: &Path,
@@ -310,4 +323,26 @@ fn read_file(
     _trust: FileTrust,
 ) -> Result<Vec<u8>, SecureInputError> {
     Err(SecureInputError::UnsupportedPlatform)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{FileTrust, file_is_trusted};
+
+    #[test]
+    fn configuration_and_public_files_require_a_trusted_owner() {
+        for trust in [FileTrust::Configuration, FileTrust::PublicMaterial] {
+            assert!(file_is_trusted(1_000, 0o644, trust, 1_000));
+            assert!(file_is_trusted(0, 0o444, trust, 1_000));
+            assert!(!file_is_trusted(2_000, 0o444, trust, 1_000));
+            assert!(!file_is_trusted(0, 0o664, trust, 1_000));
+        }
+    }
+
+    #[test]
+    fn private_files_require_owner_only_permissions() {
+        assert!(file_is_trusted(1_000, 0o600, FileTrust::OwnerOnly, 1_000));
+        assert!(!file_is_trusted(0, 0o600, FileTrust::OwnerOnly, 1_000));
+        assert!(!file_is_trusted(1_000, 0o640, FileTrust::OwnerOnly, 1_000));
+    }
 }

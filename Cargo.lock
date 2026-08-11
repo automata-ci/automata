@@ -986,7 +986,6 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-workflow-github",
  "bytes",
- "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",

@@ -30,7 +30,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, Request, State, rejection::PathRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    middleware::{self, Next},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, put},
 };
@@ -41,8 +41,6 @@ const MAX_QUERY_BYTES: usize = 1_024;
 const DEFAULT_PAGE_SIZE: u16 = 50;
 const DEFAULT_DETAIL_ASSIGNMENT_PAGE_SIZE: u16 = 50;
 const REQUEST_ID_HEADER: &str = "x-request-id";
-const REFERRER_POLICY: &str = "referrer-policy";
-const X_CONTENT_TYPE_OPTIONS: &str = "x-content-type-options";
 
 pub(crate) const USERS_PATH: &str = "/api/v1/users";
 pub(crate) const USER_PATH: &str = "/api/v1/users/{principal_id}";
@@ -86,16 +84,7 @@ pub(crate) fn management_api_router(
         )
         .route(DIRECT_BINDING_PATH, delete(revoke_direct_binding))
         .with_state(state)
-        .layer(middleware::from_fn(no_store))
-}
-
-async fn no_store(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    response
+        .layer(middleware::from_fn(super::api_security::no_store))
 }
 
 async fn list_users(State(state): State<ManagementApiState>, request: Request) -> Response {

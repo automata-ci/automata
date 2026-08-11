@@ -20,20 +20,14 @@ pub struct SecretString(String);
 
 impl SecretString {
     /// Creates a bounded, non-empty secret.
+    /// Rejected owned strings are zeroized before returning.
     ///
     /// # Errors
     ///
     /// Returns an error when the value is empty or exceeds the maximum size.
     pub fn new(value: impl Into<String>) -> Result<Self, SecretError> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(SecretError::Empty);
-        }
-        if value.len() > MAX_SECRET_LENGTH {
-            return Err(SecretError::TooLong {
-                maximum: MAX_SECRET_LENGTH,
-            });
-        }
+        let mut value = value.into();
+        validate_secret_string(&mut value)?;
         Ok(Self(value))
     }
 
@@ -44,7 +38,7 @@ impl SecretString {
 
     /// Compares this secret with a candidate without data-dependent early exit.
     pub fn constant_time_eq(&self, candidate: &str) -> bool {
-        bool::from(self.0.as_bytes().ct_eq(candidate.as_bytes()))
+        constant_time_string_eq(self.expose_secret(), candidate)
     }
 }
 
@@ -60,6 +54,20 @@ impl fmt::Debug for SecretString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecretString([REDACTED])")
     }
+}
+
+fn validate_secret_string(value: &mut String) -> Result<(), SecretError> {
+    if value.is_empty() {
+        value.zeroize();
+        return Err(SecretError::Empty);
+    }
+    if value.len() > MAX_SECRET_LENGTH {
+        value.zeroize();
+        return Err(SecretError::TooLong {
+            maximum: MAX_SECRET_LENGTH,
+        });
+    }
+    Ok(())
 }
 
 /// A shallow-cloneable string whose plaintext remains explicitly exposed.
@@ -231,10 +239,9 @@ impl SecureRandom for SystemSecureRandom {
 }
 
 fn random_secret(random: &dyn SecureRandom) -> Result<SecretString, RandomnessError> {
-    let mut bytes = [0_u8; GENERATED_SECRET_BYTES];
-    random.fill(&mut bytes)?;
-    let encoded = URL_SAFE_NO_PAD.encode(bytes);
-    bytes.zeroize();
+    let mut bytes = Zeroizing::new([0_u8; GENERATED_SECRET_BYTES]);
+    random.fill(bytes.as_mut())?;
+    let encoded = URL_SAFE_NO_PAD.encode(bytes.as_ref());
     SecretString::new(encoded).map_err(|_| RandomnessError)
 }
 
@@ -387,10 +394,26 @@ pub enum PkceError {
 }
 
 #[cfg(test)]
-mod shared_sensitive_string_tests {
+mod tests {
     use std::sync::Arc;
 
-    use super::{SharedSensitiveString, SharedSensitiveStringBacking};
+    use super::{
+        MAX_SECRET_LENGTH, SecretError, SharedSensitiveString, SharedSensitiveStringBacking,
+        validate_secret_string,
+    };
+
+    #[test]
+    fn oversized_rejection_zeroizes_the_owned_input_buffer() {
+        let mut rejected = "s".repeat(MAX_SECRET_LENGTH + 1);
+
+        assert_eq!(
+            validate_secret_string(&mut rejected),
+            Err(SecretError::TooLong {
+                maximum: MAX_SECRET_LENGTH,
+            })
+        );
+        assert!(rejected.as_bytes().iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn owned_backing_is_released_only_after_the_final_shared_owner() {

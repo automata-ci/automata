@@ -15,12 +15,12 @@ use url::Url;
 use crate::{
     config::same_origin,
     endpoint::{GithubHttpEndpoint, authorization_header},
+    repository_path::{self, has_ascii_case_insensitive_suffix},
     response::{decode_json, read_json_response},
 };
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const ACCEPT_ARCHIVE: &str = "application/octet-stream";
-const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
 
 #[derive(Deserialize)]
@@ -34,7 +34,8 @@ impl GithubHttpEndpoint {
         repository: &automata_ci_scm::RepositoryId,
         tail: &[&str],
     ) -> Result<Url, ScmError> {
-        let (owner, name) = github_repository_components(repository.as_str())?;
+        let (owner, name) = repository_path::split(repository.as_str())
+            .ok_or_else(|| ScmError::new(ScmErrorKind::InvalidResponse))?;
         let mut endpoint = self.trusted.api_base().clone();
         let mut segments = endpoint
             .path_segments_mut()
@@ -231,30 +232,6 @@ impl RepositorySourcePort for GithubHttpEndpoint {
     }
 }
 
-fn github_repository_components(repository: &str) -> Result<(&str, &str), ScmError> {
-    let mut components = repository.split('/');
-    let owner = components.next().unwrap_or_default();
-    let name = components.next().unwrap_or_default();
-    if components.next().is_some()
-        || !valid_repository_component(owner)
-        || !valid_repository_component(name)
-        || has_ascii_case_insensitive_suffix(name, ".git")
-    {
-        return Err(ScmError::new(ScmErrorKind::InvalidResponse));
-    }
-    Ok((owner, name))
-}
-
-fn valid_repository_component(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REPOSITORY_COMPONENT_BYTES
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
 fn validate_github_revision(revision: &str) -> Result<(), ScmError> {
     let invalid = revision == "@"
         || revision.starts_with(['/', '.'])
@@ -276,12 +253,6 @@ fn validate_github_revision(revision: &str) -> Result<(), ScmError> {
         return Err(ScmError::new(ScmErrorKind::InvalidResponse));
     }
     Ok(())
-}
-
-fn has_ascii_case_insensitive_suffix(value: &str, suffix: &str) -> bool {
-    value
-        .get(value.len().saturating_sub(suffix.len())..)
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
 fn validate_commit_sha(value: &str) -> Result<String, ScmError> {
