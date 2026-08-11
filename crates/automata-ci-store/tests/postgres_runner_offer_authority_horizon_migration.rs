@@ -1,10 +1,10 @@
 #[allow(dead_code)]
 mod common;
 
-use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, OperationId, UnixMillis};
+use automata_ci_core::{AttemptId, AttemptNumber, JobId, LeaseId, OperationId, UnixMillis};
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AcquireLease, CommandCursor, CommandSequence, DocumentSchema,
-    EnqueueRunnerCommand, InternalAttemptRepository as _, QueuedAttempt, RunnerCommandOutbox as _,
+    EnqueueRunnerCommand, InternalAttemptRepository as _, RunnerCommandOutbox as _,
     RunnerCommandPayload, RunnerOperationKind, RunnerSessionFence, StableRunnerSlot,
 };
 use sqlx::migrate::Migrate as _;
@@ -393,15 +393,7 @@ async fn insert_pre_horizon_offer_publication(
         .checked_add(120_000)
         .ok_or("test lease expiry overflowed PostgreSQL BIGINT")?;
     let attempt_id = AttemptId::new();
-    database
-        .store()
-        .insert_queued(QueuedAttempt::new(
-            attempt_id,
-            seed.job_id,
-            AttemptNumber::new(1)?,
-            UnixMillis::new(database_now),
-        ))
-        .await?;
+    insert_legacy_queued_attempt(database, attempt_id, seed.job_id, database_now).await?;
     let lease = database
         .store()
         .acquire_lease(AcquireLease::new(
@@ -471,6 +463,37 @@ async fn insert_pre_horizon_offer_publication(
         command_sequence: command.sequence(),
         request_operation_id,
     })
+}
+
+async fn insert_legacy_queued_attempt(
+    database: &TestDatabase,
+    attempt_id: AttemptId,
+    job_id: JobId,
+    queued_at_ms: i64,
+) -> TestResult {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO job_attempts (
+            id, job_id, attempt_number, lifecycle, fencing_token,
+            lease_failures, queued_at_ms, changed_at_ms,
+            secret_exposure_class, raw_log_disposition,
+            requested_log_visibility, effective_log_visibility,
+            output_safety_reason, output_safety_schema, classified_at_ms
+        ) VALUES (
+            $1, $2, $3, 'queued', 0, 0, $4, $4,
+            'readable_secret', 'suppress_user_output',
+            'private', 'private', 'repository_policy', 1, $4
+        )
+        ",
+    )
+    .bind(attempt_id.as_uuid())
+    .bind(job_id.as_uuid())
+    .bind(i32::try_from(AttemptNumber::new(1)?.get())?)
+    .bind(queued_at_ms)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(inserted.rows_affected(), 1);
+    Ok(())
 }
 
 async fn tombstone_legacy_offer_command(
