@@ -15,7 +15,7 @@ use automata_ci_core::{
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionEnvironment,
     ImmutableImage, NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
-    SandboxPrivilegePolicy, TargetPath,
+    SandboxPrivilegePolicy, TargetPath, TargetPlatform,
 };
 use automata_ci_runner_journal::StateRoot;
 use automata_ci_runner_spool::{ProtectionId, SpoolRoot};
@@ -55,7 +55,7 @@ pub struct RunnerProductConfig {
     spool: SpoolProtectionConfig,
     inventory: RunnerCapabilities,
     environments: BTreeMap<EnvironmentProfile, SandboxEnvironment>,
-    podman: PodmanProductConfig,
+    provider: RunnerProviderConfig,
     executor: ExecutorProductConfig,
     object_store: ObjectStoreProductConfig,
     github: GithubProductConfig,
@@ -136,10 +136,28 @@ impl RunnerProductConfig {
         &self.environments
     }
 
-    /// Returns rootless-Podman host process policy.
+    /// Returns the selected native or container execution provider policy.
     #[must_use]
-    pub const fn podman(&self) -> &PodmanProductConfig {
-        &self.podman
+    pub const fn provider(&self) -> &RunnerProviderConfig {
+        &self.provider
+    }
+
+    /// Returns rootless-Podman host process policy when selected.
+    #[must_use]
+    pub const fn podman(&self) -> Option<&PodmanProductConfig> {
+        match &self.provider {
+            RunnerProviderConfig::Podman(config) => Some(config),
+            RunnerProviderConfig::WindowsNative(_) => None,
+        }
+    }
+
+    /// Returns trusted native-Windows provider policy when selected.
+    #[must_use]
+    pub const fn windows_native(&self) -> Option<&WindowsNativeProductConfig> {
+        match &self.provider {
+            RunnerProviderConfig::WindowsNative(config) => Some(config),
+            RunnerProviderConfig::Podman(_) => None,
+        }
     }
 
     /// Returns per-job resource, isolation, path, and tool policy.
@@ -178,7 +196,7 @@ impl std::fmt::Debug for RunnerProductConfig {
             .field("spool", &self.spool)
             .field("inventory", &self.inventory)
             .field("environment_count", &self.environments.len())
-            .field("podman", &self.podman)
+            .field("provider", &self.provider)
             .field("executor", &self.executor)
             .field("object_store", &self.object_store)
             .field("github", &self.github)
@@ -206,7 +224,7 @@ impl MetricsProductConfig {
 pub struct StateRoots {
     journal: StateRoot,
     spool: SpoolRoot,
-    podman: PathBuf,
+    provider: PathBuf,
 }
 
 impl StateRoots {
@@ -222,12 +240,25 @@ impl StateRoots {
         &self.spool
     }
 
-    /// Returns the rootless-Podman adapter state root.
+    /// Returns the selected execution provider's durable state root.
     #[must_use]
-    pub fn podman(&self) -> &Path {
-        &self.podman
+    pub fn provider(&self) -> &Path {
+        &self.provider
     }
 }
+
+/// Validated execution-provider selection for one runner process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunnerProviderConfig {
+    /// Rootless Podman on a dedicated Linux execution host.
+    Podman(PodmanProductConfig),
+    /// Job Object-contained native processes for trusted Windows jobs.
+    WindowsNative(WindowsNativeProductConfig),
+}
+
+/// Trusted native-Windows execution provider configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsNativeProductConfig;
 
 /// Explicit material locations for outbound runner mTLS.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -473,13 +504,15 @@ impl ExecutorProductConfig {
 /// Executable locations baked into every configured environment manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolchainConfig {
-    bash: TargetPath,
-    sh: TargetPath,
+    bash: Option<TargetPath>,
+    sh: Option<TargetPath>,
     python: Option<TargetPath>,
     pwsh: Option<TargetPath>,
-    install: TargetPath,
-    tar: TargetPath,
-    sha256sum: TargetPath,
+    powershell: Option<TargetPath>,
+    cmd: Option<TargetPath>,
+    install: Option<TargetPath>,
+    tar: Option<TargetPath>,
+    sha256sum: Option<TargetPath>,
     node12: Option<TargetPath>,
     node16: Option<TargetPath>,
     node20: Option<TargetPath>,
@@ -489,14 +522,14 @@ pub struct ToolchainConfig {
 impl ToolchainConfig {
     /// Returns the target path to Bash.
     #[must_use]
-    pub const fn bash(&self) -> &TargetPath {
-        &self.bash
+    pub const fn bash(&self) -> Option<&TargetPath> {
+        self.bash.as_ref()
     }
 
     /// Returns the target path to the POSIX shell.
     #[must_use]
-    pub const fn sh(&self) -> &TargetPath {
-        &self.sh
+    pub const fn sh(&self) -> Option<&TargetPath> {
+        self.sh.as_ref()
     }
 
     /// Returns the optional target Python executable for `shell: python`.
@@ -511,22 +544,34 @@ impl ToolchainConfig {
         self.pwsh.as_ref()
     }
 
+    /// Returns the optional Windows PowerShell executable.
+    #[must_use]
+    pub const fn powershell(&self) -> Option<&TargetPath> {
+        self.powershell.as_ref()
+    }
+
+    /// Returns the optional Windows command interpreter.
+    #[must_use]
+    pub const fn cmd(&self) -> Option<&TargetPath> {
+        self.cmd.as_ref()
+    }
+
     /// Returns the target path to the installation utility.
     #[must_use]
-    pub const fn install(&self) -> &TargetPath {
-        &self.install
+    pub const fn install(&self) -> Option<&TargetPath> {
+        self.install.as_ref()
     }
 
     /// Returns the target path to the tar utility.
     #[must_use]
-    pub const fn tar(&self) -> &TargetPath {
-        &self.tar
+    pub const fn tar(&self) -> Option<&TargetPath> {
+        self.tar.as_ref()
     }
 
-    /// Returns the target path to the SHA-256 hashing utility.
+    /// Returns the optional POSIX SHA-256 hashing utility.
     #[must_use]
-    pub const fn sha256sum(&self) -> &TargetPath {
-        &self.sha256sum
+    pub const fn sha256sum(&self) -> Option<&TargetPath> {
+        self.sha256sum.as_ref()
     }
 
     /// Returns the optional target Node.js 12 executable for legacy actions.
@@ -705,6 +750,9 @@ pub enum RunnerProductConfigError {
     /// Rootless Podman process configuration is invalid.
     #[error("runner Podman configuration is invalid")]
     InvalidPodman,
+    /// Exactly one host-compatible execution provider must be selected.
+    #[error("runner execution provider configuration is invalid")]
+    InvalidProvider,
     /// GitHub executor policy or toolchain paths are invalid.
     #[error("runner executor configuration is invalid")]
     InvalidExecutor,
@@ -722,6 +770,12 @@ pub enum RunnerProductConfigError {
     InvalidMetrics,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderKind {
+    Podman,
+    WindowsNative,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRunnerProductConfig {
@@ -732,7 +786,10 @@ struct RawRunnerProductConfig {
     tls: RawClientTlsSources,
     spool: RawSpoolProtectionConfig,
     inventory: RawInventory,
-    podman: RawPodmanProductConfig,
+    #[serde(default)]
+    podman: Option<RawPodmanProductConfig>,
+    #[serde(default)]
+    windows_native: Option<RawWindowsNativeProductConfig>,
     executor: RawExecutorProductConfig,
     object_store: RawObjectStoreProductConfig,
     github: RawGithubProductConfig,
@@ -746,35 +803,61 @@ impl RawRunnerProductConfig {
             return Err(RunnerProductConfigError::UnsupportedSchema);
         }
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
-        let state = self.state.validate()?;
         let tls = self.tls.validate()?;
         let spool = self.spool.validate()?;
-        let executor = self.executor.validate()?;
         let github = self.github.validate()?;
         let metrics = self
             .metrics
             .map(RawMetricsProductConfig::validate)
             .transpose()?;
-        let podman = self.podman.validate(github.server_url())?;
-        let required_podman_state = required_podman_state_root(podman.runtime_directory());
-        if state.podman().as_os_str() != required_podman_state.as_os_str() {
-            return Err(RunnerProductConfigError::InvalidPodman);
-        }
-        if [state.journal().as_path(), state.spool().as_path()]
-            .into_iter()
-            .any(|durable| {
-                durable.starts_with(podman.runtime_directory())
-                    || podman.runtime_directory().starts_with(durable)
-            })
-        {
-            return Err(RunnerProductConfigError::InvalidStateRoots);
+        let (provider, provider_kind) = match (self.podman, self.windows_native) {
+            (Some(podman), None) => (
+                RunnerProviderConfig::Podman(podman.validate(github.server_url())?),
+                ProviderKind::Podman,
+            ),
+            (None, Some(windows_native)) => (
+                RunnerProviderConfig::WindowsNative(windows_native.validate()?),
+                ProviderKind::WindowsNative,
+            ),
+            _ => return Err(RunnerProductConfigError::InvalidProvider),
+        };
+        let state = self.state.validate(provider_kind)?;
+        let executor = self.executor.validate(provider_kind)?;
+        if let RunnerProviderConfig::Podman(podman) = &provider {
+            let required_podman_state = required_podman_state_root(podman.runtime_directory());
+            if state.provider().as_os_str() != required_podman_state.as_os_str() {
+                return Err(RunnerProductConfigError::InvalidPodman);
+            }
+            if [state.journal().as_path(), state.spool().as_path()]
+                .into_iter()
+                .any(|durable| {
+                    durable.starts_with(podman.runtime_directory())
+                        || podman.runtime_directory().starts_with(durable)
+                })
+            {
+                return Err(RunnerProductConfigError::InvalidStateRoots);
+            }
         }
         let (inventory, environments) = self.inventory.validate(
             self.runner_id,
             &executor,
-            podman.job_container_engine(),
-            podman.service_proxy_image().is_some(),
+            provider_kind,
+            match &provider {
+                RunnerProviderConfig::Podman(podman) => podman.job_container_engine(),
+                RunnerProviderConfig::WindowsNative(_) => {
+                    automata_ci_sandbox_podman::JobContainerEngine::Disabled
+                }
+            },
+            matches!(
+                &provider,
+                RunnerProviderConfig::Podman(podman) if podman.service_proxy_image().is_some()
+            ),
         )?;
+        if matches!(&provider, RunnerProviderConfig::WindowsNative(_))
+            && !valid_windows_provider_topology(&state, &executor, &environments)
+        {
+            return Err(RunnerProductConfigError::InvalidInventory);
+        }
         let object_store = self.object_store.validate()?;
         Ok(RunnerProductConfig {
             runner_id: self.runner_id,
@@ -784,13 +867,57 @@ impl RawRunnerProductConfig {
             spool,
             inventory,
             environments,
-            podman,
+            provider,
             executor,
             object_store,
             github,
             metrics,
         })
     }
+}
+
+fn valid_windows_provider_topology(
+    state: &StateRoots,
+    executor: &ExecutorProductConfig,
+    environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
+) -> bool {
+    let Some(provider_root) = state
+        .provider()
+        .to_str()
+        .map(|path| path.trim_end_matches('\\').to_ascii_lowercase())
+    else {
+        return false;
+    };
+    let strict_root = |path: &TargetPath| {
+        automata_ci_sandbox_windows::WindowsSandboxProviderOptions::new(PathBuf::from(
+            path.as_str(),
+        ))
+        .is_ok()
+    };
+    let strict_descendant = |path: &TargetPath| {
+        let normalized = path.as_str().trim_end_matches('\\').to_ascii_lowercase();
+        strict_root(path)
+            && normalized
+                .strip_prefix(&provider_root)
+                .is_some_and(|remainder| remainder.starts_with('\\'))
+    };
+    if !strict_descendant(executor.runner_root()) {
+        return false;
+    }
+    let runner_root = executor
+        .runner_root()
+        .as_str()
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    environments.values().all(|environment| {
+        let workspace = environment
+            .workspace()
+            .as_str()
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        strict_descendant(environment.workspace())
+            && !windows_roots_overlap(&workspace, &runner_root)
+    })
 }
 
 #[derive(Deserialize)]
@@ -817,22 +944,51 @@ impl RawMetricsProductConfig {
 struct RawStateRoots {
     journal: PathBuf,
     spool: PathBuf,
-    podman: PathBuf,
+    #[serde(default)]
+    podman: Option<PathBuf>,
+    #[serde(default)]
+    windows_native: Option<PathBuf>,
 }
 
 impl RawStateRoots {
-    fn validate(self) -> Result<StateRoots, RunnerProductConfigError> {
-        let roots = [&self.journal, &self.spool, &self.podman];
-        if roots
+    fn validate(self, provider_kind: ProviderKind) -> Result<StateRoots, RunnerProductConfigError> {
+        let provider = match (provider_kind, self.podman, self.windows_native) {
+            (ProviderKind::Podman, Some(path), None)
+            | (ProviderKind::WindowsNative, None, Some(path)) => path,
+            _ => return Err(RunnerProductConfigError::InvalidStateRoots),
+        };
+        let roots = [&self.journal, &self.spool, &provider];
+        let invalid_path = roots
             .iter()
-            .any(|path| validate_absolute_path(path).is_err())
-            || roots.iter().enumerate().any(|(left_index, left)| {
+            .any(|path| validate_absolute_path(path).is_err());
+        let overlap = match provider_kind {
+            ProviderKind::Podman => roots.iter().enumerate().any(|(left_index, left)| {
                 roots.iter().enumerate().any(|(right_index, right)| {
                     left_index != right_index
                         && (left.starts_with(right.as_path()) || right.starts_with(left.as_path()))
                 })
-            })
-        {
+            }),
+            ProviderKind::WindowsNative => {
+                let normalized = roots
+                    .iter()
+                    .map(|path| {
+                        automata_ci_sandbox_windows::WindowsSandboxProviderOptions::new(
+                            path.to_path_buf(),
+                        )
+                        .ok()?;
+                        Some(path.to_str()?.trim_end_matches('\\').to_ascii_lowercase())
+                    })
+                    .collect::<Option<Vec<_>>>();
+                normalized.is_none_or(|roots| {
+                    roots.iter().enumerate().any(|(left_index, left)| {
+                        roots.iter().enumerate().any(|(right_index, right)| {
+                            left_index != right_index && windows_roots_overlap(left, right)
+                        })
+                    })
+                })
+            }
+        };
+        if invalid_path || overlap {
             return Err(RunnerProductConfigError::InvalidStateRoots);
         }
         let journal = StateRoot::explicit(self.journal)
@@ -842,9 +998,19 @@ impl RawStateRoots {
         Ok(StateRoots {
             journal,
             spool,
-            podman: self.podman,
+            provider,
         })
     }
+}
+
+fn windows_roots_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|remainder| remainder.starts_with('\\'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|remainder| remainder.starts_with('\\'))
 }
 
 #[derive(Deserialize)]
@@ -939,6 +1105,7 @@ impl RawInventory {
         self,
         runner_id: RunnerId,
         executor: &ExecutorProductConfig,
+        provider_kind: ProviderKind,
         job_container_engine: automata_ci_sandbox_podman::JobContainerEngine,
         service_proxy_configured: bool,
     ) -> Result<
@@ -952,6 +1119,7 @@ impl RawInventory {
             || self.groups.len() > MAX_SELECTORS
             || self.environment_profiles.is_empty()
             || self.environment_profiles.len() > MAX_ENVIRONMENTS
+            || (provider_kind == ProviderKind::WindowsNative && self.max_parallel_jobs != 1)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -973,7 +1141,7 @@ impl RawInventory {
         }
         let mut environments = BTreeMap::new();
         for raw in self.environment_profiles {
-            let environment = raw.validate()?;
+            let environment = raw.validate(provider_kind)?;
             if environments
                 .insert(environment.attestation().clone(), environment)
                 .is_some()
@@ -981,27 +1149,62 @@ impl RawInventory {
                 return Err(RunnerProductConfigError::InvalidInventory);
             }
         }
-        let platform = RunnerPlatform::new(host_operating_system()?, host_architecture()?);
-        let mut sandbox_features = BTreeSet::from([
-            SandboxFeature::CLEAN_WORKSPACE,
-            SandboxFeature::NETWORK_ISOLATION,
-        ]);
-        if executor.root_filesystem() == RootFilesystemPolicy::ReadOnly {
-            sandbox_features.insert(SandboxFeature::READ_ONLY_ROOT);
+        if provider_kind == ProviderKind::WindowsNative
+            && environments.values().any(|environment| {
+                !valid_windows_process_environment(environment.default_environment(), executor)
+            })
+        {
+            return Err(RunnerProductConfigError::InvalidInventory);
         }
-        if executor.privilege() == SandboxPrivilegePolicy::Administrator {
-            sandbox_features.insert(SandboxFeature::PRIVILEGED_USER);
+        let host_operating_system = host_operating_system()?;
+        if !matches!(
+            (provider_kind, &host_operating_system),
+            (ProviderKind::Podman, OperatingSystem::Linux)
+                | (ProviderKind::WindowsNative, OperatingSystem::Windows)
+        ) {
+            return Err(RunnerProductConfigError::InvalidProvider);
         }
-        let sandbox = SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features);
-        let mut container_features = match job_container_engine {
-            automata_ci_sandbox_podman::JobContainerEngine::Disabled => BTreeSet::new(),
-            automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi => {
-                BTreeSet::from([ContainerFeature::DOCKER_COMPATIBLE_API])
+        let platform = RunnerPlatform::new(host_operating_system, host_architecture()?);
+        let (sandbox, container_features, runner_features) = match provider_kind {
+            ProviderKind::Podman => {
+                let mut sandbox_features = BTreeSet::from([
+                    SandboxFeature::CLEAN_WORKSPACE,
+                    SandboxFeature::NETWORK_ISOLATION,
+                ]);
+                if executor.root_filesystem() == RootFilesystemPolicy::ReadOnly {
+                    sandbox_features.insert(SandboxFeature::READ_ONLY_ROOT);
+                }
+                if executor.privilege() == SandboxPrivilegePolicy::Administrator {
+                    sandbox_features.insert(SandboxFeature::PRIVILEGED_USER);
+                }
+                let mut container_features = match job_container_engine {
+                    automata_ci_sandbox_podman::JobContainerEngine::Disabled => BTreeSet::new(),
+                    automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi => {
+                        BTreeSet::from([ContainerFeature::DOCKER_COMPATIBLE_API])
+                    }
+                };
+                if service_proxy_configured {
+                    container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
+                }
+                (
+                    SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features),
+                    container_features,
+                    BTreeSet::from([
+                        RunnerFeature::SHELL_STEPS,
+                        RunnerFeature::JAVASCRIPT_ACTIONS,
+                        RunnerFeature::COMMAND_FILES,
+                    ]),
+                )
             }
+            ProviderKind::WindowsNative => (
+                SandboxCapabilities::new(
+                    IsolationLevel::Process,
+                    [SandboxFeature::CLEAN_WORKSPACE],
+                ),
+                BTreeSet::new(),
+                BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+            ),
         };
-        if service_proxy_configured {
-            container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
-        }
         let inventory = RunnerCapabilities::new(runner_id, platform)
             .with_labels(labels)
             .with_groups(groups)
@@ -1010,17 +1213,74 @@ impl RawInventory {
             .with_resources_per_job(resources.capacity)
             .with_sandbox(sandbox)
             .with_containers(ContainerCapabilities::new(container_features))
-            .with_features([
-                RunnerFeature::SHELL_STEPS,
-                RunnerFeature::JAVASCRIPT_ACTIONS,
-                RunnerFeature::COMMAND_FILES,
-            ])
+            .with_features(runner_features)
             .with_environment_profiles(environments.keys().cloned());
         inventory
             .validate()
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         Ok((inventory, environments))
     }
+}
+
+fn valid_windows_process_environment(
+    environment: &ExecutionEnvironment,
+    executor: &ExecutorProductConfig,
+) -> bool {
+    let mut names = BTreeSet::new();
+    if !environment
+        .values()
+        .iter()
+        .all(|variable| names.insert(variable.name().as_str().to_lowercase()))
+    {
+        return false;
+    }
+    let value = |name: &str| {
+        environment
+            .values()
+            .iter()
+            .find(|variable| variable.name().as_str().eq_ignore_ascii_case(name))
+            .map(|variable| variable.value().expose())
+    };
+    let Some(system_root) = value("SystemRoot") else {
+        return false;
+    };
+    let Some(windir) = value("WINDIR") else {
+        return false;
+    };
+    let Some(comspec) = value("ComSpec") else {
+        return false;
+    };
+    let Some(temp) = value("TEMP") else {
+        return false;
+    };
+    let Some(tmp) = value("TMP") else {
+        return false;
+    };
+    let Some(pathext) = value("PATHEXT") else {
+        return false;
+    };
+    let Some(cmd) = executor.toolchain().cmd() else {
+        return false;
+    };
+    let windows_path_matches = |value: &str, expected: &TargetPath| {
+        TargetPath::windows(value.to_owned())
+            .is_ok_and(|path| path.as_str().eq_ignore_ascii_case(expected.as_str()))
+    };
+    let Ok(system_root_path) = TargetPath::windows(system_root.to_owned()) else {
+        return false;
+    };
+    let extensions = pathext.split(';').collect::<Vec<_>>();
+    system_root_path.as_str().eq_ignore_ascii_case(windir)
+        && windows_path_matches(comspec, cmd)
+        && windows_path_matches(temp, executor.temp())
+        && windows_path_matches(tmp, executor.temp())
+        && [".COM", ".EXE", ".BAT", ".CMD"]
+            .into_iter()
+            .all(|required| {
+                extensions
+                    .iter()
+                    .any(|extension| extension.eq_ignore_ascii_case(required))
+            })
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1065,8 +1325,11 @@ impl RawResources {
 struct RawEnvironment {
     id: String,
     manifest_sha256: String,
-    image: String,
-    keepalive_program: String,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    keepalive_program: Option<String>,
+    #[serde(default)]
     keepalive_arguments: Vec<String>,
     workspace: String,
     #[serde(default)]
@@ -1074,7 +1337,10 @@ struct RawEnvironment {
 }
 
 impl RawEnvironment {
-    fn validate(self) -> Result<SandboxEnvironment, RunnerProductConfigError> {
+    fn validate(
+        self,
+        provider_kind: ProviderKind,
+    ) -> Result<SandboxEnvironment, RunnerProductConfigError> {
         if self.keepalive_arguments.len() > MAX_KEEPALIVE_ARGUMENTS {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -1083,14 +1349,6 @@ impl RawEnvironment {
         let digest = Sha256Digest::from_str(&self.manifest_sha256)
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         let attestation = EnvironmentProfile::new(id, digest);
-        let image = ImmutableImage::new(self.image)
-            .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-        let keepalive_program = TargetPath::posix(self.keepalive_program)
-            .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-        let keepalive = ExecutionArgv::new(keepalive_program, self.keepalive_arguments)
-            .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-        let workspace = TargetPath::posix(self.workspace)
-            .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         let default_environment = self
             .default_environment
             .into_iter()
@@ -1104,14 +1362,45 @@ impl RawEnvironment {
             .collect::<Result<Vec<_>, RunnerProductConfigError>>()?;
         let default_environment = ExecutionEnvironment::new(default_environment)
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-        SandboxEnvironment::new(
-            attestation,
-            image,
-            keepalive,
-            workspace,
-            default_environment,
-        )
-        .map_err(|_| RunnerProductConfigError::InvalidInventory)
+        match provider_kind {
+            ProviderKind::Podman => {
+                let image = ImmutableImage::new(
+                    self.image
+                        .ok_or(RunnerProductConfigError::InvalidInventory)?,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                let keepalive_program = TargetPath::posix(
+                    self.keepalive_program
+                        .ok_or(RunnerProductConfigError::InvalidInventory)?,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                let keepalive = ExecutionArgv::new(keepalive_program, self.keepalive_arguments)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                let workspace = TargetPath::posix(self.workspace)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                SandboxEnvironment::new(
+                    attestation,
+                    image,
+                    keepalive,
+                    workspace,
+                    default_environment,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)
+            }
+            ProviderKind::WindowsNative => {
+                if self.image.is_some()
+                    || self.keepalive_program.is_some()
+                    || !self.keepalive_arguments.is_empty()
+                    || self.workspace.contains('%')
+                {
+                    return Err(RunnerProductConfigError::InvalidInventory);
+                }
+                let workspace = TargetPath::windows(self.workspace)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                SandboxEnvironment::native(attestation, workspace, default_environment)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)
+            }
+        }
     }
 }
 
@@ -1133,6 +1422,19 @@ struct RawPodmanProductConfig {
     service_proxy_image: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWindowsNativeProductConfig {}
+
+impl RawWindowsNativeProductConfig {
+    fn validate(self) -> Result<WindowsNativeProductConfig, RunnerProductConfigError> {
+        if std::env::consts::OS != "windows" {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        Ok(WindowsNativeProductConfig)
+    }
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawJobContainerEngine {
@@ -1145,6 +1447,9 @@ impl RawPodmanProductConfig {
         self,
         github_server_url: &Url,
     ) -> Result<PodmanProductConfig, RunnerProductConfigError> {
+        if std::env::consts::OS != "linux" {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
         validate_absolute_path(&self.binary)
             .map_err(|_| RunnerProductConfigError::InvalidPodman)?;
         validate_absolute_path(&self.home).map_err(|_| RunnerProductConfigError::InvalidPodman)?;
@@ -1228,6 +1533,7 @@ fn validate_service_proxy_image(value: String) -> Result<ImmutableImage, ()> {
 enum RawNetworkPolicy {
     Disabled,
     PrivateEgress,
+    Host,
 }
 
 #[derive(Deserialize)]
@@ -1235,6 +1541,7 @@ enum RawNetworkPolicy {
 enum RawRootFilesystemPolicy {
     ReadOnly,
     Writable,
+    Host,
 }
 
 #[derive(Deserialize)]
@@ -1242,6 +1549,7 @@ enum RawRootFilesystemPolicy {
 enum RawPrivilegePolicy {
     Unprivileged,
     Administrator,
+    Host,
 }
 
 #[derive(Deserialize)]
@@ -1262,7 +1570,10 @@ struct RawExecutorProductConfig {
 }
 
 impl RawExecutorProductConfig {
-    fn validate(self) -> Result<ExecutorProductConfig, RunnerProductConfigError> {
+    fn validate(
+        self,
+        provider_kind: ProviderKind,
+    ) -> Result<ExecutorProductConfig, RunnerProductConfigError> {
         let resources = self
             .resources
             .validate()
@@ -1271,40 +1582,55 @@ impl RawExecutorProductConfig {
         let network = match self.network {
             RawNetworkPolicy::Disabled => NetworkPolicy::Disabled,
             RawNetworkPolicy::PrivateEgress => NetworkPolicy::PrivateEgress,
+            RawNetworkPolicy::Host => NetworkPolicy::Host,
         };
         let root_filesystem = match self.root_filesystem {
             RawRootFilesystemPolicy::ReadOnly => RootFilesystemPolicy::ReadOnly,
             RawRootFilesystemPolicy::Writable => RootFilesystemPolicy::Writable,
+            RawRootFilesystemPolicy::Host => RootFilesystemPolicy::Host,
         };
         let privilege = match self.privilege {
             RawPrivilegePolicy::Unprivileged => SandboxPrivilegePolicy::Unprivileged,
             RawPrivilegePolicy::Administrator => SandboxPrivilegePolicy::Administrator,
+            RawPrivilegePolicy::Host => SandboxPrivilegePolicy::Host,
         };
-        let default_step_timeout = Duration::from_secs(self.default_step_timeout_seconds);
-        let runner_root = TargetPath::posix(self.runner_root)
-            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
-        if runner_root.as_str() == "/" {
-            return Err(RunnerProductConfigError::InvalidExecutor);
-        }
-        let home =
-            TargetPath::posix(self.home).map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
-        let tool_cache = TargetPath::posix(self.tool_cache)
-            .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
-        let temp =
-            TargetPath::posix(self.temp).map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
-        if home.as_str() == "/"
-            || temp.as_str() == "/"
-            || tool_cache.as_str() == "/"
-            || self.path.is_empty()
-            || self.path.len() > 8_192
-            || self
-                .path
-                .split(':')
-                .any(|entry| entry.is_empty() || TargetPath::posix(entry).is_err())
+        if matches!(
+            (provider_kind, network, root_filesystem, privilege),
+            (ProviderKind::Podman, NetworkPolicy::Host, _, _,)
+                | (ProviderKind::Podman, _, RootFilesystemPolicy::Host, _,)
+                | (ProviderKind::Podman, _, _, SandboxPrivilegePolicy::Host)
+        ) || (provider_kind == ProviderKind::WindowsNative
+            && (network != NetworkPolicy::Host
+                || root_filesystem != RootFilesystemPolicy::Host
+                || privilege != SandboxPrivilegePolicy::Host))
         {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
-        let toolchain = self.toolchain.validate()?;
+        let default_step_timeout = Duration::from_secs(self.default_step_timeout_seconds);
+        let parse_path = |value| provider_target_path(provider_kind, value);
+        let runner_root = parse_path(self.runner_root)?;
+        if target_is_root(&runner_root) {
+            return Err(RunnerProductConfigError::InvalidExecutor);
+        }
+        let home = parse_path(self.home)?;
+        let tool_cache = parse_path(self.tool_cache)?;
+        let temp = parse_path(self.temp)?;
+        let path_separator = match provider_kind {
+            ProviderKind::Podman => ':',
+            ProviderKind::WindowsNative => ';',
+        };
+        if target_is_root(&home)
+            || target_is_root(&temp)
+            || target_is_root(&tool_cache)
+            || self.path.is_empty()
+            || self.path.len() > 8_192
+            || self.path.split(path_separator).any(|entry| {
+                entry.is_empty() || provider_target_path(provider_kind, entry).is_err()
+            })
+        {
+            return Err(RunnerProductConfigError::InvalidExecutor);
+        }
+        let toolchain = self.toolchain.validate(provider_kind)?;
         automata_ci_job_executor_github::GithubJobExecutorConfig::new(
             resources,
             network,
@@ -1332,16 +1658,40 @@ impl RawExecutorProductConfig {
     }
 }
 
+fn provider_target_path(
+    provider_kind: ProviderKind,
+    value: impl Into<String>,
+) -> Result<TargetPath, RunnerProductConfigError> {
+    let value = value.into();
+    if provider_kind == ProviderKind::WindowsNative && value.contains('%') {
+        return Err(RunnerProductConfigError::InvalidExecutor);
+    }
+    match provider_kind {
+        ProviderKind::Podman => TargetPath::posix(value),
+        ProviderKind::WindowsNative => TargetPath::windows(value),
+    }
+    .map_err(|_| RunnerProductConfigError::InvalidExecutor)
+}
+
+fn target_is_root(path: &TargetPath) -> bool {
+    match path.platform() {
+        TargetPlatform::Posix => path.as_str() == "/",
+        TargetPlatform::Windows => path.as_str().len() == 3 && path.as_str().ends_with("\\"),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawToolchainConfig {
-    bash: String,
-    sh: String,
+    bash: Option<String>,
+    sh: Option<String>,
     python: Option<String>,
     pwsh: Option<String>,
-    install: String,
-    tar: String,
-    sha256sum: String,
+    powershell: Option<String>,
+    cmd: Option<String>,
+    install: Option<String>,
+    tar: Option<String>,
+    sha256sum: Option<String>,
     node12: Option<String>,
     node16: Option<String>,
     node20: Option<String>,
@@ -1349,23 +1699,68 @@ struct RawToolchainConfig {
 }
 
 impl RawToolchainConfig {
-    fn validate(self) -> Result<ToolchainConfig, RunnerProductConfigError> {
-        let path = |value: String| {
-            TargetPath::posix(value).map_err(|_| RunnerProductConfigError::InvalidExecutor)
-        };
-        Ok(ToolchainConfig {
-            bash: path(self.bash)?,
-            sh: path(self.sh)?,
+    fn validate(
+        self,
+        provider_kind: ProviderKind,
+    ) -> Result<ToolchainConfig, RunnerProductConfigError> {
+        let path = |value: String| provider_target_path(provider_kind, value);
+        let config = ToolchainConfig {
+            bash: self.bash.map(&path).transpose()?,
+            sh: self.sh.map(&path).transpose()?,
             python: self.python.map(&path).transpose()?,
             pwsh: self.pwsh.map(&path).transpose()?,
-            install: path(self.install)?,
-            tar: path(self.tar)?,
-            sha256sum: path(self.sha256sum)?,
+            powershell: self.powershell.map(&path).transpose()?,
+            cmd: self.cmd.map(&path).transpose()?,
+            install: self.install.map(&path).transpose()?,
+            tar: self.tar.map(&path).transpose()?,
+            sha256sum: self.sha256sum.map(&path).transpose()?,
             node12: self.node12.map(path).transpose()?,
             node16: self.node16.map(path).transpose()?,
             node20: self.node20.map(path).transpose()?,
             node24: self.node24.map(path).transpose()?,
-        })
+        };
+        let valid = match provider_kind {
+            ProviderKind::Podman => {
+                config.bash.is_some()
+                    && config.sh.is_some()
+                    && config.install.is_some()
+                    && config.tar.is_some()
+                    && config.sha256sum.is_some()
+                    && config.powershell.is_none()
+                    && config.cmd.is_none()
+            }
+            ProviderKind::WindowsNative => {
+                config.bash.is_none()
+                    && config.sh.is_none()
+                    && config.pwsh.is_some()
+                    && config.powershell.is_some()
+                    && config.cmd.is_some()
+                    && [
+                        config.python.as_ref(),
+                        config.pwsh.as_ref(),
+                        config.powershell.as_ref(),
+                        config.cmd.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .all(|path| {
+                        !path
+                            .as_str()
+                            .split('\\')
+                            .any(|segment| segment.eq_ignore_ascii_case("WindowsApps"))
+                    })
+                    && config.install.is_none()
+                    && config.tar.is_none()
+                    && config.sha256sum.is_none()
+                    && config.node12.is_none()
+                    && config.node16.is_none()
+                    && config.node20.is_none()
+                    && config.node24.is_none()
+            }
+        };
+        valid
+            .then_some(config)
+            .ok_or(RunnerProductConfigError::InvalidExecutor)
     }
 }
 
@@ -1518,6 +1913,7 @@ fn validate_control_endpoint(value: &str) -> Result<Uri, RunnerProductConfigErro
 fn host_operating_system() -> Result<OperatingSystem, RunnerProductConfigError> {
     match std::env::consts::OS {
         "linux" => Ok(OperatingSystem::Linux),
+        "windows" => Ok(OperatingSystem::Windows),
         _ => Err(RunnerProductConfigError::InvalidInventory),
     }
 }

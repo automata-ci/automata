@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "runner_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
+  "control_endpoint": "https://127.0.0.1:9090/",
+  "state": {
+    "journal": "C:\\automata\\state\\journal",
+    "spool": "C:\\automata\\state\\spool",
+    "windows_native": "C:\\automata\\native"
+  },
+  "tls": {
+    "server_roots": {
+      "kind": "environment",
+      "name": "AUTOMATA_RUNNER_SERVER_ROOTS_PEM"
+    },
+    "certificate_chain": {
+      "kind": "environment",
+      "name": "AUTOMATA_RUNNER_CERTIFICATE_CHAIN_PEM"
+    },
+    "private_key": {
+      "kind": "environment",
+      "name": "AUTOMATA_RUNNER_PRIVATE_KEY_PEM"
+    }
+  },
+  "spool": {
+    "protection_id": "windows-runner-key-v1",
+    "key_hex": {
+      "kind": "environment",
+      "name": "AUTOMATA_RUNNER_SPOOL_KEY_HEX"
+    },
+    "decrypt_only": []
+  },
+  "inventory": {
+    "labels": [
+      "self-hosted",
+      "windows",
+      "x64",
+      "windows-2025"
+    ],
+    "groups": [
+      "default"
+    ],
+    "max_parallel_jobs": 1,
+    "resources_per_job": {
+      "cpu_millis": 4000,
+      "memory_bytes": 8589934592,
+      "ephemeral_disk_bytes": 0,
+      "pids": 512
+    },
+    "environment_profiles": [
+      {
+        "id": "automata.dev/windows-2025-x64-native-v1",
+        "manifest_sha256": "aee9c4c9fb8ad2a8332ca6cf2b0a2e24bc1a61485ef224adef4831093ab5cd6c",
+        "workspace": "C:\\automata\\native\\workspaces",
+        "default_environment": {
+          "SystemRoot": "C:\\Windows",
+          "WINDIR": "C:\\Windows",
+          "ComSpec": "C:\\Windows\\System32\\cmd.exe",
+          "TEMP": "C:\\automata\\temp",
+          "TMP": "C:\\automata\\temp",
+          "PATHEXT": ".COM;.EXE;.BAT;.CMD"
+        }
+      }
+    ]
+  },
+  "windows_native": {},
+  "executor": {
+    "resources": {
+      "cpu_millis": 4000,
+      "memory_bytes": 8589934592,
+      "ephemeral_disk_bytes": 0,
+      "pids": 512
+    },
+    "network": "host",
+    "root_filesystem": "host",
+    "privilege": "host",
+    "default_step_timeout_seconds": 3600,
+    "maximum_output_bytes": 16777216,
+    "runner_root": "C:\\automata\\native\\runner",
+    "home": "C:\\automata\\home",
+    "path": "C:\\Program Files\\PowerShell\\7;C:\\Windows\\System32;C:\\Windows",
+    "temp": "C:\\automata\\temp",
+    "tool_cache": "C:\\automata\\toolcache",
+    "toolchain": {
+      "bash": null,
+      "sh": null,
+      "python": null,
+      "pwsh": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "cmd": "C:\\Windows\\System32\\cmd.exe",
+      "install": null,
+      "tar": null,
+      "node12": null,
+      "node16": null,
+      "node20": null,
+      "node24": null
+    }
+  },
+  "object_store": {
+    "endpoint": "https://s3.amazonaws.com/",
+    "region": "us-east-1",
+    "bucket": "automata-runner",
+    "prefix": "automata/v1",
+    "loopback_development": false,
+    "operation_timeout_seconds": 30,
+    "access_key_id": {
+      "kind": "environment",
+      "name": "AUTOMATA_S3_ACCESS_KEY_ID"
+    },
+    "secret_access_key": {
+      "kind": "environment",
+      "name": "AUTOMATA_S3_SECRET_ACCESS_KEY"
+    }
+  },
+  "github": {
+    "user_agent": "automata-runner/0.1.0",
+    "server_url": "https://github.com/",
+    "api_url": "https://api.github.com/",
+    "graphql_url": "https://api.github.com/graphql"
+  }
+}

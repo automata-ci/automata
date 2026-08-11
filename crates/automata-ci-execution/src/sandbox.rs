@@ -15,6 +15,7 @@ pub struct SandboxSpec {
     generation: SandboxGeneration,
     profile: SandboxEnvironment,
     workspace: TargetPath,
+    scratch: Option<TargetPath>,
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
@@ -44,6 +45,7 @@ impl SandboxSpec {
             generation,
             profile,
             workspace,
+            scratch: None,
             network,
             root_filesystem,
             privilege: SandboxPrivilegePolicy::Unprivileged,
@@ -63,6 +65,16 @@ impl SandboxSpec {
     #[must_use]
     pub const fn with_root_filesystem(mut self, root_filesystem: RootFilesystemPolicy) -> Self {
         self.root_filesystem = root_filesystem;
+        self
+    }
+
+    /// Selects the exact provider-owned per-attempt scratch root.
+    ///
+    /// Native providers use this allowlist entry for command files and other
+    /// bounded execution material outside the job workspace.
+    #[must_use]
+    pub fn with_scratch(mut self, scratch: TargetPath) -> Self {
+        self.scratch = Some(scratch);
         self
     }
 
@@ -88,6 +100,12 @@ impl SandboxSpec {
     #[must_use]
     pub const fn workspace(&self) -> &TargetPath {
         &self.workspace
+    }
+
+    /// Returns the optional provider-owned per-attempt scratch root.
+    #[must_use]
+    pub const fn scratch(&self) -> Option<&TargetPath> {
+        self.scratch.as_ref()
     }
 
     /// Returns the requested network-isolation policy.

@@ -1,6 +1,8 @@
+#![cfg(unix)]
+
 use automata_ci_core::{
-    Architecture, ContainerFeature, OperatingSystem, ResourceCapacity, RunnerFeature,
-    RunnerRequirements, SandboxFeature, Sha256Digest,
+    Architecture, ContainerFeature, IsolationLevel, OperatingSystem, ResourceCapacity,
+    RunnerFeature, RunnerRequirements, SandboxFeature, Sha256Digest,
 };
 use automata_ci_runner::product::{
     RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
@@ -35,7 +37,10 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
         .expect("dogfood configuration must select one exact environment");
     assert_eq!(profile.id().as_str(), PROFILE_ID);
     assert_eq!(profile.digest().to_string(), PROFILE_DIGEST);
-    assert_eq!(environment.image().reference(), IMAGE);
+    assert_eq!(
+        environment.image().expect("container image").reference(),
+        IMAGE
+    );
     assert_eq!(
         environment_value(environment, "CARGO_HOME"),
         Some("/opt/cargo")
@@ -56,6 +61,7 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     assert_eq!(
         config
             .podman()
+            .expect("Linux fixture selects Podman")
             .github_server_host_gateway_alias()
             .expect("local dogfood config must opt into its exact GitHub hostname")
             .as_str(),
@@ -263,7 +269,11 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
     );
     assert!(config.object_store().force_path_style());
     assert!(
-        config.podman().github_server_host_gateway_alias().is_none(),
+        config
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .github_server_host_gateway_alias()
+            .is_none(),
         "host-gateway routing must remain disabled by default"
     );
     assert_eq!(config.spool().protection_id(), "runner-key-v1");
@@ -291,9 +301,25 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
         .expect("one exact environment");
     assert_eq!(profile.id().as_str(), PROFILE_ID);
     assert_eq!(profile.digest().to_string(), PROFILE_DIGEST);
-    assert_eq!(environment.image().reference(), IMAGE);
-    assert_eq!(environment.keepalive().program().as_str(), "/bin/sleep");
-    assert_eq!(environment.keepalive().arguments(), ["infinity"]);
+    assert_eq!(
+        environment.image().expect("container image").reference(),
+        IMAGE
+    );
+    assert_eq!(
+        environment
+            .keepalive()
+            .expect("container keepalive")
+            .program()
+            .as_str(),
+        "/bin/sleep"
+    );
+    assert_eq!(
+        environment
+            .keepalive()
+            .expect("container keepalive")
+            .arguments(),
+        ["infinity"]
+    );
     assert_eq!(environment.workspace().as_str(), "/__w");
     assert_eq!(
         environment_value(environment, "CARGO_HOME"),
@@ -533,6 +559,7 @@ fn github_host_gateway_opt_in_derives_only_the_exact_validated_server_hostname()
     assert_eq!(
         config
             .podman()
+            .expect("Linux fixture selects Podman")
             .github_server_host_gateway_alias()
             .expect("mapping")
             .as_str(),
@@ -557,7 +584,13 @@ fn service_proxy_image_is_optional_strict_and_bounds_registration_authority() {
     let mut value: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     let absent = parse_value(&value).expect("service proxy may be disabled");
-    assert!(absent.podman().service_proxy_image().is_none());
+    assert!(
+        absent
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .service_proxy_image()
+            .is_none()
+    );
     assert!(
         !absent
             .inventory()
@@ -572,6 +605,7 @@ fn service_proxy_image_is_optional_strict_and_bounds_registration_authority() {
     assert_eq!(
         configured
             .podman()
+            .expect("Linux fixture selects Podman")
             .service_proxy_image()
             .expect("configured image")
             .reference(),
@@ -607,7 +641,10 @@ fn rootless_runtime_directory_is_explicit_and_required() {
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     let config = parse_value(&value).expect("explicit runtime directory must validate");
     assert_eq!(
-        config.podman().runtime_directory(),
+        config
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .runtime_directory(),
         std::path::Path::new("/run/automata-runner")
     );
 
@@ -635,7 +672,7 @@ fn podman_state_is_the_exact_dedicated_runtime_state_child() {
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     let parsed = parse_value(&value).expect("exact one-mount Podman layout");
     assert_eq!(
-        parsed.state().podman(),
+        parsed.state().provider(),
         std::path::Path::new("/run/automata-runner/automata-ci-podman/state")
     );
 
@@ -680,23 +717,38 @@ fn podman_system_inputs_are_explicit_current_only_and_helper_resolution_is_close
     let parsed = RunnerProductConfig::from_json(valid_configuration().as_bytes())
         .expect("explicit Podman system inputs");
     assert_eq!(
-        parsed.podman().approved_helper_directory(),
+        parsed
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .approved_helper_directory(),
         std::path::Path::new("/opt/automata/private/usr/sbin")
     );
     assert_eq!(
-        parsed.podman().conmon_path(),
+        parsed
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .conmon_path(),
         std::path::Path::new("/usr/bin/conmon")
     );
     assert_eq!(
-        parsed.podman().oci_runtime_path(),
+        parsed
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .oci_runtime_path(),
         std::path::Path::new("/usr/bin/crun")
     );
     assert_eq!(
-        parsed.podman().init_path(),
+        parsed
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .init_path(),
         std::path::Path::new("/usr/bin/catatonit")
     );
     assert_eq!(
-        parsed.podman().seccomp_profile_path(),
+        parsed
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .seccomp_profile_path(),
         std::path::Path::new("/usr/share/containers/seccomp.json")
     );
 
@@ -875,6 +927,14 @@ fn capability_inventory_cannot_diverge_from_execution_policy() {
     let features = config.inventory().sandbox().features();
     assert!(features.contains(&SandboxFeature::READ_ONLY_ROOT));
     assert!(!features.contains(&SandboxFeature::PRIVILEGED_USER));
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    value["executor"]["privilege"] = serde_json::Value::from("host");
+    assert_eq!(
+        parse_value(&value).expect_err("Podman cannot inherit an unisolated host identity"),
+        RunnerProductConfigError::InvalidExecutor
+    );
 
     let mut value: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");

@@ -210,7 +210,15 @@ pub enum TargetPlatform {
     Windows,
 }
 
-/// Normalized absolute path inside a sandbox, independent of host paths.
+/// Normalized absolute path in a provider's target filesystem namespace.
+///
+/// Container and virtual-machine providers normally resolve this inside an
+/// isolated guest filesystem. A trusted native provider serving a
+/// [`RootFilesystemPolicy::Host`] profile may intentionally use the same
+/// absolute syntax as the host, but every operation must still enforce its
+/// accepted path boundary—for example, copy operations are limited to the
+/// sandbox-owned workspace and scratch roots, while executable paths come from
+/// the admitted toolchain.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct TargetPath {
     platform: TargetPlatform,
@@ -289,10 +297,11 @@ impl TargetPath {
         self.platform
     }
 
-    /// Returns the normalized absolute path inside the sandbox.
+    /// Returns the normalized absolute path in the provider target namespace.
     ///
-    /// This is never a host path. Providers must resolve it only within the
-    /// sandbox's filesystem boundary.
+    /// Native [`RootFilesystemPolicy::Host`] providers may map this directly
+    /// to host syntax only after enforcing the path boundary for the requested
+    /// operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.value
@@ -320,6 +329,11 @@ pub enum NetworkPolicy {
     /// This policy does not authorize mounting host control sockets or joining
     /// an unrelated host network namespace.
     PrivateEgress,
+    /// Permit a trusted workload to use the host network directly.
+    ///
+    /// This provides no network isolation and must be matched by an explicit
+    /// [`crate::SandboxCapability::HostNetwork`] declaration.
+    Host,
 }
 
 /// Root-filesystem mutability requested by the selected profile.
@@ -333,6 +347,11 @@ pub enum RootFilesystemPolicy {
     /// This never permits writes to host paths outside explicit sandbox-owned
     /// mounts.
     Writable,
+    /// Permit a trusted native workload to see the host filesystem.
+    ///
+    /// Providers still own the admitted workspace and scratch roots, but this
+    /// policy does not claim a disposable or isolated root filesystem.
+    Host,
 }
 
 /// Privilege visible to processes inside the sandbox's isolation boundary.
@@ -348,6 +367,12 @@ pub enum SandboxPrivilegePolicy {
     Unprivileged,
     /// Provide an administrative identity confined to the sandbox boundary.
     Administrator,
+    /// Inherit the provider process host identity and token unchanged.
+    ///
+    /// This is a trusted-native policy, not privilege isolation. Providers
+    /// accepting it must explicitly advertise
+    /// [`crate::SandboxCapability::HostIdentity`].
+    Host,
 }
 
 /// Required hard resource limits for a whole-job sandbox.
@@ -401,14 +426,30 @@ impl ResourceLimits {
     }
 }
 
+/// Exact provider launch mechanism selected by an environment profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SandboxLaunch {
+    /// Launch inside a digest-pinned container kept alive for the whole job.
+    Container {
+        /// Exact immutable image selected by the admitted profile.
+        image: ImmutableImage,
+        /// Literal command keeping the whole-job container alive.
+        keepalive: ExecutionArgv,
+    },
+    /// Launch trusted commands as native host processes.
+    ///
+    /// Native providers must advertise host network/filesystem semantics and
+    /// enforce process-tree containment plus the requested resource limits.
+    Native,
+}
+
 /// Provider launch material bound to the exact scheduler-selected environment
 /// attestation. It contains no hosted-runner label interpretation or
 /// credentials.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxEnvironment {
     attestation: EnvironmentProfile,
-    image: ImmutableImage,
-    keepalive: ExecutionArgv,
+    launch: SandboxLaunch,
     workspace: TargetPath,
     default_environment: ExecutionEnvironment,
 }
@@ -433,8 +474,28 @@ impl SandboxEnvironment {
         }
         Ok(Self {
             attestation,
-            image,
-            keepalive,
+            launch: SandboxLaunch::Container { image, keepalive },
+            workspace,
+            default_environment,
+        })
+    }
+
+    /// Binds a trusted native launch to an exact scheduler-selected profile.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a workspace that does not use drive-qualified Windows syntax.
+    pub fn native(
+        attestation: EnvironmentProfile,
+        workspace: TargetPath,
+        default_environment: ExecutionEnvironment,
+    ) -> Result<Self, ValueError> {
+        if workspace.platform() != TargetPlatform::Windows {
+            return Err(ValueError::InvalidTargetPath);
+        }
+        Ok(Self {
+            attestation,
+            launch: SandboxLaunch::Native,
             workspace,
             default_environment,
         })
@@ -459,18 +520,30 @@ impl SandboxEnvironment {
         self.attestation.digest()
     }
 
-    /// Returns the exact digest-pinned image selected by the profile.
+    /// Returns the exact launch mechanism selected by the profile.
     #[must_use]
-    pub const fn image(&self) -> &ImmutableImage {
-        &self.image
+    pub const fn launch(&self) -> &SandboxLaunch {
+        &self.launch
     }
 
-    /// Returns the literal command that keeps the whole-job sandbox alive.
+    /// Returns the exact digest-pinned image for a container launch.
+    #[must_use]
+    pub const fn image(&self) -> Option<&ImmutableImage> {
+        match &self.launch {
+            SandboxLaunch::Container { image, .. } => Some(image),
+            SandboxLaunch::Native => None,
+        }
+    }
+
+    /// Returns the literal keepalive command for a container launch.
     ///
     /// Arguments are potentially sensitive and redacted by `Debug`.
     #[must_use]
-    pub const fn keepalive(&self) -> &ExecutionArgv {
-        &self.keepalive
+    pub const fn keepalive(&self) -> Option<&ExecutionArgv> {
+        match &self.launch {
+            SandboxLaunch::Container { keepalive, .. } => Some(keepalive),
+            SandboxLaunch::Native => None,
+        }
     }
 
     /// Returns the profile-defined absolute workspace target.

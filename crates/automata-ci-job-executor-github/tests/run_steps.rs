@@ -479,6 +479,7 @@ fn assert_sandbox_spec(fixture: &Fixture) {
     assert_eq!(specs[0].root_filesystem(), RootFilesystemPolicy::Writable);
     assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Administrator);
     assert_eq!(specs[0].workspace().as_str(), "/__w/automata/automata");
+    assert_eq!(specs[0].scratch(), None);
 }
 
 #[tokio::test]

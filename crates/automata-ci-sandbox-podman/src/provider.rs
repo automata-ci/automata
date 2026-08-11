@@ -746,6 +746,12 @@ impl PodmanInner {
         let user_namespace = match sandbox.privilege() {
             SandboxPrivilegePolicy::Unprivileged => "keep-id",
             SandboxPrivilegePolicy::Administrator => "keep-id:uid=0,gid=0",
+            SandboxPrivilegePolicy::Host => {
+                return Err(provider_error::known(
+                    ProviderErrorKind::UnsupportedCapability,
+                    ProviderStage::Validate,
+                ));
+            }
         };
         push_option(&mut arguments, "--userns", user_namespace);
         push_option(&mut arguments, "--cgroup-parent", cgroup_parent);
@@ -2479,6 +2485,12 @@ impl PodmanInner {
         let user_namespace = match spec.privilege() {
             SandboxPrivilegePolicy::Unprivileged => "keep-id",
             SandboxPrivilegePolicy::Administrator => "keep-id:uid=0,gid=0",
+            SandboxPrivilegePolicy::Host => {
+                return Err(provider_error::known(
+                    ProviderErrorKind::UnsupportedCapability,
+                    ProviderStage::Validate,
+                ));
+            }
         };
         push_option(&mut arguments, "--userns", user_namespace);
         push_option(&mut arguments, "--cpus", cpu_value(resources.cpu_millis()));
@@ -2627,12 +2639,23 @@ impl PodmanInner {
         push_option(
             &mut arguments,
             "--entrypoint",
-            spec.profile().keepalive().program().as_str(),
+            spec.profile()
+                .keepalive()
+                .expect("validated container profile")
+                .program()
+                .as_str(),
         );
-        arguments.push(spec.profile().image().reference().into());
+        arguments.push(
+            spec.profile()
+                .image()
+                .expect("validated container profile")
+                .reference()
+                .into(),
+        );
         arguments.extend(
             spec.profile()
                 .keepalive()
+                .expect("validated container profile")
                 .arguments()
                 .iter()
                 .map(OsString::from),
@@ -3760,7 +3783,24 @@ impl ResourceKind {
 
 fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
     let workspace = spec.workspace().as_str();
-    let keepalive = spec.profile().keepalive().program().as_str();
+    let Some(keepalive) = spec.profile().keepalive() else {
+        return Err(provider_error::known(
+            ProviderErrorKind::UnsupportedCapability,
+            ProviderStage::Validate,
+        ));
+    };
+    if spec.profile().image().is_none()
+        || spec.scratch().is_some()
+        || spec.network() == NetworkPolicy::Host
+        || spec.root_filesystem() == RootFilesystemPolicy::Host
+        || spec.privilege() == SandboxPrivilegePolicy::Host
+    {
+        return Err(provider_error::known(
+            ProviderErrorKind::UnsupportedCapability,
+            ProviderStage::Validate,
+        ));
+    }
+    let keepalive_program = keepalive.program().as_str();
     let service_port_count = spec
         .services()
         .iter()
@@ -3781,10 +3821,8 @@ fn validate_spec(spec: &SandboxSpec) -> Result<(), ProviderError> {
             .iter()
             .any(|(_, service)| !supported_service_environment(service.environment()))
         || workspace.contains([':', ','])
-        || keepalive.contains('\0')
-        || spec
-            .profile()
-            .keepalive()
+        || keepalive_program.contains('\0')
+        || keepalive
             .arguments()
             .iter()
             .any(|argument| argument.contains('\0'))
@@ -3891,12 +3929,29 @@ fn spec_fingerprint(
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, spec.profile().id().as_str().as_bytes());
     hash_field(&mut hasher, spec.profile().digest().as_bytes());
-    hash_field(&mut hasher, spec.profile().image().reference().as_bytes());
     hash_field(
         &mut hasher,
-        spec.profile().keepalive().program().as_str().as_bytes(),
+        spec.profile()
+            .image()
+            .expect("validated container profile")
+            .reference()
+            .as_bytes(),
     );
-    for argument in spec.profile().keepalive().arguments() {
+    hash_field(
+        &mut hasher,
+        spec.profile()
+            .keepalive()
+            .expect("validated container profile")
+            .program()
+            .as_str()
+            .as_bytes(),
+    );
+    for argument in spec
+        .profile()
+        .keepalive()
+        .expect("validated container profile")
+        .arguments()
+    {
         hash_field(&mut hasher, argument.as_bytes());
     }
     hash_field(&mut hasher, spec.workspace().as_str().as_bytes());

@@ -26,7 +26,7 @@ impl GithubJobExecutorConfig {
     /// # Errors
     ///
     /// Rejects zero or greater-than-24-hour default timeouts, invalid output
-    /// bounds, and non-POSIX or root runner scratch paths.
+    /// bounds, and root or separator-terminated runner scratch paths.
     pub fn new(
         resources: ResourceLimits,
         network: NetworkPolicy,
@@ -42,10 +42,15 @@ impl GithubJobExecutorConfig {
         if maximum_output_bytes == 0 || maximum_output_bytes > MAX_EXECUTION_OUTPUT_BYTES {
             return Err(GithubJobExecutorConfigError::InvalidOutputLimit);
         }
-        if runner_root.platform() != TargetPlatform::Posix
-            || runner_root.as_str() == "/"
-            || runner_root.as_str().ends_with('/')
-        {
+        let invalid_runner_root = match runner_root.platform() {
+            TargetPlatform::Posix => {
+                runner_root.as_str() == "/" || runner_root.as_str().ends_with('/')
+            }
+            TargetPlatform::Windows => {
+                runner_root.as_str().len() == 3 || runner_root.as_str().ends_with('\\')
+            }
+        };
+        if invalid_runner_root {
             return Err(GithubJobExecutorConfigError::InvalidRunnerRoot);
         }
         Ok(Self {

@@ -6,7 +6,7 @@ use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
 };
 use automata_ci_expression_github::{GithubEvaluationContext, GithubExpressionEvaluator};
-use automata_ci_github_runtime::JobCommandState;
+use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
 
 use crate::{
     ExecutorAdapterError, GithubContextSnapshot, PreparedActionDefinition, PreparedValue,
@@ -131,14 +131,17 @@ impl<'a> EnvironmentBuilder<'a> {
         extra: impl IntoIterator<Item = (String, ResolvedEnvironmentValue)>,
         masker: &mut SecretMasker,
     ) -> Result<ExecutionEnvironment, ExecutorAdapterError> {
+        let platform = commands.platform();
         let mut values = BTreeMap::new();
         for variable in self.defaults.values() {
             if variable.is_secret() {
                 masker.register(variable.value().expose())?;
             }
-            values.insert(
+            insert_environment_value(
+                &mut values,
                 variable.name().as_str().to_owned(),
                 resolved_default_value(variable),
+                platform,
             );
         }
         for secret in context.secret_masks() {
@@ -148,20 +151,27 @@ impl<'a> EnvironmentBuilder<'a> {
             if let Some(secret) = variable.shared_secret_value() {
                 masker.register(secret.expose_secret())?;
             }
-            values.insert(variable.name().to_owned(), resolved_context_value(variable));
-        }
-        self.overlay_sources(&mut values, job, context.expression(), masker)?;
-        for variable in commands.environment() {
-            values.insert(
+            insert_environment_value(
+                &mut values,
                 variable.name().to_owned(),
-                ResolvedEnvironmentValue::plain(variable.value()),
+                resolved_context_value(variable),
+                platform,
             );
         }
-        self.overlay_sources(&mut values, step, context.expression(), masker)?;
-        for (name, value) in extra {
-            values.insert(name, value);
+        self.overlay_sources(&mut values, job, context.expression(), masker, platform)?;
+        for variable in commands.environment() {
+            insert_environment_value(
+                &mut values,
+                variable.name().to_owned(),
+                ResolvedEnvironmentValue::plain(variable.value()),
+                platform,
+            );
         }
-        prepend_paths(&mut values, commands);
+        self.overlay_sources(&mut values, step, context.expression(), masker, platform)?;
+        for (name, value) in extra {
+            insert_environment_value(&mut values, name, value, platform);
+        }
+        prepend_paths(&mut values, commands, platform);
         into_execution_environment(values)
     }
 
@@ -210,7 +220,13 @@ impl<'a> EnvironmentBuilder<'a> {
             masker.register(secret.expose_secret())?;
         }
         let mut values = BTreeMap::new();
-        self.overlay_sources(&mut values, sources, context.expression(), masker)?;
+        self.overlay_sources(
+            &mut values,
+            sources,
+            context.expression(),
+            masker,
+            CommandFilePlatform::Unix,
+        )?;
         into_execution_environment(values)
     }
 
@@ -220,11 +236,14 @@ impl<'a> EnvironmentBuilder<'a> {
         sources: &BTreeMap<String, ValueSource>,
         context: &dyn GithubEvaluationContext,
         masker: &mut SecretMasker,
+        platform: CommandFilePlatform,
     ) -> Result<(), ExecutorAdapterError> {
         for (name, source) in sources {
-            destination.insert(
+            insert_environment_value(
+                destination,
                 name.clone(),
                 self.resolve_source_value(source, context, masker)?,
+                platform,
             );
         }
         Ok(())
@@ -375,25 +394,56 @@ fn resolved_context_value(
 fn prepend_paths(
     values: &mut BTreeMap<String, ResolvedEnvironmentValue>,
     commands: &JobCommandState,
+    platform: CommandFilePlatform,
 ) {
     let paths = commands.prepend_path().collect::<Vec<_>>();
     if paths.is_empty() {
         return;
     }
-    let mut path = paths.join(":");
-    let secret = values
-        .get("PATH")
+    let separator = match platform {
+        CommandFilePlatform::Unix => ':',
+        CommandFilePlatform::Windows => ';',
+    };
+    let path_key = environment_key(values, "PATH", platform);
+    let mut path = paths.join(&separator.to_string());
+    let secret = path_key
+        .as_ref()
+        .and_then(|key| values.get(key))
         .is_some_and(ResolvedEnvironmentValue::is_secret);
-    if let Some(existing) = values.get("PATH")
+    if let Some(existing) = path_key.as_ref().and_then(|key| values.get(key))
         && !existing.expose().is_empty()
     {
-        path.push(':');
+        path.push(separator);
         path.push_str(existing.expose());
     }
     values.insert(
-        "PATH".to_owned(),
+        path_key.unwrap_or_else(|| "PATH".to_owned()),
         ResolvedEnvironmentValue::from_parts(path, secret),
     );
+}
+
+fn insert_environment_value(
+    values: &mut BTreeMap<String, ResolvedEnvironmentValue>,
+    name: String,
+    value: ResolvedEnvironmentValue,
+    platform: CommandFilePlatform,
+) {
+    let key = environment_key(values, &name, platform).unwrap_or(name);
+    values.insert(key, value);
+}
+
+fn environment_key(
+    values: &BTreeMap<String, ResolvedEnvironmentValue>,
+    name: &str,
+    platform: CommandFilePlatform,
+) -> Option<String> {
+    match platform {
+        CommandFilePlatform::Unix => values.contains_key(name).then(|| name.to_owned()),
+        CommandFilePlatform::Windows => values
+            .keys()
+            .find(|candidate| candidate.eq_ignore_ascii_case(name))
+            .cloned(),
+    }
 }
 
 fn action_input_environment(name: &str) -> Result<String, ExecutorAdapterError> {

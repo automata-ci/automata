@@ -62,8 +62,8 @@ pub use service::{
 };
 pub use value::{
     ImmutableImage, NetworkPolicy, ProviderId, ResourceLimits, RootFilesystemPolicy,
-    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, TargetPath,
-    TargetPlatform,
+    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxLaunch, SandboxPrivilegePolicy,
+    TargetPath, TargetPlatform,
 };
 
 /// Maximum encoded length, in bytes, of an opaque provider or engine handle.

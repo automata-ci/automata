@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use automata_ci_execution::{ResourceLimits, SandboxHandle};
 use rustix::event::{PollFd, PollFlags, poll};
 use serde_json::{Map, Value, json};
 
@@ -1860,7 +1861,7 @@ mod observer_tests {
         },
     };
 
-    use automata_ci_execution::{ProviderId, ResourceLimits};
+    use automata_ci_execution::ProviderId;
 
     use super::*;
 
