@@ -1,3 +1,7 @@
+// These methods intentionally mirror the Linux adapter so shared provider code
+// retains one closed interface while every operation fails unsupported.
+#![allow(clippy::unused_self)]
+
 use std::sync::Arc;
 
 pub(crate) use crate::docker_contract::{DOCKER_SOCKET_DIRECTORY_TARGET, JobDockerLaunch};

@@ -512,6 +512,7 @@ fn read_privileged_file(
 
 /// Sanitized declarative static-runner configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum StaticRunnerRegistrationError {
     #[error("static runner registration path must be absolute")]
     RelativePath,
@@ -546,6 +547,7 @@ pub(crate) enum StaticRunnerRegistrationError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};

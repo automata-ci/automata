@@ -9,8 +9,12 @@ The quickest ways in are:
 | --- | --- |
 | Build from source and inspect the interface | [Getting started](getting-started.md) |
 | Check support for a workflow feature | [Compatibility](compatibility.md) |
+| Check Linux, Windows, and macOS support | [Platform support](platform-support.md) |
 | Start the durable local composition | [Control-plane setup](deployment.md) |
-| Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
+| Prepare an execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
+| Build, test, or change Automata | [Development](development.md) |
+| Contribute a change | [Contributing](../CONTRIBUTING.md) |
+| Publish crates, images, and a GitHub Release | [Releasing](releasing.md) |
 
 The [hosted UI demo](https://automata-ci.github.io/automata/) uses sample data.
 It does not connect to repositories or execute workflows.

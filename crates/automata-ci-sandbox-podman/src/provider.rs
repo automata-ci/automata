@@ -22,9 +22,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     CommandOutput, CommandRequest, CommandTermination, JobContainerEngine, NoopPodmanObserver,
-    PODMAN_PROVIDER_ID, PodmanCommandExecutor, PodmanCommandOutcome, PodmanCommandStage,
-    PodmanEvent, PodmanHostGatewayAlias, PodmanObserver, PodmanOpenError, PodmanOptions,
-    SystemCommandExecutor,
+    PodmanCommandExecutor, PodmanCommandOutcome, PodmanCommandStage, PodmanEvent,
+    PodmanHostGatewayAlias, PodmanObserver, PodmanOpenError, PodmanOptions, SystemCommandExecutor,
     command::process_cgroup,
     docker::{
         DOCKER_SOCKET_DIRECTORY_TARGET, JobDockerLaunch, JobDockerListener, JobDockerService,
@@ -42,6 +41,9 @@ use crate::{
     },
     state::{JobEnginePaths, LocalState},
 };
+
+#[cfg(target_os = "linux")]
+use crate::PODMAN_PROVIDER_ID;
 
 const SERVICE_HEALTH_FORMAT: &str = "{{.State.Status}}\n{{if .Config.Healthcheck}}configured{{else}}none{{end}}\n{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
 const SERVICE_HEALTH_CONFIGURATION_FORMAT: &str = "{{json .Config.Healthcheck}}";
@@ -132,7 +134,22 @@ impl RootlessPodmanProvider {
         observer: Arc<dyn PodmanObserver>,
     ) -> Result<Self, PodmanOpenError> {
         #[cfg(not(target_os = "linux"))]
-        return Err(crate::PodmanConfigurationError::UnsupportedPlatform.into());
+        {
+            drop((options, executor, observer));
+            Err(crate::PodmanConfigurationError::UnsupportedPlatform.into())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::open_supported(options, executor, observer)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_supported(
+        options: PodmanOptions,
+        executor: Arc<dyn PodmanCommandExecutor>,
+        observer: Arc<dyn PodmanObserver>,
+    ) -> Result<Self, PodmanOpenError> {
         options.process_environment().validate_provider_use()?;
         let state = LocalState::open(&options)?;
         options.process_environment().validate_provider_use()?;
@@ -297,6 +314,7 @@ pub(crate) struct PodmanInner {
     provider_id: ProviderId,
     capabilities: ProviderCapabilities,
     handle_locks: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
+    #[cfg_attr(not(unix), allow(clippy::zero_sized_map_values))]
     docker_services: Mutex<BTreeMap<String, JobDockerService>>,
 }
 

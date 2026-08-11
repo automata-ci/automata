@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use automata_ci_execution::NetworkPolicy;
 use automata_ci_sandbox_podman::PodmanOptions;
+#[cfg(target_os = "linux")]
 use command::ConfiguredSystemCommandExecutor;
 pub use command::{
     CommandExecutor, CommandOutput, CommandRequest, CommandTermination, SystemCommandExecutor,
@@ -19,6 +20,7 @@ pub use control::{ActiveProbeLimits, ProbeCancellation};
 pub use elf::{ElfScratchExecutableInspector, ScratchCompatibility, ScratchExecutableInspector};
 pub use http::{ReadinessProbe, SystemReadinessProbe};
 pub use plan::ActiveProbePlan;
+#[cfg(target_os = "linux")]
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -54,6 +56,7 @@ pub(crate) async fn probe_current_executable_with_cancellation(
     .await
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
 pub(crate) async fn probe_configured_current_executable_with_control(
     options: &PodmanOptions,
     network_policy: NetworkPolicy,
@@ -64,11 +67,11 @@ pub(crate) async fn probe_configured_current_executable_with_control(
         let _ = options;
         let _ = network_policy;
         let _ = cancellation;
-        return active_network_probe(
+        active_network_probe(
             ProbeStatus::Unavailable,
             Some(ProbeReasonCode::ActiveProbeUnsupportedPlatform),
             "the active Podman network probe is currently supported only on Linux".to_owned(),
-        );
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -90,6 +93,7 @@ pub(crate) async fn probe_configured_current_executable_with_control(
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
 async fn probe_current_executable_with_control(
     commands: Arc<dyn CommandExecutor>,
     scratch_root: Option<std::path::PathBuf>,

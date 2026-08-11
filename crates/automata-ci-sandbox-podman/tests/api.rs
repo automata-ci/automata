@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 mod support;
 
 use std::sync::Arc;

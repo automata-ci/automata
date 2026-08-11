@@ -75,10 +75,6 @@ impl PodmanProcessTrust {
     fn capture(_options: &PodmanOptions, _runtime_mount: RuntimeMountSnapshot) -> Result<Self, ()> {
         Ok(Self)
     }
-
-    fn revalidate(&self) -> Result<(), ()> {
-        Ok(())
-    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -255,6 +251,7 @@ fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
     Err(RunnerProductError::UnsupportedPlatform)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn admit_effective_user_id(user: u32) -> Result<(), RunnerProductError> {
     if user == 0 {
         Err(RunnerProductError::PodmanProcessTrust)
@@ -1293,6 +1290,7 @@ mod tests {
         assert_eq!(admitted.registrations.get(), 1);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn registered_service_ceiling_is_reduced_to_the_verified_provider() {
         let config = RunnerProductConfig::from_json(include_bytes!(

@@ -1,14 +1,17 @@
 use std::{
     ffi::OsString,
-    fs::{self, File},
-    io::{Read as _, Write as _},
+    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
+use std::{
+    fs::File,
+    io::{Read as _, Write as _},
+    os::fd::OwnedFd,
+};
 
 #[cfg(unix)]
 use rustix::fs::{

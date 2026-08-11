@@ -94,7 +94,11 @@ boundaries.
 | Start the durable control plane | [Control-plane setup](docs/deployment.md) |
 | Configure a Linux execution host | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
 | Understand the system design | [Architecture](docs/architecture.md) |
+| Check platform support | [Platform support](docs/platform-support.md) |
 | Build, test, or change the code | [Development](docs/development.md) |
+| Publish a release | [Release guide](docs/releasing.md) |
+| Review release history | [Changelog](CHANGELOG.md) |
+| Report a vulnerability privately | [Security policy](SECURITY.md) |
 | Find every document | [Documentation index](docs/README.md) |
 
 ## Contributing

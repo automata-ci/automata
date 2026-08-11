@@ -316,7 +316,9 @@ jobs:
             throw "expected x86_64-pc-windows-msvc, got $hostTriple"
           }
 
-      - name: Check Windows source binaries
+      - name: Check Windows source binaries without warnings
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo check --locked --bin automata --bin automata-runner
 
       - name: Lint Windows native provider and executor

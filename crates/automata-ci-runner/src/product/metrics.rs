@@ -3507,6 +3507,7 @@ mod tests {
 
     const CARDINALITY_MANIFEST: &str =
         include_str!("../../../../deploy/observability/cardinality.json");
+    const EXPECTED_RUNNER_SERIES: usize = if cfg!(target_os = "linux") { 939 } else { 938 };
 
     #[test]
     fn production_histogram_preserves_classic_buckets_and_exports_native_spans() {
@@ -3865,7 +3866,10 @@ mod tests {
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .count();
-        assert_eq!(series, 939, "runner target exact series contract changed");
+        assert_eq!(
+            series, EXPECTED_RUNNER_SERIES,
+            "runner target exact series contract changed"
+        );
         assert_reviewed_family_maximums(exposition);
         assert!(series < 1_000, "runner target exceeded its series budget");
     }
@@ -3882,7 +3886,10 @@ mod tests {
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .count();
-        assert_eq!(series, 939, "runner target exact series contract changed");
+        assert_eq!(
+            series, EXPECTED_RUNNER_SERIES,
+            "runner target exact series contract changed"
+        );
 
         for impossible in [
             "automata_ci_runner_commands_total{kind=\"lease_offer\",outcome=\"ignored_stale_lease\"}",
@@ -4498,11 +4505,32 @@ mod tests {
     }
 
     fn assert_reviewed_family_maximums(exposition: &str) {
+        #[cfg(target_os = "linux")]
         schema_contract::assert_exposition_contract(
             CARDINALITY_MANIFEST,
             exposition,
             &["common", "runner"],
         );
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(CARDINALITY_MANIFEST).expect("cardinality manifest");
+            manifest
+                .pointer_mut("/profiles/common/families")
+                .and_then(serde_json::Value::as_array_mut)
+                .expect("common metric families")
+                .retain(|family| {
+                    family.get("name").and_then(serde_json::Value::as_str)
+                        != Some("process_start_time_seconds")
+                });
+            let manifest = serde_json::to_string(&manifest).expect("platform cardinality manifest");
+            schema_contract::assert_exposition_contract(
+                &manifest,
+                exposition,
+                &["common", "runner"],
+            );
+        }
     }
 
     fn scalar_sample(exposition: &str, name: &str) -> u64 {

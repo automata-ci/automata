@@ -198,6 +198,20 @@ separate resource-heavy CI job; this workflow makes no renderer coverage
 claim. Review per-file and per-crate gaps and ratchet the committed policy only
 from a reproducible ordinary-bundle report.
 
+## Windows portability smoke
+
+On Windows, run the focused native build, preview, SSR, status, and passive
+runner diagnostic with:
+
+```console
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev/windows-smoke.ps1
+```
+
+This smoke test complements, but does not replace, the Windows native provider,
+shipped-runner process, durable-state, and shell-execution tests. See
+[platform support](platform-support.md) for the current matrix and acceptance
+gates.
+
 ## Runner capability admission
 
 `automata-runner doctor --active` checks the ambient host and the `podman` found

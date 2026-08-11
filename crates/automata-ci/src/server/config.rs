@@ -1,14 +1,14 @@
 use std::{
     collections::BTreeSet,
     convert::Infallible,
-    env, fmt,
-    fs::File,
-    io::{self, Read as _},
+    env, fmt, io,
     net::{IpAddr, SocketAddr},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
+#[cfg(unix)]
+use std::{fs::File, io::Read as _, path::Component};
 
 use thiserror::Error;
 use url::Url;

@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// The public adapter remains constructible on other targets only to return a
+// typed unsupported-platform error; Linux-only implementation helpers are then
+// intentionally unreachable.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Local rootless Podman adapter for one-container whole-job sandboxes.
 //!
 //! Every Podman invocation is local (`--remote=false`), argv-only, bounded,

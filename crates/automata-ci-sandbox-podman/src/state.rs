@@ -966,6 +966,7 @@ pub(crate) fn prepare(_options: &crate::PodmanOptions) -> Result<(), PodmanState
 pub(crate) struct LocalState;
 
 #[cfg(not(unix))]
+#[allow(clippy::unused_self)]
 impl LocalState {
     pub(crate) fn open(_options: &crate::PodmanOptions) -> Result<Self, PodmanStateRootError> {
         Err(PodmanStateRootError::UnsupportedPlatform)
