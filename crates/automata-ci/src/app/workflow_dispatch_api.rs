@@ -81,20 +81,6 @@ impl fmt::Debug for WorkflowDispatchApiInputValue {
 }
 
 impl WorkflowDispatchApiInputValue {
-    pub(crate) const fn as_boolean(&self) -> Option<bool> {
-        match self {
-            Self::Boolean(value) => Some(*value),
-            Self::String(_) => None,
-        }
-    }
-
-    pub(crate) fn as_string(&self) -> Option<&str> {
-        match self {
-            Self::Boolean(_) => None,
-            Self::String(value) => Some(value),
-        }
-    }
-
     fn character_count(&self) -> usize {
         match self {
             Self::Boolean(true) => "true".len(),
@@ -683,9 +669,18 @@ mod tests {
         assert_eq!(captured.actor().now(), UnixTimestamp::from_seconds(777));
         assert!(captured.actor().request_id().is_none());
         let inputs = captured.inputs();
-        assert_eq!(input(inputs, "target").as_string(), Some("live"));
-        assert_eq!(input(inputs, "dry_run").as_boolean(), Some(true));
-        assert_eq!(input(inputs, "note").as_string(), Some("neutral fixture"));
+        assert_eq!(
+            input(inputs, "target"),
+            &WorkflowDispatchApiInputValue::String("live".to_owned())
+        );
+        assert_eq!(
+            input(inputs, "dry_run"),
+            &WorkflowDispatchApiInputValue::Boolean(true)
+        );
+        assert_eq!(
+            input(inputs, "note"),
+            &WorkflowDispatchApiInputValue::String("neutral fixture".to_owned())
+        );
     }
 
     #[tokio::test]
