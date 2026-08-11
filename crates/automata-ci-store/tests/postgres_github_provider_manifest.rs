@@ -30,19 +30,21 @@ async fn exact_bootstrap_creates_repository_and_replays_original_evidence() -> T
             [7; 32],
             "Automata CI",
         );
+        let before_bootstrap = database_now(database.pool()).await?;
         let created = database
             .store()
             .bootstrap_github_provider_repository(request(desired.clone(), 100))
             .await?;
+        let after_bootstrap = database_now(database.pool()).await?;
         assert!(!created.manifest().is_replay());
         assert_eq!(created.manifest().current().manifest(), &desired);
-        assert_eq!(
-            created.manifest().current().registered_at(),
-            UnixMillis::new(100)
-        );
+        let registered_at = created.manifest().current().registered_at();
+        assert_database_time_bound(registered_at, before_bootstrap, after_bootstrap);
+        assert_eq!(created.runtime_policy().registered_at(), registered_at);
+        assert!(!created.runtime_policy().is_replay());
         assert_eq!(
             created.manifest().current().activated_at(),
-            Some(UnixMillis::new(100))
+            Some(registered_at)
         );
 
         let replay = database
@@ -50,6 +52,8 @@ async fn exact_bootstrap_creates_repository_and_replays_original_evidence() -> T
             .bootstrap_github_provider_repository(request(desired.clone(), 900))
             .await?;
         assert!(replay.manifest().is_replay());
+        assert!(replay.runtime_policy().is_replay());
+        assert_eq!(replay.runtime_policy().registered_at(), registered_at);
         assert_eq!(replay.manifest().current(), created.manifest().current());
         assert!(matches!(
             database
@@ -157,10 +161,11 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
             [7; 32],
             "Automata CI",
         );
-        database
+        let created = database
             .store()
             .bootstrap_github_provider_repository(request(first.clone(), 100))
             .await?;
+        let first_registered_at = created.manifest().current().registered_at();
 
         let rotated = manifest(
             tenant.clone(),
@@ -169,19 +174,28 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
             [8; 32],
             "Automata CI",
         );
+        let before_promotion = database_now(database.pool()).await?;
         let promoted = database
             .store()
             .bootstrap_github_provider_repository(request(rotated.clone(), 200))
             .await?;
+        let after_promotion = database_now(database.pool()).await?;
         assert!(!promoted.manifest().is_replay());
         assert_eq!(promoted.manifest().current().manifest(), &rotated);
+        let promoted_at = promoted.manifest().current().registered_at();
+        assert_eq!(
+            promoted.manifest().current().activated_at(),
+            Some(promoted_at)
+        );
+        assert_database_time_bound(promoted_at, before_promotion, after_promotion);
+        assert!(promoted_at >= first_registered_at);
 
         let current = database
             .store()
             .load_current_github_provider_manifest(&tenant, connection)
             .await?;
         assert_eq!(current.manifest(), &rotated);
-        assert_eq!(current.activated_at(), Some(UnixMillis::new(200)));
+        assert_eq!(current.activated_at(), Some(promoted_at));
         let historical = database
             .store()
             .load_github_provider_manifest_revision(
@@ -191,7 +205,7 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
             )
             .await?;
         assert_eq!(historical.manifest(), &first);
-        assert_eq!(historical.registered_at(), UnixMillis::new(100));
+        assert_eq!(historical.registered_at(), first_registered_at);
         assert_eq!(historical.activated_at(), None);
 
         let no_evidence_change = manifest(
@@ -246,20 +260,6 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
                 .bootstrap_github_provider_repository(request(policy_without_revision, 500))
                 .await,
         );
-        let stale_time = manifest(
-            tenant.clone(),
-            connection,
-            RevisionSet::new(3, 2, 2),
-            [8; 32],
-            "Automata CI / main",
-        );
-        assert_drift(
-            database
-                .store()
-                .bootstrap_github_provider_repository(request(stale_time, 199))
-                .await,
-        );
-
         let still_current = database
             .store()
             .load_current_github_provider_manifest(&tenant, connection)
@@ -479,18 +479,32 @@ async fn concurrent_replicas_converge_to_one_revision_and_one_replay() -> TestRe
         let right_store = database.store().clone();
         let left_request = request(desired.clone(), 100);
         let right_request = request(desired, 101);
+        let before_bootstrap = database_now(database.pool()).await?;
         let (left, right) = tokio::join!(
             left_store.bootstrap_github_provider_repository(left_request),
             right_store.bootstrap_github_provider_repository(right_request),
         );
+        let after_bootstrap = database_now(database.pool()).await?;
         let left = left?;
         let right = right?;
         assert_ne!(left.manifest().is_replay(), right.manifest().is_replay());
+        assert_eq!(
+            left.runtime_policy().is_replay(),
+            left.manifest().is_replay()
+        );
+        assert_eq!(
+            right.runtime_policy().is_replay(),
+            right.manifest().is_replay()
+        );
         assert_eq!(left.manifest().current(), right.manifest().current());
-        assert!(matches!(
-            left.manifest().current().registered_at().get(),
-            100 | 101
-        ));
+        let registered_at = left.manifest().current().registered_at();
+        assert_database_time_bound(registered_at, before_bootstrap, after_bootstrap);
+        assert_eq!(left.runtime_policy().registered_at(), registered_at);
+        assert_eq!(right.runtime_policy().registered_at(), registered_at);
+        assert_eq!(
+            left.manifest().current().activated_at(),
+            Some(registered_at)
+        );
         let counts: (i64, i64, i64) = sqlx::query_as(
             r"
             SELECT
@@ -792,6 +806,21 @@ fn tenant(value: &str) -> TenantScope {
 
 fn connection(value: u128) -> ProviderConnectionId {
     ProviderConnectionId::from_uuid(Uuid::from_u128(value)).expect("connection")
+}
+
+async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            .fetch_one(pool)
+            .await?,
+    ))
+}
+
+fn assert_database_time_bound(value: UnixMillis, lower: UnixMillis, upper: UnixMillis) {
+    assert!(
+        value >= lower && value <= upper,
+        "database-issued timestamp {value:?} fell outside {lower:?}..={upper:?}"
+    );
 }
 
 fn assert_drift<T>(result: Result<T, GithubProviderManifestStoreError>) {

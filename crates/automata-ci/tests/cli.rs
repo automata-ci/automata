@@ -1,6 +1,6 @@
 use automata_ci::cli::{
     AuthCommand, Cli, Command, OutputFormat, RepositoryRef, SecretCommand, SecretProviderCommand,
-    SecretScope, WorkflowCommand,
+    SecretScope,
 };
 use automata_ci::server::{ServerConfig, ServerConfigError};
 use clap::{CommandFactory as _, Parser as _};
@@ -156,11 +156,16 @@ fn only_operational_top_level_commands_are_advertised() {
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        names,
-        ["server", "preview", "auth", "workflow", "secret", "admin"]
-    );
-    for unavailable in ["run", "job", "runner", "runner-group", "artifact", "cache"] {
+    assert_eq!(names, ["server", "preview", "auth", "secret", "admin"]);
+    for unavailable in [
+        "workflow",
+        "run",
+        "job",
+        "runner",
+        "runner-group",
+        "artifact",
+        "cache",
+    ] {
         assert!(!names.contains(&unavailable));
     }
 }
@@ -204,34 +209,77 @@ fn stale_runner_session_timeout_help_states_its_maintenance_constraint() {
 }
 
 #[test]
-fn operator_json_output_is_accepted_after_a_nested_subcommand() {
-    let cli = Cli::try_parse_from(["automata", "admin", "status", "--output", "json"])
-        .expect("CLI must parse");
-
-    assert_eq!(
-        cli.command.operator().expect("operator options").output,
-        OutputFormat::Json
-    );
+fn nested_operator_options_are_retained_for_every_operator_tree() {
+    let cases: [&[&str]; 3] = [
+        &[
+            "automata",
+            "auth",
+            "--server-url",
+            "https://ci.example.test",
+            "status",
+            "--output",
+            "json",
+        ],
+        &[
+            "automata",
+            "secret",
+            "--server-url",
+            "https://ci.example.test",
+            "provider",
+            "status",
+            "--output",
+            "json",
+        ],
+        &[
+            "automata",
+            "admin",
+            "--server-url",
+            "https://ci.example.test",
+            "status",
+            "--output",
+            "json",
+        ],
+    ];
+    for arguments in cases {
+        let cli = Cli::try_parse_from(arguments).expect("nested operator syntax must parse");
+        let operator = cli.command.operator().expect("operator options");
+        assert_eq!(operator.server_url, "https://ci.example.test");
+        assert_eq!(operator.output, OutputFormat::Json);
+    }
 }
 
 #[test]
-fn leading_operator_options_remain_compatible_and_override_nested_defaults() {
+fn operator_options_are_scoped_to_operator_commands() {
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "--server-url",
+            "https://ci.example.test",
+            "--output",
+            "json",
+            "admin",
+            "status",
+        ])
+        .is_err()
+    );
+
     let cli = Cli::try_parse_from([
         "automata",
+        "admin",
         "--server-url",
         "https://ci.example.test",
         "--output",
         "json",
-        "admin",
         "status",
     ])
-    .expect("leading operator options must parse");
+    .expect("nested operator options must parse");
+    let operator = cli.command.operator().expect("operator options");
+    assert_eq!(operator.server_url, "https://ci.example.test");
+    assert_eq!(operator.output, OutputFormat::Json);
 
-    assert_eq!(
-        cli.operator_options(),
-        Some(("https://ci.example.test", OutputFormat::Json))
-    );
-    assert!(!cli.service_has_operator_options());
+    let root_help = Cli::command().render_long_help().to_string();
+    assert!(!root_help.contains("--server-url"));
+    assert!(!root_help.contains("--output"));
 }
 
 #[test]
@@ -258,9 +306,7 @@ fn operator_options_are_not_advertised_or_accepted_by_service_commands() {
         .is_err()
     );
 
-    let leading_service = Cli::try_parse_from(["automata", "--output", "json", "preview"])
-        .expect("leading compatibility option parses before validation");
-    assert!(leading_service.service_has_operator_options());
+    assert!(Cli::try_parse_from(["automata", "--output", "json", "preview"]).is_err());
 
     let admin_help = Cli::command()
         .find_subcommand_mut("admin")
@@ -271,6 +317,32 @@ fn operator_options_are_not_advertised_or_accepted_by_service_commands() {
     assert!(admin_help.contains("--output"));
     assert!(admin_help.contains("Output format for this operator command"));
     assert!(!admin_help.contains("Machine-readable output"));
+}
+
+#[test]
+fn server_exposes_only_the_fallback_tenant_option() {
+    let mut command = Cli::command();
+    let help = command
+        .find_subcommand_mut("server")
+        .expect("server command")
+        .render_long_help()
+        .to_string();
+
+    assert!(help.contains("--fallback-tenant-id"));
+    assert!(!help.contains("--local-admission-token-source"));
+    assert!(!help.contains("--local-admission-tenant"));
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "server",
+            "--local-admission-token-source",
+            "env:AUTOMATA_LOCAL_ADMISSION_TOKEN",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["automata", "server", "--local-admission-tenant", "legacy",]).is_err()
+    );
 }
 
 #[test]
@@ -388,56 +460,9 @@ fn only_operational_repository_secret_scopes_are_advertised() {
 }
 
 #[test]
-fn workflow_admission_help_describes_supervised_logical_progress() {
-    let mut command = Cli::command();
-    let workflow = command
-        .find_subcommand_mut("workflow")
-        .expect("workflow command");
-    let admission = workflow
-        .find_subcommand_mut("admit")
-        .expect("workflow admission command");
-    let help = admission.render_long_help().to_string();
-
-    assert!(help.contains("supervises logical preparation, activation, and materialization"));
-    assert!(help.contains("does not mean a job has finished"));
-}
-
-#[test]
-fn workflow_admission_uses_exact_source_event_and_secret_references() {
+fn workflow_commands_are_not_part_of_the_operator_contract() {
     assert!(
-        Cli::try_parse_from(["automata", "workflow", "dispatch"]).is_err(),
-        "the CLI must not imply that admission executes a workflow"
+        Cli::try_parse_from(["automata", "workflow", "admit"]).is_err(),
+        "workflow admission is authenticated provider ingress, not an operator command"
     );
-    let cli = Cli::try_parse_from([
-        "automata",
-        "workflow",
-        "admit",
-        "-R",
-        "automata-ci/automata",
-        "--provider-repository-id",
-        "repository-automata",
-        "--source-file",
-        ".github/workflows/ci.yml",
-        "--event-file",
-        "target/dogfood-event.json",
-        "--delivery-id",
-        "delivery-7",
-        "--commit-sha",
-        "0123456789abcdef0123456789abcdef01234567",
-        "--local-admission-token-source",
-        "file:target/local-admission-token",
-    ])
-    .expect("workflow admission must parse");
-
-    let Command::Workflow(workflow) = cli.command else {
-        panic!("workflow command expected");
-    };
-    let WorkflowCommand::Admit(admission) = workflow.command;
-    assert_eq!(admission.repository.to_string(), "automata-ci/automata");
-    assert_eq!(admission.delivery_id, "delivery-7");
-    assert_eq!(admission.event_name, "workflow_dispatch");
-    assert_eq!(admission.git_ref, "refs/heads/main");
-    let debug = format!("{:?}", admission.token_source);
-    assert!(debug.contains("[redacted]"));
-    assert!(!debug.contains("local-admission-token"));
 }

@@ -93,9 +93,9 @@ session credential.
 For the CLI, select the control-plane root origin and run:
 
 ```console
-automata --server-url https://ci.example.test auth login
-automata --server-url https://ci.example.test auth status
-automata --server-url https://ci.example.test auth logout
+automata auth --server-url https://ci.example.test login
+automata auth --server-url https://ci.example.test status
+automata auth --server-url https://ci.example.test logout
 ```
 
 The client accepts HTTPS, or literal-IP loopback HTTP for development. It does
@@ -142,13 +142,13 @@ operation. The current scope is one exact GitHub repository in
 The value-free and mutation commands are:
 
 ```console
-automata --server-url https://ci.example.test secret provider status
-automata --server-url https://ci.example.test secret provider activate
-automata --server-url https://ci.example.test secret list --scope repo:OWNER/REPOSITORY
-automata --server-url https://ci.example.test secret create DEPLOY_TOKEN \
+automata secret --server-url https://ci.example.test provider status
+automata secret --server-url https://ci.example.test provider activate
+automata secret --server-url https://ci.example.test list --scope repo:OWNER/REPOSITORY
+automata secret --server-url https://ci.example.test create DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY \
   --from-file /absolute/path/to/value
-automata --server-url https://ci.example.test secret delete DEPLOY_TOKEN \
+automata secret --server-url https://ci.example.test delete DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY
 ```
 
@@ -160,7 +160,7 @@ owner-owned regular file with mode `0400` or `0600`. To use redirected input
 instead, omit `--from-file`:
 
 ```console
-automata --server-url https://ci.example.test secret create DEPLOY_TOKEN \
+automata secret --server-url https://ci.example.test create DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY < /path/to/value
 ```
 

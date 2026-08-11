@@ -54,7 +54,6 @@ use super::{
         RepositorySecretFormError, collect_repository_secret_form, is_repository_secret_form,
     },
     web::{RequestContext, Viewer},
-    workflow_api::LOCAL_WORKFLOW_ADMISSION_PATH,
 };
 
 #[cfg(test)]
@@ -207,7 +206,6 @@ fn request_surface(path: &str) -> HumanRequestSurface {
             | "/auth/github/callback"
             | "/setup/auth/github"
     ) || path.starts_with("/assets/")
-        || path == LOCAL_WORKFLOW_ADMISSION_PATH
         || matches!(
             path,
             "/api/v1/auth/device"
@@ -1014,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn surfaces_keep_anonymous_auth_and_local_admission_outside_session_parsing() {
+    fn only_anonymous_auth_surfaces_bypass_session_parsing() {
         for path in [
             "/healthz",
             "/readyz",
@@ -1026,10 +1024,13 @@ mod tests {
             "/api/v1/auth/device/poll",
             "/api/v1/setup/device",
             "/api/v1/setup/device/poll",
-            "/api/v1/local/workflow-runs",
         ] {
             assert_eq!(request_surface(path), HumanRequestSurface::Bypass);
         }
+        assert_eq!(
+            request_surface("/api/v1/local/workflow-runs"),
+            HumanRequestSurface::Cli
+        );
         assert_eq!(request_surface("/api/v1/users"), HumanRequestSurface::Cli);
         assert_eq!(request_surface("/api/v1"), HumanRequestSurface::Cli);
         assert_eq!(

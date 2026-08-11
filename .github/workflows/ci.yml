@@ -155,6 +155,7 @@ jobs:
           cargo test -p automata-ci-secret-postgres --tests --all-features --locked -- --ignored --test-threads=1
           cargo test -p automata-ci-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
           cargo test -p automata-ci-results-github --test postgres_cache --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci --test github_provider_end_to_end_matrix --all-features --locked -- --ignored --test-threads=1
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked

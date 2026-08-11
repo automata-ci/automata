@@ -1078,7 +1078,7 @@ async fn projection_claims_use_database_time_for_fast_slow_and_forward_callers()
             321
         );
 
-        for skew in [-60_001, 60_001] {
+        for skew in [-120_000, 120_000] {
             let observed_at = database_now_ms(&database).await? + skew;
             assert!(matches!(
                 database

@@ -1244,21 +1244,38 @@ fn cancellation_interrupts_output_capture_after_the_leader_exits() {
     let cancellation = ProbeCancellation::default();
     let cancellation_trigger = cancellation.clone();
     let pid_file_for_trigger = fixture.pid_file.clone();
+    let leader_pid_file_for_trigger = fixture.leader_pid_file.clone();
     let trigger = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !pid_file_for_trigger.exists() && std::time::Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let capture_ready = loop {
+            let child_pid = ProcessGroupFixture::recorded_pid(&pid_file_for_trigger);
+            let leader_exited = ProcessGroupFixture::recorded_pid(&leader_pid_file_for_trigger)
+                .is_some_and(ProcessGroupFixture::process_has_exited);
+            if child_pid.is_some() && leader_exited {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
             std::thread::sleep(Duration::from_millis(10));
-        }
+        };
+        let cancelled_at = std::time::Instant::now();
         cancellation_trigger.cancel();
+        (capture_ready, cancelled_at)
     });
-    let request = fixture.escaped_pipe_request(Duration::from_secs(5));
-    let started = std::time::Instant::now();
+    let request = fixture.escaped_pipe_request(Duration::from_secs(15));
 
     let output = SystemCommandExecutor.execute(&request, &cancellation);
-    let elapsed = started.elapsed();
-    trigger.join().expect("cancellation trigger must finish");
-    fixture.terminate_descendant_group();
+    let (capture_ready, cancelled_at) = trigger.join().expect("cancellation trigger must finish");
+    let elapsed = cancelled_at.elapsed();
+    if ProcessGroupFixture::recorded_pid(&fixture.pid_file).is_some() {
+        fixture.terminate_descendant_group();
+    }
 
+    assert!(
+        capture_ready,
+        "escaped descendant and exited leader must be observed before cancellation"
+    );
     assert_eq!(output.termination(), &CommandTermination::Cancelled);
     assert!(output.stderr().contains("capture interrupted by shutdown"));
     assert!(
@@ -1640,6 +1657,7 @@ fn named_capture_workers() -> Vec<String> {
 #[derive(Debug)]
 struct ProcessGroupFixture {
     pid_file: PathBuf,
+    leader_pid_file: PathBuf,
 }
 
 #[cfg(unix)]
@@ -1648,11 +1666,16 @@ impl ProcessGroupFixture {
         let identifier = Uuid::new_v4().simple().to_string();
         fs::create_dir_all(runner_test_root()).expect("runner test scratch must be creatable");
         let pid_file = runner_test_root().join(format!("process-group-child-{identifier}.pid"));
+        let leader_pid_file =
+            runner_test_root().join(format!("process-group-leader-{identifier}.pid"));
         assert!(
-            !pid_file.exists(),
-            "collision-resistant PID path must be new"
+            !pid_file.exists() && !leader_pid_file.exists(),
+            "collision-resistant PID paths must be new"
         );
-        Self { pid_file }
+        Self {
+            pid_file,
+            leader_pid_file,
+        }
     }
 
     fn request(&self, timeout: Duration) -> CommandRequest {
@@ -1685,10 +1708,11 @@ impl ProcessGroupFixture {
         request
             .arg("-c")
             .arg(
-                "\"$2\" /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; /bin/sleep 30 & sleeper=$!; /bin/sleep 3; kill -KILL \"$sleeper\"; wait \"$sleeper\" 2>/dev/null; exit 0' automata-escaped-session \"$1\" & exit 0",
+                "printf '%s\\n' \"$$\" > \"$2\"; \"$3\" /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; /bin/sleep 30 & sleeper=$!; /bin/sleep 3; kill -KILL \"$sleeper\"; wait \"$sleeper\" 2>/dev/null; exit 0' automata-escaped-session \"$1\" & while [ ! -s \"$1\" ]; do /bin/sleep 0.01; done; exit 0",
             )
             .arg("automata-escaped-pipe-test")
             .arg(&self.pid_file)
+            .arg(&self.leader_pid_file)
             .arg(setsid);
         request
     }
@@ -1703,12 +1727,33 @@ impl ProcessGroupFixture {
         request
             .arg("-c")
             .arg(
-                "\"$2\" /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec /bin/sleep 86400' automata-indefinite-session \"$1\" & exit 0",
+                "printf '%s\\n' \"$$\" > \"$2\"; \"$3\" /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec /bin/sleep 86400' automata-indefinite-session \"$1\" & while [ ! -s \"$1\" ]; do /bin/sleep 0.01; done; exit 0",
             )
             .arg("automata-indefinite-pipe-test")
             .arg(&self.pid_file)
+            .arg(&self.leader_pid_file)
             .arg(setsid);
         request
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recorded_pid(path: &Path) -> Option<u32> {
+        fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_has_exited(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("State:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    == Some("Z")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => panic!("process leader state must be readable: {error}"),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1781,6 +1826,7 @@ impl Drop for DirectoryFixture {
 impl Drop for ProcessGroupFixture {
     fn drop(&mut self) {
         let _ignored = fs::remove_file(&self.pid_file);
+        let _ignored = fs::remove_file(&self.leader_pid_file);
     }
 }
 

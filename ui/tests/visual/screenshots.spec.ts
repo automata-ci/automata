@@ -97,7 +97,7 @@ test("repository directory exposes only honest destinations and the same-kind em
     "href",
     "?view=runs",
   );
-  await expect(row.getByRole("link", { name: "Settings" })).toHaveAttribute(
+  await expect(row.getByRole("link", { name: "Access" })).toHaveAttribute(
     "href",
     "?view=settings",
   );

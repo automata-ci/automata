@@ -21,7 +21,7 @@ use automata_ci_control::{
     LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
 };
 use automata_ci_control_plane::{DeterministicScheduler, SchedulerPolicy};
-use automata_ci_core::{RunId, UnixMillis};
+use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
@@ -50,10 +50,10 @@ use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
     BuiltinSecretCleanupRepository, ControlPlaneMaintenanceRepository, ControlPlaneStateRepository,
-    CurrentRunnerSessionRepository, EnsureTenant, HumanWorkflowReadRepository,
-    LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
-    LogicalInstanceResultRepository, LogicalInstanceResultWorkerId, LogicalJobResultRepository,
-    LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
+    CurrentRunnerSessionRepository, HumanWorkflowReadRepository, LogicalActivationPreparationStore,
+    LogicalActivationRepository, LogicalActivationWorkerId, LogicalInstanceResultRepository,
+    LogicalInstanceResultWorkerId, LogicalJobResultRepository, LogicalJobResultWorkerId,
+    LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
     LogicalWorkSelectionRepository, PostgresSecretCustodyRepository,
     PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
@@ -62,7 +62,7 @@ use automata_ci_store::{
     RunnerCommandOutbox, RunnerControlTransactionRepository, RunnerLeaseOfferRepository,
     RunnerLeaseRequestRepository, RunnerOperationReceiptRepository, RunnerSessionRepository,
     SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
-    SecretMutationRecoveryRepository, TenantScope,
+    SecretMutationRecoveryRepository,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
@@ -275,15 +275,15 @@ impl ProductionComponents {
         // Retain the human-read and immutable-object ports before the concrete
         // adapters are moved into runner-control composition below.
         let human_reads: Arc<dyn HumanWorkflowReadRepository> = store.clone();
-        let fallback_tenant = TenantId::new(config.local_admission_tenant.clone())
-            .map_err(|_| ServerCompositionError::InvalidLocalAdmission)?;
+        let fallback_tenant = TenantId::new(config.fallback_tenant_id.clone())
+            .map_err(|_| ServerCompositionError::InvalidFallbackTenant)?;
         let web_fallback_context = RequestContext::new(
             fallback_tenant.clone(),
             AuthorizationContext::anonymous(),
             None,
             None,
         )
-        .map_err(|_| ServerCompositionError::InvalidLocalAdmission)?;
+        .map_err(|_| ServerCompositionError::InvalidFallbackTenant)?;
 
         let secret_build = build_secret_management(config, store.as_ref()).await?;
         let secret_management = secret_build.runtime;
@@ -460,14 +460,11 @@ async fn apply_product_bootstrap(
         .verify_runner_capability_admission()
         .await
         .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    if config.local_admission_token.is_none() && config.static_runner_registration_file.is_none() {
+    if config.static_runner_registration_file.is_none() {
         return Ok(());
     }
     let observed_seconds = i64::try_from(SystemClock.now().as_seconds())
         .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-    let observed_millis = observed_seconds
-        .checked_mul(1_000)
-        .ok_or(ServerCompositionError::InvalidStaticRunnerRegistration)?;
 
     let fleet = config
         .static_runner_registration_file
@@ -475,15 +472,6 @@ async fn apply_product_bootstrap(
         .map(|path| load_static_runner_fleet(path, observed_seconds))
         .transpose()
         .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-
-    if config.local_admission_token.is_some() {
-        let tenant = TenantScope::from_authenticated_tenant_id(&config.local_admission_tenant)
-            .map_err(|_| ServerCompositionError::InvalidLocalAdmission)?;
-        store
-            .ensure_tenant(EnsureTenant::new(tenant, UnixMillis::new(observed_millis)))
-            .await
-            .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    }
 
     if let Some(fleet) = fleet {
         store
@@ -551,20 +539,12 @@ fn validate_effective_ui_tenant(
     config: &ServerConfig,
     effective_tenant: &TenantId,
 ) -> Result<TenantAlignedGithubProviderConfig, ServerCompositionError> {
-    let enabled_local_admission_tenant = config
-        .local_admission_token
-        .as_ref()
-        .map(|_| config.local_admission_tenant.as_str());
     let provider_repository_tenants = config
         .github_provider()
         .into_iter()
         .flat_map(super::GithubProviderConfig::repositories)
         .map(|repository| repository.tenant().as_str());
-    validate_tenant_alignment(
-        effective_tenant.as_str(),
-        enabled_local_admission_tenant,
-        provider_repository_tenants,
-    )?;
+    validate_tenant_alignment(effective_tenant.as_str(), provider_repository_tenants)?;
     Ok(TenantAlignedGithubProviderConfig(
         config.github_provider().cloned(),
     ))
@@ -572,13 +552,11 @@ fn validate_effective_ui_tenant(
 
 fn validate_tenant_alignment<'a>(
     effective_tenant: &str,
-    enabled_local_admission_tenant: Option<&str>,
     provider_repository_tenants: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), ServerCompositionError> {
-    if enabled_local_admission_tenant.is_some_and(|tenant| tenant != effective_tenant)
-        || provider_repository_tenants
-            .into_iter()
-            .any(|tenant| tenant != effective_tenant)
+    if provider_repository_tenants
+        .into_iter()
+        .any(|tenant| tenant != effective_tenant)
     {
         return Err(ServerCompositionError::InconsistentEffectiveUiTenant);
     }
@@ -595,10 +573,9 @@ mod effective_ui_tenant_tests {
     use crate::cli::{Cli, Command};
 
     const EFFECTIVE_TENANT: &str = "effective-tenant-sentinel";
-    const FOREIGN_LOCAL_TENANT: &str = "foreign-local-tenant-sentinel";
     const FOREIGN_PROVIDER_TENANT: &str = "foreign-provider-tenant-sentinel";
 
-    fn provider_server_config(local_tenant: &str) -> ServerConfig {
+    fn provider_server_config() -> ServerConfig {
         let directory = std::env::var_os("CARGO_TARGET_TMPDIR")
             .map_or_else(std::env::temp_dir, PathBuf::from)
             .join("effective-ui-tenant-composition");
@@ -624,8 +601,6 @@ mod effective_ui_tenant_tests {
             "https://results.example.test/",
             "--github-provider-config-source",
             source.as_str(),
-            "--local-admission-tenant",
-            local_tenant,
         ];
         let cli = Cli::try_parse_from(cli_arguments).expect("tenant-alignment server syntax");
         let Command::Server(server_args) = cli.command else {
@@ -636,54 +611,38 @@ mod effective_ui_tenant_tests {
 
     #[test]
     fn exact_single_tenant_topology_allows_every_enabled_surface() {
-        validate_tenant_alignment(
-            EFFECTIVE_TENANT,
-            Some(EFFECTIVE_TENANT),
-            [EFFECTIVE_TENANT, EFFECTIVE_TENANT],
-        )
-        .expect("one exact tenant must reach provider composition");
+        validate_tenant_alignment(EFFECTIVE_TENANT, [EFFECTIVE_TENANT, EFFECTIVE_TENANT])
+            .expect("one exact tenant must reach provider composition");
     }
 
     #[test]
-    fn disabled_local_admission_preserves_the_resolved_effective_tenant() {
-        validate_tenant_alignment(EFFECTIVE_TENANT, None, [EFFECTIVE_TENANT])
-            .expect("a disabled local ingress must not override durable human state");
-        validate_tenant_alignment(EFFECTIVE_TENANT, None, std::iter::empty::<&'static str>())
-            .expect("the existing fallback tenant remains valid without enabled ingresses");
+    fn no_provider_preserves_the_resolved_effective_tenant() {
+        validate_tenant_alignment(EFFECTIVE_TENANT, std::iter::empty::<&'static str>())
+            .expect("the resolved tenant remains valid without a configured provider");
     }
 
     #[test]
     fn server_configuration_is_gated_without_loading_provider_secret_sources() {
         let effective_tenant = TenantId::new("automata-main").expect("effective tenant");
-        let aligned = provider_server_config(effective_tenant.as_str());
+        let aligned = provider_server_config();
         assert!(
             validate_effective_ui_tenant(&aligned, &effective_tenant)
-                .expect("matching provider with local ingress disabled")
+                .expect("matching provider")
                 .0
                 .is_some()
         );
-
-        let disabled_local = provider_server_config(FOREIGN_LOCAL_TENANT);
-        validate_effective_ui_tenant(&disabled_local, &effective_tenant)
-            .expect("disabled local admission must not override the effective tenant");
     }
 
     #[test]
     fn any_mismatch_fails_the_pre_side_effect_gate_without_reflecting_tenants() {
-        let cases: [(Option<&str>, &[&str]); 2] = [
-            (Some(FOREIGN_LOCAL_TENANT), &[EFFECTIVE_TENANT]),
-            (
-                Some(EFFECTIVE_TENANT),
-                &[EFFECTIVE_TENANT, FOREIGN_PROVIDER_TENANT],
-            ),
+        let cases: [&[&str]; 2] = [
+            &[FOREIGN_PROVIDER_TENANT],
+            &[EFFECTIVE_TENANT, FOREIGN_PROVIDER_TENANT],
         ];
-        for (local_tenant, provider_tenants) in cases {
-            let error = validate_tenant_alignment(
-                EFFECTIVE_TENANT,
-                local_tenant,
-                provider_tenants.iter().copied(),
-            )
-            .expect_err("tenant mismatch must stop before provider runtime composition");
+        for provider_tenants in cases {
+            let error =
+                validate_tenant_alignment(EFFECTIVE_TENANT, provider_tenants.iter().copied())
+                    .expect_err("tenant mismatch must stop before provider runtime composition");
             assert!(matches!(
                 error,
                 ServerCompositionError::InconsistentEffectiveUiTenant
@@ -691,13 +650,9 @@ mod effective_ui_tenant_tests {
             let rendered = error.to_string();
             assert_eq!(
                 rendered,
-                "human UI, local admission, and GitHub provider tenant configuration is inconsistent"
+                "human UI and GitHub provider tenant configuration is inconsistent"
             );
-            for tenant in [
-                EFFECTIVE_TENANT,
-                FOREIGN_LOCAL_TENANT,
-                FOREIGN_PROVIDER_TENANT,
-            ] {
+            for tenant in [EFFECTIVE_TENANT, FOREIGN_PROVIDER_TENANT] {
                 assert!(!rendered.contains(tenant));
             }
         }
@@ -1402,9 +1357,6 @@ async fn build_human_api(
     fallback_tenant: TenantId,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let mut router = Router::new();
-    if config.load_local_admission_token()?.is_some() {
-        return Err(ServerCompositionError::InvalidLocalAdmission);
-    }
 
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {
@@ -1768,11 +1720,11 @@ pub enum ServerCompositionError {
     /// S3 namespace or credential configuration was invalid.
     #[error(transparent)]
     S3(#[from] S3BlobStoreConfigError),
-    /// Local bootstrap admission configuration is invalid.
-    #[error("local workflow admission configuration is invalid")]
-    InvalidLocalAdmission,
-    /// Enabled UI, local admission, and provider surfaces disagree on tenant scope.
-    #[error("human UI, local admission, and GitHub provider tenant configuration is inconsistent")]
+    /// The unauthenticated UI fallback tenant is invalid.
+    #[error("fallback tenant identity is invalid")]
+    InvalidFallbackTenant,
+    /// Enabled UI and provider surfaces disagree on tenant scope.
+    #[error("human UI and GitHub provider tenant configuration is inconsistent")]
     InconsistentEffectiveUiTenant,
     /// The configured human-authentication adapters or policies are invalid.
     #[error("human authentication configuration is invalid")]

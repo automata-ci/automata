@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-/// Human HTTP application, health endpoints, and opt-in workflow ingress.
+/// Human HTTP application, health endpoints, and authenticated provider ingress.
 pub mod app;
 /// Immutable executable version and source-revision metadata.
 pub mod build_info;
@@ -54,17 +54,14 @@ fn parse_process_arguments() -> Result<Option<Cli>> {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
-    if cli.service_has_operator_options() {
-        bail!("operator options cannot be used with service commands");
-    }
     match &cli.command {
         Command::Server(args) => Box::pin(server::serve(args)).await,
         Command::Preview(args) => preview::serve(args).await,
         command => {
-            let (server_url, output) = cli
-                .operator_options()
+            let operator = command
+                .operator()
                 .expect("service commands are handled before operator dispatch");
-            cli::execute_control_plane_command(server_url, output, command).await
+            cli::execute_control_plane_command(&operator.server_url, operator.output, command).await
         }
     }
 }

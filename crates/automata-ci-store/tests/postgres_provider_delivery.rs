@@ -215,6 +215,30 @@ async fn database_now(database: &TestDatabase) -> TestResult<i64> {
     )
 }
 
+async fn database_time_after(
+    database: &TestDatabase,
+    offset_millis: i64,
+) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        database_now(database)
+            .await?
+            .checked_add(offset_millis)
+            .expect("future database timestamp is representable"),
+    ))
+}
+
+async fn wait_until_database_time(database: &TestDatabase, target: UnixMillis) -> TestResult {
+    loop {
+        let remaining = target.get().saturating_sub(database_now(database).await?);
+        if remaining <= 0 {
+            return Ok(());
+        }
+        let sleep_millis = u64::try_from(remaining.min(100))
+            .expect("positive bounded database-time remainder fits u64");
+        tokio::time::sleep(Duration::from_millis(sleep_millis)).await;
+    }
+}
+
 fn claim(owner: ProviderDeliveryClaimOwnerId, requested_observed_at: i64) -> ClaimProviderDelivery {
     let observed_at = if requested_observed_at >= 1_000_000_000_000 {
         requested_observed_at
@@ -893,8 +917,9 @@ async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() 
             reclaimed.claim(),
             failure("provider_unavailable"),
             transition_at,
-            UnixMillis::new(transition_at.get() + 10),
+            database_time_after(&database, 5_000).await?,
         )?;
+        let retry_at = retry.retry_at();
         let receipt = database.store().retry_provider_delivery(retry).await?;
         assert_eq!(receipt.state(), ProviderDeliveryState::RetryPending);
         assert_eq!(receipt.attempts(), 1);
@@ -905,7 +930,7 @@ async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() 
                 .await?
                 .is_none()
         );
-        sleep_through(UnixMillis::new(transition_at.get() + 10)).await;
+        wait_until_database_time(&database, retry_at).await?;
         let second_attempt = database
             .store()
             .claim_provider_delivery(claim(owner(), 1_200))

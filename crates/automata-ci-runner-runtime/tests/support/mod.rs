@@ -1697,7 +1697,7 @@ impl JobExecutor for CleanupIsolationExecutor {
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(operation_id);
             let attempt = self.cleanup_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            self.cleanup_parked.notify_waiters();
+            self.cleanup_parked.notify_one();
             if attempt == 1 {
                 events
                     .provider_operation_failed(

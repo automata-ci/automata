@@ -8,6 +8,22 @@ use std::{
     },
 };
 
+use automata_ci_core::{
+    AttemptId, FencingToken, JobId, JobIrVersion, LeaseId, RunId, RunnerId, RunnerSessionId,
+};
+use automata_ci_credential_github::{
+    GithubInstallationTokenRevocationCandidate, GithubInstallationTokenRevocationFailureKind,
+    GithubInstallationTokenRevocationOutcome,
+};
+use automata_ci_store::{
+    GithubRepositoryId, GithubRuntimeAuthorityActivationSelectionTail,
+    GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityMaterializationSelectionTail,
+    GithubRuntimeAuthorityNamespace, GithubRuntimeAuthorityPreparationSelectionTail,
+    GithubServerServiceAuthorityIdentity, LogicalActivationGeneration,
+    LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
+    LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
+    RunnerGeneration, SessionEpoch, StableRunnerSlot,
+};
 use serde_json::{Value, json};
 
 use super::*;
@@ -124,6 +140,380 @@ fn load_config(document: &Value) -> GithubProviderConfig {
     }
     GithubProviderConfig::load(&super::super::SecretSource::File(path))
         .expect("valid provider configuration")
+}
+
+fn set_repository_revisions(repository: &mut Value, manifest: u64, policy: u64) {
+    repository["manifest_revision"] = json!(manifest);
+    repository["policy_revision"] = json!(policy);
+    repository["authorities"]["checks_write"]["policy_revision"] = json!(policy);
+}
+
+fn live_test_broker(
+    config: &GithubProviderConfig,
+    installation_id: u64,
+) -> Arc<GithubAppCredentialBroker> {
+    const PKCS8_DER: &[u8] = include_bytes!(
+        "../../../automata-ci-credential-github/tests/fixtures/rsa2048-test-key.pkcs8.der"
+    );
+
+    let pem = pem_rfc7468::encode_string("PRIVATE KEY", pem_rfc7468::LineEnding::LF, PKCS8_DER)
+        .expect("published RSA fixture encodes as PEM");
+    let private_key = SecretString::new(pem).expect("published RSA fixture is nonempty");
+    let broker_config = GithubAppCredentialConfig::github_dot_com(
+        github_app_issuer(config).expect("validated App issuer"),
+        GithubInstallationId::new(installation_id).expect("installation"),
+        GITHUB_HTTP_USER_AGENT,
+    )
+    .expect("GitHub.com broker configuration");
+    Arc::new(
+        GithubAppCredentialBroker::new(broker_config, &private_key)
+            .expect("published RSA fixture constructs a live broker"),
+    )
+}
+
+fn checks_authority(
+    plan: &GithubProviderBootstrapPlan,
+    repository_id: u64,
+) -> GithubServerServiceAuthorityIdentity {
+    plan.authorities()
+        .iter()
+        .find(|authority| {
+            authority.scope() == GithubServerServiceScope::ChecksWrite
+                && authority.github_repository_id().get() == repository_id
+        })
+        .cloned()
+        .expect("checks authority for configured repository")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeRouteEvidence {
+    github_app_id: GithubServerServiceAppId,
+    github_app_client_id: GithubServerServiceAppClientId,
+    github_app_jwt_issuer_kind: GithubServerServiceJwtIssuer,
+    app_key_spki_sha256: Sha256Digest,
+    configuration_fingerprint: Sha256Digest,
+}
+
+impl RuntimeRouteEvidence {
+    fn from_authority(authority: &GithubServerServiceAuthorityIdentity) -> Self {
+        Self {
+            github_app_id: authority.github_app_id(),
+            github_app_client_id: authority.app_client_id().clone(),
+            github_app_jwt_issuer_kind: authority.jwt_issuer(),
+            app_key_spki_sha256: authority.app_key_spki_sha256(),
+            configuration_fingerprint: authority.configuration_fingerprint(),
+        }
+    }
+}
+
+fn runtime_identity(
+    authority: &GithubServerServiceAuthorityIdentity,
+    route: &RuntimeRouteEvidence,
+    seed: u128,
+    policy_digest_byte: u8,
+) -> GithubRuntimeAuthorityIdentity {
+    let identifier = |offset| Uuid::from_u128(seed + offset);
+    let policy_digest = Sha256Digest::from_bytes([policy_digest_byte; 32]);
+    GithubRuntimeAuthorityIdentity::new(
+        authority.tenant().clone(),
+        AttemptId::from_uuid(identifier(1)),
+        FencingToken::new(1).expect("fence"),
+        LeaseId::from_uuid(identifier(2)),
+        UnixMillis::new(1_000),
+        UnixMillis::new(10_000),
+        RunId::from_uuid(identifier(3)),
+        JobId::from_uuid(identifier(4)),
+        RunnerId::from_uuid(identifier(5)),
+        RunnerSessionId::from_uuid(identifier(6)),
+        SessionEpoch::new(1).expect("session epoch"),
+        RunnerGeneration::new(1).expect("runner generation"),
+        StableRunnerSlot::new(1).expect("runner slot"),
+        JobIrVersion::current(),
+        1_024,
+        policy_digest,
+        authority.repository_id(),
+        authority.connection_id(),
+        authority.installation_id(),
+        route.github_app_id,
+        route.github_app_client_id.clone(),
+        route.github_app_jwt_issuer_kind,
+        GithubRepositoryId::new(authority.github_repository_id().get()).expect("repository ID"),
+        authority.github_repository_name().clone(),
+        GithubRuntimeAuthorityNamespace::new("github.actions.runtime").expect("namespace"),
+        policy_digest,
+        route.app_key_spki_sha256,
+        route.configuration_fingerprint,
+        GithubRuntimeAuthorityPreparationSelectionTail::new(
+            LogicalWorkSelectionId::from_uuid(identifier(7)).expect("preparation selection"),
+            LogicalActivationWorkerId::from_uuid(identifier(8)).expect("preparation owner"),
+            LogicalActivationPreparationGeneration::new(1).expect("preparation generation"),
+            Sha256Digest::from_bytes([0x31; 32]),
+            UnixMillis::new(1_100),
+            UnixMillis::new(1_200),
+        )
+        .expect("preparation tail"),
+        GithubRuntimeAuthorityActivationSelectionTail::new(
+            LogicalWorkSelectionId::from_uuid(identifier(9)).expect("activation selection"),
+            LogicalActivationWorkerId::from_uuid(identifier(10)).expect("activation owner"),
+            LogicalActivationGeneration::new(1).expect("activation generation"),
+            Sha256Digest::from_bytes([0x32; 32]),
+            UnixMillis::new(1_200),
+            UnixMillis::new(1_300),
+        )
+        .expect("activation tail"),
+        GithubRuntimeAuthorityMaterializationSelectionTail::new(
+            LogicalWorkSelectionId::from_uuid(identifier(11)).expect("materialization selection"),
+            LogicalMaterializationWorkerId::from_uuid(identifier(12))
+                .expect("materialization owner"),
+            LogicalMaterializationGeneration::new(1).expect("materialization generation"),
+            Sha256Digest::from_bytes([0x33; 32]),
+            UnixMillis::new(1_300),
+            UnixMillis::new(1_400),
+        )
+        .expect("materialization tail"),
+        UnixMillis::new(2_000),
+        UnixMillis::new(3_000),
+    )
+    .expect("runtime identity")
+}
+
+fn changed_digest(digest: Sha256Digest) -> Sha256Digest {
+    let mut bytes = *digest.as_bytes();
+    bytes[0] ^= 0xff;
+    Sha256Digest::from_bytes(bytes)
+}
+
+struct RevisionRoutingFixture {
+    broker: Arc<GithubAppCredentialBroker>,
+    pin: JobAuthorityBrokerPin,
+    historical: GithubServerServiceAuthorityIdentity,
+    current: GithubServerServiceAuthorityIdentity,
+    current_peer: GithubServerServiceAuthorityIdentity,
+}
+
+fn revision_routing_fixture() -> RevisionRoutingFixture {
+    const INSTALLATION_ID: u64 = 202;
+    const REPOSITORY_ID: u64 = 302;
+
+    let mut current_repository = repository(
+        "tenant-current",
+        0x211,
+        INSTALLATION_ID,
+        REPOSITORY_ID,
+        402,
+        "octo/current-repository",
+        "public",
+        0x811,
+        None,
+    );
+    set_repository_revisions(&mut current_repository, 2, 8);
+    let mut current_peer = repository(
+        "tenant-peer",
+        0x212,
+        INSTALLATION_ID,
+        303,
+        403,
+        "octo/peer-repository",
+        "public",
+        0x911,
+        None,
+    );
+    set_repository_revisions(&mut current_peer, 3, 9);
+    let mut current_document = document(&[current_repository, current_peer]);
+    current_document["app"]["configuration_revision"] = json!(8);
+    let current_config = load_config(&current_document);
+    let broker = live_test_broker(&current_config, INSTALLATION_ID);
+    let verifier =
+        GithubWebhookVerifier::new(b"runtime revision routing verifier").expect("webhook verifier");
+    let current_plan = GithubProviderBootstrapPlan::new(&current_config, &broker, &verifier)
+        .expect("same-installation current registry builds");
+    let pins = job_authority_broker_pins(&current_plan)
+        .expect("different policy revisions share one exact broker pin");
+    assert_eq!(pins.len(), 1);
+    let pin = pins
+        .get(&INSTALLATION_ID)
+        .cloned()
+        .expect("one same-installation route");
+
+    let mut historical_repository = repository(
+        "tenant-current",
+        0x211,
+        INSTALLATION_ID,
+        REPOSITORY_ID,
+        402,
+        "octo/current-repository",
+        "public",
+        0x711,
+        None,
+    );
+    set_repository_revisions(&mut historical_repository, 1, 7);
+    let mut historical_document = document(&[historical_repository]);
+    historical_document["app"]["configuration_revision"] = json!(5);
+    let historical_config = load_config(&historical_document);
+    let historical_plan = GithubProviderBootstrapPlan::new(&historical_config, &broker, &verifier)
+        .expect("historical revision builds against the same live broker");
+
+    RevisionRoutingFixture {
+        broker,
+        pin,
+        historical: checks_authority(&historical_plan, REPOSITORY_ID),
+        current: checks_authority(&current_plan, REPOSITORY_ID),
+        current_peer: checks_authority(&current_plan, 303),
+    }
+}
+
+#[test]
+fn same_installation_current_policy_revisions_share_one_configuration_pin() {
+    let fixture = revision_routing_fixture();
+
+    assert_eq!(fixture.current.app_configuration_revision().get(), 8);
+    assert_eq!(fixture.current_peer.app_configuration_revision().get(), 8);
+    assert_eq!(fixture.current.policy_revision().get(), 8);
+    assert_eq!(fixture.current_peer.policy_revision().get(), 9);
+    assert_ne!(
+        fixture.current.identity_digest(),
+        fixture.current_peer.identity_digest()
+    );
+    assert_eq!(
+        fixture.current.configuration_fingerprint(),
+        fixture.current_peer.configuration_fingerprint()
+    );
+    assert_eq!(
+        fixture.pin.configuration_fingerprint,
+        fixture.current.configuration_fingerprint()
+    );
+    assert_eq!(
+        fixture.broker.app_key_spki_sha256(),
+        fixture.pin.app_key_spki_sha256
+    );
+}
+
+fn assert_historical_and_current_revision_route(fixture: &RevisionRoutingFixture) {
+    assert_eq!(fixture.historical.app_configuration_revision().get(), 5);
+    assert_eq!(fixture.current.app_configuration_revision().get(), 8);
+    assert_eq!(fixture.historical.policy_revision().get(), 7);
+    assert_eq!(fixture.current.policy_revision().get(), 8);
+    assert_ne!(
+        fixture.historical.identity_digest(),
+        fixture.current.identity_digest()
+    );
+    assert_eq!(
+        fixture.historical.installation_id(),
+        fixture.current.installation_id()
+    );
+    assert_eq!(
+        fixture.historical.app_key_spki_sha256(),
+        fixture.current.app_key_spki_sha256()
+    );
+    assert_eq!(
+        fixture.historical.jwt_issuer(),
+        fixture.current.jwt_issuer()
+    );
+    assert_eq!(
+        fixture.historical.configuration_fingerprint(),
+        fixture.current.configuration_fingerprint()
+    );
+}
+
+#[tokio::test]
+async fn historical_and_current_identities_share_exact_live_route_and_mismatches_close() {
+    let fixture = revision_routing_fixture();
+    assert_historical_and_current_revision_route(&fixture);
+    let historical_route = RuntimeRouteEvidence::from_authority(&fixture.historical);
+    let current_route = RuntimeRouteEvidence::from_authority(&fixture.current);
+    assert_eq!(historical_route, current_route);
+
+    let historical = runtime_identity(&fixture.historical, &historical_route, 0x1_000, 0x71);
+    let current = runtime_identity(&fixture.current, &current_route, 0x2_000, 0x81);
+    assert_ne!(historical.policy_digest(), current.policy_digest());
+
+    // Runtime construction feeds this one pin into both provider-operation paths.
+    let mint_route = PinnedGithubRuntimeAuthorityMintBroker::new(
+        fixture.broker.clone(),
+        fixture.pin.github_app_id,
+        fixture.pin.github_app_client_id.clone(),
+        fixture.pin.github_app_jwt_issuer_kind,
+        fixture.pin.configuration_fingerprint,
+    )
+    .expect("the live mint route consumes the converged pin");
+    let lifecycle_route = GithubRuntimeAuthorityLifecycleBrokerRouter::new([(
+        fixture.broker,
+        fixture.pin.github_app_id,
+        fixture.pin.github_app_client_id,
+        fixture.pin.github_app_jwt_issuer_kind,
+        fixture.pin.configuration_fingerprint,
+    )])
+    .expect("the live lifecycle route consumes the same converged pin");
+    for identity in [&historical, &current] {
+        assert_eq!(
+            mint_route.installation_id(),
+            identity.provider_installation_id().get()
+        );
+        assert_eq!(mint_route.github_app_id(), identity.github_app_id());
+        assert_eq!(
+            mint_route.github_app_client_id(),
+            identity.github_app_client_id()
+        );
+        assert_eq!(
+            mint_route.github_app_jwt_issuer_kind(),
+            identity.github_app_jwt_issuer_kind()
+        );
+        assert_eq!(
+            mint_route.github_app_jwt_issuer_value(),
+            identity.github_app_jwt_issuer_value()
+        );
+        assert_eq!(
+            mint_route.app_key_spki_sha256(),
+            identity.app_key_spki_sha256()
+        );
+        assert_eq!(
+            mint_route.configuration_fingerprint(),
+            identity.configuration_fingerprint()
+        );
+        assert_eq!(
+            lifecycle_route.maximum_request_duration(identity),
+            Some(mint_route.maximum_mint_duration())
+        );
+    }
+
+    let mut wrong_key = current_route.clone();
+    wrong_key.app_key_spki_sha256 = changed_digest(wrong_key.app_key_spki_sha256);
+    let mut wrong_issuer = current_route.clone();
+    wrong_issuer.github_app_jwt_issuer_kind = match wrong_issuer.github_app_jwt_issuer_kind {
+        GithubServerServiceJwtIssuer::AppClientId => GithubServerServiceJwtIssuer::AppId,
+        GithubServerServiceJwtIssuer::AppId => GithubServerServiceJwtIssuer::AppClientId,
+    };
+    let mut wrong_fingerprint = current_route;
+    wrong_fingerprint.configuration_fingerprint =
+        changed_digest(wrong_fingerprint.configuration_fingerprint);
+    let candidate = GithubInstallationTokenRevocationCandidate::from_protected_secret(
+        SecretString::new("routing-mismatch-token").expect("candidate"),
+    )
+    .expect("bounded protected candidate");
+
+    for (label, route) in [
+        ("App key", wrong_key),
+        ("JWT issuer", wrong_issuer),
+        ("configuration fingerprint", wrong_fingerprint),
+    ] {
+        let mismatch = runtime_identity(&fixture.current, &route, 0x3_000, 0x81);
+        assert_eq!(lifecycle_route.maximum_request_duration(&mismatch), None);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(50),
+            lifecycle_route.revoke(&mismatch, &candidate),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{label} mismatch reached the live provider"));
+        assert!(
+            matches!(
+                outcome,
+                GithubInstallationTokenRevocationOutcome::Unconfirmed(failure)
+                    if failure.kind()
+                        == GithubInstallationTokenRevocationFailureKind::InvalidResponse
+            ),
+            "{label} mismatch must fail at the exact route"
+        );
+    }
 }
 
 #[test]

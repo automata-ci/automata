@@ -219,7 +219,6 @@ dependencies = [
  "automata-ci-secret-postgres",
  "automata-ci-store",
  "automata-ci-ui-renderer",
- "automata-ci-workflow-github",
  "automata-ci-workflow-service",
  "axum",
  "base64",

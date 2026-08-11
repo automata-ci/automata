@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -66,9 +66,10 @@ use ring::hmac;
 use serde_json::{Value, json};
 use sqlx::{
     AssertSqlSafe, PgPool, Row as _,
-    postgres::{PgConnectOptions, PgPoolOptions},
+    postgres::{PgConnectOptions, PgPoolOptions, PgRow},
 };
 use tar::{Builder, EntryType, Header};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -80,7 +81,7 @@ const AFTER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
 const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
-    SELECT repository.owner, repository.name,
+    SELECT repository.owner, repository.name, job.id AS logical_job_id,
            job.activation_origin_selection_id,
            job.activation_fence AS current_activation_generation,
            job.activation_input_digest AS current_activation_input_digest,
@@ -357,8 +358,7 @@ impl AutonomousWorkflowPhaseExecutor for MatrixExecutorTrace {
         shutdown: CancellationToken,
         deadline: AutonomousWorkflowDeadline,
     ) -> AutonomousWorkflowExecutionFuture<'a> {
-        self.inner
-            .execute_preparation(lease, shutdown, deadline)
+        self.inner.execute_preparation(lease, shutdown, deadline)
     }
 
     fn execute_activation<'a>(
@@ -687,7 +687,8 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
         workflow_service.run_once(CancellationToken::new()).await?,
         AutonomousWorkflowOutcome::Idle
     );
-    assert_activation_execution_traces(&selection_trace, &executor_trace);
+    let activation_trace_jobs =
+        assert_activation_execution_traces(&selection_trace, &executor_trace);
     assert_eq!(source.observations().len(), source_calls_before_execution);
     assert_eq!(
         credentials.observations().len(),
@@ -696,7 +697,7 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
     assert_eq!(credentials.release_count(), release_calls_before_execution);
 
     eprintln!("matrix stage: activation-renewal-lineage");
-    assert_activation_renewal_lineage(database.pool()).await?;
+    assert_activation_renewal_lineage(database.pool(), &activation_trace_jobs).await?;
     eprintln!("matrix stage: durable-profile-and-job-ir");
     assert_durable_profiles_and_job_ir(database.pool(), &blobs).await
 }
@@ -704,7 +705,7 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
 fn assert_activation_execution_traces(
     selections: &MatrixSelectionTrace,
     executor: &MatrixExecutorTrace,
-) {
+) -> BTreeSet<Uuid> {
     let activation_consumes = selections.activation_consumes();
     assert_eq!(activation_consumes.len(), MATRIX.len());
     for generations in activation_consumes.values() {
@@ -732,6 +733,7 @@ fn assert_activation_execution_traces(
         deadline_jobs,
         activation_consumes.keys().copied().collect::<BTreeSet<_>>()
     );
+    deadline_jobs
 }
 
 fn assert_source_authentication(
@@ -769,12 +771,16 @@ fn assert_source_authentication(
     assert_eq!(credentials.release_count(), 2);
 }
 
-async fn assert_activation_renewal_lineage(pool: &PgPool) -> TestResult {
+async fn assert_activation_renewal_lineage(
+    pool: &PgPool,
+    activation_trace_jobs: &BTreeSet<Uuid>,
+) -> TestResult {
     let rows = sqlx::query(ACTIVATION_RENEWAL_LINEAGE_QUERY)
         .fetch_all(pool)
         .await?;
     assert_eq!(rows.len(), MATRIX.len());
     let mut seen = BTreeSet::new();
+    let mut sql_jobs = BTreeSet::new();
     for row in &rows {
         let repository = format!(
             "{}/{}",
@@ -786,12 +792,17 @@ async fn assert_activation_renewal_lineage(pool: &PgPool) -> TestResult {
             seen.insert(repository.clone()),
             "duplicate activation lineage for {repository}"
         );
+        assert!(
+            sql_jobs.insert(row.try_get::<Uuid, _>("logical_job_id")?),
+            "duplicate activation SQL target for {repository}"
+        );
         assert_activation_renewal_identity(row, &repository)?;
         assert_activation_renewal_generation_and_time(row, &repository)?;
         assert_activation_renewal_digest_and_policy(row, &repository)?;
         assert_eq!(case.repository, repository);
     }
     assert_eq!(seen.len(), MATRIX.len());
+    assert_eq!(&sql_jobs, activation_trace_jobs);
     Ok(())
 }
 
@@ -868,15 +879,23 @@ fn assert_activation_renewal_generation_and_time(row: &PgRow, repository: &str) 
     );
     let selection_claimed_at = row.try_get::<i64, _>("selection_claimed_at_ms")?;
     let selection_expires_at = row.try_get::<i64, _>("selection_expires_at_ms")?;
+    let predecessor_claimed_at = row.try_get::<i64, _>("predecessor_claimed_at_ms")?;
+    let predecessor_expires_at = row.try_get::<i64, _>("predecessor_expires_at_ms")?;
     assert_eq!(
-        row.try_get::<i64, _>("predecessor_claimed_at_ms")?,
-        selection_claimed_at,
+        predecessor_claimed_at, selection_claimed_at,
         "{repository} predecessor claim start"
     );
     assert_eq!(
-        row.try_get::<i64, _>("predecessor_expires_at_ms")?,
-        selection_expires_at,
+        predecessor_expires_at, selection_expires_at,
         "{repository} predecessor claim expiry"
+    );
+    let predecessor_duration = predecessor_expires_at
+        .checked_sub(predecessor_claimed_at)
+        .expect("validated predecessor duration");
+    let requested_duration = row.try_get::<i64, _>("requested_duration_ms")?;
+    assert!(
+        requested_duration > predecessor_duration,
+        "{repository} renewal request must strictly extend the predecessor duration"
     );
     let successor_claimed_at = row.try_get::<i64, _>("successor_claimed_at_ms")?;
     let successor_expires_at = row.try_get::<i64, _>("successor_expires_at_ms")?;
@@ -892,7 +911,7 @@ fn assert_activation_renewal_generation_and_time(row: &PgRow, repository: &str) 
     );
     assert_eq!(
         successor_expires_at.checked_sub(successor_claimed_at),
-        Some(row.try_get::<i64, _>("requested_duration_ms")?),
+        Some(requested_duration),
         "{repository} successor duration"
     );
     assert!(

@@ -752,58 +752,37 @@ fn control_plane_payload_keys_are_mandatory_exact_length_and_rotation_aware() {
 }
 
 #[test]
-fn local_admission_is_rejected_before_product_composition() {
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--listen",
-        "0.0.0.0:8080",
-        "--local-admission-token-source",
-        "env:AUTOMATA_LOCAL_ADMISSION_TOKEN",
-    ])
-    .expect("CLI syntax must parse");
+fn fallback_tenant_is_explicit_and_validated_before_adapter_composition() {
+    let default_cli = Cli::try_parse_from(["automata", "server"]).expect("server syntax");
+    let Command::Server(default_args) = default_cli.command else {
+        panic!("server command expected");
+    };
+    assert_eq!(default_args.fallback_tenant_id, "local");
+
+    let cli = Cli::try_parse_from(["automata", "server", "--fallback-tenant-id", "not a tenant"])
+        .expect("CLI syntax must parse");
     let Command::Server(args) = cli.command else {
         panic!("server command expected");
     };
     assert!(matches!(
         ServerConfig::from_args(&args),
-        Err(ServerConfigError::UnsupportedLocalAdmission)
+        Err(ServerConfigError::InvalidFallbackTenant)
     ));
 
     let cli = Cli::try_parse_from([
         "automata",
         "server",
-        "--local-admission-token-source",
-        "file:target/local-admission-token",
+        "--fallback-tenant-id",
+        "tenant-a",
         "--results-public-url",
         "https://results.example.test/",
     ])
-    .expect("loopback local ingress must parse");
+    .expect("custom fallback tenant syntax");
     let Command::Server(args) = cli.command else {
         panic!("server command expected");
     };
-    assert!(matches!(
-        ServerConfig::from_args(&args),
-        Err(ServerConfigError::UnsupportedLocalAdmission)
-    ));
-}
-
-#[test]
-fn local_admission_tenant_is_validated_before_adapter_composition() {
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--local-admission-tenant",
-        "not a tenant",
-    ])
-    .expect("CLI syntax must parse");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert!(matches!(
-        ServerConfig::from_args(&args),
-        Err(ServerConfigError::InvalidLocalAdmissionTenant)
-    ));
+    assert_eq!(args.fallback_tenant_id, "tenant-a");
+    ServerConfig::from_args(&args).expect("valid fallback tenant configuration");
 }
 
 #[test]

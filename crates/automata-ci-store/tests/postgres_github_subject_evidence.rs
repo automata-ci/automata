@@ -60,17 +60,6 @@ struct CheckProjectionState {
     state_updated_at_ms: i64,
 }
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
-struct LocalAdmissionState {
-    github_subject_evidence_required: bool,
-    run_count: i64,
-    evidence_count: i64,
-    workflow_run_id: Option<Uuid>,
-    linked_at_ms: Option<i64>,
-    desired_state: String,
-    desired_revision: i64,
-}
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
@@ -348,7 +337,7 @@ async fn concurrent_private_acceptance_pins_both_disjoint_authorities_once() -> 
             OWNER_ID,
             OWNER_ID,
             HEAD_SHA,
-            200,
+            fixture.activated_at.get(),
             11,
         );
         let store_a = database.store().clone();
@@ -414,7 +403,7 @@ async fn missing_exact_service_authority_rejects_without_any_partial_write() -> 
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                200,
+                fixture.activated_at.get(),
                 12,
             ))
             .await;
@@ -459,30 +448,24 @@ async fn logical_admission_records_once_and_replay_uses_durable_run_time() -> Te
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                200,
+                fixture.activated_at.get(),
                 30,
             ))
             .await?;
-        let initial_claim = claim_delivery(
-            &database,
-            accepted.delivery_id(),
-            0x301,
-            UnixMillis::new(220),
-            UnixMillis::new(300),
-        )
-        .await?;
+        let initial_claim = claim_delivery(&database, accepted.delivery_id(), 0x301, 1_000).await?;
+        let admitted_at = initial_claim.claimed_at();
         let command = logical_command(
             &fixture,
             "logical-admission-main",
             0x61,
             31,
             0x1_000,
-            UnixMillis::new(250),
+            admitted_at,
         );
         let run_id = command.run_id();
         let first = database
             .store()
-            .admit_authenticated_github_delivery(command, initial_claim, UnixMillis::new(250))
+            .admit_authenticated_github_delivery(command, initial_claim, admitted_at)
             .await?;
         assert!(!first.is_replay());
         let check_after_initial =
@@ -491,33 +474,28 @@ async fn logical_admission_records_once_and_replay_uses_durable_run_time() -> Te
             check_after_initial,
             CheckProjectionState {
                 workflow_run_id: Some(run_id.as_uuid()),
-                linked_at_ms: Some(250),
+                linked_at_ms: Some(admitted_at.get()),
                 desired_state: "in_progress".to_owned(),
                 desired_revision: 2,
-                desired_updated_at_ms: 250,
+                desired_updated_at_ms: admitted_at.get(),
                 outbox_state: "pending".to_owned(),
                 attempted_revision: None,
                 attempt_count: 0,
                 claim_fence: 0,
                 projected_revision: 0,
-                state_updated_at_ms: 250,
+                state_updated_at_ms: admitted_at.get(),
             }
         );
 
-        let replay_claim = claim_delivery(
-            &database,
-            accepted.delivery_id(),
-            0x302,
-            UnixMillis::new(300),
-            UnixMillis::new(1_300),
-        )
-        .await?;
+        wait_until(database.pool(), initial_claim.expires_at()).await?;
+        let replay_claim = claim_delivery(&database, accepted.delivery_id(), 0x302, 60_000).await?;
         assert_ne!(replay_claim.claim(), initial_claim.claim());
         assert_eq!(replay_claim.attempt(), initial_claim.attempt());
         assert_eq!(
             replay_claim.claim().fence(),
             initial_claim.claim().fence() + 1
         );
+        let replay_observed_at = replay_claim.claimed_at();
         let replay = database
             .store()
             .admit_authenticated_github_delivery(
@@ -527,10 +505,10 @@ async fn logical_admission_records_once_and_replay_uses_durable_run_time() -> Te
                     0x61,
                     31,
                     0x1_000,
-                    UnixMillis::new(900),
+                    replay_observed_at,
                 ),
                 replay_claim,
-                UnixMillis::new(900),
+                replay_observed_at,
             )
             .await?;
         assert!(replay.is_replay());
@@ -541,7 +519,15 @@ async fn logical_admission_records_once_and_replay_uses_durable_run_time() -> Te
             load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?;
         assert_eq!(check_after_replay, check_after_initial);
 
-        assert_run_evidence(&database, &fixture, &accepted, run_id, initial_claim).await?;
+        assert_run_evidence(
+            &database,
+            &fixture,
+            &accepted,
+            run_id,
+            initial_claim,
+            admitted_at,
+        )
+        .await?;
         Ok(())
     })
     .await
@@ -560,26 +546,6 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
             100,
         )
         .await?;
-        let accepted_a = database
-            .store()
-            .accept_manifest_pinned_github_delivery(acceptance(
-                &fixture,
-                "delivery-conflict-a",
-                OWNER_ID,
-                OWNER_ID,
-                HEAD_SHA,
-                200,
-                40,
-            ))
-            .await?;
-        let claim_a = claim_delivery(
-            &database,
-            accepted_a.delivery_id(),
-            0x401,
-            UnixMillis::new(220),
-            UnixMillis::new(1_220),
-        )
-        .await?;
         let accepted_b = database
             .store()
             .accept_manifest_pinned_github_delivery(acceptance(
@@ -588,7 +554,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                201,
+                fixture.activated_at.get(),
                 40,
             ))
             .await?;
@@ -596,32 +562,49 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
             &database,
             accepted_b.delivery_id(),
             0x402,
-            UnixMillis::new(221),
-            UnixMillis::new(1_221),
+            60_000,
         )
         .await?;
+        let accepted_a = database
+            .store()
+            .accept_manifest_pinned_github_delivery(acceptance(
+                &fixture,
+                "delivery-conflict-a",
+                OWNER_ID,
+                OWNER_ID,
+                HEAD_SHA,
+                fixture.activated_at.get(),
+                40,
+            ))
+            .await?;
+        let claim_a = claim_delivery(
+            &database,
+            accepted_a.delivery_id(),
+            0x401,
+            60_000,
+        )
+        .await?;
+        assert!(claim_b.claimed_at() <= claim_a.claimed_at());
+        assert!(claim_a.claimed_at() < claim_b.expires_at());
+        let admitted_at = claim_a.claimed_at();
         let command = logical_command(
             &fixture,
             "logical-delivery-switch",
             0x70,
             41,
             0x2_000,
-            UnixMillis::new(250),
+            admitted_at,
         );
         let run_id = command.run_id();
         database
             .store()
-            .admit_authenticated_github_delivery(
-                command.clone(),
-                claim_a,
-                UnixMillis::new(250),
-            )
+            .admit_authenticated_github_delivery(command.clone(), claim_a, admitted_at)
             .await?;
 
         assert!(matches!(
             database
                 .store()
-                .admit_authenticated_github_delivery(command, claim_b, UnixMillis::new(250))
+                .admit_authenticated_github_delivery(command, claim_b, admitted_at)
                 .await,
             Err(LogicalWorkflowAdmissionStoreError::Store(
                 StoreError::CorruptData(_)
@@ -637,10 +620,10 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
                         0x71,
                         41,
                         0x2_000,
-                        UnixMillis::new(260),
+                        admitted_at,
                     ),
                     claim_b,
-                    UnixMillis::new(260),
+                    admitted_at,
                 )
                 .await,
             Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
@@ -676,7 +659,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                200,
+                foreign.activated_at.get(),
                 50,
             ))
             .await?;
@@ -684,8 +667,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
             &database,
             foreign_delivery.delivery_id(),
             0x403,
-            UnixMillis::new(220),
-            UnixMillis::new(1_220),
+            60_000,
         )
         .await?;
         let target = bootstrap(
@@ -696,13 +678,14 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
             100,
         )
         .await?;
+        let foreign_admitted_at = database_now(database.pool()).await?;
         let foreign_command = logical_command(
             &target,
             "logical-foreign-delivery",
             0x72,
             51,
             0x3_000,
-            UnixMillis::new(250),
+            foreign_admitted_at,
         );
         let foreign_run_id = foreign_command.run_id();
         let foreign_workflow_id = foreign_command.workflow_id();
@@ -712,7 +695,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
             .admit_authenticated_github_delivery(
                 foreign_command,
                 foreign_claim,
-                UnixMillis::new(250),
+                foreign_admitted_at,
             )
             .await;
         assert!(
@@ -758,7 +741,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn expired_claim_rolls_back_and_ordinary_admission_cannot_be_backfilled() -> TestResult {
+async fn expired_claim_and_unsupported_local_admission_leave_no_partial_state() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(
             &database,
@@ -776,36 +759,27 @@ async fn expired_claim_rolls_back_and_ordinary_admission_cannot_be_backfilled() 
                 OWNER_ID,
                 OWNER_ID,
                 HEAD_SHA,
-                200,
+                fixture.activated_at.get(),
                 60,
             ))
             .await?;
-        let expired_claim = claim_delivery(
-            &database,
-            accepted.delivery_id(),
-            0x501,
-            UnixMillis::new(220),
-            UnixMillis::new(300),
-        )
-        .await?;
+        let expired_claim =
+            claim_delivery(&database, accepted.delivery_id(), 0x501, 60_000).await?;
+        let expired_at = expired_claim.expires_at();
         let command = logical_command(
             &fixture,
             "logical-expired-local",
             0x80,
             61,
             0x4_000,
-            UnixMillis::new(300),
+            expired_at,
         );
         let run_id = command.run_id();
 
         assert!(matches!(
             database
                 .store()
-                .admit_authenticated_github_delivery(
-                    command.clone(),
-                    expired_claim,
-                    UnixMillis::new(300),
-                )
+                .admit_authenticated_github_delivery(command.clone(), expired_claim, expired_at,)
                 .await,
             Err(LogicalWorkflowAdmissionStoreError::Store(
                 StoreError::CorruptData(_)
@@ -814,44 +788,20 @@ async fn expired_claim_rolls_back_and_ordinary_admission_cannot_be_backfilled() 
         let rolled_back = admission_counts(&database, run_id).await?;
         assert_eq!(rolled_back, (0, 0, 0));
 
-        let ordinary = database
-            .store()
-            .admit_logical_workflow(command.clone())
-            .await?;
-        assert!(!ordinary.is_replay());
-        let successor = claim_delivery(
-            &database,
-            accepted.delivery_id(),
-            0x502,
-            UnixMillis::new(300),
-            UnixMillis::new(1_300),
-        )
-        .await?;
         assert!(matches!(
-            database
-                .store()
-                .admit_authenticated_github_delivery(command, successor, UnixMillis::new(300),)
-                .await,
-            Err(LogicalWorkflowAdmissionStoreError::Store(
-                StoreError::CorruptData(_)
-            ))
+            database.store().admit_logical_workflow(command).await,
+            Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
         ));
+        assert_eq!(admission_counts(&database, run_id).await?, (0, 0, 0));
 
-        let durable =
-            load_local_admission_state(&database, run_id, accepted.check_subject_id().as_uuid())
-                .await?;
-        assert_eq!(
-            durable,
-            LocalAdmissionState {
-                github_subject_evidence_required: false,
-                run_count: 1,
-                evidence_count: 0,
-                workflow_run_id: None,
-                linked_at_ms: None,
-                desired_state: "queued".to_owned(),
-                desired_revision: 1,
-            }
-        );
+        let durable: (Option<Uuid>, Option<i64>, String, i64) = sqlx::query_as(
+            "SELECT workflow_run_id, linked_at_ms, desired_state, desired_revision \
+             FROM github_check_subjects WHERE id = $1",
+        )
+        .bind(accepted.check_subject_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable, (None, None, "queued".to_owned(), 1));
         Ok(())
     })
     .await
@@ -869,10 +819,18 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
             100,
         )
         .await?;
+        let accepted_at = fixture.activated_at.get();
         let bare_id = Uuid::new_v4();
-        let bare_error = insert_inbox(database.pool(), &fixture, bare_id, "bare-delivery", 200, 20)
-            .await
-            .expect_err("a bare GitHub inbox must fail at statement commit");
+        let bare_error = insert_inbox(
+            database.pool(),
+            &fixture,
+            bare_id,
+            "bare-delivery",
+            accepted_at,
+            20,
+        )
+        .await
+        .expect_err("a bare GitHub inbox must fail at statement commit");
         assert_constraint(&bare_error, "github_delivery_atomic_queued_check_required");
 
         let mut no_check = database.pool().begin().await?;
@@ -882,7 +840,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
             &fixture,
             no_check_id,
             "evidence-without-check",
-            210,
+            accepted_at,
             21,
         )
         .await?;
@@ -913,7 +871,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
             &fixture,
             no_evidence_id,
             "check-without-evidence",
-            220,
+            accepted_at,
             22,
         )
         .await?;
@@ -928,7 +886,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
             ) VALUES (
                 $1, $2, $3, $4, '.github/workflows/ci.yml',
                 $5, $6, $7, $8, $9, 'Automata CI',
-                'automata-check:' || $1::TEXT, 220, 220
+                'automata-check:' || $1::TEXT, $10, $10
             )
             ",
         )
@@ -941,6 +899,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
         .bind(i64::try_from(REPOSITORY_ID)?)
         .bind(i64::try_from(APP_ID)?)
         .bind(HEAD_SHA.as_slice())
+        .bind(accepted_at)
         .execute(&mut *no_evidence)
         .await
         .expect_err("a Check without the immutable extension must fail");
@@ -958,6 +917,7 @@ struct Fixture {
     tenant: TenantScope,
     connection: ProviderConnectionId,
     manifest: GithubProviderManifest,
+    activated_at: UnixMillis,
     checks_authority: GithubServerServiceAuthorityIdentity,
     private_source_authority: Option<GithubServerServiceAuthorityIdentity>,
 }
@@ -1007,7 +967,7 @@ async fn bootstrap_manifest_only(
         [7; 32],
         [6; 32],
     );
-    database
+    let bootstrapped = database
         .store()
         .bootstrap_github_provider_repository(
             github_manifest_fixture::fixture_github_repository_bootstrap(
@@ -1016,6 +976,11 @@ async fn bootstrap_manifest_only(
             ),
         )
         .await?;
+    let activated_at = bootstrapped
+        .manifest()
+        .current()
+        .activated_at()
+        .expect("bootstrapped manifest is current");
     let checks_authority = authority(
         &manifest,
         GithubServerServiceScope::ChecksWrite,
@@ -1035,6 +1000,7 @@ async fn bootstrap_manifest_only(
         tenant,
         connection,
         manifest,
+        activated_at,
         checks_authority,
         private_source_authority,
     })
@@ -1193,10 +1159,11 @@ async fn claim_delivery(
     database: &TestDatabase,
     delivery_id: ProviderDeliveryId,
     owner_seed: u128,
-    observed_at: UnixMillis,
-    expires_at: UnixMillis,
+    duration_millis: i64,
 ) -> TestResult<AuthenticatedGithubDeliveryClaim> {
     let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(owner_seed))?;
+    let observed_at = database_now(database.pool()).await?;
+    let expires_at = checked_add_millis(observed_at, duration_millis)?;
     let claimed = database
         .store()
         .claim_provider_delivery(ClaimProviderDelivery::new(owner, observed_at, expires_at)?)
@@ -1209,6 +1176,34 @@ async fn claim_delivery(
         claimed.claimed_at(),
         claimed.expires_at(),
     )?)
+}
+
+async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            .fetch_one(pool)
+            .await?,
+    ))
+}
+
+fn checked_add_millis(base: UnixMillis, duration_millis: i64) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        base.get()
+            .checked_add(duration_millis)
+            .ok_or("test timestamp overflow")?,
+    ))
+}
+
+async fn wait_until(pool: &sqlx::PgPool, target: UnixMillis) -> TestResult {
+    sqlx::query(
+        "SELECT pg_sleep(GREATEST(0.0, \
+         ($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + 1)::double precision \
+         / 1000.0))",
+    )
+    .bind(target.get())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn load_check_projection(
@@ -1240,6 +1235,7 @@ async fn assert_run_evidence(
     accepted: &ManifestPinnedGithubDeliveryReceipt,
     run_id: RunId,
     initial_claim: AuthenticatedGithubDeliveryClaim,
+    admitted_at: UnixMillis,
 ) -> TestResult {
     let evidence = database
         .store()
@@ -1252,7 +1248,7 @@ async fn assert_run_evidence(
     assert_eq!(evidence.delivery_id(), accepted.delivery_id());
     assert_eq!(evidence.admission_claim(), initial_claim);
     assert_eq!(evidence.check_subject_id(), accepted.check_subject_id());
-    assert_eq!(evidence.admitted_at(), UnixMillis::new(250));
+    assert_eq!(evidence.admitted_at(), admitted_at);
     assert_eq!(evidence.request().head_sha().as_bytes(), HEAD_SHA);
     assert_eq!(
         evidence.request().workflow_path().as_str(),
@@ -1286,30 +1282,6 @@ async fn assert_run_evidence(
     .await?;
     assert!(evidence_required);
     Ok(())
-}
-
-async fn load_local_admission_state(
-    database: &TestDatabase,
-    run_id: RunId,
-    subject_id: Uuid,
-) -> TestResult<LocalAdmissionState> {
-    Ok(sqlx::query_as(
-        r"
-        SELECT receipt.github_subject_evidence_required,
-               (SELECT count(*) FROM workflow_runs WHERE id = $1) AS run_count,
-               (SELECT count(*) FROM github_workflow_run_subject_evidence WHERE run_id = $1)
-                   AS evidence_count,
-               subject.workflow_run_id, subject.linked_at_ms,
-               subject.desired_state, subject.desired_revision
-        FROM workflow_admission_receipts AS receipt
-        JOIN github_check_subjects AS subject ON subject.id = $2
-        WHERE receipt.run_id = $1
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .bind(subject_id)
-    .fetch_one(database.pool())
-    .await?)
 }
 
 async fn admission_counts(database: &TestDatabase, run_id: RunId) -> TestResult<(i64, i64, i64)> {

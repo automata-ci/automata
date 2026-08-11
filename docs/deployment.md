@@ -370,8 +370,9 @@ human authentication enabled, this is the tenant in durable installation state
 or the configured bootstrap tenant while setup is active; otherwise it is the
 validated fallback tenant, which defaults to `local`. Any provider mismatch
 fails startup before the App private key or webhook HMAC is loaded and before
-provider manifests or runtime state are constructed; there is no tenant chooser
-or compatibility fallback.
+provider manifests or runtime state are constructed. Set the unauthenticated
+fallback with `--fallback-tenant-id` or `AUTOMATA_FALLBACK_TENANT_ID`; there is
+no tenant chooser or compatibility fallback.
 
 For a fresh database, also provide one complete installation tuple:
 
@@ -399,9 +400,9 @@ After setup has completed, a Linux workstation with `secret-tool` and an
 unlocked Secret Service can verify the CLI-audience path:
 
 ```console
-automata --server-url http://127.0.0.1:8080 auth login
-automata --server-url http://127.0.0.1:8080 auth status
-automata --server-url http://127.0.0.1:8080 auth logout
+automata auth --server-url http://127.0.0.1:8080 login
+automata auth --server-url http://127.0.0.1:8080 status
+automata auth --server-url http://127.0.0.1:8080 logout
 ```
 
 The client has no plaintext credential-file fallback. It commits the device
@@ -441,12 +442,12 @@ commands reuse the stored CLI session and require `secret-tool` plus its
 unlocked Secret Service:
 
 ```console
-automata --server-url http://127.0.0.1:8080 secret provider status
-automata --server-url http://127.0.0.1:8080 secret provider activate
-automata --server-url http://127.0.0.1:8080 secret list --scope repo:OWNER/REPOSITORY
-automata --server-url http://127.0.0.1:8080 secret create DEPLOY_TOKEN \
+automata secret --server-url http://127.0.0.1:8080 provider status
+automata secret --server-url http://127.0.0.1:8080 provider activate
+automata secret --server-url http://127.0.0.1:8080 list --scope repo:OWNER/REPOSITORY
+automata secret --server-url http://127.0.0.1:8080 create DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY --from-file /absolute/path/to/value
-automata --server-url http://127.0.0.1:8080 secret delete DEPLOY_TOKEN \
+automata secret --server-url http://127.0.0.1:8080 delete DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY
 ```
 
@@ -555,11 +556,10 @@ persistent ingestion.
 
 ## 6. Exercise configured provider admission
 
-The current server deliberately rejects the legacy local bearer ingress; it is
-not a supported workflow-admission path. To create durable workflow work, first
-configure the exact GitHub provider above, then deliver a supported signed
-`push` webhook for `.github/workflows/ci.yml` on `refs/heads/main` through that
-provider boundary.
+The server exposes no local bearer workflow ingress. To create durable workflow
+work, first configure the exact GitHub provider above, then deliver a supported
+signed `push` webhook for `.github/workflows/ci.yml` on `refs/heads/main`
+through that provider boundary.
 
 Admission validates and persists immutable workflow evidence asynchronously.
 Its durable receipt does not mean a job has finished: the mandatory autonomous

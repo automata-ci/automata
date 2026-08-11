@@ -885,12 +885,12 @@ jq --exit-status '
   | ($profiles.control_plane.series_budget == 5000)
     and ($profiles.runner.series_budget == 1000)
     and (($profiles.common.families | map(.maximum_series) | add) == 49)
-    and (($profiles.control_plane.families | map(.maximum_series) | add) == 4794)
+    and (($profiles.control_plane.families | map(.maximum_series) | add) == 4730)
     and (($profiles.runner.families | map(.maximum_series) | add) == 890)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add))
-      == 4843
+      == 4779
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)
@@ -898,14 +898,14 @@ jq --exit-status '
       == 939
     )
     and (($profiles.common | native_label_sets) == 2)
-    and (($profiles.control_plane | native_label_sets) == 136)
+    and (($profiles.control_plane | native_label_sets) == 135)
     and (($profiles.runner | native_label_sets) == 28)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add)
        + ($profiles.common | native_label_sets)
        + ($profiles.control_plane | native_label_sets))
-      == 4981
+      == 4916
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)

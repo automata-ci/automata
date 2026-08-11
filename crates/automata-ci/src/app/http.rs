@@ -675,14 +675,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn combined_router_instruments_a_product_route_merged_before_the_layer() {
+    async fn combined_router_instruments_a_provider_route_merged_before_the_layer() {
         let metrics =
             ControlPlaneMetrics::new(BuildInfo::current()).expect("control-plane metrics");
         let router = instrument_combined_router(
-            Router::new().route(
-                "/api/v1/local/workflow-runs",
-                post(|| async { StatusCode::ACCEPTED }),
-            ),
+            Router::new().route("/webhooks/github", post(|| async { StatusCode::ACCEPTED })),
             metrics.clone(),
         );
 
@@ -690,12 +687,12 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/local/workflow-runs")
+                    .uri("/webhooks/github")
                     .body(Body::empty())
-                    .expect("workflow admission request"),
+                    .expect("provider webhook request"),
             )
             .await
-            .expect("workflow admission response");
+            .expect("provider webhook response");
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
         let exposition = metrics
@@ -703,7 +700,7 @@ mod tests {
             .encode_openmetrics()
             .expect("bounded exposition");
         assert!(exposition.as_str().contains(
-            "automata_ci_control_plane_http_requests_total{method=\"post\",route=\"/api/v1/local/workflow-runs\",status_class=\"2xx\"} 1"
+            "automata_ci_control_plane_http_requests_total{method=\"post\",route=\"/webhooks/github\",status_class=\"2xx\"} 1"
         ));
     }
 

@@ -96,7 +96,12 @@ async fn readiness_rejects_traffic_until_mandatory_dependencies_are_probed() {
 
 #[tokio::test]
 async fn unmatched_human_api_paths_use_the_sanitized_json_envelope() {
-    for path in ["/api/v1", "/api/v1/", "/api/v1/missing"] {
+    for path in [
+        "/api/v1",
+        "/api/v1/",
+        "/api/v1/missing",
+        "/api/v1/local/workflow-runs",
+    ] {
         let response = test_router()
             .oneshot(
                 Request::builder()

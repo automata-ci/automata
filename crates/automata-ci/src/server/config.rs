@@ -34,7 +34,6 @@ const MAX_S3_CREDENTIAL_BYTES: usize = 16 * 1_024;
 const MAX_CA_PEM_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_CERTIFICATE_PEM_BYTES: usize = 4 * 1_024 * 1_024;
 const MAX_PRIVATE_KEY_PEM_BYTES: usize = 1024 * 1024;
-const MAX_LOCAL_ADMISSION_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_RESULTS_SIGNING_KEY_BYTES: usize = 16 * 1024;
 const MAX_RESULTS_KEY_ID_BYTES: usize = 255;
 const MAX_GITHUB_CLIENT_SECRET_BYTES: usize = 16 * 1024;
@@ -323,8 +322,7 @@ pub struct ServerConfig {
     pub(crate) maintenance_batch_size: MaintenanceBatchSize,
     pub(crate) maximum_lease_failures: LeaseFailureLimit,
     pub(crate) stale_runner_session_timeout: StaleSessionTimeoutMillis,
-    pub(crate) local_admission_token: Option<SecretSource>,
-    pub(crate) local_admission_tenant: String,
+    pub(crate) fallback_tenant_id: String,
     pub(crate) static_runner_registration_file: Option<PathBuf>,
 }
 
@@ -568,20 +566,17 @@ impl ServerConfig {
     ///
     /// Returns a typed error for invalid endpoint or duration configuration.
     pub fn from_args(args: &ServerArgs) -> Result<Self, ServerConfigError> {
-        if args.local_admission_token_source.is_some() {
-            return Err(ServerConfigError::UnsupportedLocalAdmission);
-        }
         validate_static_runner_registration_path(args.static_runner_registration_file.as_deref())?;
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
-        if args.local_admission_tenant.is_empty()
-            || args.local_admission_tenant.len() > 255
+        if args.fallback_tenant_id.is_empty()
+            || args.fallback_tenant_id.len() > 255
             || args
-                .local_admission_tenant
+                .fallback_tenant_id
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
-            return Err(ServerConfigError::InvalidLocalAdmissionTenant);
+            return Err(ServerConfigError::InvalidFallbackTenant);
         }
         let s3_endpoint =
             Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
@@ -659,8 +654,7 @@ impl ServerConfig {
             maintenance_batch_size,
             maximum_lease_failures,
             stale_runner_session_timeout,
-            local_admission_token: args.local_admission_token_source.clone(),
-            local_admission_tenant: args.local_admission_tenant.clone(),
+            fallback_tenant_id: args.fallback_tenant_id.clone(),
             static_runner_registration_file: args.static_runner_registration_file.clone(),
         })
     }
@@ -729,15 +723,6 @@ impl ServerConfig {
             .load_bytes(MAX_PRIVATE_KEY_PEM_BYTES)
     }
 
-    pub(crate) fn load_local_admission_token(
-        &self,
-    ) -> Result<Option<Zeroizing<String>>, SecretLoadError> {
-        self.local_admission_token
-            .as_ref()
-            .map(|source| source.load_scalar(MAX_LOCAL_ADMISSION_TOKEN_BYTES))
-            .transpose()
-    }
-
     pub(crate) fn load_results_signing_key(&self) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
         self.results_signing_key
             .load_bytes(MAX_RESULTS_SIGNING_KEY_BYTES)
@@ -748,9 +733,6 @@ fn validate_local_listeners(args: &ServerArgs) -> Result<(), ServerConfigError> 
     if args.listen.port() == 0 || args.runner_listen.port() == 0 || args.results_listen.port() == 0
     {
         return Err(ServerConfigError::InvalidServiceListener);
-    }
-    if args.local_admission_token_source.is_some() && !args.listen.ip().is_loopback() {
-        return Err(ServerConfigError::LocalAdmissionRequiresLoopback);
     }
     if args.human_trusted_reverse_proxy == args.auth_allow_loopback_http
         && (args.human_trusted_reverse_proxy || !args.listen.ip().is_loopback())
@@ -969,7 +951,6 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
     ];
     let optional = [
         args.s3_session_token_source.as_ref(),
-        args.local_admission_token_source.as_ref(),
         args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
     ];
@@ -1074,9 +1055,6 @@ fn development_results_endpoint(
 /// Invalid server deployment configuration.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ServerConfigError {
-    /// Local unsigned admission has no immutable manifest/runtime-policy authority.
-    #[error("local workflow admission is unsupported by current runtime policy")]
-    UnsupportedLocalAdmission,
     /// A credential option did not contain an environment or file reference.
     #[error("secret configuration must use env:NAME or file:PATH references")]
     InvalidSecretSource,
@@ -1140,12 +1118,9 @@ pub enum ServerConfigError {
     /// The optional GitHub provider registry is malformed, excessive, or incoherent.
     #[error("GitHub provider configuration is invalid")]
     InvalidGithubProviderConfiguration,
-    /// Local admission is deliberately unavailable on a non-loopback listener.
-    #[error("local workflow admission requires a loopback human HTTP listener")]
-    LocalAdmissionRequiresLoopback,
-    /// The tenant bound to local admission is malformed.
-    #[error("local workflow admission tenant is invalid")]
-    InvalidLocalAdmissionTenant,
+    /// The unauthenticated fallback tenant identity is malformed.
+    #[error("fallback tenant identity is invalid")]
+    InvalidFallbackTenant,
     /// Static runner registration must be read from an absolute privileged path.
     #[error("static runner registration path must be absolute")]
     InvalidStaticRunnerRegistrationPath,

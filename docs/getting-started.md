@@ -207,7 +207,7 @@ commands:
 
 ```console
 automata preview --listen 127.0.0.1:8180
-automata --server-url http://127.0.0.1:8180 admin status
+automata admin --server-url http://127.0.0.1:8180 status
 ```
 
 ### The runner doctor reports missing Podman capabilities

@@ -2,14 +2,14 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use super::{OutputFormat, RepositoryRef, SecretScope};
+use super::{OutputFormat, SecretScope};
 use crate::server::{SecretSource, VersionedSecretSource};
 
 #[derive(Debug, Subcommand)]
 /// Top-level service and operator command selection.
 ///
-/// Server, preview, authentication, workflow admission, repository-secret, and
-/// administrative status operations are implemented in the product.
+/// Server, preview, authentication, repository-secret, and administrative
+/// status operations are implemented in the product.
 pub enum Command {
     /// Run the human API, runner control, Results gateway, and SSR interface.
     Server(Box<ServerArgs>),
@@ -20,8 +20,6 @@ pub enum Command {
     Preview(PreviewArgs),
     /// Authenticate the operator CLI and manage its server-scoped session.
     Auth(AuthArgs),
-    /// Admit an exact workflow snapshot.
-    Workflow(WorkflowArgs),
     /// Manage encrypted Actions secrets.
     Secret(SecretArgs),
     /// Inspect control-plane status.
@@ -34,7 +32,6 @@ impl Command {
     pub const fn operator(&self) -> Option<&OperatorArgs> {
         match self {
             Self::Auth(args) => Some(&args.operator),
-            Self::Workflow(args) => Some(&args.operator),
             Self::Secret(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
             Self::Server(_) | Self::Preview(_) => None,
@@ -495,17 +492,13 @@ pub struct ServerArgs {
     )]
     pub stale_runner_session_timeout_seconds: u64,
 
-    /// Enable the loopback-only local workflow ingress with a bearer-token reference.
+    /// Tenant used by unauthenticated UI and provider scope when human auth is disabled.
     #[arg(
-        long = "local-admission-token-source",
-        env = "AUTOMATA_LOCAL_ADMISSION_TOKEN_SOURCE",
-        value_name = "env:NAME|file:PATH"
+        long = "fallback-tenant-id",
+        env = "AUTOMATA_FALLBACK_TENANT_ID",
+        default_value = "local"
     )]
-    pub local_admission_token_source: Option<SecretSource>,
-
-    /// Authenticated tenant bound to the local workflow ingress.
-    #[arg(long, env = "AUTOMATA_LOCAL_ADMISSION_TENANT", default_value = "local")]
-    pub local_admission_tenant: String,
+    pub fallback_tenant_id: String,
 
     /// Privileged static runner-fleet registration document loaded during startup.
     #[arg(
@@ -536,84 +529,6 @@ pub enum AuthCommand {
     Status,
     /// Revoke and remove the current server-scoped CLI session.
     Logout,
-}
-
-#[derive(Debug, Args)]
-/// Workflow definition and admission command selection.
-pub struct WorkflowArgs {
-    /// Connection and output policy for this operator command.
-    #[command(flatten)]
-    pub operator: OperatorArgs,
-    /// Workflow operation to perform.
-    #[command(subcommand)]
-    pub command: WorkflowCommand,
-}
-
-#[derive(Debug, Subcommand)]
-/// Workflow operations supported by the command model.
-pub enum WorkflowCommand {
-    /// Admit an exact snapshot through the local integration ingress.
-    ///
-    /// Admission validates and stores the run request. The server's mandatory
-    /// worker then supervises logical preparation, activation, and materialization;
-    /// the admission receipt itself does not mean a job has finished.
-    Admit(WorkflowAdmissionArgs),
-}
-
-#[derive(Debug, Args)]
-/// Exact provider evidence and source bytes for one local workflow admission.
-///
-/// The local bootstrap ingress validates every identifier and binds
-/// `delivery_id` to immutable request evidence for exact retry replay.
-pub struct WorkflowAdmissionArgs {
-    /// Repository in OWNER/NAME form.
-    #[arg(short = 'R', long)]
-    pub repository: RepositoryRef,
-
-    /// Stable repository identifier assigned by the provider.
-    #[arg(long)]
-    pub provider_repository_id: String,
-
-    /// Repository-relative workflow path.
-    #[arg(long, default_value = ".github/workflows/ci.yml")]
-    pub workflow: String,
-
-    /// Exact workflow source included in the admission.
-    #[arg(long, value_name = "PATH", default_value = ".github/workflows/ci.yml")]
-    pub source_file: PathBuf,
-
-    /// Exact provider event JSON. Omit to use an empty object.
-    #[arg(long, value_name = "PATH")]
-    pub event_file: Option<PathBuf>,
-
-    /// GitHub-compatible event name.
-    #[arg(long, default_value = "workflow_dispatch")]
-    pub event_name: String,
-
-    /// Stable provider delivery identifier used for exact retry replay.
-    #[arg(long)]
-    pub delivery_id: String,
-
-    /// Immutable 40- or 64-character commit SHA selected for this run.
-    #[arg(long)]
-    pub commit_sha: String,
-
-    /// Fully-qualified Git ref selected for this run.
-    #[arg(long = "ref", default_value = "refs/heads/main")]
-    pub git_ref: String,
-
-    /// Display name of the selected workflow.
-    #[arg(long, default_value = "CI")]
-    pub workflow_name: String,
-
-    /// Local admission bearer-token reference; the value never enters argv.
-    #[arg(
-        long = "local-admission-token-source",
-        env = "AUTOMATA_LOCAL_ADMISSION_TOKEN_SOURCE",
-        default_value = "env:AUTOMATA_LOCAL_ADMISSION_TOKEN",
-        value_name = "env:NAME|file:PATH"
-    )]
-    pub token_source: SecretSource,
 }
 
 #[derive(Debug, Args)]

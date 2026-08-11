@@ -66,7 +66,7 @@ fn admin_status_process_has_exact_success_streams_and_exit_status() {
     ]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_automata"))
-        .args(["--server-url", &server, "admin", "status"])
+        .args(["admin", "--server-url", &server, "status"])
         .env_remove("RUST_LOG")
         .output()
         .expect("admin status process must run");
@@ -90,9 +90,9 @@ fn admin_status_process_keeps_not_ready_inspectable() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_automata"))
         .args([
+            "admin",
             "--server-url",
             &server,
-            "admin",
             "status",
             "--output",
             "json",
@@ -192,7 +192,7 @@ fn admin_status_process_fails_without_stdout_or_response_reflection() {
     ));
 
     let output = Command::new(env!("CARGO_BIN_EXE_automata"))
-        .args(["--server-url", &server, "admin", "status"])
+        .args(["admin", "--server-url", &server, "status"])
         .env_remove("RUST_LOG")
         .output()
         .expect("admin status process must run");

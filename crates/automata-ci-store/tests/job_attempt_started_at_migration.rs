@@ -58,26 +58,29 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
 
         let seed = seed_control_plane(database.pool(), 1).await?;
         let attempt_id = AttemptId::new();
+        let queued_at = database_now(database.pool()).await?;
         database
             .store()
             .insert_queued(QueuedAttempt::new(
                 attempt_id,
                 seed.job_id,
                 AttemptNumber::new(1)?,
-                UnixMillis::new(10),
+                queued_at,
             ))
             .await?;
-        database
+        let lease_observed_at = database_now(database.pool()).await?;
+        let lease = database
             .store()
             .acquire_lease(AcquireLease::new(
                 attempt_id,
                 LeaseId::new(),
                 seed.session_fences[0],
                 StableRunnerSlot::new(1)?,
-                UnixMillis::new(20),
-                UnixMillis::new(40),
+                lease_observed_at,
+                checked_add_millis(lease_observed_at, 60_000)?,
             )?)
             .await?;
+        let started_at_ms = lease.issued_at().get();
 
         let mut connection = database.pool().acquire().await?;
         let migration = MIGRATOR
@@ -87,7 +90,12 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
         connection.apply(table_name, migration).await?;
         drop(connection);
 
-        assert_eq!(started_at(database.pool(), attempt_id).await?, Some(20));
+        assert_eq!(
+            started_at(database.pool(), attempt_id).await?,
+            Some(started_at_ms)
+        );
+
+        let requeued_at = checked_add_millis(lease.issued_at(), 1)?;
 
         sqlx::query(
             r"
@@ -96,18 +104,24 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
                 lease_issued_at_ms = NULL, lease_expires_at_ms = NULL,
                 runner_session_id = NULL, runner_session_epoch = NULL,
                 runner_generation = NULL, runner_slot = NULL,
-                lease_failures = lease_failures + 1, queued_at_ms = 30,
-                changed_at_ms = 30
+                lease_failures = lease_failures + 1, queued_at_ms = $2,
+                changed_at_ms = $2
             WHERE id = $1
             ",
         )
         .bind(attempt_id.as_uuid())
+        .bind(requeued_at.get())
         .execute(database.pool())
         .await?;
-        assert_eq!(started_at(database.pool(), attempt_id).await?, Some(20));
+        assert_eq!(
+            started_at(database.pool(), attempt_id).await?,
+            Some(started_at_ms)
+        );
 
-        let rewrite = sqlx::query("UPDATE job_attempts SET started_at_ms = 21 WHERE id = $1")
+        let rewritten_start = checked_add_millis(lease.issued_at(), 1)?;
+        let rewrite = sqlx::query("UPDATE job_attempts SET started_at_ms = $2 WHERE id = $1")
             .bind(attempt_id.as_uuid())
+            .bind(rewritten_start.get())
             .execute(database.pool())
             .await
             .expect_err("the first execution start is immutable");
@@ -119,19 +133,36 @@ async fn live_lease_is_backfilled_and_start_survives_custody_release() -> TestRe
         );
 
         let never_leased = AttemptId::new();
+        let never_leased_queued_at = checked_add_millis(requeued_at, 1)?;
         database
             .store()
             .insert_queued(QueuedAttempt::new(
                 never_leased,
                 seed.job_id,
                 AttemptNumber::new(2)?,
-                UnixMillis::new(31),
+                never_leased_queued_at,
             ))
             .await?;
         assert_eq!(started_at(database.pool(), never_leased).await?, None);
         Ok(())
     })
     .await
+}
+
+async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            .fetch_one(pool)
+            .await?,
+    ))
+}
+
+fn checked_add_millis(base: UnixMillis, duration_millis: i64) -> TestResult<UnixMillis> {
+    Ok(UnixMillis::new(
+        base.get()
+            .checked_add(duration_millis)
+            .ok_or("test timestamp overflow")?,
+    ))
 }
 
 async fn started_at(pool: &sqlx::PgPool, attempt_id: AttemptId) -> TestResult<Option<i64>> {

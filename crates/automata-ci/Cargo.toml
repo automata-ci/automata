@@ -45,7 +45,6 @@ automata-ci-secret.workspace = true
 automata-ci-secret-postgres.workspace = true
 automata-ci-store.workspace = true
 automata-ci-ui-renderer.workspace = true
-automata-ci-workflow-github.workspace = true
 automata-ci-workflow-service.workspace = true
 axum.workspace = true
 base64.workspace = true

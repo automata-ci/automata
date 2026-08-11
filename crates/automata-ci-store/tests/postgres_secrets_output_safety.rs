@@ -11,6 +11,13 @@ use common::{
 const SECRETS_MIGRATION: &str = include_str!("../migrations/0012_secrets_output_safety.sql");
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+#[derive(Clone, Copy)]
+struct SeededHuman {
+    principal_id: Uuid,
+    session_id: Uuid,
+    authorization_revision: i64,
+}
+
 #[test]
 fn secrets_migration_is_ciphertext_only_and_fail_private() {
     for table in [
@@ -250,8 +257,10 @@ async fn secrets_upgrade_backfills_outputs_private_and_seeds_builtin_provider() 
 async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -> TestResult {
     run_with_database(|database| async move {
         let seed = seed_control_plane(database.pool(), 0).await?;
-        let principal = seed_human(database.pool(), &seed.tenant_id, "301", "cipher").await?;
+        let actor = seed_human(database.pool(), &seed.tenant_id, "301", "cipher").await?;
+        let principal = actor.principal_id;
         activate_builtin(database.pool(), &seed.tenant_id).await?;
+        insert_custody_canary(database.pool(), "secret-kek-v1").await?;
         let plaintext_provider_configuration = sqlx::query(
             r#"
             UPDATE secret_providers
@@ -361,17 +370,21 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
         .bind(principal)
         .execute(database.pool())
         .await?;
+        let mut reservation = database.pool().begin().await?;
         sqlx::query(
             r"
             INSERT INTO secret_version_mutations (
                 tenant_id, mutation_id, secret_id, scope_kind,
                 repository_id, environment_id, canonical_name,
                 provider_id, mutation_kind,
-                reserved_secret_revision, provider_create_request_id,
-                reserved_by_principal_id, reserved_at_ms
+                reserved_secret_revision, reserved_version_number,
+                confirmation_deadline_ms, provider_create_request_id,
+                reserved_by_principal_id, reserved_by_session_id,
+                reserved_authorization_revision, reserved_at_ms
             ) VALUES (
                 $1, $2, $3, 'environment', $4, $5,
-                'BUILTIN_VALUE', 'builtin', 'create', 1, $6, $7, 2
+                'BUILTIN_VALUE', 'builtin', 'create', 1, 1, 600002,
+                $6, $7, $8, $9, 2
             )
             ",
         )
@@ -382,8 +395,26 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
         .bind(environment)
         .bind(&create_request)
         .bind(principal)
-        .execute(database.pool())
+        .bind(actor.session_id)
+        .bind(actor.authorization_revision)
+        .execute(&mut *reservation)
         .await?;
+        sqlx::query(
+            r"
+            INSERT INTO secret_mutation_recovery_outbox (
+                operation_id, tenant_id, mutation_id,
+                next_attempt_at_ms, created_at_ms
+            ) VALUES (
+                automata_secret_mutation_recovery_operation_id($1, $2),
+                $1, $2, 600002, 2
+            )
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(mutation)
+        .execute(&mut *reservation)
+        .await?;
+        reservation.commit().await?;
         let mut invalid_stage = database.pool().begin().await?;
         insert_builtin_version(
             &mut invalid_stage,
@@ -504,7 +535,9 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
             SET state = 'confirmed', completion_kind = 'builtin_created',
                 committed_version_id = $3, committed_version_number = 1,
                 confirmed_secret_revision = 2,
-                confirmed_by_principal_id = $4, confirmed_at_ms = 2,
+                confirmed_by_principal_id = $4, confirmed_by_session_id = $5,
+                confirmed_authorization_revision = $6, confirmed_at_ms = 2,
+                terminal_actor_kind = 'human',
                 revision = 2
             WHERE tenant_id = $1 AND mutation_id = $2
               AND state = 'reserved' AND revision = 1
@@ -514,6 +547,8 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
         .bind(mutation)
         .bind(version)
         .bind(principal)
+        .bind(actor.session_id)
+        .bind(actor.authorization_revision)
         .execute(&mut *confirmation)
         .await?;
         confirmation.commit().await?;
@@ -786,7 +821,8 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
                   'secret_provider_locator_envelopes',
                   'secret_provider_version_envelopes',
                   'secret_provider_lease_envelopes',
-                  'secret_version_envelopes'
+                  'secret_version_envelopes',
+                  'secret_custody_key_canaries'
               )
               AND column_name IN ('ciphertext', 'nonce', 'wrapped_data_key')
               AND data_type = 'bytea'
@@ -794,7 +830,7 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(encrypted_envelope_columns, 15);
+        assert_eq!(encrypted_envelope_columns, 18);
         let unexpected_binary_columns: i64 = sqlx::query_scalar(
             r"
             SELECT count(*)
@@ -805,6 +841,7 @@ async fn secret_scopes_envelopes_and_versions_are_strict_and_ciphertext_only() -
               AND NOT (
                   (
                       table_name IN (
+                          'secret_custody_key_canaries',
                           'secret_provider_configuration_envelopes',
                           'secret_provider_locator_envelopes',
                           'secret_provider_version_envelopes',
@@ -1117,10 +1154,13 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
 async fn workload_grants_require_scope_access_and_protected_environment_approval() -> TestResult {
     run_with_database(|database| async move {
         let seed = seed_control_plane(database.pool(), 0).await?;
-        let principal = seed_human(database.pool(), &seed.tenant_id, "401", "approver").await?;
-        let second_principal =
-            seed_human(database.pool(), &seed.tenant_id, "402", "reviewer").await?;
+        let actor = seed_human(database.pool(), &seed.tenant_id, "401", "approver").await?;
+        let principal = actor.principal_id;
+        let second_principal = seed_human(database.pool(), &seed.tenant_id, "402", "reviewer")
+            .await?
+            .principal_id;
         activate_builtin(database.pool(), &seed.tenant_id).await?;
+        insert_custody_canary(database.pool(), "secret-kek-v1").await?;
         let attempt = Uuid::new_v4();
         sqlx::query(
             r"
@@ -1156,8 +1196,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .await?;
 
         let (secret, version) =
-            create_tenant_secret(database.pool(), &seed.tenant_id, principal, "DEPLOY_TOKEN")
-                .await?;
+            create_tenant_secret(database.pool(), &seed.tenant_id, actor, "DEPLOY_TOKEN").await?;
 
         let without_repository_access = insert_workload_grant(
             database.pool(),
@@ -1356,10 +1395,25 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .bind(lease)
         .execute(database.pool())
         .await?;
+        sqlx::query(
+            r"
+            UPDATE secret_cleanup_outbox
+            SET status = 'in_progress', attempts = 1, claim_generation = 1,
+                locked_by = 'cleanup-worker', locked_at_ms = 4
+            WHERE operation_id = $1
+            ",
+        )
+        .bind(cleanup_operation)
+        .execute(database.pool())
+        .await?;
         let freeform_cleanup_failure = sqlx::query(
             r"
             UPDATE secret_cleanup_outbox
-            SET last_failure_kind = 'password=sentinel-secret'
+            SET status = 'pending', attempts = 1, claim_generation = 1,
+                next_attempt_at_ms = 5,
+                locked_by = NULL, locked_at_ms = NULL,
+                last_failure_kind = 'password=sentinel-secret',
+                completed_at_ms = NULL
             WHERE operation_id = $1
             ",
         )
@@ -1494,7 +1548,7 @@ async fn seed_human(
     tenant_id: &str,
     provider_subject: &str,
     provider_login: &str,
-) -> TestResult<Uuid> {
+) -> TestResult<SeededHuman> {
     let principal = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO human_principals (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Secret test human', 1, 1)",
@@ -1527,7 +1581,47 @@ async fn seed_human(
     .bind(principal)
     .execute(pool)
     .await?;
-    Ok(principal)
+    let authorization_revision: i64 = sqlx::query_scalar(
+        r"
+        SELECT authorization_revision
+        FROM tenant_human_memberships
+        WHERE tenant_id = $1 AND principal_id = $2
+        ",
+    )
+    .bind(tenant_id)
+    .bind(principal)
+    .fetch_one(pool)
+    .await?;
+    let session_id = Uuid::new_v4();
+    let mut token_hash = [0_u8; 32];
+    token_hash[..16].copy_from_slice(session_id.as_bytes());
+    token_hash[16..].copy_from_slice(session_id.as_bytes());
+    sqlx::query(
+        r"
+        INSERT INTO human_sessions (
+            id, tenant_id, principal_id, provider_id, provider_subject,
+            session_kind, audience, token_hash, token_hash_key_id,
+            authorization_revision, issued_at_ms, last_seen_at_ms,
+            idle_expires_at_ms, expires_at_ms
+        ) VALUES (
+            $1, $2, $3, 'github', $4, 'browser', 'automata.web',
+            $5, 'secret-output-session-v1', $6, 1, 1, 700000, 750000
+        )
+        ",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(principal)
+    .bind(provider_subject)
+    .bind(token_hash.as_slice())
+    .bind(authorization_revision)
+    .execute(pool)
+    .await?;
+    Ok(SeededHuman {
+        principal_id: principal,
+        session_id,
+        authorization_revision,
+    })
 }
 
 async fn create_public_run_and_job(pool: &PgPool, seed: &SeedData) -> TestResult<(Uuid, Uuid)> {
@@ -1759,13 +1853,33 @@ async fn insert_provider_lease_envelope(
     Ok(())
 }
 
+async fn insert_custody_canary(pool: &PgPool, wrapping_key_id: &str) -> TestResult {
+    sqlx::query(
+        r"
+        INSERT INTO secret_custody_key_canaries (
+            wrapping_key_id, canary_generation, canary_schema,
+            ciphertext, nonce, wrapped_data_key, envelope_schema,
+            created_at_ms
+        ) VALUES ($1, 1, 1, $2, $3, $4, 1, 2)
+        ",
+    )
+    .bind(wrapping_key_id)
+    .bind(vec![51_u8; 52])
+    .bind(vec![52_u8; 12])
+    .bind(vec![53_u8; 48])
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Trusted fixture spells out the complete stage/confirm authority.
 async fn create_tenant_secret(
     pool: &PgPool,
     tenant_id: &str,
-    principal: Uuid,
+    actor: SeededHuman,
     canonical_name: &str,
 ) -> TestResult<(Uuid, Uuid)> {
+    let principal = actor.principal_id;
     let secret = Uuid::new_v4();
     let mutation = Uuid::new_v4();
     let version = Uuid::new_v4();
@@ -1785,16 +1899,19 @@ async fn create_tenant_secret(
     .bind(principal)
     .execute(pool)
     .await?;
+    let mut reservation = pool.begin().await?;
     sqlx::query(
         r"
         INSERT INTO secret_version_mutations (
             tenant_id, mutation_id, secret_id, scope_kind,
             canonical_name, provider_id, mutation_kind,
-            reserved_secret_revision, provider_create_request_id,
-            reserved_by_principal_id, reserved_at_ms
+            reserved_secret_revision, reserved_version_number,
+            confirmation_deadline_ms, provider_create_request_id,
+            reserved_by_principal_id, reserved_by_session_id,
+            reserved_authorization_revision, reserved_at_ms
         ) VALUES (
             $1, $2, $3, 'tenant', $4, 'builtin', 'create',
-            1, $5, $6, 2
+            1, 1, 600002, $5, $6, $7, $8, 2
         )
         ",
     )
@@ -1804,8 +1921,26 @@ async fn create_tenant_secret(
     .bind(canonical_name)
     .bind(&create_request)
     .bind(principal)
-    .execute(pool)
+    .bind(actor.session_id)
+    .bind(actor.authorization_revision)
+    .execute(&mut *reservation)
     .await?;
+    sqlx::query(
+        r"
+        INSERT INTO secret_mutation_recovery_outbox (
+            operation_id, tenant_id, mutation_id,
+            next_attempt_at_ms, created_at_ms
+        ) VALUES (
+            automata_secret_mutation_recovery_operation_id($1, $2),
+            $1, $2, 600002, 2
+        )
+        ",
+    )
+    .bind(tenant_id)
+    .bind(mutation)
+    .execute(&mut *reservation)
+    .await?;
+    reservation.commit().await?;
     let mut staging = pool.begin().await?;
     insert_builtin_version(
         &mut staging,
@@ -1892,7 +2027,9 @@ async fn create_tenant_secret(
         SET state = 'confirmed', completion_kind = 'builtin_created',
             committed_version_id = $3, committed_version_number = 1,
             confirmed_secret_revision = 2,
-            confirmed_by_principal_id = $4, confirmed_at_ms = 3,
+            confirmed_by_principal_id = $4, confirmed_by_session_id = $5,
+            confirmed_authorization_revision = $6, confirmed_at_ms = 3,
+            terminal_actor_kind = 'human',
             revision = 2
         WHERE tenant_id = $1 AND mutation_id = $2
           AND state = 'reserved' AND revision = 1
@@ -1902,6 +2039,8 @@ async fn create_tenant_secret(
     .bind(mutation)
     .bind(version)
     .bind(principal)
+    .bind(actor.session_id)
+    .bind(actor.authorization_revision)
     .execute(&mut *confirmation)
     .await?;
     confirmation.commit().await?;

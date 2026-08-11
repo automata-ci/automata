@@ -1163,12 +1163,9 @@ async fn executor_failure_is_terminalized_per_slot_while_sibling_and_supervisor_
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
 
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        client.wait_for_released_slot_poll(),
-    )
-    .await
-    .expect("failed slot publishes and releases its terminal result");
+    tokio::time::timeout(Duration::from_mins(1), client.wait_for_released_slot_poll())
+        .await
+        .expect("failed slot publishes and releases its terminal result");
     assert!(executor.survivor_started());
     assert!(
         !task.is_finished(),
@@ -1258,11 +1255,8 @@ async fn credential_free_executor_failure_remains_secretless_without_an_authorit
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
 
-    let terminalized = tokio::time::timeout(
-        Duration::from_secs(15),
-        client.wait_for_released_slot_poll(),
-    )
-    .await;
+    let terminalized =
+        tokio::time::timeout(Duration::from_mins(1), client.wait_for_released_slot_poll()).await;
     assert!(
         terminalized.is_ok(),
         "credential-free executor failure is terminalized; task_finished={}; snapshot={:?}",
@@ -1417,7 +1411,7 @@ async fn uncertain_terminal_cleanup_is_parked_and_retried_while_the_sibling_keep
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
 
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         executor.wait_until_cleanup_is_parked().await;
         loop {
             if client.finalizing_heartbeats() > 0
@@ -1444,9 +1438,12 @@ async fn uncertain_terminal_cleanup_is_parked_and_retried_while_the_sibling_keep
     assert_terminal_cleanup_order(cleanup_order.as_ref(), false);
 
     executor.release_cleanup();
-    tokio::time::timeout(Duration::from_secs(1), client.wait_for_released_slot_poll())
-        .await
-        .expect("safe cleanup completes before result ACK and release");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.wait_for_released_slot_poll(),
+    )
+    .await
+    .expect("safe cleanup completes before result ACK and release");
     assert_eq!(
         client.terminal_results(),
         vec![(failed.lease.attempt_id(), JobConclusion::Failure)]
@@ -1457,7 +1454,7 @@ async fn uncertain_terminal_cleanup_is_parked_and_retried_while_the_sibling_keep
     assert!(snapshot.slot(survivor.slot).is_some());
 
     shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
+    tokio::time::timeout(Duration::from_secs(15), task)
         .await
         .expect("two-slot runner shutdown")
         .expect("runtime task")

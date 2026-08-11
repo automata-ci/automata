@@ -2,8 +2,8 @@
 
 This warning means a target is approaching its 1,000-runner or 5,000-control-
 plane sample limit. The current reviewed classic maxima are 939 runner and
-4,843 control-plane series. With native and classic histograms ingested
-together, the reviewed Prometheus maxima are 969 runner and 4,981
+4,779 control-plane series. With native and classic histograms ingested
+together, the reviewed Prometheus maxima are 969 runner and 4,916
 control-plane samples per scrape, before Prometheus-generated target metadata.
 
 1. Compare `scrape_samples_post_metric_relabeling` and response size before and

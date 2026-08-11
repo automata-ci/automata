@@ -118,7 +118,7 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
     databaseTests,
     /--workspace|--all-targets|automata-ci-results-github --tests/,
   );
-  assert.equal((databaseTests.match(/^\s+cargo test /gm) ?? []).length, 6);
+  assert.equal((databaseTests.match(/^\s+cargo test /gm) ?? []).length, 7);
 
   const broadDatabasePackages = new Set([
     "automata-ci-auth-postgres",
@@ -136,16 +136,21 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
       `${packageName} database suite must run exactly once`,
     );
   }
-  const resultsTargets = new Set(["postgres_artifacts", "postgres_cache"]);
-  for (const target of resultsTargets) {
-    const command =
-      `cargo test -p automata-ci-results-github --test ${target} ` +
-      "--all-features --locked -- --ignored --test-threads=1";
-    assert.equal(
-      databaseTests.split(command).length - 1,
-      1,
-      `the database-only Results ${target} suite must run exactly once`,
-    );
+  const explicitDatabaseTargets = new Map([
+    ["automata-ci", new Set(["github_provider_end_to_end_matrix"])],
+    ["automata-ci-results-github", new Set(["postgres_artifacts", "postgres_cache"])],
+  ]);
+  for (const [packageName, targets] of explicitDatabaseTargets) {
+    for (const target of targets) {
+      const command =
+        `cargo test -p ${packageName} --test ${target} ` +
+        "--all-features --locked -- --ignored --test-threads=1";
+      assert.equal(
+        databaseTests.split(command).length - 1,
+        1,
+        `the database-only ${packageName}/${target} suite must run exactly once`,
+      );
+    }
   }
 
   const ignored = ignoredRustSuites();
@@ -172,7 +177,7 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
     databaseOnlySuites.add(suite);
     assert.ok(
       broadDatabasePackages.has(packageName) ||
-        (packageName === "automata-ci-results-github" && resultsTargets.has(testTarget)),
+        explicitDatabaseTargets.get(packageName)?.has(testTarget),
       `${suite} requires only the test database but is not covered by CI`,
     );
   }

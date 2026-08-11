@@ -188,8 +188,8 @@ before applying the firewall policy.
 
 ## Workflow admission and autonomous progress
 
-The current server rejects the legacy local bearer ingress. Configure the exact
-GitHub provider registry below to admit supported signed `push` webhooks for
+The server exposes no local bearer workflow ingress. Configure the exact GitHub
+provider registry below to admit supported signed `push` webhooks for
 `.github/workflows/ci.yml` on `refs/heads/main`.
 
 Admission validates and persists immutable workflow evidence asynchronously.
@@ -235,9 +235,9 @@ available.
 On Linux, the operational device client is:
 
 ```console
-automata --server-url https://ci.example.test auth login
-automata --server-url https://ci.example.test auth status
-automata --server-url https://ci.example.test auth logout
+automata auth --server-url https://ci.example.test login
+automata auth --server-url https://ci.example.test status
+automata auth --server-url https://ci.example.test logout
 ```
 
 It requires `secret-tool` and an unlocked OS Secret Service. There is no
@@ -290,9 +290,11 @@ Every repository `tenant_id` must equal the server's one effective UI tenant.
 With human authentication enabled, that is the tenant in durable installation
 state (or its configured bootstrap tenant while setup is active); without human
 authentication, it is the validated fallback tenant, which defaults to `local`.
-A mismatch fails startup before the App private key or webhook HMAC is loaded
-and before provider manifests or runtime state are constructed. The current
-registry has no tenant chooser, fallback, or multi-tenant compatibility mode.
+Set it with `--fallback-tenant-id` (or `AUTOMATA_FALLBACK_TENANT_ID`) when the
+default is not appropriate. A mismatch fails startup before the App private key
+or webhook HMAC is loaded and before provider manifests or runtime state are
+constructed. The current registry has no tenant chooser or multi-tenant
+compatibility mode.
 
 The GitHub App webhook URL is the public Automata origin plus
 `/webhooks/github`. Configure GitHub with the same HMAC secret referenced by the
@@ -340,12 +342,12 @@ The Linux operator CLI exposes a repository-scoped subset when its CLI session
 is stored in an unlocked Secret Service and `secret-tool` remains available:
 
 ```console
-automata --server-url https://ci.example.test secret provider status
-automata --server-url https://ci.example.test secret provider activate
-automata --server-url https://ci.example.test secret list --scope repo:OWNER/REPOSITORY
-automata --server-url https://ci.example.test secret create DEPLOY_TOKEN \
+automata secret --server-url https://ci.example.test provider status
+automata secret --server-url https://ci.example.test provider activate
+automata secret --server-url https://ci.example.test list --scope repo:OWNER/REPOSITORY
+automata secret --server-url https://ci.example.test create DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY --from-file /absolute/path/to/value
-automata --server-url https://ci.example.test secret delete DEPLOY_TOKEN \
+automata secret --server-url https://ci.example.test delete DEPLOY_TOKEN \
   --scope repo:OWNER/REPOSITORY
 ```
 

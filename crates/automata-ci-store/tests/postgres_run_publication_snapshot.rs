@@ -48,7 +48,7 @@ struct DurableAttemptSafety {
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates an isolated PostgreSQL schema"]
-async fn both_admission_paths_snapshot_the_closed_publication_matrix() -> TestResult {
+async fn supported_admission_snapshots_the_closed_publication_matrix() -> TestResult {
     run_with_database(|database| async move {
         let tenant = format!("run-publication-{}", Uuid::new_v4().simple());
         seed_tenant(&database, &tenant).await?;
@@ -87,14 +87,16 @@ async fn both_admission_paths_snapshot_the_closed_publication_matrix() -> TestRe
                 &format!("matrix-{index}-logical"),
             )?;
             database.store().admit_workflow(legacy.clone()).await?;
-            database
-                .store()
-                .admit_logical_workflow(logical.clone())
-                .await?;
+            assert_logical_unsupported(
+                &database
+                    .store()
+                    .admit_logical_workflow(logical.clone())
+                    .await,
+            );
+            assert_no_admission(&database, logical.run_id()).await?;
 
             let expected = snapshot(policy);
             assert_eq!(load_snapshot(&database, legacy.run_id()).await?, expected);
-            assert_eq!(load_snapshot(&database, logical.run_id()).await?, expected);
             assert_eq!(
                 load_attempt_safety(&database, legacy.run_id()).await?,
                 readable_attempt_safety(audience, 1_000)
@@ -140,10 +142,13 @@ async fn later_policy_changes_preserve_and_replay_the_original_snapshot() -> Tes
             "change-logical",
         )?;
         database.store().admit_workflow(legacy.clone()).await?;
-        database
-            .store()
-            .admit_logical_workflow(logical.clone())
-            .await?;
+        assert_logical_unsupported(
+            &database
+                .store()
+                .admit_logical_workflow(logical.clone())
+                .await,
+        );
+        assert_no_admission(&database, logical.run_id()).await?;
 
         set_policy(
             &database,
@@ -165,16 +170,15 @@ async fn later_policy_changes_preserve_and_replay_the_original_snapshot() -> Tes
                 .await?
                 .is_replay()
         );
-        assert!(
-            database
+        assert_logical_unsupported(
+            &database
                 .store()
                 .admit_logical_workflow(logical.clone())
-                .await?
-                .is_replay()
+                .await,
         );
+        assert_no_admission(&database, logical.run_id()).await?;
         let expected = snapshot(admitted_policy);
         assert_eq!(load_snapshot(&database, legacy.run_id()).await?, expected);
-        assert_eq!(load_snapshot(&database, logical.run_id()).await?, expected);
         Ok(())
     })
     .await
@@ -183,7 +187,8 @@ async fn later_policy_changes_preserve_and_replay_the_original_snapshot() -> Tes
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates an isolated PostgreSQL schema"]
 #[allow(clippy::too_many_lines)] // One isolated schema exercises both corrupt policy shapes.
-async fn missing_and_malformed_repository_policies_fail_both_paths_atomically() -> TestResult {
+async fn invalid_policies_fail_supported_admission_and_local_logical_stays_unsupported()
+-> TestResult {
     run_with_database(|database| async move {
         let tenant = format!("run-publication-invalid-{}", Uuid::new_v4().simple());
         seed_tenant(&database, &tenant).await?;
@@ -222,7 +227,7 @@ async fn missing_and_malformed_repository_policies_fail_both_paths_atomically() 
             "missing-logical",
         )?;
         assert_legacy_corruption(&database.store().admit_workflow(missing_legacy.clone()).await);
-        assert_logical_corruption(
+        assert_logical_unsupported(
             &database
                 .store()
                 .admit_logical_workflow(missing_logical.clone())
@@ -283,7 +288,7 @@ async fn missing_and_malformed_repository_policies_fail_both_paths_atomically() 
                 .admit_workflow(malformed_legacy.clone())
                 .await,
         );
-        assert_logical_corruption(
+        assert_logical_unsupported(
             &database
                 .store()
                 .admit_logical_workflow(malformed_logical.clone())
@@ -331,10 +336,13 @@ async fn exact_replay_rejects_tampered_publication_snapshot_evidence() -> TestRe
             "tamper-logical",
         )?;
         database.store().admit_workflow(legacy.clone()).await?;
-        database
-            .store()
-            .admit_logical_workflow(logical.clone())
-            .await?;
+        assert_logical_unsupported(
+            &database
+                .store()
+                .admit_logical_workflow(logical.clone())
+                .await,
+        );
+        assert_no_admission(&database, logical.run_id()).await?;
 
         sqlx::query(
             "ALTER TABLE workflow_runs DISABLE TRIGGER workflow_runs_publication_snapshot_immutable",
@@ -348,19 +356,13 @@ async fn exact_replay_rejects_tampered_publication_snapshot_evidence() -> TestRe
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_runs SET requested_log_visibility = 'private' WHERE id = $1",
-        )
-        .bind(logical.run_id().as_uuid())
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
             "ALTER TABLE workflow_runs ENABLE TRIGGER workflow_runs_publication_snapshot_immutable",
         )
         .execute(database.pool())
         .await?;
 
         assert_legacy_corruption(&database.store().admit_workflow(legacy).await);
-        assert_logical_corruption(&database.store().admit_logical_workflow(logical).await);
+        assert_logical_unsupported(&database.store().admit_logical_workflow(logical).await);
         Ok(())
     })
     .await
@@ -651,7 +653,7 @@ fn assert_legacy_corruption(
     ));
 }
 
-fn assert_logical_corruption(
+fn assert_logical_unsupported(
     result: &Result<
         automata_ci_store::LogicalWorkflowAdmissionReceipt,
         LogicalWorkflowAdmissionStoreError,
@@ -659,8 +661,6 @@ fn assert_logical_corruption(
 ) {
     assert!(matches!(
         result,
-        Err(LogicalWorkflowAdmissionStoreError::Store(
-            StoreError::CorruptData(_)
-        ))
+        Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
     ));
 }

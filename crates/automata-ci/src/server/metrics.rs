@@ -98,7 +98,7 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 40] = [
+const HTTP_ROUTE_LABELS: [&str; 39] = [
     "/healthz",
     "/readyz",
     "/",
@@ -114,7 +114,6 @@ const HTTP_ROUTE_LABELS: [&str; 40] = [
     REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE,
     RBAC_SETTINGS_ROUTE,
     "/assets/{*asset_path}",
-    "/api/v1/local/workflow-runs",
     GITHUB_WEBHOOK_PATH,
     GITHUB_WEB_BEGIN_PATH,
     GITHUB_WEB_CALLBACK_PATH,
@@ -1748,7 +1747,6 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
             | "/settings/access/direct-bindings/{binding_id}/revoke",
         ) => RBAC_SETTINGS_ROUTE,
         Some("/assets/{*asset_path}") => "/assets/{*asset_path}",
-        Some("/api/v1/local/workflow-runs") => "/api/v1/local/workflow-runs",
         Some(GITHUB_WEB_BEGIN_PATH) => GITHUB_WEB_BEGIN_PATH,
         Some(GITHUB_WEB_CALLBACK_PATH) => GITHUB_WEB_CALLBACK_PATH,
         Some(GITHUB_WEB_LOGOUT_PATH) => GITHUB_WEB_LOGOUT_PATH,
@@ -2393,7 +2391,7 @@ mod tests {
             .exporter()
             .encode_openmetrics()
             .expect("OpenMetrics exposition");
-        assert_eq!(openmetrics_histogram_label_sets(exposition.as_str()), 138);
+        assert_eq!(openmetrics_histogram_label_sets(exposition.as_str()), 137);
     }
 
     fn openmetrics_histogram_label_sets(exposition: &str) -> usize {
