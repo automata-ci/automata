@@ -547,9 +547,19 @@ class PublicationContract(unittest.TestCase):
     def test_unpopulated_and_noncanonical_locks_fail_closed(self) -> None:
         waiting = self.root / "waiting.json"
         waiting.write_bytes(
-            (
-                REPOSITORY_ROOT / "images/service-proxy/service-proxy-lock.json"
-            ).read_bytes()
+            publication.canonical_json(
+                {
+                    "binary_sha256": None,
+                    "candidate_commit": None,
+                    "containerfile_sha256": None,
+                    "image": None,
+                    "publisher_commit": None,
+                    "sbom_sha256": None,
+                    "schema_version": 1,
+                    "source_identity_sha256": None,
+                    "source_provenance_sha256": None,
+                }
+            )
         )
         with self.assertRaisesRegex(SystemExit, "awaiting a candidate"):
             publication.load_lock(waiting)
