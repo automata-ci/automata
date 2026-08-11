@@ -78,8 +78,8 @@ class CandidateContract(unittest.TestCase):
         reference_name: str | None = None,
         archive_mtime: int = 0,
         extra_member: bool = False,
-        duplicate_manifest: bool = False,
-        distinct_manifest: bool = False,
+        include_index_media_type: bool = True,
+        index_media_type: object = "application/vnd.oci.image.index.v1+json",
     ) -> None:
         source_sha = hashlib.sha256(self.source_bytes).hexdigest()
         labels = {
@@ -124,30 +124,13 @@ class CandidateContract(unittest.TestCase):
             manifest_descriptor["annotations"] = {
                 "org.opencontainers.image.ref.name": reference_name
             }
-        manifests = [manifest_descriptor]
-        if duplicate_manifest:
-            duplicate_descriptor = dict(manifest_descriptor)
-            duplicate_descriptor["annotations"] = {
-                "org.opencontainers.image.ref.name": "transport-duplicate"
-            }
-            manifests.append(duplicate_descriptor)
-        distinct_manifest_bytes = b""
-        distinct_manifest_descriptor = None
-        if distinct_manifest:
-            distinct_manifest_bytes = manifest + b"\n"
-            distinct_manifest_descriptor = self.descriptor(
-                distinct_manifest_bytes,
-                "application/vnd.oci.image.manifest.v1+json",
-            )
-            manifests.append(distinct_manifest_descriptor)
-        index = json.dumps(
-            {
-                "manifests": manifests,
-                "mediaType": "application/vnd.oci.image.index.v1+json",
-                "schemaVersion": 2,
-            },
-            separators=(",", ":"),
-        ).encode()
+        index_document = {
+            "manifests": [manifest_descriptor],
+            "schemaVersion": 2,
+        }
+        if include_index_media_type:
+            index_document["mediaType"] = index_media_type
+        index = json.dumps(index_document, separators=(",", ":")).encode()
         members = {
             "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
             "index.json": index,
@@ -157,11 +140,6 @@ class CandidateContract(unittest.TestCase):
         }
         if extra_member:
             members["unreferenced"] = b"must not survive"
-        if distinct_manifest_descriptor is not None:
-            members[
-                "blobs/sha256/"
-                + distinct_manifest_descriptor["digest"].removeprefix("sha256:")
-            ] = distinct_manifest_bytes
         with tarfile.open(self.oci, "w") as archive:
             for name, contents in members.items():
                 info = tarfile.TarInfo(name)
@@ -248,7 +226,7 @@ class CandidateContract(unittest.TestCase):
         )
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
-    def test_duplicate_transport_descriptors_canonicalize_to_one_manifest(self) -> None:
+    def test_optional_index_media_type_canonicalizes_to_explicit_media_type(self) -> None:
         first = self.root / "first.tar"
         candidate.create(
             argparse.Namespace(
@@ -258,7 +236,11 @@ class CandidateContract(unittest.TestCase):
                 github_output=None,
             )
         )
-        self.write_oci(duplicate_manifest=True)
+        self.write_oci(
+            include_index_media_type=False,
+            reference_name="localhost/automata-ci/service-proxy:podman-4-transport",
+            archive_mtime=123456,
+        )
         second = self.root / "second.tar"
         candidate.create(
             argparse.Namespace(
@@ -270,19 +252,25 @@ class CandidateContract(unittest.TestCase):
         )
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
-    def test_distinct_image_manifests_fail_closed(self) -> None:
-        self.write_oci(distinct_manifest=True)
-        output = self.root / "candidate.tar"
-        with self.assertRaisesRegex(SystemExit, "exactly one unique"):
-            candidate.create(
-                argparse.Namespace(
-                    context=self.context,
-                    oci_archive=self.oci,
-                    output=output,
-                    github_output=None,
-                )
-            )
-        self.assertFalse(output.exists())
+    def test_invalid_index_media_type_fails_closed(self) -> None:
+        invalid_media_types = (
+            None,
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        )
+        for media_type in invalid_media_types:
+            with self.subTest(media_type=media_type):
+                self.write_oci(index_media_type=media_type)
+                output = self.root / "candidate.tar"
+                with self.assertRaisesRegex(SystemExit, "index media type differs"):
+                    candidate.create(
+                        argparse.Namespace(
+                            context=self.context,
+                            oci_archive=self.oci,
+                            output=output,
+                            github_output=None,
+                        )
+                    )
+                self.assertFalse(output.exists())
 
     def test_unreferenced_oci_member_fails_closed(self) -> None:
         self.write_oci(extra_member=True)
