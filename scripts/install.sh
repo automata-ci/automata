@@ -86,8 +86,9 @@ if [ ! -e "$temporary_parent" ]; then
 elif [ ! -d "$temporary_parent" ]; then
   die "temporary path is not a directory: $temporary_parent"
 fi
-[ -w "$temporary_parent" ] && [ -x "$temporary_parent" ] || \
+if [ ! -w "$temporary_parent" ] || [ ! -x "$temporary_parent" ]; then
   die "temporary directory is not writable and searchable: $temporary_parent"
+fi
 if [ "$temporary_parent_is_private" = true ]; then
   chmod 0700 -- "$temporary_parent" || \
     die "could not secure temporary directory: $temporary_parent"
@@ -145,16 +146,22 @@ curl --fail --location --silent --show-error --proto '=https,file' \
   --proto-redir '=https' --tlsv1.2 --retry 3 \
   --max-filesize "$maximum_checksum_bytes" \
   --output "$checksum_path" "${release_base}/${asset}.sha256"
-[ -f "$archive_path" ] && [ ! -L "$archive_path" ] || \
+if [ ! -f "$archive_path" ] || [ -L "$archive_path" ]; then
   die "release archive download is not a regular file"
-[ -f "$checksum_path" ] && [ ! -L "$checksum_path" ] || \
+fi
+if [ ! -f "$checksum_path" ] || [ -L "$checksum_path" ]; then
   die "release checksum download is not a regular file"
+fi
 archive_bytes="$(stat -c '%s' -- "$archive_path")"
 checksum_bytes="$(stat -c '%s' -- "$checksum_path")"
-[ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -le "$maximum_archive_bytes" ] || \
+if ! [ "$archive_bytes" -gt 0 ] || \
+  ! [ "$archive_bytes" -le "$maximum_archive_bytes" ]; then
   die "release archive size is outside the supported bound"
-[ "$checksum_bytes" -gt 0 ] && [ "$checksum_bytes" -le "$maximum_checksum_bytes" ] || \
+fi
+if ! [ "$checksum_bytes" -gt 0 ] || \
+  ! [ "$checksum_bytes" -le "$maximum_checksum_bytes" ]; then
   die "release checksum size is outside the supported bound"
+fi
 
 expected_line="$(sed -n '1p' "$checksum_path")"
 [ "$(wc -l < "$checksum_path")" -eq 1 ] || \
@@ -214,24 +221,28 @@ tar --extract --gzip --file "$archive_path" \
   die "release archive could not be extracted"
 for extracted_member in SHA256SUMS VERSION automata automata-runner; do
   extracted_path="${extract_directory}/${extracted_member}"
-  [ -f "$extracted_path" ] && [ ! -L "$extracted_path" ] && \
-    [ "$(stat -c '%h' -- "$extracted_path")" -eq 1 ] || \
+  if [ ! -f "$extracted_path" ] || [ -L "$extracted_path" ] || \
+    ! [ "$(stat -c '%h' -- "$extracted_path")" -eq 1 ]; then
     die "release archive member must be one regular file: $extracted_member"
+  fi
 done
 [ "$(stat -c '%s' -- "${extract_directory}/VERSION")" -le 256 ] || \
   die "release archive VERSION is too large"
 for executable in automata automata-runner; do
   executable_bytes="$(stat -c '%s' -- "${extract_directory}/${executable}")"
-  [ "$executable_bytes" -gt 0 ] && [ "$executable_bytes" -le 134217728 ] || \
+  if ! [ "$executable_bytes" -gt 0 ] || \
+    ! [ "$executable_bytes" -le 134217728 ]; then
     die "release archive executable size is outside the supported bound: $executable"
+  fi
 done
 
 checksum_members="${temporary_directory}/checksum-members.txt"
 sed -n 's/^[0-9a-f]\{64\}  //p' "${extract_directory}/SHA256SUMS" \
   > "$checksum_members"
-[ "$(wc -l < "${extract_directory}/SHA256SUMS")" -eq 10 ] && \
-  [ "$(wc -l < "$checksum_members")" -eq 10 ] || \
+if ! [ "$(wc -l < "${extract_directory}/SHA256SUMS")" -eq 10 ] || \
+  ! [ "$(wc -l < "$checksum_members")" -eq 10 ]; then
   die "release archive SHA256SUMS has an unexpected format"
+fi
 for checksummed_member in \
   LICENSE \
   THIRD_PARTY_LICENSES.txt \

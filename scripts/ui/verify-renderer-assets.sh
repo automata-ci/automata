@@ -31,26 +31,26 @@ usage="usage: $0 [--transaction-owner-marker ACTIVE_FORMAT_PATH --transaction-ow
 while (( $# >= 1 )); do
     case "$1" in
         --transaction-owner-marker)
-            (( $# >= 2 )) && [[ -z "${transaction_owner_marker}" ]] || {
+            if (( $# < 2 )) || [[ -n "${transaction_owner_marker}" ]]; then
                 echo "${usage}" >&2
                 exit 1
-            }
+            fi
             transaction_owner_marker="$2"
             shift 2
             ;;
         --transaction-owner-id)
-            (( $# >= 2 )) && [[ -z "${transaction_owner_id}" ]] || {
+            if (( $# < 2 )) || [[ -n "${transaction_owner_id}" ]]; then
                 echo "${usage}" >&2
                 exit 1
-            }
+            fi
             transaction_owner_id="$2"
             shift 2
             ;;
         --transaction-owner-lock-fd)
-            (( $# >= 2 )) && [[ -z "${transaction_owner_lock_fd}" ]] || {
+            if (( $# < 2 )) || [[ -n "${transaction_owner_lock_fd}" ]]; then
                 echo "${usage}" >&2
                 exit 1
-            }
+            fi
             transaction_owner_lock_fd="$2"
             shift 2
             ;;

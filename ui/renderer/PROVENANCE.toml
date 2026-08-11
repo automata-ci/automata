@@ -36,10 +36,10 @@ ssr_bundle_sha256 = "9329f570db20bd526cd60d23e168d747996b6df9ccbe212b4c82c47106e
 
 [ui]
 package_lock_sha256 = "51085a2acccd0b8a8bc47f43e72e6ddfe3e75620b88de421ca8a65c7b434f2aa"
-script_public_path = "/assets/entry-client-B2HosViX.js"
-stylesheet_public_path = "/assets/entry-client-CfC55N9q.css"
+script_public_path = "/assets/entry-client-Bns7fGXZ.js"
+stylesheet_public_path = "/assets/entry-client-Dqn-xo1E.css"
 
 [artifacts]
 component_sha256 = "4171e31d1e40e7215180d65ad32dd369bde8a08b4d75335821c0ffe38aa60639"
 script_sha256 = "4c480bea82223cc544a29606372922580dc60cb4465f02421921146ebc58ae43"
-stylesheet_sha256 = "f8830bf4c5083bf6771e02a55b25ecdf3f5e50cdb16e8a962a02b19356f9b4f1"
+stylesheet_sha256 = "eb30a331dbf4e509adbaf645d174d0058f102aad67c4c2f85164c73e1a911594"

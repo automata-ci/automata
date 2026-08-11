@@ -11,11 +11,11 @@ pub(crate) const CLIENT_SCRIPT_BYTES: &[u8] = include_bytes!(
 );
 pub(crate) const CLIENT_SCRIPT_SHA256: &str =
     "4c480bea82223cc544a29606372922580dc60cb4465f02421921146ebc58ae43";
-pub(crate) const CLIENT_SCRIPT_PATH: &str = "/assets/entry-client-B2HosViX.js";
+pub(crate) const CLIENT_SCRIPT_PATH: &str = "/assets/entry-client-Bns7fGXZ.js";
 
 pub(crate) const CLIENT_STYLE_BYTES: &[u8] = include_bytes!(
-    "../assets/styles-f8830bf4c5083bf6771e02a55b25ecdf3f5e50cdb16e8a962a02b19356f9b4f1.css"
+    "../assets/styles-eb30a331dbf4e509adbaf645d174d0058f102aad67c4c2f85164c73e1a911594.css"
 );
 pub(crate) const CLIENT_STYLE_SHA256: &str =
-    "f8830bf4c5083bf6771e02a55b25ecdf3f5e50cdb16e8a962a02b19356f9b4f1";
-pub(crate) const CLIENT_STYLE_PATH: &str = "/assets/entry-client-CfC55N9q.css";
+    "eb30a331dbf4e509adbaf645d174d0058f102aad67c4c2f85164c73e1a911594";
+pub(crate) const CLIENT_STYLE_PATH: &str = "/assets/entry-client-Dqn-xo1E.css";
