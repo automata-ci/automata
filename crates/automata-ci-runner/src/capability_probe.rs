@@ -201,7 +201,11 @@ impl CapabilityProbe {
 
 /// Probes host facts without treating mere interface presence as enforceable support.
 pub fn probe_capabilities() -> Vec<CapabilityProbe> {
+    #[cfg(target_os = "linux")]
     let mut probes = vec![probe_process_execution()];
+
+    #[cfg(not(target_os = "linux"))]
+    let probes = vec![probe_process_execution()];
 
     #[cfg(target_os = "linux")]
     {

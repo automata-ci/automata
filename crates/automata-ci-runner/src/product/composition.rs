@@ -75,10 +75,6 @@ impl PodmanProcessTrust {
     fn capture(_options: &PodmanOptions, _runtime_mount: RuntimeMountSnapshot) -> Result<Self, ()> {
         Ok(Self)
     }
-
-    fn revalidate(&self) -> Result<(), ()> {
-        Ok(())
-    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -255,6 +251,7 @@ fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
     Err(RunnerProductError::UnsupportedPlatform)
 }
 
+#[cfg(target_os = "linux")]
 fn admit_effective_user_id(user: u32) -> Result<(), RunnerProductError> {
     if user == 0 {
         Err(RunnerProductError::PodmanProcessTrust)
@@ -1145,6 +1142,7 @@ mod tests {
         effects.assert_none();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn root_is_rejected_before_any_podman_state_preparation() {
         assert!(matches!(

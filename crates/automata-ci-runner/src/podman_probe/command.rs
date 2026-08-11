@@ -5,13 +5,18 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
+        mpsc::{Receiver, RecvTimeoutError, TryRecvError},
     },
     thread,
     time::{Duration, Instant},
 };
 
-use automata_ci_sandbox_podman::{PodmanOptions, PodmanProcessEnvironment};
+#[cfg(any(unix, test))]
+use std::sync::mpsc;
+
+#[cfg(target_os = "linux")]
+use automata_ci_sandbox_podman::PodmanOptions;
+use automata_ci_sandbox_podman::PodmanProcessEnvironment;
 
 use super::ProbeCancellation;
 
@@ -295,6 +300,7 @@ pub(super) struct ConfiguredSystemCommandExecutor {
 }
 
 impl ConfiguredSystemCommandExecutor {
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub(super) fn from_options(options: &PodmanOptions) -> Self {
         Self {
@@ -352,8 +358,11 @@ fn execute_system_command(
         Err(output) => return output,
     };
     let deadline = CommandDeadline::new(request, Instant::now());
-    let (termination, mut wait_error) =
+    let (termination, wait_error) =
         wait_for_termination(&mut child, request, cancellation, deadline);
+
+    #[cfg(target_os = "linux")]
+    let mut wait_error = wait_error;
 
     #[cfg(target_os = "linux")]
     if matches!(termination, CommandTermination::Exited(_)) {
@@ -624,6 +633,7 @@ impl CappedReader {
         Err("interruptible child output capture is not implemented on this platform".to_owned())
     }
 
+    #[cfg(any(unix, test))]
     fn spawn_interruptible<R>(reader: R, limit: usize, stream: &str) -> Result<Self, String>
     where
         R: std::io::Read + Send + 'static,
@@ -753,6 +763,7 @@ impl CapturedStream {
     }
 }
 
+#[cfg(any(unix, test))]
 fn read_capped<R>(mut reader: R, limit: usize, stop: &AtomicBool) -> Result<(String, bool), String>
 where
     R: std::io::Read,
@@ -867,29 +878,30 @@ fn signal_process_group(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Error, Read};
+    #[cfg(target_os = "linux")]
     use std::{
         fs,
-        io::{Cursor, Error, Read},
         path::{Path, PathBuf},
     };
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt as _;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use automata_ci_sandbox_podman::{
         PodmanBinary, PodmanLaunchTrust, PodmanLaunchTrustHandle, PodmanStateRoot,
     };
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use uuid::Uuid;
 
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[derive(Debug)]
     struct TestLaunchTrust;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl PodmanLaunchTrust for TestLaunchTrust {
         fn revalidate(&self) -> bool {
             true
@@ -961,7 +973,7 @@ mod tests {
         assert_eq!(reaped.code(), Some(23));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn configured_executor_uses_exact_binary_base_arguments_and_clean_environment() {
         let fixture = TestDirectory::new();
@@ -1067,12 +1079,12 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     struct TestDirectory {
         root: PathBuf,
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl TestDirectory {
         fn new() -> Self {
             let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1093,7 +1105,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ignored = fs::remove_dir_all(&self.root);

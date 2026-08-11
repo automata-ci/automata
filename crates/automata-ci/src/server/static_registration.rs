@@ -515,12 +515,15 @@ fn read_privileged_file(
 pub(crate) enum StaticRunnerRegistrationError {
     #[error("static runner registration path must be absolute")]
     RelativePath,
+    #[cfg(unix)]
     #[error("static runner registration file could not be read")]
     UnreadableFile,
+    #[cfg(unix)]
     #[error(
         "static runner registration paths must have trusted non-writable ancestors and root-owned, non-writable, single-linked regular files reached without symlinks"
     )]
     InsecureFile,
+    #[cfg(unix)]
     #[error("static runner registration file exceeds its byte limit")]
     FileTooLarge,
     #[error("static runner registration document is invalid")]
@@ -546,6 +549,7 @@ pub(crate) enum StaticRunnerRegistrationError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -641,6 +645,7 @@ mod tests {
         .expect("document")
     }
 
+    #[cfg(unix)]
     #[test]
     fn document_derives_der_digest_and_exact_routing_facts() {
         let id = RunnerId::new();
@@ -658,6 +663,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn document_accepts_two_distinct_rotation_leaves_only() {
         let id = RunnerId::new();
@@ -682,7 +688,7 @@ mod tests {
                 |path| match path.to_str() {
                     Some("/run/automata/client.pem") => Ok(first.pem.clone()),
                     Some("/run/automata/client-next.pem") => Ok(second.pem.clone()),
-                    _ => Err(StaticRunnerRegistrationError::UnreadableFile),
+                    _ => panic!("unexpected certificate path"),
                 },
             )
             .expect("overlap fleet");
@@ -846,6 +852,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn document_gates_oidc_capability_on_server_operational_readiness() {
         let id = RunnerId::new();

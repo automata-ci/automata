@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+use automata_ci_runner::capability_probe::{CGROUP_V2, USER_NAMESPACE};
 use automata_ci_runner::capability_probe::{
-    CGROUP_V2, KernelModuleReadiness, PODMAN_NETWORK_ISOLATION, PROCESS_EXECUTION, ProbeReasonCode,
-    ProbeStatus, USER_NAMESPACE, assess_podman_network_isolation, probe_capabilities,
-    usable_capabilities,
+    KernelModuleReadiness, PODMAN_NETWORK_ISOLATION, PROCESS_EXECUTION, ProbeReasonCode,
+    ProbeStatus, assess_podman_network_isolation, probe_capabilities, usable_capabilities,
 };
 
 #[test]

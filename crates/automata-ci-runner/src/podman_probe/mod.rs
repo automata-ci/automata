@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use automata_ci_execution::NetworkPolicy;
 use automata_ci_sandbox_podman::PodmanOptions;
+#[cfg(target_os = "linux")]
 use command::ConfiguredSystemCommandExecutor;
 pub use command::{
     CommandExecutor, CommandOutput, CommandRequest, CommandTermination, SystemCommandExecutor,
@@ -19,6 +20,7 @@ pub use control::{ActiveProbeLimits, ProbeCancellation};
 pub use elf::{ElfScratchExecutableInspector, ScratchCompatibility, ScratchExecutableInspector};
 pub use http::{ReadinessProbe, SystemReadinessProbe};
 pub use plan::ActiveProbePlan;
+#[cfg(target_os = "linux")]
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]

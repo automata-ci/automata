@@ -22,9 +22,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     CommandOutput, CommandRequest, CommandTermination, JobContainerEngine, NoopPodmanObserver,
-    PODMAN_PROVIDER_ID, PodmanCommandExecutor, PodmanCommandOutcome, PodmanCommandStage,
-    PodmanEvent, PodmanHostGatewayAlias, PodmanObserver, PodmanOpenError, PodmanOptions,
-    SystemCommandExecutor,
+    PodmanCommandExecutor, PodmanCommandOutcome, PodmanCommandStage, PodmanEvent,
+    PodmanHostGatewayAlias, PodmanObserver, PodmanOpenError, PodmanOptions, SystemCommandExecutor,
     command::process_cgroup,
     docker::{
         DOCKER_SOCKET_DIRECTORY_TARGET, JobDockerLaunch, JobDockerListener, JobDockerService,
@@ -42,6 +41,9 @@ use crate::{
     },
     state::{JobEnginePaths, LocalState},
 };
+
+#[cfg(target_os = "linux")]
+use crate::PODMAN_PROVIDER_ID;
 
 const SERVICE_HEALTH_FORMAT: &str = "{{.State.Status}}\n{{if .Config.Healthcheck}}configured{{else}}none{{end}}\n{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
 const SERVICE_HEALTH_CONFIGURATION_FORMAT: &str = "{{json .Config.Healthcheck}}";
@@ -132,54 +134,61 @@ impl RootlessPodmanProvider {
         observer: Arc<dyn PodmanObserver>,
     ) -> Result<Self, PodmanOpenError> {
         #[cfg(not(target_os = "linux"))]
-        return Err(crate::PodmanConfigurationError::UnsupportedPlatform.into());
-        options.process_environment().validate_provider_use()?;
-        let state = LocalState::open(&options)?;
-        options.process_environment().validate_provider_use()?;
-        let provider_id = ProviderId::new(PODMAN_PROVIDER_ID)
-            .map_err(|_| crate::PodmanConfigurationError::InvalidBinary)?;
-        let mut declared_capabilities = vec![
-            SandboxCapability::WholeJob,
-            SandboxCapability::Attach,
-            SandboxCapability::Inspect,
-            SandboxCapability::Exec,
-            SandboxCapability::Signal,
-            SandboxCapability::Wait,
-            SandboxCapability::CopyTo,
-            SandboxCapability::CopyFrom,
-            SandboxCapability::EnvironmentInjection,
-            SandboxCapability::NetworkDisabled,
-            SandboxCapability::PrivateEgress,
-            SandboxCapability::ReadOnlyRootFilesystem,
-            SandboxCapability::WritableRootFilesystem,
-            SandboxCapability::Administrator,
-            SandboxCapability::UserNamespace,
-            SandboxCapability::ResourceLimits,
-        ];
-        if options.service_proxy_image().is_some() {
-            declared_capabilities.push(SandboxCapability::ServiceContainers);
+        {
+            let _ = (options, executor, observer);
+            Err(crate::PodmanConfigurationError::UnsupportedPlatform.into())
         }
-        if options.job_container_engine() == JobContainerEngine::AttemptScopedDockerApi {
-            declared_capabilities.push(SandboxCapability::DockerCompatibleApi);
+
+        #[cfg(target_os = "linux")]
+        {
+            options.process_environment().validate_provider_use()?;
+            let state = LocalState::open(&options)?;
+            options.process_environment().validate_provider_use()?;
+            let provider_id = ProviderId::new(PODMAN_PROVIDER_ID)
+                .map_err(|_| crate::PodmanConfigurationError::InvalidBinary)?;
+            let mut declared_capabilities = vec![
+                SandboxCapability::WholeJob,
+                SandboxCapability::Attach,
+                SandboxCapability::Inspect,
+                SandboxCapability::Exec,
+                SandboxCapability::Signal,
+                SandboxCapability::Wait,
+                SandboxCapability::CopyTo,
+                SandboxCapability::CopyFrom,
+                SandboxCapability::EnvironmentInjection,
+                SandboxCapability::NetworkDisabled,
+                SandboxCapability::PrivateEgress,
+                SandboxCapability::ReadOnlyRootFilesystem,
+                SandboxCapability::WritableRootFilesystem,
+                SandboxCapability::Administrator,
+                SandboxCapability::UserNamespace,
+                SandboxCapability::ResourceLimits,
+            ];
+            if options.service_proxy_image().is_some() {
+                declared_capabilities.push(SandboxCapability::ServiceContainers);
+            }
+            if options.job_container_engine() == JobContainerEngine::AttemptScopedDockerApi {
+                declared_capabilities.push(SandboxCapability::DockerCompatibleApi);
+            }
+            let capabilities = ProviderCapabilities::new(declared_capabilities)
+                .map_err(|_| crate::PodmanConfigurationError::InvalidLimits)?;
+            let inner = Arc::new(PodmanInner {
+                options,
+                state,
+                executor,
+                observer,
+                provider_id,
+                capabilities,
+                handle_locks: Mutex::new(BTreeMap::new()),
+                docker_services: Mutex::new(BTreeMap::new()),
+            });
+            if inner.options.service_proxy_image().is_some() {
+                inner
+                    .verify_service_proxy_image(inner.operation_deadline(), &NeverCancelled)
+                    .map_err(|_| crate::PodmanConfigurationError::ServiceProxyUnavailable)?;
+            }
+            Ok(Self { inner })
         }
-        let capabilities = ProviderCapabilities::new(declared_capabilities)
-            .map_err(|_| crate::PodmanConfigurationError::InvalidLimits)?;
-        let inner = Arc::new(PodmanInner {
-            options,
-            state,
-            executor,
-            observer,
-            provider_id,
-            capabilities,
-            handle_locks: Mutex::new(BTreeMap::new()),
-            docker_services: Mutex::new(BTreeMap::new()),
-        });
-        if inner.options.service_proxy_image().is_some() {
-            inner
-                .verify_service_proxy_image(inner.operation_deadline(), &NeverCancelled)
-                .map_err(|_| crate::PodmanConfigurationError::ServiceProxyUnavailable)?;
-        }
-        Ok(Self { inner })
     }
 }
 
