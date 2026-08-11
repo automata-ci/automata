@@ -133,11 +133,17 @@ class PublicationContract(unittest.TestCase):
             "size": len(contents),
         }
 
-    def write_oci(self) -> None:
+    def write_oci(self, directory_pax_headers: dict[str, str] | None = None) -> None:
         source_sha = hashlib.sha256(self.source_bytes).hexdigest()
         layer_stream = io.BytesIO()
         with tarfile.open(
-            fileobj=layer_stream, mode="w", format=tarfile.USTAR_FORMAT
+            fileobj=layer_stream,
+            mode="w",
+            format=(
+                tarfile.PAX_FORMAT
+                if directory_pax_headers is not None
+                else tarfile.USTAR_FORMAT
+            ),
         ) as layer_archive:
             directories = (
                 "usr",
@@ -154,6 +160,8 @@ class PublicationContract(unittest.TestCase):
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
                 info.mtime = self.release["source_date_epoch"]
+                if name == "usr" and directory_pax_headers is not None:
+                    info.pax_headers = directory_pax_headers
                 layer_archive.addfile(info)
             files = {
                 "usr/libexec/automata-ci-service-proxy": (
@@ -425,6 +433,38 @@ class PublicationContract(unittest.TestCase):
                 ):
                     publication.expanded_layer(contents, media_type)
 
+    def test_overlay_storage_pax_metadata_remains_forbidden(self) -> None:
+        for index, headers in enumerate(
+            (
+                {"SCHILY.xattr.user.overlay.origin": ""},
+                {"SCHILY.xattr.user.overlay.impure": "y"},
+            )
+        ):
+            with self.subTest(headers=headers):
+                self.write_oci(headers)
+                tainted_candidate = self.root / f"overlay-{index}.tar"
+                candidate.create(
+                    argparse.Namespace(
+                        context=self.context,
+                        oci_archive=self.oci,
+                        output=tainted_candidate,
+                        github_output=None,
+                    )
+                )
+                with self.assertRaisesRegex(SystemExit, "unsafe entry"):
+                    publication.prepare_candidate(
+                        argparse.Namespace(
+                            candidate=tainted_candidate,
+                            source_directory=self.source_directory,
+                            candidate_commit=self.candidate_commit,
+                            publisher_commit=self.publisher_commit,
+                            run_id="1",
+                            run_attempt="1",
+                            output=self.root / f"overlay-output-{index}",
+                            github_output=None,
+                        )
+                    )
+
     def test_credentialed_publisher_requires_exact_candidate_source(self) -> None:
         containerfile = self.source_directory / "images/service-proxy/Containerfile"
         containerfile.write_bytes(
@@ -456,6 +496,14 @@ class PublicationContract(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(containerfile.count("\nWORKDIR /\n"), 1)
         self.assertEqual(builder.count("  --identity-label=false \\\n"), 1)
+        self.assertEqual(builder.count("  'driver = \"vfs\"' \\\n"), 1)
+        self.assertEqual(
+            builder.count('mktemp -d "$TMPDIR/podman-vfs.XXXXXXXX"'), 1
+        )
+        self.assertEqual(builder.count("unset STORAGE_DRIVER STORAGE_OPTS"), 1)
+        self.assertEqual(
+            builder.count('export CONTAINERS_STORAGE_CONF="$storage_config"'), 1
+        )
 
     def test_reviewed_lock_and_dispatch_inputs_are_exact(self) -> None:
         lock_path, lock, _ = self.load_review()

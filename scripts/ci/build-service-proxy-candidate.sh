@@ -34,6 +34,37 @@ readonly context output_directory
 [[ ! -e "$output_directory" ]] || die "output directory already exists"
 install -d -m 0700 -- "$output_directory"
 
+# Rootless OverlayFS records its private origin/impure bookkeeping as PAX
+# xattrs in exported layers on Ubuntu's Podman 4.x stack. Build this tiny
+# scratch image in an isolated VFS store so builder-only overlay metadata can
+# never enter the immutable candidate or its reviewed digest.
+storage_directory="$(mktemp -d "$TMPDIR/podman-vfs.XXXXXXXX")"
+storage_config="$storage_directory/storage.conf"
+storage_graphroot="$storage_directory/graphroot"
+storage_runroot="$storage_directory/runroot"
+install -d -m 0700 -- "$storage_graphroot" "$storage_runroot"
+install -m 0600 /dev/null "$storage_config"
+printf '%s\n' \
+  '[storage]' \
+  'driver = "vfs"' \
+  "graphroot = \"$storage_graphroot\"" \
+  "runroot = \"$storage_runroot\"" >"$storage_config"
+unset STORAGE_DRIVER STORAGE_OPTS
+export CONTAINERS_STORAGE_CONF="$storage_config"
+readonly storage_directory storage_config storage_graphroot storage_runroot
+
+tag="localhost/automata-ci/service-proxy:candidate-${BASHPID}"
+readonly tag
+cleanup() {
+  podman image rm --force "$tag" >/dev/null 2>&1 || true
+  if [[ "$storage_directory" == "$TMPDIR"/podman-vfs.* \
+    && -d "$storage_directory" \
+    && ! -L "$storage_directory" ]]; then
+    rm -rf -- "$storage_directory"
+  fi
+}
+trap cleanup EXIT
+
 runtime="${AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME:-podman}"
 [[ "$runtime" == podman ]] || die "candidate builds require the Podman OCI builder"
 command -v podman >/dev/null 2>&1 || die "Podman is unavailable"
@@ -65,13 +96,6 @@ binary_sha256="${source_values[4]}"
 sbom_sha256="${source_values[5]}"
 source_sha256="${source_values[6]}"
 readonly version revision created source_date_epoch binary_sha256 sbom_sha256 source_sha256
-
-tag="localhost/automata-ci/service-proxy:candidate-${BASHPID}"
-readonly tag
-cleanup() {
-  podman image rm --force "$tag" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
 
 env -u SOURCE_DATE_EPOCH podman build \
   --build-arg "AUTOMATA_CREATED=${created}" \
