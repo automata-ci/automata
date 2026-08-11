@@ -434,21 +434,18 @@ impl<'a> ProbeResources<'a> {
     }
 
     fn verify_context_binding(&self, stage: &str) -> Result<(), ProbeFailure> {
-        self.context
-            .as_ref()
-            .ok_or_else(|| {
-                ProbeFailure::indeterminate(
-                    ProbeReasonCode::ActiveProbePreparationFailed,
-                    format!("probe rootfs was unavailable {stage}"),
-                )
-            })?
-            .verify_for_use(self.executable)
-            .map_err(|detail| {
-                ProbeFailure::indeterminate(
-                    ProbeReasonCode::ActiveProbePreparationFailed,
-                    format!("probe rootfs integrity failed {stage}: {detail}"),
-                )
-            })
+        let context = self.context.as_ref().ok_or_else(|| {
+            ProbeFailure::indeterminate(
+                ProbeReasonCode::ActiveProbePreparationFailed,
+                format!("probe rootfs was unavailable {stage}"),
+            )
+        })?;
+        verify_probe_context_for_use(context, self.executable).map_err(|detail| {
+            ProbeFailure::indeterminate(
+                ProbeReasonCode::ActiveProbePreparationFailed,
+                format!("probe rootfs integrity failed {stage}: {detail}"),
+            )
+        })
     }
 
     fn verify_container_network(&self) -> Result<(), ProbeFailure> {
@@ -1206,10 +1203,6 @@ impl ProbeContext {
         Ok(())
     }
 
-    fn verify_for_use(&self, _expected_payload: &[u8]) -> Result<(), String> {
-        Err("active Podman probing is unsupported on this platform".to_owned())
-    }
-
     fn remove(&mut self) -> Result<(), String> {
         let entries = fs::read_dir(&self.path)
             .map_err(|error| format!("could not scan the owned probe context: {error}"))?
@@ -1230,6 +1223,22 @@ impl ProbeContext {
         fs::remove_dir(&self.path)
             .map_err(|error| format!("could not remove the exact probe context: {error}"))
     }
+}
+
+#[cfg(unix)]
+fn verify_probe_context_for_use(
+    context: &ProbeContext,
+    expected_payload: &[u8],
+) -> Result<(), String> {
+    context.verify_for_use(expected_payload)
+}
+
+#[cfg(not(unix))]
+fn verify_probe_context_for_use(
+    _context: &ProbeContext,
+    _expected_payload: &[u8],
+) -> Result<(), String> {
+    Err("active Podman probing is unsupported on this platform".to_owned())
 }
 
 fn canonical_podman_identifier(kind: ResourceKind, value: &str) -> Option<&str> {

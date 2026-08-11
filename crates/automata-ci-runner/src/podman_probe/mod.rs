@@ -56,69 +56,68 @@ pub(crate) async fn probe_current_executable_with_cancellation(
     .await
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_configured_current_executable_with_control(
+    _options: &PodmanOptions,
+    _network_policy: NetworkPolicy,
+    _cancellation: &ProbeCancellation,
+) -> std::future::Ready<CapabilityProbe> {
+    std::future::ready(unsupported_platform_probe())
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) async fn probe_configured_current_executable_with_control(
     options: &PodmanOptions,
     network_policy: NetworkPolicy,
     cancellation: &ProbeCancellation,
 ) -> CapabilityProbe {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = options;
-        let _ = network_policy;
-        let _ = cancellation;
-        return active_network_probe(
-            ProbeStatus::Unavailable,
-            Some(ProbeReasonCode::ActiveProbeUnsupportedPlatform),
-            "the active Podman network probe is currently supported only on Linux".to_owned(),
-        );
+    if cancellation.is_cancelled() {
+        return interrupted_probe(cancellation, None, &[], ProbeCleanupStatus::NotApplicable);
     }
-
-    #[cfg(target_os = "linux")]
-    {
-        if cancellation.is_cancelled() {
-            return interrupted_probe(cancellation, None, &[], ProbeCleanupStatus::NotApplicable);
-        }
-        let passive = assess_configured_podman_network_isolation(options.binary().as_path());
-        if passive.status() != ProbeStatus::Detected {
-            return passive;
-        }
-        probe_current_executable_with_control(
-            Arc::new(ConfiguredSystemCommandExecutor::from_options(options)),
-            Some(options.state_root().as_path().join("active-probe")),
-            network_policy,
-            cancellation,
-        )
-        .await
+    let passive = assess_configured_podman_network_isolation(options.binary().as_path());
+    if passive.status() != ProbeStatus::Detected {
+        return passive;
     }
+    probe_current_executable_with_control(
+        Arc::new(ConfiguredSystemCommandExecutor::from_options(options)),
+        Some(options.state_root().as_path().join("active-probe")),
+        network_policy,
+        cancellation,
+    )
+    .await
 }
 
+#[cfg(not(target_os = "linux"))]
+fn probe_current_executable_with_control(
+    _commands: Arc<dyn CommandExecutor>,
+    _scratch_root: Option<std::path::PathBuf>,
+    _network_policy: NetworkPolicy,
+    _cancellation: &ProbeCancellation,
+) -> std::future::Ready<CapabilityProbe> {
+    std::future::ready(unsupported_platform_probe())
+}
+
+#[cfg(target_os = "linux")]
 async fn probe_current_executable_with_control(
     commands: Arc<dyn CommandExecutor>,
     scratch_root: Option<std::path::PathBuf>,
     network_policy: NetworkPolicy,
     cancellation: &ProbeCancellation,
 ) -> CapabilityProbe {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = commands;
-        let _ = scratch_root;
-        let _ = network_policy;
-        let _ = cancellation;
-        active_network_probe(
-            ProbeStatus::Unavailable,
-            Some(ProbeReasonCode::ActiveProbeUnsupportedPlatform),
-            "the active Podman network probe is currently supported only on Linux".to_owned(),
-        )
-    }
+    let plan = match current_probe_plan(scratch_root, network_policy) {
+        Ok(plan) => plan,
+        Err(probe) => return probe,
+    };
+    run_system_active_probe_with_control(plan, commands, cancellation.clone()).await
+}
 
-    #[cfg(target_os = "linux")]
-    {
-        let plan = match current_probe_plan(scratch_root, network_policy) {
-            Ok(plan) => plan,
-            Err(probe) => return probe,
-        };
-        run_system_active_probe_with_control(plan, commands, cancellation.clone()).await
-    }
+#[cfg(not(target_os = "linux"))]
+fn unsupported_platform_probe() -> CapabilityProbe {
+    active_network_probe(
+        ProbeStatus::Unavailable,
+        Some(ProbeReasonCode::ActiveProbeUnsupportedPlatform),
+        "the active Podman network probe is currently supported only on Linux".to_owned(),
+    )
 }
 
 #[cfg(target_os = "linux")]

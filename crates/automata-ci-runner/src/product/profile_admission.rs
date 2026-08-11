@@ -561,26 +561,23 @@ impl ProfileAdmissionContext<'_> {
             .zip(script_paths)
             .zip(operation_ids.copy)
         {
-            let request = match CopyToRequest::new(
+            let Ok(request) = CopyToRequest::new(
                 operation_id,
                 script.clone(),
                 probe.script_content().to_vec(),
-            ) {
-                Ok(request) => request,
-                Err(_) => {
-                    let (cleanup, cleanup_error) = cleanup_handle(
-                        self.provider,
-                        record.handle(),
-                        self.generation,
-                        operation_ids.destroy,
-                        &self.cleanup_cancellation,
-                    );
-                    return Err(ProfileAdmissionError::evidence(
-                        ProfileAdmissionErrorKind::InvalidCopyEvidence,
-                        cleanup,
-                        cleanup_error,
-                    ));
-                }
+            ) else {
+                let (cleanup, cleanup_error) = cleanup_handle(
+                    self.provider,
+                    record.handle(),
+                    self.generation,
+                    operation_ids.destroy,
+                    &self.cleanup_cancellation,
+                );
+                return Err(ProfileAdmissionError::evidence(
+                    ProfileAdmissionErrorKind::InvalidCopyEvidence,
+                    cleanup,
+                    cleanup_error,
+                ));
             };
             if let Err(error) = endpoint.copy_to(&request, &self.provisioning_cancellation) {
                 let (cleanup, cleanup_error) = cleanup_handle(
@@ -605,46 +602,40 @@ impl ProfileAdmissionContext<'_> {
             .zip(script_paths)
             .zip(operation_ids.exec)
         {
-            let argv = match probe.argv(script) {
-                Ok(argv) => argv,
-                Err(_) => {
-                    let (cleanup, cleanup_error) = cleanup_handle(
-                        self.provider,
-                        record.handle(),
-                        self.generation,
-                        operation_ids.destroy,
-                        &self.cleanup_cancellation,
-                    );
-                    return Err(ProfileAdmissionError::evidence(
-                        ProfileAdmissionErrorKind::InvalidExecutionEvidence,
-                        cleanup,
-                        cleanup_error,
-                    ));
-                }
+            let Ok(argv) = probe.argv(script) else {
+                let (cleanup, cleanup_error) = cleanup_handle(
+                    self.provider,
+                    record.handle(),
+                    self.generation,
+                    operation_ids.destroy,
+                    &self.cleanup_cancellation,
+                );
+                return Err(ProfileAdmissionError::evidence(
+                    ProfileAdmissionErrorKind::InvalidExecutionEvidence,
+                    cleanup,
+                    cleanup_error,
+                ));
             };
-            let command = match ExecutionCommand::new(
+            let Ok(command) = ExecutionCommand::new(
                 operation_id,
                 argv,
                 workspace.clone(),
                 environment.default_environment().clone(),
                 NATIVE_PROBE_TIMEOUT,
                 NATIVE_PROBE_OUTPUT_BYTES,
-            ) {
-                Ok(command) => command,
-                Err(_) => {
-                    let (cleanup, cleanup_error) = cleanup_handle(
-                        self.provider,
-                        record.handle(),
-                        self.generation,
-                        operation_ids.destroy,
-                        &self.cleanup_cancellation,
-                    );
-                    return Err(ProfileAdmissionError::evidence(
-                        ProfileAdmissionErrorKind::InvalidExecutionEvidence,
-                        cleanup,
-                        cleanup_error,
-                    ));
-                }
+            ) else {
+                let (cleanup, cleanup_error) = cleanup_handle(
+                    self.provider,
+                    record.handle(),
+                    self.generation,
+                    operation_ids.destroy,
+                    &self.cleanup_cancellation,
+                );
+                return Err(ProfileAdmissionError::evidence(
+                    ProfileAdmissionErrorKind::InvalidExecutionEvidence,
+                    cleanup,
+                    cleanup_error,
+                ));
             };
             let output = match endpoint.exec(&command, &self.provisioning_cancellation) {
                 Ok(output) => output,
@@ -1829,8 +1820,6 @@ mod tests {
         let system_root = required_environment("SystemRoot");
         let windir = required_environment("WINDIR");
         let comspec = required_environment("ComSpec");
-        let temp = required_environment("TEMP");
-        let tmp = required_environment("TMP");
         let pathext = required_environment("PATHEXT");
         let powershell = Path::new(&system_root)
             .join("System32")
@@ -1868,8 +1857,8 @@ mod tests {
                 environment_variable("SystemRoot", system_root),
                 environment_variable("WINDIR", windir),
                 environment_variable("ComSpec", comspec),
-                environment_variable("TEMP", temp),
-                environment_variable("TMP", tmp),
+                environment_variable("TEMP", required_environment("TEMP")),
+                environment_variable("TMP", required_environment("TMP")),
                 environment_variable("PATHEXT", pathext),
             ])
             .expect("exact native default environment"),

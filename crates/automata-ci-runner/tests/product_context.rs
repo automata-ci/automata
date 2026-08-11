@@ -720,20 +720,24 @@ struct ContextFixture {
     runtime_authorities: JobRuntimeAuthorities,
 }
 
+fn fixture_runner_config() -> RunnerProductConfig {
+    #[cfg(windows)]
+    let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
+    #[cfg(target_os = "linux")]
+    let config_bytes = include_bytes!("../config/runner.local.example.json").as_slice();
+    let mut document: serde_json::Value =
+        serde_json::from_slice(config_bytes).expect("runner config JSON");
+    document["github"]["server_url"] = serde_json::json!("https://github.com/");
+    document["github"]["api_url"] = serde_json::json!("https://api.github.com/");
+    document["github"]["graphql_url"] = serde_json::json!("https://api.github.com/graphql");
+    document["github"]["allow_insecure_http"] = serde_json::json!(false);
+    let encoded = serde_json::to_vec(&document).expect("runner config encoding");
+    RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
+}
+
 impl ContextFixture {
     fn new() -> Self {
-        #[cfg(windows)]
-        let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
-        #[cfg(target_os = "linux")]
-        let config_bytes = include_bytes!("../config/runner.local.example.json").as_slice();
-        let mut document: serde_json::Value =
-            serde_json::from_slice(config_bytes).expect("runner config JSON");
-        document["github"]["server_url"] = serde_json::json!("https://github.com/");
-        document["github"]["api_url"] = serde_json::json!("https://api.github.com/");
-        document["github"]["graphql_url"] = serde_json::json!("https://api.github.com/graphql");
-        document["github"]["allow_insecure_http"] = serde_json::json!(false);
-        let encoded = serde_json::to_vec(&document).expect("runner config encoding");
-        let config = RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture");
+        let config = fixture_runner_config();
         let (profile, _) = config
             .environments()
             .first_key_value()

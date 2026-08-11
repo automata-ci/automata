@@ -326,6 +326,14 @@ struct SpoolDecryptionKeyConfig {
 /// Explicit rootless-Podman host process configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PodmanProductConfig {
+    paths: Box<PodmanProductPaths>,
+    job_container_engine: automata_ci_sandbox_podman::JobContainerEngine,
+    github_server_host_gateway_alias: Option<automata_ci_sandbox_podman::PodmanHostGatewayAlias>,
+    service_proxy_image: Option<ImmutableImage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PodmanProductPaths {
     binary: PathBuf,
     home: PathBuf,
     runtime_directory: PathBuf,
@@ -334,58 +342,55 @@ pub struct PodmanProductConfig {
     oci_runtime_path: PathBuf,
     init_path: PathBuf,
     seccomp_profile_path: PathBuf,
-    job_container_engine: automata_ci_sandbox_podman::JobContainerEngine,
-    github_server_host_gateway_alias: Option<automata_ci_sandbox_podman::PodmanHostGatewayAlias>,
-    service_proxy_image: Option<ImmutableImage>,
 }
 
 impl PodmanProductConfig {
     /// Returns the validated absolute Podman executable path.
     #[must_use]
     pub fn binary(&self) -> &Path {
-        &self.binary
+        &self.paths.binary
     }
 
     /// Returns the absolute home directory supplied to the Podman process.
     #[must_use]
     pub fn home(&self) -> &Path {
-        &self.home
+        &self.paths.home
     }
 
     /// Returns the required absolute dedicated rootless-runtime mountpoint.
     #[must_use]
     pub fn runtime_directory(&self) -> &Path {
-        &self.runtime_directory
+        &self.paths.runtime_directory
     }
 
     /// Returns the sole administrator-controlled helper directory supplied as `PATH`.
     #[must_use]
     pub fn approved_helper_directory(&self) -> &Path {
-        &self.approved_helper_directory
+        &self.paths.approved_helper_directory
     }
 
     /// Returns the exact administrator-controlled conmon executable.
     #[must_use]
     pub fn conmon_path(&self) -> &Path {
-        &self.conmon_path
+        &self.paths.conmon_path
     }
 
     /// Returns the exact administrator-controlled OCI runtime executable.
     #[must_use]
     pub fn oci_runtime_path(&self) -> &Path {
-        &self.oci_runtime_path
+        &self.paths.oci_runtime_path
     }
 
     /// Returns the exact administrator-controlled container init executable.
     #[must_use]
     pub fn init_path(&self) -> &Path {
-        &self.init_path
+        &self.paths.init_path
     }
 
     /// Returns the exact administrator-controlled seccomp profile.
     #[must_use]
     pub fn seccomp_profile_path(&self) -> &Path {
-        &self.seccomp_profile_path
+        &self.paths.seccomp_profile_path
     }
 
     /// Returns whether jobs receive an attempt-scoped Docker-compatible API.
@@ -815,8 +820,8 @@ impl RawRunnerProductConfig {
                 RunnerProviderConfig::Podman(podman.validate(github.server_url())?),
                 ProviderKind::Podman,
             ),
-            (None, Some(windows_native)) => (
-                RunnerProviderConfig::WindowsNative(windows_native.validate()?),
+            (None, Some(_)) => (
+                RunnerProviderConfig::WindowsNative(RawWindowsNativeProductConfig::validate()?),
                 ProviderKind::WindowsNative,
             ),
             _ => return Err(RunnerProductConfigError::InvalidProvider),
@@ -952,10 +957,11 @@ struct RawStateRoots {
 
 impl RawStateRoots {
     fn validate(self, provider_kind: ProviderKind) -> Result<StateRoots, RunnerProductConfigError> {
-        let provider = match (provider_kind, self.podman, self.windows_native) {
-            (ProviderKind::Podman, Some(path), None)
-            | (ProviderKind::WindowsNative, None, Some(path)) => path,
-            _ => return Err(RunnerProductConfigError::InvalidStateRoots),
+        let ((ProviderKind::Podman, Some(provider), None)
+        | (ProviderKind::WindowsNative, None, Some(provider))) =
+            (provider_kind, self.podman, self.windows_native)
+        else {
+            return Err(RunnerProductConfigError::InvalidStateRoots);
         };
         let roots = [&self.journal, &self.spool, &provider];
         let invalid_path = roots
@@ -973,7 +979,7 @@ impl RawStateRoots {
                     .iter()
                     .map(|path| {
                         automata_ci_sandbox_windows::WindowsSandboxProviderOptions::new(
-                            path.to_path_buf(),
+                            (*path).clone(),
                         )
                         .ok()?;
                         Some(path.to_str()?.trim_end_matches('\\').to_ascii_lowercase())
@@ -1165,46 +1171,12 @@ impl RawInventory {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
         let platform = RunnerPlatform::new(host_operating_system, host_architecture()?);
-        let (sandbox, container_features, runner_features) = match provider_kind {
-            ProviderKind::Podman => {
-                let mut sandbox_features = BTreeSet::from([
-                    SandboxFeature::CLEAN_WORKSPACE,
-                    SandboxFeature::NETWORK_ISOLATION,
-                ]);
-                if executor.root_filesystem() == RootFilesystemPolicy::ReadOnly {
-                    sandbox_features.insert(SandboxFeature::READ_ONLY_ROOT);
-                }
-                if executor.privilege() == SandboxPrivilegePolicy::Administrator {
-                    sandbox_features.insert(SandboxFeature::PRIVILEGED_USER);
-                }
-                let mut container_features = match job_container_engine {
-                    automata_ci_sandbox_podman::JobContainerEngine::Disabled => BTreeSet::new(),
-                    automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi => {
-                        BTreeSet::from([ContainerFeature::DOCKER_COMPATIBLE_API])
-                    }
-                };
-                if service_proxy_configured {
-                    container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
-                }
-                (
-                    SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features),
-                    container_features,
-                    BTreeSet::from([
-                        RunnerFeature::SHELL_STEPS,
-                        RunnerFeature::JAVASCRIPT_ACTIONS,
-                        RunnerFeature::COMMAND_FILES,
-                    ]),
-                )
-            }
-            ProviderKind::WindowsNative => (
-                SandboxCapabilities::new(
-                    IsolationLevel::Process,
-                    [SandboxFeature::CLEAN_WORKSPACE],
-                ),
-                BTreeSet::new(),
-                BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
-            ),
-        };
+        let (sandbox, container_features, runner_features) = provider_capabilities(
+            provider_kind,
+            executor,
+            job_container_engine,
+            service_proxy_configured,
+        );
         let inventory = RunnerCapabilities::new(runner_id, platform)
             .with_labels(labels)
             .with_groups(groups)
@@ -1219,6 +1191,55 @@ impl RawInventory {
             .validate()
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         Ok((inventory, environments))
+    }
+}
+
+fn provider_capabilities(
+    provider_kind: ProviderKind,
+    executor: &ExecutorProductConfig,
+    job_container_engine: automata_ci_sandbox_podman::JobContainerEngine,
+    service_proxy_configured: bool,
+) -> (
+    SandboxCapabilities,
+    BTreeSet<ContainerFeature>,
+    BTreeSet<RunnerFeature>,
+) {
+    match provider_kind {
+        ProviderKind::Podman => {
+            let mut sandbox_features = BTreeSet::from([
+                SandboxFeature::CLEAN_WORKSPACE,
+                SandboxFeature::NETWORK_ISOLATION,
+            ]);
+            if executor.root_filesystem() == RootFilesystemPolicy::ReadOnly {
+                sandbox_features.insert(SandboxFeature::READ_ONLY_ROOT);
+            }
+            if executor.privilege() == SandboxPrivilegePolicy::Administrator {
+                sandbox_features.insert(SandboxFeature::PRIVILEGED_USER);
+            }
+            let mut container_features = match job_container_engine {
+                automata_ci_sandbox_podman::JobContainerEngine::Disabled => BTreeSet::new(),
+                automata_ci_sandbox_podman::JobContainerEngine::AttemptScopedDockerApi => {
+                    BTreeSet::from([ContainerFeature::DOCKER_COMPATIBLE_API])
+                }
+            };
+            if service_proxy_configured {
+                container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
+            }
+            (
+                SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features),
+                container_features,
+                BTreeSet::from([
+                    RunnerFeature::SHELL_STEPS,
+                    RunnerFeature::JAVASCRIPT_ACTIONS,
+                    RunnerFeature::COMMAND_FILES,
+                ]),
+            )
+        }
+        ProviderKind::WindowsNative => (
+            SandboxCapabilities::new(IsolationLevel::Process, [SandboxFeature::CLEAN_WORKSPACE]),
+            BTreeSet::new(),
+            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+        ),
     }
 }
 
@@ -1250,12 +1271,6 @@ fn valid_windows_process_environment(
     let Some(comspec) = value("ComSpec") else {
         return false;
     };
-    let Some(temp) = value("TEMP") else {
-        return false;
-    };
-    let Some(tmp) = value("TMP") else {
-        return false;
-    };
     let Some(pathext) = value("PATHEXT") else {
         return false;
     };
@@ -1272,8 +1287,9 @@ fn valid_windows_process_environment(
     let extensions = pathext.split(';').collect::<Vec<_>>();
     system_root_path.as_str().eq_ignore_ascii_case(windir)
         && windows_path_matches(comspec, cmd)
-        && windows_path_matches(temp, executor.temp())
-        && windows_path_matches(tmp, executor.temp())
+        && ["TEMP", "TMP"]
+            .into_iter()
+            .all(|name| value(name).is_some_and(|path| windows_path_matches(path, executor.temp())))
         && [".COM", ".EXE", ".BAT", ".CMD"]
             .into_iter()
             .all(|required| {
@@ -1427,7 +1443,7 @@ struct RawPodmanProductConfig {
 struct RawWindowsNativeProductConfig {}
 
 impl RawWindowsNativeProductConfig {
-    fn validate(self) -> Result<WindowsNativeProductConfig, RunnerProductConfigError> {
+    fn validate() -> Result<WindowsNativeProductConfig, RunnerProductConfigError> {
         if std::env::consts::OS != "windows" {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
@@ -1491,14 +1507,16 @@ impl RawPodmanProductConfig {
             .transpose()
             .map_err(|()| RunnerProductConfigError::InvalidPodman)?;
         Ok(PodmanProductConfig {
-            binary: self.binary,
-            home: self.home,
-            runtime_directory: self.runtime_directory,
-            approved_helper_directory: self.approved_helper_directory,
-            conmon_path: self.conmon_path,
-            oci_runtime_path: self.oci_runtime_path,
-            init_path: self.init_path,
-            seccomp_profile_path: self.seccomp_profile_path,
+            paths: Box::new(PodmanProductPaths {
+                binary: self.binary,
+                home: self.home,
+                runtime_directory: self.runtime_directory,
+                approved_helper_directory: self.approved_helper_directory,
+                conmon_path: self.conmon_path,
+                oci_runtime_path: self.oci_runtime_path,
+                init_path: self.init_path,
+                seccomp_profile_path: self.seccomp_profile_path,
+            }),
             job_container_engine: match self.job_container_engine {
                 RawJobContainerEngine::Disabled => {
                     automata_ci_sandbox_podman::JobContainerEngine::Disabled
@@ -1676,7 +1694,7 @@ fn provider_target_path(
 fn target_is_root(path: &TargetPath) -> bool {
     match path.platform() {
         TargetPlatform::Posix => path.as_str() == "/",
-        TargetPlatform::Windows => path.as_str().len() == 3 && path.as_str().ends_with("\\"),
+        TargetPlatform::Windows => path.as_str().len() == 3 && path.as_str().ends_with('\\'),
     }
 }
 

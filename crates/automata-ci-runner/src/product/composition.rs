@@ -72,8 +72,8 @@ struct PodmanProcessTrust;
 
 #[cfg(not(target_os = "linux"))]
 impl PodmanProcessTrust {
-    fn capture(_options: &PodmanOptions, _runtime_mount: RuntimeMountSnapshot) -> Result<Self, ()> {
-        Ok(Self)
+    fn capture(_options: &PodmanOptions, _runtime_mount: RuntimeMountSnapshot) -> Self {
+        Self
     }
 }
 
@@ -143,7 +143,7 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
             if admission.is_none() {
                 return Ok(());
             }
-            PreparedProvider::Podman(options)
+            PreparedProvider::Podman(Box::new(options))
         }
         RunnerProviderConfig::WindowsNative(_) => {
             if shutdown.is_requested() {
@@ -167,14 +167,22 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
     let started = after_admitted_value(composition, |composition| {
         prepared.revalidate()?;
         mark_admitted_composition_ready(&config, &composition);
-        let supervisor = composition.supervisor.clone();
-        let runtime_shutdown = shutdown.runtime.clone();
-        let runtime = async move { supervisor.run(runtime_shutdown).await };
-        Ok((composition, runtime))
+        Ok(composition)
     })?;
-    let Some((composition, runtime)) = started else {
+    let Some(composition) = started else {
         return Ok(());
     };
+    run_started_composition(composition, metrics_listener, shutdown).await
+}
+
+async fn run_started_composition(
+    composition: RunnerComposition,
+    metrics_listener: Option<TcpListener>,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    let supervisor = composition.supervisor.clone();
+    let runtime_shutdown = shutdown.runtime.clone();
+    let runtime = async move { supervisor.run(runtime_shutdown).await };
     let exporter = composition.metrics.as_ref().map(RunnerMetrics::exporter);
     let metrics_service = serve_metrics(metrics_listener, exporter, shutdown.runtime.clone());
     let metrics_sampler = sample_metrics(
@@ -228,7 +236,7 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
 }
 
 enum PreparedProvider {
-    Podman(PodmanOptions),
+    Podman(Box<PodmanOptions>),
     WindowsNative,
 }
 
@@ -270,8 +278,11 @@ fn prepare_admitted_podman(
         .map_err(|_| RunnerProductError::PodmanProcessTrust)?;
     let podman_options = build_podman_options(config)?;
     prepare_probe_directories(&podman_options)?;
+    #[cfg(target_os = "linux")]
     let trust = PodmanProcessTrust::capture(&podman_options, runtime_mount)
         .map_err(|_| RunnerProductError::PodmanProcessTrust)?;
+    #[cfg(not(target_os = "linux"))]
+    let trust = PodmanProcessTrust::capture(&podman_options, runtime_mount);
     Ok(podman_options.with_launch_trust(PodmanLaunchTrustHandle::new(Arc::new(trust))))
 }
 
@@ -382,7 +393,7 @@ fn compose(
     prepared.revalidate()?;
     let provider = match prepared {
         PreparedProvider::Podman(options) => {
-            build_podman_provider(options.clone(), metrics.as_ref())?
+            build_podman_provider(options.as_ref().clone(), metrics.as_ref())?
         }
         PreparedProvider::WindowsNative => build_windows_provider(config, metrics.as_ref())?,
     };
