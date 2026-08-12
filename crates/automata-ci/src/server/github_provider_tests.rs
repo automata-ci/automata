@@ -368,6 +368,96 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     }
 }
 
+fn historical_authority(
+    current: &GithubServerServiceAuthorityIdentity,
+    authority_id: u128,
+    app_revision: u64,
+    policy_revision: u64,
+    app_key_spki_sha256: Sha256Digest,
+    configuration_fingerprint: Sha256Digest,
+) -> GithubServerServiceAuthorityIdentity {
+    GithubServerServiceAuthorityIdentity::new(
+        current.tenant().clone(),
+        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(authority_id))
+            .expect("historical authority ID"),
+        current.repository_id(),
+        current.connection_id(),
+        current.installation_id(),
+        current.github_app_id(),
+        current.github_repository_id(),
+        current.github_repository_name().clone(),
+        current.scope(),
+        current.app_client_id().clone(),
+        current.jwt_issuer(),
+        app_key_spki_sha256,
+        automata_ci_store::GithubServerServiceRevision::new(app_revision)
+            .expect("historical App revision"),
+        automata_ci_store::GithubServerServiceRevision::new(policy_revision)
+            .expect("historical policy revision"),
+        configuration_fingerprint,
+    )
+    .expect("historical authority")
+}
+
+#[tokio::test]
+async fn historical_revision_resolves_only_through_the_exact_current_live_route() {
+    let config = load_config("historical-route.json", &mixed_document()).expect("mixed config");
+    let plan = fixed_evidence_plan(&config, 0x71);
+    let target = MemoryBootstrapTarget::default();
+    let ready = plan
+        .bootstrap_with_target(&target, UnixMillis::new(2_000))
+        .await
+        .expect("bootstrap");
+    let resolver = ready.credential_request_resolver();
+    let current = &plan.authorities()[0];
+    let historical = historical_authority(
+        current,
+        0x7a1,
+        current.app_configuration_revision().get() - 1,
+        current.policy_revision().get() - 1,
+        current.app_key_spki_sha256(),
+        current.configuration_fingerprint(),
+    );
+
+    let historical_request = resolver
+        .resolve_github_server_service_credential_request(&historical)
+        .await
+        .expect("historical resolution")
+        .expect("same live route remains authorized");
+    assert_eq!(historical_request.identity(), &historical);
+    assert_eq!(
+        historical_request.request(),
+        &github_server_service_credential_request(&historical).expect("canonical request")
+    );
+
+    for mismatch in [
+        historical_authority(
+            current,
+            0x7a2,
+            current.app_configuration_revision().get() - 1,
+            current.policy_revision().get() - 1,
+            Sha256Digest::from_bytes([0xa2; 32]),
+            current.configuration_fingerprint(),
+        ),
+        historical_authority(
+            current,
+            0x7a3,
+            current.app_configuration_revision().get() - 1,
+            current.policy_revision().get() - 1,
+            current.app_key_spki_sha256(),
+            Sha256Digest::from_bytes([0xa3; 32]),
+        ),
+    ] {
+        assert!(
+            resolver
+                .resolve_github_server_service_credential_request(&mismatch)
+                .await
+                .expect("closed mismatch")
+                .is_none()
+        );
+    }
+}
+
 #[tokio::test]
 async fn runtime_policy_drift_fails_before_manifest_or_authority_writes() {
     const DRIFTED_POLICY: &[u8] = br#"{

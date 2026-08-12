@@ -156,6 +156,61 @@ impl GithubProviderCredentialHandoffIssuer for FakeHandoffs {
     }
 }
 
+struct FakeAuthorityLookup {
+    descriptors: Mutex<
+        BTreeMap<
+            GithubServerServiceAuthorityId,
+            automata_ci_store::GithubServerServiceAuthorityDescriptor,
+        >,
+    >,
+    calls: AtomicUsize,
+}
+
+impl FakeAuthorityLookup {
+    fn new(
+        descriptors: impl IntoIterator<Item = automata_ci_store::GithubServerServiceAuthorityDescriptor>,
+    ) -> Self {
+        Self {
+            descriptors: Mutex::new(
+                descriptors
+                    .into_iter()
+                    .map(|descriptor| (descriptor.identity().authority_id(), descriptor))
+                    .collect(),
+            ),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl fmt::Debug for FakeAuthorityLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FakeAuthorityLookup")
+            .field("descriptors", &"[AUTHORITY DESCRIPTORS]")
+            .field("calls", &self.calls.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
+#[async_trait]
+impl GithubProviderAuthorityLookup for FakeAuthorityLookup {
+    async fn inspect(
+        &self,
+        selector: &GithubServerServiceAuthoritySelector,
+    ) -> Result<
+        automata_ci_store::GithubServerServiceAuthorityDescriptor,
+        GithubServerServiceStoreError,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.descriptors
+            .lock()
+            .expect("descriptor lock")
+            .get(&selector.authority_id())
+            .cloned()
+            .ok_or(GithubServerServiceStoreError::NotFound)
+    }
+}
+
 #[derive(Debug)]
 struct FakeDeliveryRelease {
     calls: Arc<AtomicUsize>,
@@ -403,6 +458,51 @@ fn authority(scope: GithubServerServiceScope, id: u128) -> GithubServerServiceAu
         Sha256Digest::from_bytes([0x61; 32]),
     )
     .expect("authority")
+}
+
+fn historical_authority(
+    current: &GithubServerServiceAuthorityIdentity,
+    id: u128,
+    app_key_spki_sha256: Sha256Digest,
+) -> GithubServerServiceAuthorityIdentity {
+    GithubServerServiceAuthorityIdentity::new(
+        current.tenant().clone(),
+        authority_id(id),
+        current.repository_id(),
+        current.connection_id(),
+        current.installation_id(),
+        current.github_app_id(),
+        current.github_repository_id(),
+        current.github_repository_name().clone(),
+        current.scope(),
+        current.app_client_id().clone(),
+        current.jwt_issuer(),
+        app_key_spki_sha256,
+        GithubServerServiceRevision::new(2).expect("historical App revision"),
+        GithubServerServiceRevision::new(4).expect("historical policy revision"),
+        current.configuration_fingerprint(),
+    )
+    .expect("historical authority")
+}
+
+fn authority_descriptor(
+    identity: GithubServerServiceAuthorityIdentity,
+    state: GithubServerServiceAuthorityState,
+) -> automata_ci_store::GithubServerServiceAuthorityDescriptor {
+    automata_ci_store::GithubServerServiceAuthorityDescriptor::from_durable_parts(
+        identity,
+        state,
+        None,
+        None,
+        GithubServerServiceGeneration::new(1).expect("next generation"),
+        0,
+        None,
+        None,
+        None,
+        UnixMillis::new(0),
+        UnixMillis::new(0),
+    )
+    .expect("authority descriptor")
 }
 
 fn concrete_release_codec() -> Arc<EnvelopeCodec> {
@@ -659,6 +759,16 @@ fn adapters(
     GithubProviderCredentialAdapters::with_handoffs(handoffs, authorities).expect("adapters")
 }
 
+fn durable_adapters(
+    handoffs: Arc<FakeHandoffs>,
+    authorities: &[GithubServerServiceAuthorityIdentity],
+    lookup: Arc<FakeAuthorityLookup>,
+) -> GithubProviderCredentialAdapters {
+    let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
+    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup)
+        .expect("durable adapters")
+}
+
 #[test]
 fn registry_is_bounded_unique_and_implements_both_delivery_ports() {
     fn assert_ports<T: GithubChecksCredentialProvider + GithubDeliverySourceCredentialProvider>() {}
@@ -719,6 +829,64 @@ async fn full_checks_coordinates_are_rejected_before_handoff_io() {
         GithubChecksCredentialProviderError::Rejected
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn active_historical_checks_authority_uses_the_exact_current_live_route() {
+    let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
+    let historical = historical_authority(&current, 0x62, current.app_key_spki_sha256());
+    let lookup = Arc::new(FakeAuthorityLookup::new([authority_descriptor(
+        historical.clone(),
+        GithubServerServiceAuthorityState::Active,
+    )]));
+    let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
+    let adapters = durable_adapters(
+        Arc::clone(&handoffs),
+        std::slice::from_ref(&current),
+        Arc::clone(&lookup),
+    );
+
+    let credential = adapters
+        .acquire_checks(checks_context(&historical))
+        .await
+        .expect("historical authority on the current route");
+    assert_eq!(
+        credential.authority_selector(),
+        &GithubServerServiceAuthoritySelector::from_identity(&historical)
+    );
+    drop(credential);
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(handoffs.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() {
+    let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
+    let retired = historical_authority(&current, 0x62, current.app_key_spki_sha256());
+    let drifted = historical_authority(&current, 0x63, Sha256Digest::from_bytes([0x77; 32]));
+    let lookup = Arc::new(FakeAuthorityLookup::new([
+        authority_descriptor(retired.clone(), GithubServerServiceAuthorityState::Retired),
+        authority_descriptor(drifted.clone(), GithubServerServiceAuthorityState::Active),
+    ]));
+    let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
+    let adapters = durable_adapters(
+        Arc::clone(&handoffs),
+        std::slice::from_ref(&current),
+        Arc::clone(&lookup),
+    );
+    let unknown = historical_authority(&current, 0x64, current.app_key_spki_sha256());
+
+    for rejected in [&retired, &drifted, &unknown] {
+        assert_eq!(
+            adapters
+                .acquire_checks(checks_context(rejected))
+                .await
+                .expect_err("historical route must fail closed"),
+            GithubChecksCredentialProviderError::Rejected
+        );
+    }
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(handoffs.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
