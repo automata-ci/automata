@@ -38,7 +38,7 @@ use automata_ci_runner_spool::{
     SpoolProtectionOutcome,
 };
 use automata_ci_runner_transport::{
-    ClientErrorKind, ClientFuture, PreparedRequest, RunnerControlClient,
+    ClientErrorKind, ClientFuture, PreparedRequest, RetryClass, RunnerControlClient,
     RunnerControlClientByteDirection, RunnerControlClientObserver,
 };
 use automata_ci_sandbox_podman::{
@@ -650,6 +650,16 @@ impl RunnerControlClient for ObservedRunnerControlClient {
                 |_| ControlOutcome::Success,
             );
             self.metrics.complete(kind, outcome, started.elapsed());
+            if let Err(error) = result.as_ref()
+                && error.retry_class() == RetryClass::Never
+            {
+                tracing::error!(
+                    request_kind = ?kind,
+                    error_kind = ?error.kind(),
+                    retry = ?error.retry_class(),
+                    "runner control request failed terminally"
+                );
+            }
             if result.is_ok() {
                 self.metrics
                     .last_success_seconds
