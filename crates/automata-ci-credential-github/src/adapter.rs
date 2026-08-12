@@ -5,8 +5,8 @@ use automata_ci_auth::{
     time::{Clock, SystemClock, UnixTimestamp},
 };
 use automata_ci_credential::{
-    CredentialError, CredentialErrorKind, CredentialProvenance, PermissionSet, ProviderResourceId,
-    RepositoryCredentialRequest,
+    CredentialError, CredentialErrorKind, CredentialProvenance, PermissionLevel, PermissionSet,
+    ProviderResourceId, RepositoryCredentialRequest,
 };
 use automata_ci_scm::ScmProviderId;
 use reqwest::{
@@ -46,7 +46,9 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_024;
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 3_600;
 const MAX_PROVIDER_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
-const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v1\0";
+const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v2\0";
+const COMPATIBLE_BROKER_POLICY_FINGERPRINT_DOMAIN_V1: &[u8] =
+    b"automata-ci/github-app-broker-policy/v1\0";
 
 struct ValidatedResponseMetadata {
     provider_expires_at: UnixTimestamp,
@@ -141,8 +143,35 @@ impl GithubAppCredentialBroker {
     /// validation and constructs a fractional-millisecond timeout.
     #[must_use]
     pub fn broker_policy_fingerprint(&self) -> automata_ci_store::Sha256Digest {
+        self.broker_policy_fingerprint_for_domain(BROKER_POLICY_FINGERPRINT_DOMAIN)
+    }
+
+    /// Returns explicitly supported predecessor fingerprints for immutable
+    /// historical server-service authorities.
+    ///
+    /// Version 1 differs only in rejecting GitHub's unavoidable implicit
+    /// `metadata:read` permission in an otherwise exact token response. The
+    /// current broker preserves the same request permissions, origin, API
+    /// version, resource limits, timeouts, transport mode, issuer, and key.
+    /// Product routing may therefore recognize this one predecessor while
+    /// continuing to reject every unknown policy fingerprint.
+    #[must_use]
+    pub fn compatible_historical_broker_policy_fingerprints(
+        &self,
+    ) -> [automata_ci_store::Sha256Digest; 1] {
+        [
+            self.broker_policy_fingerprint_for_domain(
+                COMPATIBLE_BROKER_POLICY_FINGERPRINT_DOMAIN_V1,
+            ),
+        ]
+    }
+
+    fn broker_policy_fingerprint_for_domain(
+        &self,
+        domain: &[u8],
+    ) -> automata_ci_store::Sha256Digest {
         let mut digest = Sha256::new();
-        digest.update(BROKER_POLICY_FINGERPRINT_DOMAIN);
+        digest.update(domain);
         update_fingerprint_part(&mut digest, self.config.api_base.as_str().as_bytes());
         update_fingerprint_part(&mut digest, GITHUB_API_VERSION.as_bytes());
         update_fingerprint_part(&mut digest, self.config.user_agent.as_bytes());
@@ -428,7 +457,7 @@ impl GithubAppCredentialBroker {
             )));
         }
         let returned_permissions = response.permissions.into_inner();
-        if &returned_permissions != request.permissions() {
+        if !permissions_match_github_response(request.permissions(), &returned_permissions) {
             return Err(failure(CredentialError::new(
                 CredentialErrorKind::PermissionMismatch,
             )));
@@ -530,6 +559,24 @@ impl GithubAppCredentialBroker {
         }
         Ok(endpoint)
     }
+}
+
+fn permissions_match_github_response(requested: &PermissionSet, returned: &PermissionSet) -> bool {
+    if returned == requested {
+        return true;
+    }
+    if returned.len() != requested.len().saturating_add(1) {
+        return false;
+    }
+
+    returned.iter().all(|(returned_name, returned_level)| {
+        if returned_name.as_str() == "metadata" {
+            return returned_level == PermissionLevel::Read;
+        }
+        requested.iter().any(|(requested_name, requested_level)| {
+            requested_name == returned_name && requested_level == returned_level
+        })
+    })
 }
 
 fn update_fingerprint_part(digest: &mut Sha256, value: &[u8]) {

@@ -153,6 +153,77 @@ async fn check_suite_creation_preserves_the_exact_200_and_201_distinction() {
 }
 
 #[tokio::test]
+async fn check_suite_creation_resolves_the_exact_auto_created_suite_after_422() {
+    let server = FixtureServer::spawn().await;
+    server.enqueue(ResponseSpec::status(
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+    ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        json!({
+            "total_count": 1,
+            "check_suites": [
+                {"id": 23, "head_sha": SHA, "app": {"id": 17}}
+            ]
+        })
+        .to_string(),
+    ));
+    let endpoint = server.endpoint();
+    let app = GithubCheckAppId::new(17).expect("app id");
+
+    let outcome = endpoint
+        .create_check_suite(&repository(), &revision(), app, &token())
+        .await
+        .expect("existing suite must reconcile");
+    let GithubCheckSuiteCreateOutcome::Existing(suite) = outcome else {
+        panic!("expected an existing suite");
+    };
+    assert_eq!(suite.id().get(), 23);
+    assert_eq!(suite.app_id(), app);
+    assert_eq!(suite.head_sha(), &revision());
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].uri, "/api/repos/acme/widget/check-suites");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].uri,
+        concat!(
+            "/api/repos/acme/widget/commits/",
+            "0123456789abcdef0123456789abcdef01234567",
+            "/check-suites?app_id=17&per_page=100&page=1"
+        )
+    );
+    assert!(requests[1].body.is_empty());
+}
+
+#[tokio::test]
+async fn check_suite_creation_does_not_hide_a_rejected_request_without_an_exact_suite() {
+    let server = FixtureServer::spawn().await;
+    server.enqueue(ResponseSpec::status(
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+    ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        json!({"total_count": 0, "check_suites": []}).to_string(),
+    ));
+
+    let error = server
+        .endpoint()
+        .create_check_suite(
+            &repository(),
+            &revision(),
+            GithubCheckAppId::new(17).expect("app id"),
+            &token(),
+        )
+        .await
+        .expect_err("an unrelated rejected request must stay rejected");
+    assert_eq!(error, GithubChecksError::Rejected);
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
 async fn check_run_creation_sends_only_bounded_identity_and_accepts_exact_201() {
     let server = FixtureServer::spawn().await;
     server.enqueue(ResponseSpec::json(

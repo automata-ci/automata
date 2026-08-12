@@ -15,8 +15,9 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_core::UnixMillis;
 use automata_ci_credential_github::{
     GithubServerServiceCoordinatorClock, GithubServerServiceCredentialIssuer,
-    GithubServerServiceCredentialRepository, GithubServerServiceHandoffBinding,
-    GithubServerServiceHandoffError, PendingGithubServerServiceCorruptionCleanup,
+    GithubServerServiceCredentialRepository, GithubServerServiceCredentialRequestResolver,
+    GithubServerServiceHandoffBinding, GithubServerServiceHandoffError,
+    GithubServerServiceResolutionError, PendingGithubServerServiceCorruptionCleanup,
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
 };
 use automata_ci_github_delivery::{
@@ -30,9 +31,10 @@ use automata_ci_github_delivery::{
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubServerServiceAction,
     GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthoritySelector, GithubServerServiceConsumerClaim,
+    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
+    GithubServerServiceAuthorityState, GithubServerServiceConsumerClaim,
     GithubServerServiceHandoffId, GithubServerServiceIssuanceKey, GithubServerServiceScope,
-    ProviderDeliveryIdentity, ProviderRepositoryOwnerId,
+    GithubServerServiceStoreError, ProviderDeliveryIdentity, ProviderRepositoryOwnerId,
 };
 use thiserror::Error;
 use tokio::{
@@ -40,6 +42,8 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
 };
 use uuid::Uuid;
+
+use super::GithubProviderCredentialRequestResolver;
 
 /// Maximum live or release-pending handoffs supervised by one adapter set.
 pub const MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES: usize = 4_096;
@@ -677,13 +681,61 @@ pub struct GithubProviderCredentialAdapters {
     handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
     authorities:
         Arc<BTreeMap<GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity>>,
+    durable_authorities: Option<DurableGithubProviderAuthorityResolver>,
+}
+
+#[derive(Clone)]
+struct DurableGithubProviderAuthorityResolver {
+    repository: Arc<dyn GithubProviderAuthorityLookup>,
+    routes: GithubProviderCredentialRequestResolver,
+}
+
+#[async_trait]
+trait GithubProviderAuthorityLookup: fmt::Debug + Send + Sync {
+    async fn inspect(
+        &self,
+        selector: &GithubServerServiceAuthoritySelector,
+    ) -> Result<
+        automata_ci_store::GithubServerServiceAuthorityDescriptor,
+        GithubServerServiceStoreError,
+    >;
+}
+
+struct StoreGithubProviderAuthorityLookup {
+    repository: Arc<dyn GithubServerServiceAuthorityRepository>,
+}
+
+#[async_trait]
+impl GithubProviderAuthorityLookup for StoreGithubProviderAuthorityLookup {
+    async fn inspect(
+        &self,
+        selector: &GithubServerServiceAuthoritySelector,
+    ) -> Result<
+        automata_ci_store::GithubServerServiceAuthorityDescriptor,
+        GithubServerServiceStoreError,
+    > {
+        self.repository
+            .inspect_github_server_service_authority(selector.tenant(), selector.authority_id())
+            .await
+    }
+}
+
+impl fmt::Debug for StoreGithubProviderAuthorityLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoreGithubProviderAuthorityLookup")
+            .field("repository", &"[AUTHORITY REPOSITORY]")
+            .finish()
+    }
 }
 
 impl GithubProviderCredentialAdapters {
     /// Constructs product adapters from a bootstrap-projected exact authority set.
     ///
-    /// The repository must be the same durable 0032 implementation used by the
-    /// issuer. It is retained only inside redacted pending-release replay
+    /// Both repository ports must be views of the same durable 0032
+    /// implementation used by the issuer. The authority view revalidates exact
+    /// current and historical descriptors before any handoff attempt; the
+    /// credential view is retained inside redacted pending-release replay
     /// evidence.
     ///
     /// # Errors
@@ -692,15 +744,24 @@ impl GithubProviderCredentialAdapters {
     pub fn new(
         issuer: Arc<GithubServerServiceCredentialIssuer>,
         repository: Arc<dyn GithubServerServiceCredentialRepository>,
+        authority_repository: Arc<dyn GithubServerServiceAuthorityRepository>,
         releases: Arc<GithubProviderCredentialReleaseSupervisor>,
         authorities: &[GithubServerServiceAuthorityIdentity],
+        routes: GithubProviderCredentialRequestResolver,
     ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
         let handoffs = Arc::new(ExactCredentialHandoffIssuer {
             issuer,
             repository,
             releases,
         });
-        Self::with_handoffs(handoffs, authorities)
+        let mut adapters = Self::with_handoffs(handoffs, authorities)?;
+        adapters.durable_authorities = Some(DurableGithubProviderAuthorityResolver {
+            repository: Arc::new(StoreGithubProviderAuthorityLookup {
+                repository: authority_repository,
+            }),
+            routes,
+        });
+        Ok(adapters)
     }
 
     fn with_handoffs(
@@ -735,20 +796,57 @@ impl GithubProviderCredentialAdapters {
         Ok(Self {
             handoffs,
             authorities: Arc::new(exact),
+            durable_authorities: None,
         })
     }
 
-    fn authority(
+    #[cfg(test)]
+    fn with_durable_handoffs(
+        handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
+        authorities: &[GithubServerServiceAuthorityIdentity],
+        repository: Arc<dyn GithubProviderAuthorityLookup>,
+        routes: GithubProviderCredentialRequestResolver,
+    ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
+        let mut adapters = Self::with_handoffs(handoffs, authorities)?;
+        adapters.durable_authorities =
+            Some(DurableGithubProviderAuthorityResolver { repository, routes });
+        Ok(adapters)
+    }
+
+    async fn authority(
         &self,
         selector: &GithubServerServiceAuthoritySelector,
         scope: GithubServerServiceScope,
-    ) -> Result<&GithubServerServiceAuthorityIdentity, GithubProviderCredentialHandoffError> {
-        let identity = self
-            .authorities
-            .get(&selector.authority_id())
-            .ok_or(GithubProviderCredentialHandoffError::Rejected)?;
+    ) -> Result<GithubServerServiceAuthorityIdentity, GithubProviderCredentialHandoffError> {
+        let identity = if let Some(durable) = &self.durable_authorities {
+            let descriptor = durable
+                .repository
+                .inspect(selector)
+                .await
+                .map_err(|error| map_authority_resolution_store_error(&error))?;
+            if descriptor.state() != GithubServerServiceAuthorityState::Active
+                || GithubServerServiceAuthoritySelector::from_identity(descriptor.identity())
+                    != *selector
+            {
+                return Err(GithubProviderCredentialHandoffError::Rejected);
+            }
+            match durable
+                .routes
+                .resolve_github_server_service_credential_request(descriptor.identity())
+                .await
+                .map_err(map_authority_resolution_error)?
+            {
+                Some(resolved) => resolved.identity().clone(),
+                None => return Err(GithubProviderCredentialHandoffError::Rejected),
+            }
+        } else {
+            self.authorities
+                .get(&selector.authority_id())
+                .cloned()
+                .ok_or(GithubProviderCredentialHandoffError::Rejected)?
+        };
         if identity.scope() != scope
-            || GithubServerServiceAuthoritySelector::from_identity(identity) != *selector
+            || GithubServerServiceAuthoritySelector::from_identity(&identity) != *selector
         {
             return Err(GithubProviderCredentialHandoffError::Rejected);
         }
@@ -761,8 +859,9 @@ impl GithubProviderCredentialAdapters {
     ) -> Result<GithubChecksServerServiceCredential, GithubChecksCredentialProviderError> {
         let authority = self
             .authority(&context.selector, GithubServerServiceScope::ChecksWrite)
+            .await
             .map_err(checks_handoff_error)?;
-        if !checks_identity_matches(authority, &context.identity)
+        if !checks_identity_matches(&authority, &context.identity)
             || context.consumer.action().required_scope() != GithubServerServiceScope::ChecksWrite
         {
             return Err(GithubChecksCredentialProviderError::Rejected);
@@ -783,7 +882,7 @@ impl GithubProviderCredentialAdapters {
             release_invalid_handoff(handoff).await;
             return Err(GithubChecksCredentialProviderError::InvariantViolation);
         }
-        let Ok(canonical_request) = github_server_service_credential_request(authority) else {
+        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
             release_invalid_handoff(handoff).await;
             return Err(GithubChecksCredentialProviderError::InvariantViolation);
         };
@@ -824,8 +923,9 @@ impl GithubProviderCredentialAdapters {
                 &context.selector,
                 GithubServerServiceScope::PrivateRepositorySourceRead,
             )
+            .await
             .map_err(source_handoff_error)?;
-        if !private_identity_matches(authority, &context.identity)
+        if !private_identity_matches(&authority, &context.identity)
             || context.consumer.action() != private_action(context.action)
         {
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
@@ -846,7 +946,7 @@ impl GithubProviderCredentialAdapters {
             release_invalid_handoff(handoff).await;
             return Err(GithubDeliverySourceCredentialProviderError::InvariantViolation);
         }
-        let Ok(canonical_request) = github_server_service_credential_request(authority) else {
+        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
             release_invalid_handoff(handoff).await;
             return Err(GithubDeliverySourceCredentialProviderError::InvariantViolation);
         };
@@ -881,12 +981,47 @@ impl GithubProviderCredentialAdapters {
     }
 }
 
+fn map_authority_resolution_store_error(
+    error: &GithubServerServiceStoreError,
+) -> GithubProviderCredentialHandoffError {
+    match error {
+        GithubServerServiceStoreError::Operation(_) => {
+            GithubProviderCredentialHandoffError::Unavailable
+        }
+        GithubServerServiceStoreError::NotFound => GithubProviderCredentialHandoffError::Rejected,
+        GithubServerServiceStoreError::CorruptData
+        | GithubServerServiceStoreError::IdentityConflict
+        | GithubServerServiceStoreError::ClaimRejected
+        | GithubServerServiceStoreError::HandoffRejected
+        | GithubServerServiceStoreError::RefreshAlreadyActive
+        | GithubServerServiceStoreError::FenceExhausted
+        | GithubServerServiceStoreError::RetryLimitReached
+        | GithubServerServiceStoreError::HandoffStillLive => {
+            GithubProviderCredentialHandoffError::Inconsistent
+        }
+    }
+}
+
+fn map_authority_resolution_error(
+    error: GithubServerServiceResolutionError,
+) -> GithubProviderCredentialHandoffError {
+    match error {
+        GithubServerServiceResolutionError::Unavailable => {
+            GithubProviderCredentialHandoffError::Unavailable
+        }
+        GithubServerServiceResolutionError::Inconsistent => {
+            GithubProviderCredentialHandoffError::Inconsistent
+        }
+    }
+}
+
 impl fmt::Debug for GithubProviderCredentialAdapters {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GithubProviderCredentialAdapters")
             .field("handoffs", &self.handoffs)
             .field("authority_count", &self.authorities.len())
+            .field("durable_authorities", &self.durable_authorities.is_some())
             .finish()
     }
 }

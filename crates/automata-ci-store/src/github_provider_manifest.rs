@@ -700,7 +700,13 @@ impl GithubProviderManifest {
         let app_evidence_changed = self.app_key_spki_sha256 != prior.app_key_spki_sha256;
         let verifier_evidence_changed =
             self.webhook_verifier_fingerprint != prior.webhook_verifier_fingerprint;
-        let policy_evidence_changed = self.repository_visibility != prior.repository_visibility
+        // The repository policy revision also versions the manifest-pinned
+        // server-service authorities.  An authority implementation policy can
+        // therefore rotate without changing another manifest field; the
+        // strictly contiguous revision is the durable evidence for that
+        // otherwise external policy transition.
+        let policy_evidence_changed = self.policy_revision != prior.policy_revision
+            || self.repository_visibility != prior.repository_visibility
             || self.check_name != prior.check_name
             || self.check_subject_key != prior.check_subject_key
             || self.authority_profile != prior.authority_profile

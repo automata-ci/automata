@@ -56,9 +56,10 @@ use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckStoreError, GithubJobRuntimeAuthorityRepository, GithubRuntimeAuthorityRepository,
     GithubRuntimeAuthorityWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceScope, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceRepository, LogicalWorkflowAdmissionRepository, PostgresStore,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderRepositoryVisibility, TenantScope,
+    GithubServerServiceAuthorityRepository, GithubServerServiceJwtIssuer, GithubServerServiceScope,
+    GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
+    LogicalWorkflowAdmissionRepository, PostgresStore, ProviderConnectionId,
+    ProviderDeliveryClaimOwnerId, ProviderRepositoryVisibility, TenantScope,
 };
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionObserver, WorkflowAdmissionService,
@@ -418,8 +419,10 @@ impl GithubProviderRuntimeBuilder {
         }
 
         let ready = plan.bootstrap(store.as_ref(), applied_at).await?;
+        let credential_request_resolver = ready.credential_request_resolver();
+        let credential_adapter_routes = credential_request_resolver.clone();
         let resolver: Arc<dyn GithubServerServiceCredentialRequestResolver> =
-            Arc::new(ready.credential_request_resolver());
+            Arc::new(credential_request_resolver.clone());
         let routed_brokers = brokers
             .iter()
             .map(|(installation_id, broker)| {
@@ -433,6 +436,8 @@ impl GithubProviderRuntimeBuilder {
         );
         let broker: Arc<dyn GithubServerServiceCredentialBroker> = router.clone();
         let credential_repository: Arc<dyn GithubServerServiceCredentialRepository> = store.clone();
+        let credential_authority_repository: Arc<dyn GithubServerServiceAuthorityRepository> =
+            store.clone();
         let envelopes = Arc::new(EnvelopeCodec::new(key_encryption_provider));
         let runtime_handle = Handle::try_current()
             .map_err(|_| GithubProviderRuntimeBuildError::RuntimeUnavailable)?;
@@ -586,8 +591,10 @@ impl GithubProviderRuntimeBuilder {
         let adapters = Arc::new(GithubProviderCredentialAdapters::new(
             credential_issuer,
             credential_repository.clone(),
+            credential_authority_repository,
             releases.clone(),
             plan.authorities(),
+            credential_adapter_routes,
         )?);
 
         let endpoint = GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
