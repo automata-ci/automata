@@ -18,6 +18,7 @@ BEGIN
     END IF;
 END;
 $automata$;
+
 ALTER TABLE workflow_runtime_policy_revisions
     ADD COLUMN resource_policy_canonical BYTEA NOT NULL,
     DROP CONSTRAINT workflow_runtime_policy_revisions_identity,
@@ -191,6 +192,7 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
 $automata$;
+
 CREATE OR REPLACE FUNCTION automata_workflow_runtime_policy_digest(TEXT, UUID, BIGINT)
 RETURNS BYTEA
 LANGUAGE SQL

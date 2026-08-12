@@ -2668,7 +2668,7 @@ BEGIN
          AND session.provider_id = identity.provider_id
          AND session.provider_subject = identity.provider_subject
         JOIN workflow_runs AS target_run
-         ON target_run.id = attempt.run_id
+          ON target_run.id = attempt.run_id
          AND target_run.triggering_actor = identity.provider_login
          AND target_run.runner_requirements_schema = 3
          AND target_run.status = 'queued'

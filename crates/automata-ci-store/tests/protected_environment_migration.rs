@@ -72,7 +72,7 @@ fn adapter_keeps_gate_workflow_value_free_and_lease_fenced() {
         "FOR UPDATE OF gate, attempt",
         "verify_runtime_context(&gate, request.activation_context_digest().as_bytes())?;",
         "load_prepare_replay(&mut transaction, &gate, request.tenant()).await?;",
-        "verify_prepare_replay(&stored, &request)?;",
+        "verify_prepare_replay(&stored, &request, requested_by_principal_id)?;",
         ".bind(gate.attempt_id)",
         "automata_job_variable_binding_digest",
         "automata_job_secret_selection_digest",

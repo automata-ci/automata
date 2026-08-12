@@ -1,4 +1,3 @@
--- Forward-only authenticated repository-dispatch admission.
 ALTER TABLE github_provider_delivery_evidence
     ADD COLUMN authenticated_event_source_revision BYTEA,
     ADD COLUMN authenticated_event_source_authority TEXT COLLATE "C";

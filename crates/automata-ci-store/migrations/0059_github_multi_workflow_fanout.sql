@@ -1,4 +1,3 @@
--- Forward-only bounded multi-workflow fanout.
 ALTER TABLE github_provider_manifest_revisions
     DROP CONSTRAINT github_provider_manifest_revisions_digest_canonical,
     DROP CONSTRAINT github_provider_manifest_revisions_selector_exact;
