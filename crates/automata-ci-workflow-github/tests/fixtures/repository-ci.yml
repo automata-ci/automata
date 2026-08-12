@@ -327,6 +327,8 @@ jobs:
       - name: Show pinned MSVC toolchain
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force -Path $env:TMPDIR | Out-Null
           rustc --version --verbose
           cargo --version --verbose
@@ -367,6 +369,8 @@ jobs:
       - name: Test Windows durable state and secure inputs
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo test --locked `
             -p automata-ci-runner-journal `
             -p automata-ci-runner-spool `
@@ -401,6 +405,8 @@ jobs:
       - name: Test Windows native provider and shell execution
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo test --locked -p automata-ci-sandbox-windows
           cargo test --locked `
             -p automata-ci-job-executor-github `
@@ -415,6 +421,8 @@ jobs:
       - name: Smoke test Windows preview and passive diagnostics
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo build --locked --bin automata --bin automata-runner
 
           $listener = [System.Net.Sockets.TcpListener]::new(

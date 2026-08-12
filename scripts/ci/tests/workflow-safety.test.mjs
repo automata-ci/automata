@@ -358,6 +358,35 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
+test("Windows PowerShell command groups fail on the first native error", () => {
+  const ci = source(".github/workflows/ci.yml");
+  const fixture = source(
+    "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
+  );
+  const windows = workflowJob(ci, "windows");
+  const powershellSteps = windows
+    .split(/^      - name: /m)
+    .filter((step) => step.includes("        shell: pwsh\n"));
+
+  assert.equal(
+    fixture,
+    ci,
+    "the compiler fixture must exactly mirror the committed CI workflow",
+  );
+  assert.equal(
+    powershellSteps.length,
+    4,
+    "every multiline Windows PowerShell step must be covered by the fail-fast contract",
+  );
+  for (const step of powershellSteps) {
+    assert.match(
+      step,
+      /        shell: pwsh\n        run: \|\n          \$ErrorActionPreference = 'Stop'\n          \$PSNativeCommandUseErrorActionPreference = \$true\n/,
+      "a failed native command must terminate its Windows PowerShell step",
+    );
+  }
+});
+
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
   const ci = source(".github/workflows/ci.yml");
   const rustCoverage = section(
