@@ -259,6 +259,51 @@ fn github_provider_is_disabled_without_its_single_config_source() {
 }
 
 #[test]
+fn conformance_export_authority_is_loopback_machine_only_and_bounded() {
+    let token_path = test_file("conformance-export-token.txt");
+    write_secret_file(&token_path, b"0123456789abcdef0123456789abcdef\n");
+    let token_source = format!("file:{}", token_path.display());
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--conformance-export-token-source",
+        &token_source,
+    ])
+    .expect("deployment-token syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    let config = ServerConfig::from_args(&args).expect("loopback machine authority");
+    assert_eq!(
+        config
+            .load_conformance_export_token()
+            .expect("token source")
+            .expect("configured token")
+            .as_str(),
+        "0123456789abcdef0123456789abcdef"
+    );
+
+    write_secret_file(&token_path, b"too-short\n");
+    assert!(matches!(
+        config.load_conformance_export_token(),
+        Err(SecretLoadError::TooShort { minimum: 32 })
+    ));
+
+    let mut exposed = args;
+    exposed.listen = "0.0.0.0:8080".parse().expect("socket address");
+    assert!(ServerConfig::from_args(&exposed).is_err());
+
+    let mut human = configured_human_auth_args();
+    human.conformance_export_token_source = exposed.conformance_export_token_source;
+    assert!(matches!(
+        ServerConfig::from_args(&human),
+        Err(ServerConfigError::InvalidConformanceExportConfiguration)
+    ));
+}
+
+#[test]
 fn raw_github_webhook_secret_configuration_is_not_exposed() {
     assert!(
         Cli::try_parse_from([
