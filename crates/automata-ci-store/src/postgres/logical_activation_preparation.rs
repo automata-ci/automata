@@ -1185,6 +1185,7 @@ fn build_descriptor(
         WorkflowId::from_uuid(get_uuid(row, prefix, "workflow_id")?),
         get_string(row, prefix, "workflow_name")?,
         get_string(row, prefix, "git_ref")?,
+        get_string(row, prefix, "event_name")?,
         get_optional_string(row, prefix, "actor")?,
         RunIdAlias::new(
             u64::try_from(get_i64(row, prefix, "run_id_alias")?)

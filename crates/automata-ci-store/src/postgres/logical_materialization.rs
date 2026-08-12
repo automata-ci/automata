@@ -1097,7 +1097,8 @@ fn instance_query() -> &'static str {
            publication.authority_profile,
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
-           run.workflow_id, run.workflow_name, run.git_ref, run.actor,
+           run.workflow_id, run.workflow_name, run.git_ref, run.event_name,
+           run.actor,
            run.triggering_actor,
            run.public_run_id_alias AS run_id_alias,
            run.run_number, run.run_attempt,
@@ -1199,7 +1200,8 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
            publication.authority_profile,
            logical_job.logical_key,
            repository.id AS runtime_policy_repository_id,
-           run.workflow_id, run.workflow_name, run.git_ref, run.actor,
+           run.workflow_id, run.workflow_name, run.git_ref, run.event_name,
+           run.actor,
            run.triggering_actor,
            run.public_run_id_alias AS run_id_alias,
            run.run_number, run.run_attempt,
@@ -3437,6 +3439,7 @@ fn decode_descriptor(
         WorkflowId::from_uuid(row.try_get("workflow_id").map_err(operation_error)?),
         row.try_get("workflow_name").map_err(operation_error)?,
         row.try_get("git_ref").map_err(operation_error)?,
+        row.try_get("event_name").map_err(operation_error)?,
         row.try_get("actor").map_err(operation_error)?,
         RunIdAlias::new(
             u64::try_from(

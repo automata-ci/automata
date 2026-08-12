@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     EnvironmentReviewArgs, EnvironmentReviewDecision, OutputFormat,
     auth::{
-        CliServerOrigin, auth_client, bearer_header, decode_json_response,
-        discard_bounded_response,
+        CliServerOrigin, auth_client, bearer_header, decode_json_response, discard_bounded_response,
     },
     credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
 };
@@ -139,7 +138,7 @@ async fn response_error<T>(response: Response, status: StatusCode) -> Result<T> 
 }
 
 const fn indeterminate_review_message() -> &'static str {
-    "environment-review outcome is indeterminate; inspect the current gate before retrying the exact same decision"
+    "environment-review outcome is indeterminate; retry only the exact same repository, attempt, and decision"
 }
 
 fn print_environment_review(
@@ -351,7 +350,10 @@ mod tests {
         );
         assert_eq!(completed.repository_id.to_string(), REPOSITORY_ID);
         assert_eq!(completed.attempt_id.to_string(), ATTEMPT_ID);
-        assert!(matches!(completed.decision, EnvironmentReviewDecision::Approve));
+        assert!(matches!(
+            completed.decision,
+            EnvironmentReviewDecision::Approve
+        ));
         assert!(matches!(completed.state, EnvironmentGateState::Ready));
     }
 

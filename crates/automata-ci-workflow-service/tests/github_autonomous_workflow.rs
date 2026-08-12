@@ -1534,6 +1534,7 @@ async fn new_harness_with(
             WorkflowId::from_uuid(Uuid::from_u128(14)),
             "Autonomous CI".to_owned(),
             GIT_REF.to_owned(),
+            "workflow_dispatch".to_owned(),
             Some("synthetic-actor".to_owned()),
             RunIdAlias::new(11).expect("run ID alias"),
             7,

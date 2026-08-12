@@ -39,7 +39,27 @@ impl ProtectedEnvironmentLeaseGate {
             .repository
             .resolve_job_credentials(&self.tenant, attempt_id)
             .await;
+        if state
+            .as_ref()
+            .is_ok_and(|state| terminal_gate_state(*state))
+        {
+            return self.conclude_terminal(attempt_id).await;
+        }
         gate_state_disposition(state)
+    }
+
+    async fn conclude_terminal(
+        &self,
+        attempt_id: AttemptId,
+    ) -> Result<RunnableAttemptGateDisposition, StoreError> {
+        match self
+            .repository
+            .conclude_terminal_job_environment(&self.tenant, attempt_id)
+            .await
+        {
+            Ok(()) => Ok(RunnableAttemptGateDisposition::Ineligible),
+            Err(error) => protected_error_disposition(error),
+        }
     }
 }
 
@@ -69,6 +89,12 @@ impl RunnableAttemptGate for ProtectedEnvironmentLeaseGate {
             Err(error) => return protected_error_disposition(error),
         };
 
+        // Terminal gates must progress even when the job has variable
+        // references whose values cannot otherwise be resolved yet.
+        if snapshot.phase() == JobEnvironmentGatePhase::Terminal {
+            return self.conclude_terminal(attempt_id).await;
+        }
+
         // Variable versions are value-free selectors, but no ephemeral value
         // custody path exists yet. Keeping such attempts queued prevents a
         // durable selector from being mistaken for an executable value.
@@ -78,9 +104,8 @@ impl RunnableAttemptGate for ProtectedEnvironmentLeaseGate {
 
         match snapshot.phase() {
             JobEnvironmentGatePhase::Ready => Ok(RunnableAttemptGateDisposition::Ready),
-            JobEnvironmentGatePhase::Waiting | JobEnvironmentGatePhase::Terminal => {
-                Ok(RunnableAttemptGateDisposition::Ineligible)
-            }
+            JobEnvironmentGatePhase::Waiting => Ok(RunnableAttemptGateDisposition::Ineligible),
+            JobEnvironmentGatePhase::Terminal => unreachable!("terminal gate handled above"),
             JobEnvironmentGatePhase::Resolving => self.resolve(attempt_id).await,
             JobEnvironmentGatePhase::SelectionPending => {
                 let Some(activation) = snapshot.activation() else {
@@ -119,11 +144,23 @@ impl RunnableAttemptGate for ProtectedEnvironmentLeaseGate {
                 })?;
                 match self.repository.prepare_job_environment(request).await {
                     Ok(JobEnvironmentGateState::Resolving) => self.resolve(attempt_id).await,
+                    Ok(state) if terminal_gate_state(state) => {
+                        self.conclude_terminal(attempt_id).await
+                    }
                     state => gate_state_disposition(state),
                 }
             }
         }
     }
+}
+
+const fn terminal_gate_state(state: JobEnvironmentGateState) -> bool {
+    matches!(
+        state,
+        JobEnvironmentGateState::Rejected
+            | JobEnvironmentGateState::Expired
+            | JobEnvironmentGateState::Cancelled
+    )
 }
 
 fn gate_state_disposition(
@@ -194,6 +231,7 @@ mod tests {
         resolve_state: Mutex<JobEnvironmentGateState>,
         prepare_calls: AtomicUsize,
         resolve_calls: AtomicUsize,
+        terminal_calls: AtomicUsize,
     }
 
     impl FakeRepository {
@@ -204,6 +242,7 @@ mod tests {
                 resolve_state: Mutex::new(JobEnvironmentGateState::Ready),
                 prepare_calls: AtomicUsize::new(0),
                 resolve_calls: AtomicUsize::new(0),
+                terminal_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -231,6 +270,15 @@ mod tests {
             _request: ReviewJobEnvironment,
         ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
             Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        }
+
+        async fn conclude_terminal_job_environment(
+            &self,
+            _tenant: &TenantScope,
+            _attempt_id: AttemptId,
+        ) -> Result<(), ProtectedEnvironmentStoreError> {
+            self.terminal_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
 
         async fn resolve_job_credentials(
@@ -349,23 +397,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waiting_or_expired_selection_stays_ineligible() {
-        for (phase, observed_at) in [
-            (JobEnvironmentGatePhase::Waiting, UnixMillis::new(2_000)),
-            (
-                JobEnvironmentGatePhase::SelectionPending,
-                UnixMillis::new(1_000 + APPROVAL_LIFETIME_MILLIS),
-            ),
-        ] {
-            let repository = Arc::new(FakeRepository::new(snapshot(phase, 0)));
-            let gate = ProtectedEnvironmentLeaseGate::new(repository.clone(), tenant());
-            assert_eq!(
-                gate.evaluate(attempt(), observed_at).await.expect("gate"),
-                RunnableAttemptGateDisposition::Ineligible
-            );
-            assert_eq!(repository.prepare_calls.load(Ordering::Relaxed), 0);
-            assert_eq!(repository.resolve_calls.load(Ordering::Relaxed), 0);
-        }
+    async fn waiting_gate_stays_ineligible_until_the_store_proves_a_terminal_state() {
+        let repository = Arc::new(FakeRepository::new(snapshot(
+            JobEnvironmentGatePhase::Waiting,
+            0,
+        )));
+        let gate = ProtectedEnvironmentLeaseGate::new(repository.clone(), tenant());
+        assert_eq!(
+            gate.evaluate(attempt(), UnixMillis::new(2_000))
+                .await
+                .expect("gate"),
+            RunnableAttemptGateDisposition::Ineligible
+        );
+        assert_eq!(repository.prepare_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(repository.resolve_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(repository.terminal_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_gate_concludes_even_when_variable_resolution_is_blocked() {
+        let repository = Arc::new(FakeRepository::new(snapshot(
+            JobEnvironmentGatePhase::Terminal,
+            1,
+        )));
+        let gate = ProtectedEnvironmentLeaseGate::new(repository.clone(), tenant());
+
+        assert_eq!(
+            gate.evaluate(attempt(), UnixMillis::new(2_000))
+                .await
+                .expect("gate"),
+            RunnableAttemptGateDisposition::Ineligible
+        );
+        assert_eq!(repository.prepare_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(repository.resolve_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(repository.terminal_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

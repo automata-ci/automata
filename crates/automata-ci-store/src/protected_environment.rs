@@ -880,6 +880,17 @@ pub trait ProtectedEnvironmentRepository: fmt::Debug + Send + Sync {
         request: ReviewJobEnvironment,
     ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError>;
 
+    /// Concludes a queued attempt whose durable environment gate is terminal.
+    ///
+    /// Implementations must authenticate the tenant-scoped terminal gate and
+    /// make exact retries idempotent. This prevents rejected or expired work
+    /// from remaining forever queued but permanently ineligible.
+    async fn conclude_terminal_job_environment(
+        &self,
+        tenant: &TenantScope,
+        attempt_id: AttemptId,
+    ) -> Result<(), ProtectedEnvironmentStoreError>;
+
     /// Selects current variable/secret versions or records GitHub-compatible missing names.
     async fn resolve_job_credentials(
         &self,

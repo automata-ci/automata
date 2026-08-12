@@ -18,7 +18,8 @@ It does not connect to repositories or execute workflows.
 ## Operate Automata
 
 - [Authentication and authorization](authentication.md) covers login, roles,
-  permissions, sessions, secrets, and repository visibility.
+  permissions, sessions, secrets, protected-environment reviews, and repository
+  visibility.
 - [Workflow reruns](workflow-reruns.md) documents the authenticated CLI,
   idempotent retry identity, exact selections, and current admission limits.
 - [Prometheus and OpenMetrics](observability.md) defines the scrape endpoints,

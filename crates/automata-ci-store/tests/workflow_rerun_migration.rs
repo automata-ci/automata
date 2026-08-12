@@ -20,6 +20,7 @@ use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_da
 
 const MIGRATION_VERSION: i64 = 64;
 const MIGRATION: &str = include_str!("../migrations/0064_workflow_reruns.sql");
+const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/workflow_rerun.rs");
 const RELEASED_0061: &str =
     include_str!("../migrations/0061_reusable_workflow_runtime_authority.sql");
 
@@ -112,6 +113,51 @@ fn migration_0064_seals_public_identity_authority_and_source_lineage() {
             "missing rerun invariant: {required}"
         );
     }
+}
+
+#[test]
+fn root_and_nested_reruns_take_the_group_lock_before_the_source_row() {
+    let admission = POSTGRES_ADAPTER
+        .split_once("async fn admit_authorized_rerun(")
+        .expect("rerun admission function")
+        .1
+        .split_once("async fn persist_rerun(")
+        .expect("bounded rerun admission body")
+        .0;
+    let hint = admission
+        .find("let root_run_id_hint = resolve_rerun_root_hint")
+        .expect("unlocked root hint");
+    let group_lock = admission
+        .find("lock_rerun_group(&mut transaction, root_run_id_hint)")
+        .expect("root group lock");
+    let source_lock = admission
+        .find("let source = lock_source_run(&mut transaction, &request)")
+        .expect("selected source row lock");
+    let root_recheck = admission
+        .find("if source.root_run_id != root_run_id_hint")
+        .expect("locked root recheck");
+    assert!(hint < group_lock && group_lock < source_lock && source_lock < root_recheck);
+
+    let resolver = POSTGRES_ADAPTER
+        .split_once("async fn resolve_rerun_root_hint(")
+        .expect("root hint resolver")
+        .1
+        .split_once("async fn lock_source_run(")
+        .expect("bounded root hint resolver")
+        .0;
+    assert!(resolver.contains("COALESCE(attempt.root_run_id, run.id)"));
+    assert!(!resolver.contains("FOR UPDATE"));
+    assert!(!resolver.contains("FOR SHARE"));
+    assert!(MIGRATION.contains("workflow_rerun_attempts_no_update_delete"));
+
+    let source_resolver = POSTGRES_ADAPTER
+        .split_once("async fn lock_source_run(")
+        .expect("source row resolver")
+        .1
+        .split_once("async fn lock_private_source_authority(")
+        .expect("bounded source row resolver")
+        .0;
+    assert!(source_resolver.contains("FOR UPDATE OF run"));
 }
 
 #[tokio::test]

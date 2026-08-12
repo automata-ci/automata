@@ -55,21 +55,81 @@ CREATE TABLE workflow_plan_v2_job_environment_evidence (
     CONSTRAINT job_environment_evidence_created_at CHECK (created_at_ms >= 0)
 );
 
--- Reusable secret identifiers are GitHub-style case-insensitive names, while
--- the expansion ledger preserves source spelling. Refuse unsafe/colliding
--- historical targets, then compare their ASCII-uppercase canonical form to
--- job credential references and managed-secret names.
-ALTER TABLE workflow_plan_v2_reusable_secret_bindings
-    ADD CONSTRAINT workflow_plan_v2_reusable_secret_targets_canonicalizable CHECK (
-        target_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'
-        AND upper(target_name) !~ '^(GITHUB_|ACTIONS_|RUNNER_|AUTOMATA_)'
-        AND octet_length(target_name) <= 255
-    );
+-- The pre-0066 expansion ledger deliberately preserves caller spelling and
+-- can contain historical case-fold collisions or names that current managed
+-- secrets would reject. Do not rewrite or globally constrain that history.
+-- Instead, authorize one selected canonical name only when every non-root hop
+-- has exactly one case-insensitive target and that binding forwards the same
+-- name from its parent. Renaming never conveys managed-secret authority.
+CREATE FUNCTION automata_reusable_secret_identity_chain_is_exact(
+    target_run_id UUID,
+    target_invocation_id UUID,
+    target_canonical_name TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+PARALLEL UNSAFE
+AS $automata$
+DECLARE
+    current_invocation_id UUID := target_invocation_id;
+    parent_invocation_id UUID;
+    current_depth SMALLINT;
+    expected_depth SMALLINT;
+    matching_target_count BIGINT;
+    same_name_source_count BIGINT;
+    visited_invocations UUID[] := ARRAY[]::UUID[];
+BEGIN
+    IF target_canonical_name IS NULL
+       OR target_canonical_name !~ '^[A-Z_][A-Z0-9_]*$'
+       OR target_canonical_name ~ '^(GITHUB_|ACTIONS_|RUNNER_|AUTOMATA_)'
+       OR octet_length(target_canonical_name) > 255 THEN
+        RETURN FALSE;
+    END IF;
 
-CREATE UNIQUE INDEX workflow_plan_v2_reusable_secret_targets_casefold_unique
-    ON workflow_plan_v2_reusable_secret_bindings (
-        run_id, invocation_id, (upper(target_name) COLLATE "C")
-    );
+    LOOP
+        IF current_invocation_id = ANY(visited_invocations) THEN
+            RETURN FALSE;
+        END IF;
+        visited_invocations := array_append(
+            visited_invocations,
+            current_invocation_id
+        );
+
+        SELECT expansion.parent_invocation_id, expansion.depth
+          INTO parent_invocation_id, current_depth
+        FROM workflow_plan_v2_reusable_invocation_expansions AS expansion
+        WHERE expansion.run_id = target_run_id
+          AND expansion.invocation_id = current_invocation_id;
+        IF NOT FOUND
+           OR expected_depth IS NOT NULL AND current_depth <> expected_depth THEN
+            RETURN FALSE;
+        END IF;
+        IF parent_invocation_id IS NULL THEN
+            RETURN current_depth = 0;
+        END IF;
+        IF current_depth <= 0 THEN
+            RETURN FALSE;
+        END IF;
+
+        SELECT count(*),
+               count(*) FILTER (
+                   WHERE upper(binding.source_name) = target_canonical_name
+               )
+          INTO matching_target_count, same_name_source_count
+        FROM workflow_plan_v2_reusable_secret_bindings AS binding
+        WHERE binding.run_id = target_run_id
+          AND binding.invocation_id = current_invocation_id
+          AND upper(binding.target_name) = target_canonical_name;
+        IF matching_target_count <> 1 OR same_name_source_count <> 1 THEN
+            RETURN FALSE;
+        END IF;
+
+        expected_depth := current_depth - 1;
+        current_invocation_id := parent_invocation_id;
+    END LOOP;
+END;
+$automata$;
 
 CREATE FUNCTION automata_validate_job_environment_activation_evidence()
 RETURNS trigger
@@ -98,12 +158,10 @@ BEGIN
     SELECT NOT EXISTS (
         SELECT 1
         FROM unnest(logical_job.secret_reference_names) AS referenced_secret(name)
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM workflow_plan_v2_reusable_secret_bindings AS binding
-            WHERE binding.run_id = instance.run_id
-              AND binding.invocation_id = instance.invocation_id
-              AND upper(binding.target_name) = referenced_secret.name
+        WHERE NOT automata_reusable_secret_identity_chain_is_exact(
+            instance.run_id,
+            instance.invocation_id,
+            referenced_secret.name
         )
     ) INTO all_reusable_secret_references_bound;
 
@@ -172,12 +230,10 @@ SELECT (target_secret).status = 'active'
        OR (
            (target_gate).reusable_secret_permission = 'explicit'
            AND (target_policy).reusable_workflow_mode = 'explicit_only'
-           AND EXISTS (
-               SELECT 1
-               FROM workflow_plan_v2_reusable_secret_bindings AS binding
-               WHERE binding.run_id = (target_gate).run_id
-                 AND binding.invocation_id = (target_gate).invocation_id
-                 AND upper(binding.target_name) = (target_secret).canonical_name
+           AND automata_reusable_secret_identity_chain_is_exact(
+               (target_gate).run_id,
+               (target_gate).invocation_id,
+               (target_secret).canonical_name
            )
        )
    )
@@ -197,6 +253,40 @@ SELECT (target_secret).status = 'active'
                 )))
    );
 $automata$;
+
+-- Existing terminal rows are intentionally allowed to remain evidence-free,
+-- because their admission inputs cannot be reconstructed. Every instance
+-- inserted after the migration must, however, have its value-free evidence by
+-- transaction commit. The immediate evidence foreign key requires the instance
+-- row first; this deferred trigger then permits its evidence row any time before
+-- commit while preventing any new evidence-free durable row.
+CREATE FUNCTION automata_require_job_environment_activation_evidence()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $automata$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM workflow_plan_v2_instances AS instance
+        WHERE instance.id = NEW.id
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM workflow_plan_v2_job_environment_evidence AS evidence
+        WHERE evidence.instance_id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'new activation instance requires environment evidence'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_plan_v2_instances_environment_evidence_required';
+    END IF;
+    RETURN NULL;
+END;
+$automata$;
+
+CREATE CONSTRAINT TRIGGER workflow_plan_v2_instances_require_environment_evidence
+AFTER INSERT ON workflow_plan_v2_instances
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION automata_require_job_environment_activation_evidence();
 
 -- Variable values do not yet have an ephemeral, receipt-bound custody path.
 -- Keep every variable-bearing logical job queued even if an older or direct

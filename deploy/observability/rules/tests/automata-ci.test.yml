@@ -951,7 +951,7 @@ tests:
       - series: scrape_samples_post_metric_relabeling{job="automata-runner",instance="runner-cardinality"}
         values: 981x25
       - series: scrape_samples_post_metric_relabeling{job="automata-control-plane",instance="cp-cardinality"}
-        values: 4501x25
+        values: 4726x25
       - series: automata_ci_control_plane_ready{job="automata-control-plane",instance="cp-unready"}
         values: 0x25
       - series: automata_ci_control_plane_dependency_ready{job="automata-control-plane",instance="cp-dependency",dependency="postgres"}
@@ -988,7 +988,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: Automata target is near its series budget
-              description: Target cp-cardinality exposes 4501 post-relabel samples.
+              description: Target cp-cardinality exposes 4726 post-relabel samples.
               runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/metrics-budget.md
       - eval_time: 6m
         alertname: AutomataControlPlaneUnready
