@@ -33,7 +33,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 10);
+    assert_eq!(plan.workflow().jobs().len(), 11);
     assert_eq!(
         plan.workflow()
             .jobs()
@@ -47,6 +47,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
             "renderer_tests",
             "postgres_store",
             "postgres_integrations",
+            "windows",
             "frontend",
             "renderer",
             "dist_build",

@@ -9,7 +9,10 @@ const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(testDirectory, "../../..");
 
 function source(relativePath) {
-  return readFileSync(path.join(repositoryRoot, relativePath), "utf8");
+  return readFileSync(path.join(repositoryRoot, relativePath), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
 }
 
 function filesRecursively(directory) {
@@ -55,6 +58,18 @@ function section(text, start, end) {
   const endIndex = text.indexOf(end, startIndex + start.length);
   assert.notEqual(endIndex, -1, `missing section end: ${end}`);
   return text.slice(startIndex, endIndex);
+}
+
+function workflowJob(text, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const start = new RegExp(`^  ${escapedName}:[ \\t]*\\r?$`, "m").exec(text);
+  assert.ok(start, `missing workflow job: ${name}`);
+  const contentStart = start.index + start[0].length;
+  const nextJob = /^  [A-Za-z_][A-Za-z0-9_-]*:[ \t]*\r?$/m.exec(
+    text.slice(contentStart),
+  );
+  const endIndex = nextJob ? contentStart + nextJob.index : text.length;
+  return text.slice(start.index, endIndex);
 }
 
 function checkReleaseOrder(
@@ -140,12 +155,8 @@ function assertRegistryAttestationsUsePrivateHome(
 
 test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () => {
   const ci = source(".github/workflows/ci.yml");
-  const store = section(ci, "\n  postgres_store:", "\n  postgres_integrations:");
-  const integrations = section(
-    ci,
-    "\n  postgres_integrations:",
-    "\n  frontend:",
-  );
+  const store = workflowJob(ci, "postgres_store");
+  const integrations = workflowJob(ci, "postgres_integrations");
   const storeShard = source("scripts/ci/run-postgres-store-shard.sh");
   const versionGate = source("scripts/ci/verify-postgres-version.sh");
   const pinnedPostgres =
