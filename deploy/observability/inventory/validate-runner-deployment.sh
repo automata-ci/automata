@@ -110,9 +110,14 @@ if ! cmp --silent "$expected_metrics" "$metrics_snapshot"; then
   exit 1
 fi
 
-awk '
+if ! awk '
   /^          instance: [^[:space:]]+$/ {
-    print "          instance: replace-me-unique"
+    instances += 1
+    print "          instance: replace-me-unique-" instances
+    next
+  }
+  /^          host: [^[:space:]]+$/ {
+    print "          host: replace-me-host"
     next
   }
   /^          environment: [^[:space:]]+$/ {
@@ -128,38 +133,73 @@ awk '
     next
   }
   { print }
-' "$agent_snapshot" > "$normalized_agent"
+  END {
+    if (instances != 3) {
+      exit 1
+    }
+  }
+' "$agent_snapshot" > "$normalized_agent"; then
+  printf '%s\n' 'runner Agent must contain exactly three canonical process identities' >&2
+  exit 1
+fi
 if ! cmp --silent "$canonical_agent_template" "$normalized_agent"; then
   printf '%s\n' \
-    'runner Agent must be an exact canonical template with only identity and remote URL substituted' >&2
+    'runner Agent must be the exact three-runner template with only identities and remote URL substituted' >&2
   exit 1
 fi
 
-extract_single_value() {
+extract_values() {
   local key="$1"
+  local expected_count="$2"
   local value
+  local -a values
   mapfile -t values < <(
     awk -v key="$key" '$1 == key ":" { print $2 }' "$agent_snapshot"
   )
-  if [[ ${#values[@]} -ne 1 ]]; then
-    printf 'runner Agent must contain exactly one canonical %s label\n' "$key" >&2
+  if [[ ${#values[@]} -ne "$expected_count" ]]; then
+    printf 'runner Agent must contain exactly %s canonical %s labels\n' \
+      "$expected_count" "$key" >&2
     return 1
   fi
-  value="${values[0]}"
-  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] ||
-    [[ "$value" == replace-me ]] || [[ "$value" == replace-me-unique ]] ||
-    [[ "$value" == example ]] || [[ "$value" == example-cluster ]] ||
-    [[ "$value" == runner-example-01 ]]; then
-    printf 'runner Agent %s label is invalid or still a placeholder\n' "$key" >&2
-    return 1
-  fi
-  printf '%s\n' "$value"
+  for value in "${values[@]}"; do
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] ||
+      [[ "$value" == replace-me* ]] || [[ "$value" == example ]] ||
+      [[ "$value" == example-cluster ]] || [[ "$value" == runner-example-* ]]; then
+      printf 'runner Agent %s label is invalid or still a placeholder\n' "$key" >&2
+      return 1
+    fi
+    printf '%s\n' "$value"
+  done
 }
 
-runner_instance="$(extract_single_value instance)"
-runner_cluster="$(extract_single_value cluster)"
-runner_environment="$(extract_single_value environment)"
-readonly runner_instance runner_cluster runner_environment
+mapfile -t runner_instances < <(extract_values instance 3)
+mapfile -t runner_hosts < <(extract_values host 3)
+mapfile -t runner_clusters < <(extract_values cluster 3)
+mapfile -t runner_environments < <(extract_values environment 3)
+if [[ ${#runner_instances[@]} -ne 3 ]] ||
+  [[ ${#runner_hosts[@]} -ne 3 ]] ||
+  [[ ${#runner_clusters[@]} -ne 3 ]] ||
+  [[ ${#runner_environments[@]} -ne 3 ]] ||
+  [[ "${runner_instances[0]}" == "${runner_instances[1]}" ]] ||
+  [[ "${runner_instances[0]}" == "${runner_instances[2]}" ]] ||
+  [[ "${runner_instances[1]}" == "${runner_instances[2]}" ]]; then
+  printf '%s\n' 'runner Agent requires three distinct runner instance identities' >&2
+  exit 1
+fi
+runner_host="${runner_hosts[0]}"
+runner_cluster="${runner_clusters[0]}"
+runner_environment="${runner_environments[0]}"
+for index in 1 2; do
+  if [[ "${runner_hosts[$index]}" != "$runner_host" ]] ||
+    [[ "${runner_clusters[$index]}" != "$runner_cluster" ]] ||
+    [[ "${runner_environments[$index]}" != "$runner_environment" ]]; then
+    printf '%s\n' \
+      'runner Agent processes must share one stable host, cluster, and environment identity' >&2
+    exit 1
+  fi
+done
+readonly -a runner_instances runner_hosts runner_clusters runner_environments
+readonly runner_host runner_cluster runner_environment
 
 mapfile -t remote_write_urls < <(
   awk '$1 == "-" && $2 == "url:" { print $3 }' "$agent_snapshot"
@@ -194,12 +234,15 @@ if ((inventory_generation > current_time + maximum_inventory_future_skew_seconds
 fi
 readonly inventory_generation current_time
 
-expected_inventory_sample="automata_ci_runner_inventory_expected{job=\"automata-runner\",instance=\"$runner_instance\",cluster=\"$runner_cluster\",environment=\"$runner_environment\"} 1"
-readonly expected_inventory_sample
-if [[ "$(grep -Fxc "$expected_inventory_sample" <<< "$inventory_metrics")" -ne 1 ]]; then
-  printf '%s\n' 'runner Agent identity is absent or inconsistent in central inventory' >&2
-  exit 1
-fi
+for index in 0 1 2; do
+  runner_slot="$((index + 1))"
+  expected_inventory_sample="automata_ci_runner_inventory_expected{job=\"automata-runner\",instance=\"${runner_instances[$index]}\",host=\"$runner_host\",runner_slot=\"$runner_slot\",cluster=\"$runner_cluster\",environment=\"$runner_environment\"} 1"
+  if [[ "$(grep -Fxc "$expected_inventory_sample" <<< "$inventory_metrics")" -ne 1 ]]; then
+    printf 'runner Agent slot %s identity is absent or inconsistent in central inventory\n' \
+      "$runner_slot" >&2
+    exit 1
+  fi
+done
 
 promtool_path="${AUTOMATA_PROMTOOL:-}"
 container_runtime="${AUTOMATA_METRICS_CONTAINER_RUNTIME:-}"

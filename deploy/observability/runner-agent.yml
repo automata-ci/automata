@@ -22,10 +22,27 @@ scrape_configs:
       - targets:
           - 127.0.0.1:9464
         labels:
-          # REQUIRED: template this to one stable, globally unique inventory
-          # identity before deployment. Every node scrapes the same loopback
-          # address, so the default Prometheus instance label would collide.
-          instance: replace-me-unique
+          # REQUIRED: template the three globally unique runner identities and
+          # one shared stable host identity before deployment.
+          instance: replace-me-unique-1
+          host: replace-me-host
+          runner_slot: "1"
+          environment: replace-me
+          cluster: replace-me
+      - targets:
+          - 127.0.0.1:9465
+        labels:
+          instance: replace-me-unique-2
+          host: replace-me-host
+          runner_slot: "2"
+          environment: replace-me
+          cluster: replace-me
+      - targets:
+          - 127.0.0.1:9466
+        labels:
+          instance: replace-me-unique-3
+          host: replace-me-host
+          runner_slot: "3"
           environment: replace-me
           cluster: replace-me
 

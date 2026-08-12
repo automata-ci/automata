@@ -24,7 +24,7 @@ groups:
       - alert: AutomataRunnerMissingFromInventory
         expr: >-
           automata_ci_runner_inventory_expected{job="automata-runner"} == 1
-          unless on (job, instance, cluster, environment)
+          unless on (job, instance, host, runner_slot, cluster, environment)
           up{job="automata-runner"}
         for: 5m
         labels:

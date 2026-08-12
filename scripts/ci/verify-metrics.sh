@@ -134,16 +134,27 @@ readonly automata_inventory_generation
 jq --null-input \
   --argjson generated_at_seconds "$automata_inventory_generation" '
   {
-    schema: 2,
+    schema: 3,
     generated_at_seconds: $generated_at_seconds,
     runners: [
       {
-        instance: "runner-ci-02",
+        instance: "runner-ci-03",
+        host: "runner-host-ci-01",
+        runner_slot: 3,
         cluster: "ci-cluster",
         environment: "staging"
       },
       {
         instance: "runner-ci-01",
+        host: "runner-host-ci-01",
+        runner_slot: 1,
+        cluster: "ci-cluster",
+        environment: "staging"
+      },
+      {
+        instance: "runner-ci-02",
+        host: "runner-host-ci-01",
+        runner_slot: 2,
         cluster: "ci-cluster",
         environment: "staging"
       }
@@ -156,16 +167,21 @@ run_promtool check metrics < "$automata_inventory_metrics"
 if [[ "$(sed -n '3p' "$automata_inventory_metrics")" != \
   "automata_ci_runner_inventory_generation_timestamp_seconds $automata_inventory_generation" ]] ||
   [[ "$(sed -n '6p' "$automata_inventory_metrics")" != \
-  'automata_ci_runner_inventory_expected{job="automata-runner",instance="runner-ci-01",cluster="ci-cluster",environment="staging"} 1' ]] ||
+  'automata_ci_runner_inventory_expected{job="automata-runner",instance="runner-ci-01",host="runner-host-ci-01",runner_slot="1",cluster="ci-cluster",environment="staging"} 1' ]] ||
   [[ "$(sed -n '7p' "$automata_inventory_metrics")" != \
-  'automata_ci_runner_inventory_expected{job="automata-runner",instance="runner-ci-02",cluster="ci-cluster",environment="staging"} 1' ]] ||
-  [[ "$(wc -l < "$automata_inventory_metrics")" -ne 7 ]]; then
+  'automata_ci_runner_inventory_expected{job="automata-runner",instance="runner-ci-02",host="runner-host-ci-01",runner_slot="2",cluster="ci-cluster",environment="staging"} 1' ]] ||
+  [[ "$(sed -n '8p' "$automata_inventory_metrics")" != \
+  'automata_ci_runner_inventory_expected{job="automata-runner",instance="runner-ci-03",host="runner-host-ci-01",runner_slot="3",cluster="ci-cluster",environment="staging"} 1' ]] ||
+  [[ "$(wc -l < "$automata_inventory_metrics")" -ne 8 ]]; then
   printf '%s\n' 'runner inventory exposition is not exact and deterministic' >&2
   exit 1
 fi
 
 sed \
-  -e 's/instance: replace-me-unique/instance: runner-ci-01/' \
+  -e 's/instance: replace-me-unique-1/instance: runner-ci-01/' \
+  -e 's/instance: replace-me-unique-2/instance: runner-ci-02/' \
+  -e 's/instance: replace-me-unique-3/instance: runner-ci-03/' \
+  -e 's/host: replace-me-host/host: runner-host-ci-01/' \
   -e 's/environment: replace-me/environment: staging/' \
   -e 's/cluster: replace-me/cluster: ci-cluster/' \
   -e 's#https://prometheus\.example\.invalid/#https://metrics.company.net/#' \
@@ -237,7 +253,35 @@ if deploy/observability/inventory/render-runner-inventory.sh \
   exit 1
 fi
 
-jq '(.runners[] | select(.instance == "runner-ci-01") | .cluster) = "other-cluster"' \
+jq '.runners = .runners[0:2]' "$automata_inventory" \
+  > "$automata_scratch/runner-inventory-incomplete-host.json"
+if deploy/observability/inventory/render-runner-inventory.sh \
+  "$automata_scratch/runner-inventory-incomplete-host.json" \
+  > /dev/null 2>&1; then
+  printf '%s\n' 'runner inventory renderer accepted a host with only two runners' >&2
+  exit 1
+fi
+
+jq '(.runners[] | select(.runner_slot == 3) | .runner_slot) = 2' \
+  "$automata_inventory" \
+  > "$automata_scratch/runner-inventory-duplicate-slot.json"
+if deploy/observability/inventory/render-runner-inventory.sh \
+  "$automata_scratch/runner-inventory-duplicate-slot.json" \
+  > /dev/null 2>&1; then
+  printf '%s\n' 'runner inventory renderer accepted duplicate host runner slots' >&2
+  exit 1
+fi
+
+jq '.runners[2].host = "other-host"' "$automata_inventory" \
+  > "$automata_scratch/runner-inventory-split-host.json"
+if deploy/observability/inventory/render-runner-inventory.sh \
+  "$automata_scratch/runner-inventory-split-host.json" \
+  > /dev/null 2>&1; then
+  printf '%s\n' 'runner inventory renderer accepted split host identity' >&2
+  exit 1
+fi
+
+jq '(.runners[] | select(.instance == "runner-ci-01") | .instance) = "runner-inventory-other"' \
   "$automata_inventory" > "$automata_scratch/runner-inventory-mismatch.json"
 deploy/observability/inventory/render-runner-inventory.sh \
   "$automata_scratch/runner-inventory-mismatch.json" \
@@ -290,7 +334,7 @@ if AUTOMATA_PROMTOOL="$automata_promtool" \
   exit 1
 fi
 
-sed '/          - 127[.]0[.]0[.]1:9464/a\          - 127.0.0.1:9465' \
+sed '/          - 127[.]0[.]0[.]1:9464/a\          - 127.0.0.1:9470' \
   "$automata_rendered_agent" > "$automata_scratch/runner-agent-extra-target.yml"
 run_promtool_scratch_config "$automata_scratch/runner-agent-extra-target.yml"
 if AUTOMATA_PROMTOOL="$automata_promtool" \
@@ -352,8 +396,18 @@ if AUTOMATA_PROMTOOL="$automata_promtool" \
   exit 1
 fi
 
-sed '/        labels:/,+6c\        labels: {instance: runner-ci-01, environment: staging, cluster: ci-cluster}' \
-  "$automata_rendered_agent" > "$automata_scratch/runner-agent-flow-labels.yml"
+awk '
+  !replaced && $0 == "        labels:" {
+    print "        labels: {instance: runner-ci-01, host: runner-host-ci-01, runner_slot: \"1\", environment: staging, cluster: ci-cluster}"
+    replaced = 1
+    skip = 1
+    next
+  }
+  skip && $0 == "      - targets:" {
+    skip = 0
+  }
+  !skip { print }
+' "$automata_rendered_agent" > "$automata_scratch/runner-agent-flow-labels.yml"
 run_promtool_scratch_config "$automata_scratch/runner-agent-flow-labels.yml"
 if AUTOMATA_PROMTOOL="$automata_promtool" \
   AUTOMATA_METRICS_CONTAINER_RUNTIME="$automata_container_runtime" \
