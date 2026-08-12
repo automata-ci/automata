@@ -85,17 +85,7 @@ async fn apply_credential_rejection_migration(connection: &mut sqlx::PgConnectio
     Ok(())
 }
 
-async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
-    let mut connection = database.pool().acquire().await?;
-    connection
-        .ensure_migrations_table(MIGRATOR.table_name.as_ref())
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| migration.version < 35) {
-        connection
-            .apply(MIGRATOR.table_name.as_ref(), migration)
-            .await?;
-    }
-    apply_credential_rejection_migration(&mut connection).await?;
+async fn install_current_outbox_fixture(pool: &sqlx::PgPool) -> TestResult {
     // These focused 0029 lifecycle tests intentionally stop before the 0035
     // current-only cutover. Model only the later immutable selector projection
     // consumed by the current outbox adapter; full 0037 parity is covered by
@@ -114,7 +104,7 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
         )
         ",
     )
-    .execute(database.pool())
+    .execute(pool)
     .await?;
     sqlx::query(
         r"
@@ -131,7 +121,24 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
         )
         ",
     )
-    .execute(database.pool())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r"
+        CREATE TABLE workflow_rerun_check_evidence (
+            github_check_subject_id UUID PRIMARY KEY,
+            run_id UUID NOT NULL UNIQUE,
+            tenant_id TEXT NOT NULL,
+            repository_id UUID NOT NULL,
+            provider_connection_id UUID NOT NULL,
+            checks_authority_id UUID NOT NULL,
+            checks_authority_identity_digest BYTEA NOT NULL,
+            checks_authority_app_configuration_revision BIGINT NOT NULL,
+            checks_authority_policy_revision BIGINT NOT NULL
+        )
+        ",
+    )
+    .execute(pool)
     .await?;
     sqlx::query(
         r"
@@ -158,7 +165,7 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
         $$
         ",
     )
-    .execute(database.pool())
+    .execute(pool)
     .await?;
     sqlx::query(
         r"
@@ -167,8 +174,34 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
         FOR EACH ROW EXECUTE FUNCTION checks_test_pin_authority()
         ",
     )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
+    let mut connection = database.pool().acquire().await?;
+    connection
+        .ensure_migrations_table(MIGRATOR.table_name.as_ref())
+        .await?;
+    for migration in MIGRATOR.iter().filter(|migration| migration.version < 35) {
+        connection
+            .apply(MIGRATOR.table_name.as_ref(), migration)
+            .await?;
+    }
+    sqlx::query(
+        r"
+        ALTER TABLE github_check_subjects
+            ALTER COLUMN provider_delivery_id DROP NOT NULL,
+            ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'provider_delivery',
+            ADD COLUMN schedule_fire_id UUID,
+            ADD COLUMN workflow_rerun_run_id UUID
+        ",
+    )
     .execute(database.pool())
     .await?;
+    apply_credential_rejection_migration(&mut connection).await?;
+    install_current_outbox_fixture(database.pool()).await?;
     Ok(())
 }
 

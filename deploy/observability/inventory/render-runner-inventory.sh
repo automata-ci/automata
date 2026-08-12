@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly maximum_inventory_bytes=$((1024 * 1024))
-readonly maximum_runners=10000
+readonly maximum_runners=9999
 readonly maximum_generation_timestamp=4102444800
 inventory_snapshot=''
 
@@ -60,12 +60,11 @@ if ! inventory_json="$(jq --compact-output --exit-status \
     def identity:
       type == "string"
       and test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-      and . != "replace-me"
-      and . != "replace-me-unique";
+      and (startswith("replace-me") | not);
     if (
       type == "object"
       and (keys | sort) == ["generated_at_seconds", "runners", "schema"]
-      and .schema == 2
+      and .schema == 3
       and (.generated_at_seconds | type == "number")
       and (.generated_at_seconds | floor == .)
       and (
@@ -77,15 +76,31 @@ if ! inventory_json="$(jq --compact-output --exit-status \
       and all(
         .runners[];
         type == "object"
-        and (keys | sort) == ["cluster", "environment", "instance"]
+        and (keys | sort) == ["cluster", "environment", "host", "instance", "runner_slot"]
         and (.instance | identity)
+        and (.host | identity)
         and (.cluster | identity)
         and (.environment | identity)
+        and (.runner_slot | type == "number")
+        and (.runner_slot | floor == .)
+        and (.runner_slot >= 1 and .runner_slot <= 3)
       )
       and ([.runners[].instance] | length == (unique | length))
+      and (
+        [.runners[] | {host, cluster, environment, runner_slot}]
+        | group_by(.host)
+        | all(
+            .[];
+            length == 3
+            and ([.[].runner_slot] | sort) == [1, 2, 3]
+            and ([.[].cluster] | unique | length) == 1
+            and ([.[].environment] | unique | length) == 1
+          )
+      )
     ) then . else error("invalid runner inventory") end
   ' "$inventory_snapshot")"; then
-  printf '%s\n' 'runner inventory is invalid, unbounded, or contains duplicate identities' >&2
+  printf '%s\n' \
+    'runner inventory is invalid, unbounded, or does not contain exact three-process hosts' >&2
   exit 1
 fi
 readonly inventory_json
@@ -98,7 +113,7 @@ printf '%s\n' \
   '# TYPE automata_ci_runner_inventory_expected gauge'
 jq --raw-output '
   .runners
-  | sort_by(.instance)
+  | sort_by(.host, .runner_slot)
   | .[]
-  | "automata_ci_runner_inventory_expected{job=\"automata-runner\",instance=\"\(.instance)\",cluster=\"\(.cluster)\",environment=\"\(.environment)\"} 1"
+  | "automata_ci_runner_inventory_expected{job=\"automata-runner\",instance=\"\(.instance)\",host=\"\(.host)\",runner_slot=\"\(.runner_slot)\",cluster=\"\(.cluster)\",environment=\"\(.environment)\"} 1"
 ' <<< "$inventory_json"

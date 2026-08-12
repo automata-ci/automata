@@ -40,13 +40,13 @@ groups:
 
       - record: job:automata_ci_runner_control_requests:rate5m
         expr: >-
-          sum without (instance, kind, outcome) (
+          sum without (instance, host, runner_slot, kind, outcome) (
             rate(automata_ci_runner_control_requests_total{job="automata-runner"}[5m])
           )
 
       - record: job:automata_ci_runner_control_failures:rate5m
         expr: >-
-          sum without (instance, kind, outcome) (
+          sum without (instance, host, runner_slot, kind, outcome) (
             rate(automata_ci_runner_control_requests_total{
               job="automata-runner",
               outcome=~"transport_error|timeout|http_error|invalid_response"
@@ -58,7 +58,7 @@ groups:
           job:automata_ci_runner_control_failures:rate5m
           /
           clamp_min(
-            sum without (instance, kind, outcome) (
+            sum without (instance, host, runner_slot, kind, outcome) (
               rate(automata_ci_runner_control_requests_total{
                 job="automata-runner",
                 outcome!="cancelled"
@@ -254,19 +254,25 @@ groups:
           cluster_kind:automata_ci_control_plane_artifact_reservations:max > 0
 
       - record: cluster:automata_ci_runner_slots_configured:sum
-        expr: sum without (instance) (automata_ci_runner_slots_configured)
+        expr: >-
+          sum without (instance, host, runner_slot) (
+            automata_ci_runner_slots_configured
+          )
 
       - record: cluster_state:automata_ci_runner_slots:sum
-        expr: sum without (instance) (automata_ci_runner_slots)
+        expr: >-
+          sum without (instance, host, runner_slot) (
+            automata_ci_runner_slots
+          )
 
       - record: cluster:automata_ci_runner_slot_utilization:ratio
         expr: >-
-          sum without (instance, state) (
+          sum without (instance, host, runner_slot, state) (
             automata_ci_runner_slots{state!="idle"}
           )
           /
           clamp_min(
-            sum without (instance, state) (
+            sum without (instance, host, runner_slot, state) (
               automata_ci_runner_slots
             ),
             1

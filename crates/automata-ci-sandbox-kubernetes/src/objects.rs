@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use automata_ci_core::{JobResourceAllocation, ResourceCapacity};
 use automata_ci_execution::{
-    NetworkPolicy as SandboxNetworkPolicy, RootFilesystemPolicy, SandboxSpec,
+    ImmutableImage, NetworkPolicy as SandboxNetworkPolicy, RootFilesystemPolicy, SandboxSpec,
 };
 use k8s_openapi::{
     api::{
@@ -48,12 +48,17 @@ pub(crate) fn build_objects(
     config: &KubernetesSandboxConfig,
 ) -> Result<SandboxObjects, automata_ci_execution::ProviderError> {
     let allocation = validated_allocation(spec, config)?;
-    let fingerprint = fingerprint(spec, allocation, config);
+    let image = spec
+        .profile()
+        .image()
+        .ok_or_else(|| invalid_configuration(automata_ci_execution::ProviderStage::Validate))?;
+    let fingerprint = fingerprint(spec, image, allocation, config);
     let labels = object_labels(name);
     let annotations = object_annotations(spec, &fingerprint);
     let pod = build_pod(
         name,
         spec,
+        image,
         config,
         allocation,
         labels.clone(),
@@ -134,6 +139,7 @@ fn object_annotations(spec: &SandboxSpec, fingerprint: &str) -> BTreeMap<String,
 fn build_pod(
     name: &str,
     spec: &SandboxSpec,
+    image: &ImmutableImage,
     config: &KubernetesSandboxConfig,
     allocation: JobResourceAllocation,
     labels: BTreeMap<String, String>,
@@ -143,6 +149,7 @@ fn build_pod(
     let init_container = guest_init_container(config, &security_context, guest_volume_mount(false));
     let container = job_container(
         spec,
+        image,
         config,
         allocation,
         security_context,
@@ -228,6 +235,7 @@ fn guest_init_container(
 
 fn job_container(
     spec: &SandboxSpec,
+    image: &ImmutableImage,
     config: &KubernetesSandboxConfig,
     allocation: JobResourceAllocation,
     security_context: SecurityContext,
@@ -235,7 +243,7 @@ fn job_container(
 ) -> Container {
     Container {
         name: MAIN_CONTAINER.into(),
-        image: Some(spec.profile().image().reference().into()),
+        image: Some(image.reference().into()),
         image_pull_policy: Some("IfNotPresent".into()),
         command: Some(vec![
             GUEST_BINARY.into(),
@@ -407,6 +415,7 @@ fn resource_map(
 
 fn fingerprint(
     spec: &SandboxSpec,
+    image: &ImmutableImage,
     allocation: JobResourceAllocation,
     config: &KubernetesSandboxConfig,
 ) -> String {
@@ -420,7 +429,7 @@ fn fingerprint(
         &generation,
         spec.profile().attestation().id().as_str(),
         &profile_digest,
-        spec.profile().image().reference(),
+        image.reference(),
         spec.workspace().as_str(),
         config.guest_image().reference(),
     ] {

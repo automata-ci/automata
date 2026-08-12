@@ -35,6 +35,7 @@ use automata_ci_protocol::{
     ServerToRunner, SessionDisposition,
 };
 use automata_ci_protocol_protobuf::encode_job_runtime_context;
+use automata_ci_runner::product::RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION;
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
     RunnerControlHandler, RunnerControlServer, ServerTlsConfig, TransportLimits,
@@ -1013,7 +1014,7 @@ fn write_runner_config(
     .collect::<Vec<_>>()
     .join(";");
     let config = json!({
-        "schema_version": 1,
+        "schema_version": RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
         "runner_id": runner_id.to_string(),
         "control_endpoint": format!("https://{control_address}/"),
         "state": {

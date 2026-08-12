@@ -19,12 +19,13 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_core::{
-    Architecture, JobIrVersion, JobIrVersionRange, OperatingSystem, OperationId,
-    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerSessionId, UnixMillis,
+    Architecture, AttemptId, FencingToken, JobIrVersion, JobIrVersionRange, JobLifecycle,
+    LeaseGuard, LeaseId, OperatingSystem, OperationId, RunnerCapabilities, RunnerId,
+    RunnerPlatform, RunnerSessionId, UnixMillis,
 };
 use automata_ci_protocol::{
-    CommandCursor, ErrorMessage, LeaseRequest, MessageHeader, NegotiatedSession, NoWork,
-    ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
+    CommandCursor, ErrorMessage, LeaseHeartbeat, LeaseRequest, MessageHeader, NegotiatedSession,
+    NoWork, ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
     SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_transport::{
@@ -509,6 +510,33 @@ pub fn poll_request() -> PreparedRequest {
         &ProtocolLimits::default(),
     )
     .expect("valid poll")
+}
+
+pub fn heartbeat_request() -> PreparedRequest {
+    let session_id = RunnerSessionId::new();
+    let header = MessageHeader::request(
+        SUPPORTED_PROTOCOL_RANGE.max(),
+        session_id,
+        OperationId::new(),
+    );
+    PreparedRequest::for_session(
+        RunnerToServer::Heartbeat(LeaseHeartbeat::new(
+            header,
+            AttemptId::new(),
+            LeaseGuard::new(LeaseId::new(), FencingToken::new(1).expect("fencing token")),
+            JobLifecycle::Running,
+            UnixMillis::new(1_700_000_000_000),
+        )),
+        NegotiatedSession::new(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            JobIrVersion::current(),
+            session_id,
+            SessionDisposition::Opened,
+            CommandCursor::initial(),
+        ),
+        &ProtocolLimits::default(),
+    )
+    .expect("valid heartbeat")
 }
 
 pub struct RunningServer {

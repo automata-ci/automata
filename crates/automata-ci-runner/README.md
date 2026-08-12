@@ -6,9 +6,14 @@ the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman on Linux or the experimental native provider
-on Windows. The checked-in [Linux](config/runner.local.example.json) and
-[Windows](config/runner.windows.example.json) examples show each selection.
+configuration: rootless Podman or Kubernetes on Linux, or the experimental
+native provider on Windows. The checked-in Linux host examples
+([one](config/runner.local-1.example.json),
+[two](config/runner.local-2.example.json), and
+[three](config/runner.local-3.example.json)) select three independent
+single-slot Podman processes; the
+[Windows](config/runner.windows.example.json) example remains one process and
+one slot. The bootstrap guide documents the Kubernetes configuration shape.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -81,11 +86,10 @@ profile. Every `uses:` action, including JavaScript, composite, local,
 repository, and container actions, fails closed. Job containers, service
 containers, administrator profiles, and parallel native jobs are unsupported.
 
-The Windows CI gate exercises the production composition through the shipped
-`automata-runner run` process against ephemeral mTLS control-plane and loopback
-S3 fixtures. It verifies session establishment, a credential-free lease,
-runtime-context hydration, native shell execution, log and result publication,
-sandbox cleanup, and a subsequent released-slot poll.
+Hosted Windows CI is currently disabled because Automata does not yet operate
+Windows runners. The native-provider tests remain in the repository, but they
+are not a release gate; do not deploy this path until its Windows end-to-end CI
+gate is restored.
 
 ## Job boundary
 

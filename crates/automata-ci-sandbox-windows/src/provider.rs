@@ -37,7 +37,7 @@ use crate::{
 const DESTROY_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 const DESTROY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
+const PROVIDER_CAPABILITIES: [SandboxCapability; 12] = [
     SandboxCapability::WholeJob,
     SandboxCapability::Attach,
     SandboxCapability::Inspect,
@@ -49,6 +49,7 @@ const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
     SandboxCapability::HostFilesystem,
     SandboxCapability::HostIdentity,
     SandboxCapability::ResourceLimits,
+    SandboxCapability::ProcessLimits,
 ];
 
 pub(crate) const ENDPOINT_CAPABILITIES: [SandboxCapability; 4] = [
@@ -1661,7 +1662,8 @@ mod tests {
             .join("v1.0")
             .join("powershell.exe");
         let script = "$child = Start-Process -FilePath $env:COMSPEC \
-                      -ArgumentList '/d','/c','ping -n 30 127.0.0.1 > nul' -PassThru; \
+                      -ArgumentList '/d','/c','ping -n 30 127.0.0.1 > nul' \
+                      -PassThru -NoNewWindow; \
                       [System.IO.File]::WriteAllText(\
                         $env:AUTOMATA_PID_FILE, [string]$child.Id); \
                       [System.Threading.Thread]::Sleep(30000)";

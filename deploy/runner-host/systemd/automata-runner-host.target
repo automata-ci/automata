@@ -1,0 +1,17 @@
+[Unit]
+Description=Three-process Automata CI runner host
+Documentation=https://github.com/automata-ci/automata/blob/main/deploy/runner-host/README.md
+Requires=run-automata_runner_1.mount
+Requires=run-automata_runner_2.mount
+Requires=run-automata_runner_3.mount
+Requires=automata-runner@1.service
+Requires=automata-runner@2.service
+Requires=automata-runner@3.service
+After=network-online.target
+After=run-automata_runner_1.mount
+After=run-automata_runner_2.mount
+After=run-automata_runner_3.mount
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target

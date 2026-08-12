@@ -408,5 +408,3 @@ BEGIN
     RETURN NEW;
 END;
 $automata$;
-
-

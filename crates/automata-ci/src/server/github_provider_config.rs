@@ -17,6 +17,7 @@ use automata_ci_workflow_service::GithubRunnerPolicy;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use thiserror::Error;
+use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::SecretSource;
@@ -26,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 2;
+const CONFIG_SCHEMA: u16 = 3;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -137,6 +138,7 @@ impl fmt::Debug for GithubProviderInternalRepositoryId {
 /// One strict GitHub App, webhook authority, and repository registry.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderConfig {
+    transport: GithubProviderTransport,
     app: GithubProviderAppConfig,
     webhook: GithubProviderWebhookConfig,
     schedule: GithubProviderScheduleConfig,
@@ -178,6 +180,7 @@ impl GithubProviderConfig {
         }
         let app = GithubProviderAppConfig::validate(raw.app)?;
         let webhook = GithubProviderWebhookConfig::validate(raw.webhook)?;
+        let transport = GithubProviderTransport::validate(raw.transport)?;
         let schedule = GithubProviderScheduleConfig::validate(raw.schedule)?;
         let mut repositories = raw
             .repositories
@@ -189,11 +192,18 @@ impl GithubProviderConfig {
             (repository.installation_id, repository.repository_id)
         });
         Ok(Self {
+            transport,
             app,
             webhook,
             schedule,
             repositories: repositories.into(),
         })
+    }
+
+    /// Returns the closed production or loopback-emulator transport policy.
+    #[must_use]
+    pub const fn transport(&self) -> &GithubProviderTransport {
+        &self.transport
     }
 
     /// Returns the one App identity and private-key source authority.
@@ -230,6 +240,7 @@ impl fmt::Debug for GithubProviderConfig {
             .count();
         formatter
             .debug_struct("GithubProviderConfig")
+            .field("transport", &self.transport)
             .field("app", &self.app)
             .field("webhook", &self.webhook)
             .field("schedule", &self.schedule)
@@ -241,6 +252,75 @@ impl fmt::Debug for GithubProviderConfig {
             )
             .finish()
     }
+}
+
+/// Closed transport policy for GitHub provider HTTP operations.
+///
+/// Production always uses the fixed GitHub.com endpoints. Isolated E2E may
+/// select one exact loopback HTTP API base; it cannot redirect or fall back to
+/// another origin.
+#[derive(Clone, Eq, PartialEq)]
+pub enum GithubProviderTransport {
+    /// Fixed public GitHub.com transport.
+    GithubDotCom,
+    /// Exact loopback HTTP endpoint owned by an isolated protocol emulator.
+    LoopbackEmulator { api_base: Url },
+}
+
+impl GithubProviderTransport {
+    fn validate(raw: RawTransport) -> Result<Self, GithubProviderConfigError> {
+        match raw {
+            RawTransport::GithubDotCom => Ok(Self::GithubDotCom),
+            RawTransport::LoopbackEmulator { api_base } => {
+                let api_base = Url::parse(&api_base).map_err(|_| GithubProviderConfigError)?;
+                if !valid_loopback_api_base(&api_base) {
+                    return Err(GithubProviderConfigError);
+                }
+                Ok(Self::LoopbackEmulator { api_base })
+            }
+        }
+    }
+
+    /// Returns the isolated emulator API base, when selected.
+    #[must_use]
+    pub const fn loopback_api_base(&self) -> Option<&Url> {
+        match self {
+            Self::GithubDotCom => None,
+            Self::LoopbackEmulator { api_base } => Some(api_base),
+        }
+    }
+}
+
+impl fmt::Debug for GithubProviderTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::GithubDotCom => "GithubDotCom",
+            Self::LoopbackEmulator { .. } => "LoopbackEmulator([configured])",
+        })
+    }
+}
+
+fn valid_loopback_api_base(url: &Url) -> bool {
+    let loopback = match url.host() {
+        Some(Host::Domain(domain)) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain
+                    .to_ascii_lowercase()
+                    .strip_suffix(".localhost")
+                    .is_some_and(|prefix| !prefix.is_empty())
+        }
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    url.scheme() == "http"
+        && loopback
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path().ends_with('/')
+        && !url.cannot_be_a_base()
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 /// Validated bounded scheduler policy for the GitHub provider.
@@ -781,11 +861,19 @@ fn validate_unique_repositories(
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     schema: u16,
+    transport: RawTransport,
     app: RawApp,
     webhook: RawWebhook,
     #[serde(default)]
     schedule: Option<RawSchedule>,
     repositories: Vec<RawRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum RawTransport {
+    GithubDotCom,
+    LoopbackEmulator { api_base: String },
 }
 
 #[derive(Default, Deserialize)]

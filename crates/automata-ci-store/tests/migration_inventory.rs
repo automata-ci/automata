@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, ffi::OsStr, fs, path::Path};
 
 type InventoryEntry = (String, bool);
-const RESERVED_MIGRATION_VERSIONS: &[i64] = &[57, 63];
+const RESERVED_MIGRATION_VERSIONS: &[i64] = &[];
 
 fn validate_migration_entries(
     entries: impl IntoIterator<Item = InventoryEntry>,
@@ -153,15 +153,9 @@ fn noncontiguous_versions_report_gap_adjacent_filenames() {
 }
 
 #[test]
-fn only_explicit_retired_versions_may_be_absent() {
-    let reserved_inventory = (1_i64..=64)
-        .filter(|version| !RESERVED_MIGRATION_VERSIONS.contains(version))
-        .map(|version| (format!("{version:04}_migration.sql"), true));
-    validate_migration_entries(reserved_inventory)
-        .expect("the two explicit retired migration slots may remain absent");
-
-    let unreviewed_gap = (1_i64..=64)
-        .filter(|version| ![42, 57, 63].contains(version))
+fn every_numeric_migration_version_is_contiguous() {
+    let unreviewed_gap = (1_i64..=70)
+        .filter(|version| *version != 42)
         .map(|version| (format!("{version:04}_migration.sql"), true));
     let error = validate_migration_entries(unreviewed_gap)
         .expect_err("an unreviewed migration gap must still be rejected");

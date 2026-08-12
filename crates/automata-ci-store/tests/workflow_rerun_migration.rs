@@ -18,17 +18,17 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_database};
 
-const MIGRATION_VERSION: i64 = 64;
-const MIGRATION: &str = include_str!("../migrations/0064_workflow_reruns.sql");
+const MIGRATION_VERSION: i64 = 65;
+const MIGRATION: &str = include_str!("../migrations/0065_workflow_reruns.sql");
 const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/workflow_rerun.rs");
-const RELEASED_0061: &str =
-    include_str!("../migrations/0061_reusable_workflow_runtime_authority.sql");
+const RUNTIME_AUTHORITY: &str =
+    include_str!("../migrations/0063_reusable_workflow_runtime_authority.sql");
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[test]
-fn released_0061_is_byte_exact_and_rerun_authority_is_forward_only() {
-    let digest: [u8; 32] = Sha256::digest(RELEASED_0061.as_bytes()).into();
+fn runtime_authority_is_byte_exact_and_rerun_authority_is_forward_only() {
+    let digest: [u8; 32] = Sha256::digest(RUNTIME_AUTHORITY.as_bytes()).into();
     assert_eq!(
         digest,
         [
@@ -36,20 +36,20 @@ fn released_0061_is_byte_exact_and_rerun_authority_is_forward_only() {
             0x6b, 0xae, 0x5d, 0x0b, 0xce, 0xd3, 0xbd, 0x68, 0x73, 0x7c, 0x88, 0xf3, 0xe5, 0x03,
             0x6a, 0xae, 0xbd, 0x19,
         ],
-        "released migration 0061 changed bytes"
+        "runtime-authority migration changed bytes"
     );
     assert!(
-        !RELEASED_0061.contains("workflow_rerun"),
-        "0061 contains forward-only rerun authority"
+        !RUNTIME_AUTHORITY.contains("workflow_rerun"),
+        "0063 contains forward-only rerun authority"
     );
 }
 
 #[test]
-fn migration_0064_seals_public_identity_authority_and_source_lineage() {
+fn migration_0065_seals_public_identity_authority_and_source_lineage() {
     let migration = MIGRATOR
         .iter()
         .find(|migration| migration.version == MIGRATION_VERSION)
-        .expect("migration 0064 is embedded");
+        .expect("migration 0065 is embedded");
     assert_eq!(migration.description.as_ref(), "workflow reruns");
     for required in [
         "CREATE UNIQUE INDEX workflow_runs_public_id_attempt",
@@ -104,9 +104,23 @@ fn migration_0064_seals_public_identity_authority_and_source_lineage() {
         "automata_github_oidc_authority_is_current",
         "automata_validate_github_runtime_authority_v3_identity",
         "'scheduled_fire', 'workflow_rerun'",
+        "workflow_selection_kind",
+        "provider_delivery_workflow_inventories",
+        "workflow_authorized",
+        "audit.action = 'workflow.dispatch'",
+        "receipt.github_subject_evidence_required = FALSE",
+        "github_provider_manifest_current AS current_manifest",
+        "workflow runtime policy pin lacks authenticated manifest provenance",
         "automata_require_preparation_runner_policy_provenance",
         "automata_validate_logical_activation_preparation_claim",
         "LEFT JOIN workflow_plan_v2_effective_job_results AS result",
+        "JOIN workflow_plan_v2_reusable_call_results AS call_result",
+        "call_result.parent_result_descriptor_digest = NEW.descriptor_digest",
+        "LEFT JOIN workflow_plan_v2_effective_job_results AS prerequisite",
+        "target_marker.runner_requirements_schema = 3",
+        "source_marker.runner_requirements_schema = 3",
+        "target_run.runner_requirements_schema = 3",
+        "source_run.runner_requirements_schema = 3",
     ] {
         assert!(
             MIGRATION.contains(required),
@@ -233,7 +247,7 @@ async fn pre_rerun_schema_upgrades_forward_only_and_matches_current_authority() 
         assert_eq!(rerun_aware_functions, 5);
 
         let migration_applied: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 64 AND success)",
+            "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 65 AND success)",
         )
         .fetch_one(database.pool())
         .await?;
@@ -672,12 +686,13 @@ async fn insert_source_run(
             concurrency_group_key, admission_epoch, event_digest, event_size_bytes,
             event_media_type, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, workflow_name, git_ref, actor,
-            display_title, commit_subject, public_run_id_alias, triggering_actor
+            display_title, commit_subject, public_run_id_alias, triggering_actor,
+            runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'push', 'event.json', $7, 'completed', 1, 2,
             NULL, 4, $8, 128, 'application/json', $9, 'plan.pb', 128,
             'application/vnd.automata.workflow-plan+json', 2, 'workflow', 'refs/heads/main',
-            'github-actions[bot]', 'Workflow', 'Initial commit', $10, NULL
+            'github-actions[bot]', 'Workflow', 'Initial commit', $10, NULL, 3
         )
         ",
     )
@@ -711,12 +726,12 @@ async fn insert_pre_rerun_source_run(
             concurrency_group_key, admission_epoch, event_digest, event_size_bytes,
             event_media_type, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, workflow_name, git_ref, actor,
-            display_title, commit_subject
+            display_title, commit_subject, runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, 1, 1, 'push', 'event.json', $5, 'completed', 1, 2,
             NULL, 4, $6, 128, 'application/json', $7, 'plan.pb', 128,
             'application/vnd.automata.workflow-plan+json', 2, 'workflow', 'refs/heads/main',
-            'github-actions[bot]', 'Workflow', 'Initial commit'
+            'github-actions[bot]', 'Workflow', 'Initial commit', 3
         )
         ",
     )

@@ -746,7 +746,7 @@ async fn seed_execution(database: &TestDatabase) -> TestResult<GithubJobRuntimeA
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,
@@ -2175,6 +2175,7 @@ async fn recovered_indeterminate_token_is_revocation_only() -> TestResult {
 #[allow(clippy::too_many_lines)]
 async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> TestResult {
     run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_300_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let first = database
             .store()
@@ -2300,7 +2301,7 @@ async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> T
                 .await?
                 .is_none()
         );
-        tokio::time::sleep(Duration::from_millis(5_200)).await;
+        set_database_test_clock(&database, retry_at.get()).await?;
 
         let mut tasks = Vec::new();
         for ordinal in 0..32_u128 {
@@ -3147,7 +3148,7 @@ async fn inspection_requires_exact_provider_identity_and_direct_lifecycle_edits_
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn one_worker_concurrently_creates_only_one_revocation_claim() -> TestResult {
+async fn concurrent_same_worker_calls_return_one_durable_revocation_claim() -> TestResult {
     run_with_database(|database| async move {
         let first = seed_authority(&database).await?;
         let second = seed_authority(&database).await?;
@@ -3163,7 +3164,15 @@ async fn one_worker_concurrently_creates_only_one_revocation_claim() -> TestResu
             right_store.claim_github_runtime_authority_revocation(revocation_claim(owner, 5_000)?,)
         );
         let claims = [left?, right?].into_iter().flatten().collect::<Vec<_>>();
-        assert_eq!(claims.len(), 1);
+        let claim = claims.first().expect("one caller claims the authority");
+        for replay in &claims[1..] {
+            assert_eq!(replay.key(), claim.key());
+            assert_eq!(replay.owner(), claim.owner());
+            assert_eq!(replay.fence(), claim.fence());
+            assert_eq!(replay.attempt(), claim.attempt());
+            assert_eq!(replay.claimed_at(), claim.claimed_at());
+            assert_eq!(replay.expires_at(), claim.expires_at());
+        }
         let active_claim_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM github_runtime_authority_issuances \
              WHERE revoke_claim_owner_id = $1",

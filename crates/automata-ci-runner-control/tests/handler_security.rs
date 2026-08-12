@@ -38,7 +38,7 @@ use automata_ci_runner_control::{
     RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
     RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerIdentityPorts, RunnerLeasePorts,
+    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
 };
 use automata_ci_runner_transport::ApplicationErrorKind;
 use automata_ci_store::{
@@ -81,6 +81,7 @@ struct RecordingRunnerControlObserver {
     messages: Mutex<Vec<(RunnerControlMessageKind, RunnerControlMessageOutcome)>>,
     durable: Mutex<Vec<(RunnerDurableMessageKind, RunnerDurableDisposition, u64)>>,
     offers: Mutex<Vec<LeaseOfferObservation>>,
+    lease_request_failures: Mutex<Vec<(RunnerLeaseRequestStage, RunnerControlFailure)>>,
 }
 
 impl RunnerControlObserver for RecordingRunnerControlObserver {
@@ -120,6 +121,17 @@ impl RunnerControlObserver for RecordingRunnerControlObserver {
             .lock()
             .expect("offer observation lock")
             .push(outcome);
+    }
+
+    fn observe_lease_request_failure(
+        &self,
+        stage: RunnerLeaseRequestStage,
+        failure: RunnerControlFailure,
+    ) {
+        self.lease_request_failures
+            .lock()
+            .expect("lease request failure observation lock")
+            .push((stage, failure));
     }
 }
 
@@ -3080,6 +3092,7 @@ async fn closed_or_disabled_session_cannot_refresh_liveness_through_a_lease_poll
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One adversarial case binds the complete authenticated stale-session exchange.
 async fn transport_sync_correlates_only_an_authenticated_stale_session() {
     let (stale, identity, _runner_id, _generation) = harness(DesiredRunnerState::Active);
     let request_header = MessageHeader::request(
@@ -3177,6 +3190,17 @@ async fn transport_sync_correlates_only_an_authenticated_stale_session() {
         .await
         .expect_err("operation collision remains a conflict");
     assert_eq!(collision.kind(), ApplicationErrorKind::Conflict);
+    assert_eq!(
+        *conflict
+            .observer
+            .lease_request_failures
+            .lock()
+            .expect("lease request failure observations"),
+        vec![(
+            RunnerLeaseRequestStage::DurableAdmission,
+            RunnerControlFailure::Conflict,
+        )]
+    );
 }
 
 #[tokio::test]

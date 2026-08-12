@@ -193,6 +193,7 @@ impl GithubDeliverySourceCredentialRequest<'_> {
         observed_at: UnixMillis,
     ) -> Result<GithubDeliverySourceCredentialRequest<'a>, GithubDeliverySourceCredentialValueError>
     {
+        let observed_at = observed_at.max(snapshot.renewed_at());
         let required_through = provider_required_through(snapshot, observed_at)?;
         if identity.provider() != "github"
             || identity.repository_visibility() != ProviderRepositoryVisibility::Private
@@ -285,6 +286,7 @@ pub(crate) fn provider_required_through(
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
 ) -> Result<UnixMillis, GithubDeliverySourceCredentialValueError> {
+    let observed_at = observed_at.max(snapshot.renewed_at());
     let required_through = snapshot
         .expires_at()
         .get()
@@ -1092,8 +1094,9 @@ impl GithubDeliveryService {
                 .map_err(Into::into);
         };
         loop {
-            let observed_at = self.now()?;
-            let requested_snapshot = lease.require_live_at(observed_at).map_err(claim_error)?;
+            let (requested_snapshot, observed_at) = lease
+                .require_live_observation(self.now()?)
+                .map_err(claim_error)?;
             let repository_owner_id =
                 ProviderRepositoryOwnerId::new(prepared.event().repository().owner_id().get())
                     .map_err(|_| {
@@ -1171,14 +1174,15 @@ impl GithubDeliveryService {
                 return Err(error);
             }
         };
-        let latest = match lease.require_live_at(provider_observed_at) {
-            Ok(latest) => latest,
-            Err(error) => {
-                drop(operation);
-                (*credential).release().await;
-                return Err(claim_error(error));
-            }
-        };
+        let (latest, provider_observed_at) =
+            match lease.require_live_observation(provider_observed_at) {
+                Ok(observation) => observation,
+                Err(error) => {
+                    drop(operation);
+                    (*credential).release().await;
+                    return Err(claim_error(error));
+                }
+            };
         if latest != requested_snapshot {
             drop(operation);
             (*credential).release().await;
@@ -1223,8 +1227,9 @@ impl GithubDeliveryService {
                 return Err(error);
             }
         };
-        let post_provider_snapshot = match lease.require_live_at(post_provider_observed_at) {
-            Ok(snapshot) => snapshot,
+        let post_provider_snapshot = match lease.require_live_observation(post_provider_observed_at)
+        {
+            Ok((snapshot, _)) => snapshot,
             Err(error) => {
                 drop(operation);
                 (*credential).release().await;
@@ -1343,7 +1348,9 @@ impl GithubDeliveryService {
             if Instant::now() >= confirmed_predecessor_deadline {
                 return Err(GithubDeliveryServiceError::ClaimLost);
             }
-            let latest = lease.require_live_at(observed_at).map_err(claim_error)?;
+            let (latest, observed_at) = lease
+                .require_live_observation(observed_at)
+                .map_err(claim_error)?;
             let timing = ProviderDeliveryRenewalTiming::new(
                 confirmed_predecessor_deadline,
                 monotonic_observed_at,
@@ -1472,7 +1479,7 @@ impl GithubDeliveryService {
         if sampled_at >= current_deadline {
             return Err(GithubDeliveryServiceError::ClaimLost);
         }
-        let observed_at = self.now()?;
+        let observed_at = self.now()?.max(predecessor.renewed_at());
         if observed_at < wall_floor {
             return Err(GithubDeliveryServiceError::InvalidTrustedTime);
         }

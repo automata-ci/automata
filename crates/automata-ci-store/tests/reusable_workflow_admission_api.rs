@@ -7,9 +7,10 @@ use automata_ci_store::{
     AdmittedReusableInput, AdmittedReusableInputKind, AdmittedReusableInvocation,
     AdmittedReusableJob, AdmittedReusableOutput, AdmittedReusablePermissions,
     AdmittedReusableSecret, AdmittedReusableWorkflowCatalogEntry,
-    AdmittedReusableWorkflowExpansion, LogicalWorkflowAdmissionValueError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    RepositoryId, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    AdmittedReusableWorkflowExpansion, JobCredentialRequirements, JobEnvironmentRequirement,
+    LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ObjectKey, RepositoryId, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -460,6 +461,32 @@ fn planned_jobs_child_linkage_and_command_attachment_remain_exact() {
     let command = build_command(Some(expansion.clone()), true)
         .expect("the complete store-shape expansion must be admitted");
     assert_eq!(command.reusable_workflows(), Some(&expansion));
+}
+
+#[test]
+fn planned_reusable_jobs_retain_exact_value_free_credential_requirements() {
+    let requirements = JobCredentialRequirements::new(
+        JobEnvironmentRequirement::Environment(digest(44)),
+        ["DEPLOY_TOKEN".to_owned(), "RELEASE_TOKEN".to_owned()],
+        ["CHANNEL".to_owned()],
+    )
+    .expect("valid credential requirements");
+    let job = reusable_job(job_id(304), "deploy", 0, false, Vec::new())
+        .with_credential_requirements(requirements.clone());
+
+    assert_eq!(job.credential_requirements(), &requirements);
+    assert_eq!(
+        job.credential_requirements().environment(),
+        JobEnvironmentRequirement::Environment(digest(44))
+    );
+    assert_eq!(
+        job.credential_requirements().secret_names(),
+        &["DEPLOY_TOKEN".to_owned(), "RELEASE_TOKEN".to_owned()]
+    );
+    assert_eq!(
+        job.credential_requirements().variable_names(),
+        &["CHANNEL".to_owned()]
+    );
 }
 
 #[test]

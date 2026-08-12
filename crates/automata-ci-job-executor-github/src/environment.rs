@@ -5,7 +5,10 @@ use automata_ci_core::{ExpressionProgram, ValueSource, ValueTemplate, ValueTempl
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
 };
-use automata_ci_expression_github::{GithubEvaluationContext, GithubExpressionEvaluator};
+use automata_ci_expression_github::{
+    GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
+    GithubObject, GithubStatus, GithubValue,
+};
 use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
 
 use crate::{
@@ -136,6 +139,33 @@ impl<'a> EnvironmentBuilder<'a> {
         extra: impl IntoIterator<Item = (String, ResolvedEnvironmentValue)>,
         masker: &mut SecretMasker,
     ) -> Result<ExecutionEnvironment, ExecutorAdapterError> {
+        let values = self.phase_values(context, commands, job, step, extra, masker)?;
+        into_execution_environment(values.process)
+    }
+
+    pub(crate) fn phase_expression_values(
+        &self,
+        context: &GithubContextSnapshot,
+        commands: &JobCommandState,
+        job: &BTreeMap<String, ValueSource>,
+        step: &BTreeMap<String, ValueSource>,
+        masker: &mut SecretMasker,
+    ) -> Result<Vec<(String, ResolvedEnvironmentValue)>, ExecutorAdapterError> {
+        self.phase_values(context, commands, job, step, std::iter::empty(), masker)
+            .map(|values| values.expression)
+            .map(BTreeMap::into_iter)
+            .map(Iterator::collect)
+    }
+
+    fn phase_values(
+        &self,
+        context: &GithubContextSnapshot,
+        commands: &JobCommandState,
+        job: &BTreeMap<String, ValueSource>,
+        step: &BTreeMap<String, ValueSource>,
+        extra: impl IntoIterator<Item = (String, ResolvedEnvironmentValue)>,
+        masker: &mut SecretMasker,
+    ) -> Result<ResolvedPhaseValues, ExecutorAdapterError> {
         let platform = commands.platform();
         let mut values = BTreeMap::new();
         for variable in self.defaults.values() {
@@ -163,21 +193,33 @@ impl<'a> EnvironmentBuilder<'a> {
                 platform,
             );
         }
-        self.overlay_sources(&mut values, job, context.expression(), masker, platform)?;
-        for variable in commands.environment() {
-            insert_environment_value(
-                &mut values,
-                variable.name().to_owned(),
-                ResolvedEnvironmentValue::plain(variable.value()),
-                platform,
-            );
+        let mut expression = expression_environment(context.expression())?;
+        for (name, source) in job {
+            let value = self.resolve_source_value(source, context.expression(), masker)?;
+            insert_environment_value(&mut values, name.clone(), value.clone(), platform);
+            insert_expression_environment(&mut expression, name.clone(), value);
         }
-        self.overlay_sources(&mut values, step, context.expression(), masker, platform)?;
+        for variable in commands.environment() {
+            let name = variable.name().to_owned();
+            let value = ResolvedEnvironmentValue::plain(variable.value());
+            insert_environment_value(&mut values, name.clone(), value.clone(), platform);
+            insert_expression_environment(&mut expression, name, value);
+        }
+        let step_context = EnvironmentEvaluationContext::new(context.expression(), &expression)?;
+        for (name, source) in step {
+            let value = self.resolve_source_value(source, &step_context, masker)?;
+            insert_environment_value(&mut values, name.clone(), value.clone(), platform);
+            insert_expression_environment(&mut expression, name.clone(), value);
+        }
         for (name, value) in extra {
             insert_environment_value(&mut values, name, value, platform);
         }
         prepend_paths(&mut values, commands, platform);
-        into_execution_environment(values)
+        prepend_expression_paths(&mut expression, commands, platform);
+        Ok(ResolvedPhaseValues {
+            process: values,
+            expression,
+        })
     }
 
     pub(crate) fn resolve_action_inputs(
@@ -509,6 +551,41 @@ fn prepend_paths(
     }
     values.insert(
         path_key.unwrap_or_else(|| "PATH".to_owned()),
+        ResolvedEnvironmentValue::from_parts(path, secret),
+    );
+}
+
+fn prepend_expression_paths(
+    values: &mut BTreeMap<String, ResolvedEnvironmentValue>,
+    commands: &JobCommandState,
+    platform: CommandFilePlatform,
+) {
+    let paths = commands.prepend_path().collect::<Vec<_>>();
+    if paths.is_empty() {
+        return;
+    }
+    let separator = match platform {
+        CommandFilePlatform::Unix => ':',
+        CommandFilePlatform::Windows => ';',
+    };
+    let path_key = values
+        .keys()
+        .find(|candidate| candidate.eq_ignore_ascii_case("PATH"))
+        .cloned();
+    let mut path = paths.join(&separator.to_string());
+    let secret = path_key
+        .as_ref()
+        .and_then(|key| values.get(key))
+        .is_some_and(ResolvedEnvironmentValue::is_secret);
+    if let Some(existing) = path_key.as_ref().and_then(|key| values.get(key))
+        && !existing.expose().is_empty()
+    {
+        path.push(separator);
+        path.push_str(existing.expose());
+    }
+    insert_expression_environment(
+        values,
+        "PATH".to_owned(),
         ResolvedEnvironmentValue::from_parts(path, secret),
     );
 }

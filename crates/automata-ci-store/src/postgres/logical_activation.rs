@@ -1213,6 +1213,7 @@ fn require_activation_selection_origin(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Rehydration validates the complete immutable claim row.
 async fn decode_claimed(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ClaimLogicalJobActivation,

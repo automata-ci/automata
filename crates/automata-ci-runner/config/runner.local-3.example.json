@@ -1,31 +1,31 @@
 {
   "schema_version": 2,
-  "runner_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
+  "runner_id": "a3e2f8e1-7094-4ca5-a904-82991e0c8df3",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
-    "journal": "/var/lib/automata-runner/journal",
-    "spool": "/var/lib/automata-runner/spool",
-    "podman": "/run/automata-runner/automata-ci-podman/state"
+    "journal": "/var/lib/automata-runner/3/journal",
+    "spool": "/var/lib/automata-runner/3/spool",
+    "podman": "/run/automata_runner_3/automata-ci-podman/state"
   },
   "tls": {
     "server_roots": {
       "kind": "file",
-      "path": "/etc/automata-runner/tls/server-ca.pem"
+      "path": "/etc/automata-runner/instances/3/tls/server-ca.pem"
     },
     "certificate_chain": {
       "kind": "file",
-      "path": "/etc/automata-runner/tls/runner.pem"
+      "path": "/etc/automata-runner/instances/3/tls/runner.pem"
     },
     "private_key": {
       "kind": "file",
-      "path": "/etc/automata-runner/tls/runner-key.pem"
+      "path": "/etc/automata-runner/instances/3/tls/runner-key.pem"
     }
   },
   "spool": {
-    "protection_id": "local-runner-key-v1",
+    "protection_id": "local-runner-3-key-v1",
     "key_hex": {
       "kind": "file",
-      "path": "/etc/automata-runner/secrets/spool-key-v1.hex"
+      "path": "/etc/automata-runner/instances/3/secrets/spool-key-v1.hex"
     },
     "decrypt_only": []
   },
@@ -39,7 +39,7 @@
     "groups": [
       "default"
     ],
-    "max_parallel_jobs": 3,
+    "max_parallel_jobs": 1,
     "resources_per_job": {
       "cpu_millis": 4000,
       "memory_bytes": 17179869184,
@@ -65,8 +65,8 @@
   },
   "podman": {
     "binary": "/usr/bin/podman",
-    "home": "/var/lib/automata-runner/home",
-    "runtime_directory": "/run/automata-runner",
+    "home": "/var/lib/automata-runner/3/home",
+    "runtime_directory": "/run/automata_runner_3",
     "approved_helper_directory": "/opt/automata/private/usr/sbin",
     "conmon_path": "/usr/bin/conmon",
     "oci_runtime_path": "/usr/bin/crun",
@@ -122,9 +122,12 @@
   },
   "github": {
     "user_agent": "automata-runner/0.1.0",
-    "server_url": "http://automata-git.ghe.com:8088/",
-    "api_url": "http://automata-git.ghe.com:8088/api/v3/",
-    "graphql_url": "http://automata-git.ghe.com:8088/api/graphql",
+    "server_url": "http://automata-git.localhost:8088/",
+    "api_url": "http://automata-git.localhost:8088/api/v3/",
+    "graphql_url": "http://automata-git.localhost:8088/api/graphql",
     "allow_insecure_http": true
+  },
+  "metrics": {
+    "listen": "127.0.0.1:9466"
   }
 }

@@ -187,6 +187,7 @@ async fn fast_and_slow_callers_are_closed_while_direct_leases_keep_exact_duratio
                 )?)
                 .await;
             assert!(matches!(result, Err(AttemptStoreError::Operation(_))));
+            terminalize_attempt_as_lost(&database, attempt_id).await?;
         }
 
         let before = database_now(database.pool()).await?;
@@ -2702,7 +2703,7 @@ fn offer_with_horizon(
             RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
             fixture.request_digest,
         ),
-        RunnerProtocolVersion::new(4)?,
+        RunnerProtocolVersion::new(5)?,
         fixture.slot,
         fixture.lease.clone(),
         fixture.metadata.clone(),
@@ -2791,6 +2792,7 @@ async fn install_stale_offer_prefix(
         .store()
         .publish_lease_offer(offer(&fixture, OperationId::new())?)
         .await?;
+    terminalize_attempt_as_lost(database, fixture.lease.attempt_id()).await?;
     for ordinal in 2_u32..=u32::from(stale_count) {
         let attempt_id = insert_queued(
             database,
@@ -2856,15 +2858,20 @@ async fn install_stale_offer_prefix(
         .execute(database.pool())
         .await?;
         assert_eq!(publication.rows_affected(), 1);
+        terminalize_attempt_as_lost(database, attempt_id).await?;
     }
+    insert_queued(
+        database,
+        fixture.seed.job_id,
+        u32::from(stale_count) + 1,
+        database_now(database.pool()).await?.get(),
+    )
+    .await?;
     sqlx::query("UPDATE runner_sessions SET last_command_sequence = $2 WHERE id = $1")
         .bind(fence.session_id().as_uuid())
         .bind(i64::from(stale_count))
         .execute(database.pool())
         .await?;
-    let mut takeover = database.pool().begin().await?;
-    replace_locked_lease(&mut takeover, &fixture).await?;
-    takeover.commit().await?;
     let later = if append_live_command {
         Some(enqueue_clock_probe(database, fence, b"after stale offer prefix").await?)
     } else {
@@ -2919,6 +2926,33 @@ async fn insert_queued(
         ))
         .await?;
     Ok(attempt_id)
+}
+
+async fn terminalize_attempt_as_lost(database: &TestDatabase, attempt_id: AttemptId) -> TestResult {
+    let terminalized = sqlx::query(
+        r"
+        UPDATE job_attempts
+        SET lifecycle = 'lost',
+            lease_id = NULL,
+            runner_id = NULL,
+            lease_issued_at_ms = NULL,
+            lease_expires_at_ms = NULL,
+            runner_session_id = NULL,
+            runner_session_epoch = NULL,
+            runner_generation = NULL,
+            runner_slot = NULL,
+            changed_at_ms = greatest(
+                changed_at_ms,
+                floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+            )
+        WHERE id = $1
+        ",
+    )
+    .bind(attempt_id.as_uuid())
+    .execute(database.pool())
+    .await?;
+    assert_eq!(terminalized.rows_affected(), 1);
+    Ok(())
 }
 
 fn operation_request(

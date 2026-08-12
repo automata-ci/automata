@@ -1017,7 +1017,7 @@ fn future_unknown_optional_fields_are_ignored() {
 }
 
 #[test]
-fn only_current_protocol_v4_is_accepted() {
+fn only_current_protocol_v5_is_accepted() {
     let current = fixture_wire::RunnerFrame {
         payload: Some(fixture_wire::runner_frame::Payload::LeaseRequest(
             fixture_wire::LeaseRequest {
@@ -1028,7 +1028,7 @@ fn only_current_protocol_v4_is_accepted() {
         )),
     };
     decode_runner_frame(&encode(&current), &ProtocolLimits::default())
-        .expect("current protocol v4");
+        .expect("current protocol v5");
 
     let mut legacy = current.clone();
     let Some(fixture_wire::runner_frame::Payload::LeaseRequest(request)) = legacy.payload.as_mut()

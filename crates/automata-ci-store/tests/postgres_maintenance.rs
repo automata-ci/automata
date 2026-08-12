@@ -286,7 +286,7 @@ async fn stale_session_timeout_preserves_short_resume_window_then_fences_offline
                 RunnerSessionId::new(),
                 fence.runner_id(),
                 RunnerGeneration::new(1)?,
-                RunnerProtocolVersion::new(4)?,
+                RunnerProtocolVersion::new(5)?,
                 JobIrVersion::current(),
                 capabilities,
                 open_observed_at,
@@ -794,10 +794,11 @@ async fn insert_pending_concurrency_run(
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-            concurrency_group_key, concurrency_queue_policy
+            concurrency_group_key, concurrency_queue_policy, runner_requirements_schema
         )
         SELECT $1, repository_id, workflow_id, snapshot_id, 2, event_name,
-               event_object_key, head_sha, 'queued', 70, 70, 'dogfood', 'single'
+               event_object_key, head_sha, 'queued', 70, 70, 'dogfood', 'single',
+               runner_requirements_schema
         FROM workflow_runs WHERE id = $2
         ",
     )

@@ -240,6 +240,17 @@ pub struct ServerArgs {
     )]
     pub auth_encryption_key_source: Option<SecretSource>,
 
+    /// Deployment-scoped bearer for the private conformance export.
+    ///
+    /// This machine-only authority is accepted only when the human listener is
+    /// loopback-bound and human authentication is disabled.
+    #[arg(
+        long,
+        env = "AUTOMATA_CONFORMANCE_EXPORT_TOKEN_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub conformance_export_token_source: Option<SecretSource>,
+
     /// Stable identity for the active human-authentication token wrapping key.
     #[arg(long, env = "AUTOMATA_AUTH_KEY_ID", default_value = "primary")]
     pub auth_key_id: String,

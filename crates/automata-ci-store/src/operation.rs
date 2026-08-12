@@ -477,7 +477,7 @@ impl CompleteLeaseRequest {
     }
 }
 
-/// Bounded exact-response ledger for protocol-v4 lease-request chains.
+/// Bounded exact-response ledger for protocol-v5 lease-request chains.
 #[async_trait]
 pub trait RunnerLeaseRequestRepository: Send + Sync {
     /// Admits a first request, exact retry, or exact completed-head successor.

@@ -604,7 +604,7 @@ async fn unresponsive_endpoint() -> (GithubHttpEndpoint, JoinHandle<()>) {
         Duration::from_millis(40),
     )
     .unwrap();
-    let endpoint = GithubHttpEndpoint::new_for_loopback_testing(
+    let endpoint = GithubHttpEndpoint::new_for_loopback_emulator(
         origin.clone(),
         origin.join("api/").unwrap(),
         "automata-changed-files-test/0.1.0",

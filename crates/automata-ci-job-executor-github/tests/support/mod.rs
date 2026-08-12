@@ -851,7 +851,14 @@ fn envelope_with_all_settings_and_environment_profile(
     authority_profile: JobAuthorityProfile,
     environment_profile: EnvironmentProfile,
 ) -> JobIrEnvelope {
-    let requirements = RunnerRequirements::default().with_environment_profile(environment_profile);
+    let allocation = JobResourceAllocation::new(
+        ResourceCapacity::new(100, 256 * 1024 * 1024, 0, 0),
+        ResourceCapacity::new(2_000, 2 * 1024 * 1024 * 1024, 0, 0),
+    )
+    .expect("resource allocation");
+    let requirements = RunnerRequirements::default()
+        .with_environment_profile(environment_profile)
+        .with_resource_allocation(allocation);
     let mut job = JobIr::new(
         JobId::new(),
         RunId::new(),

@@ -18,12 +18,14 @@ go stale.
    `# EOF`.
 5. Check Prometheus target details for timeout, body-size, sample, or label-limit
    rejection. Do not raise limits before finding the unexpected growth.
-6. For a runner behind NAT, check the node-local Agent and remote-write queue;
-   central `up` may describe the Agent target rather than direct reachability.
+6. For a runner behind NAT, check the node-local Agent, all three loopback
+   targets on ports 9464 through 9466, and the remote-write queue; central `up`
+   may describe those Agent targets rather than direct reachability.
 7. Confirm the central inventory still publishes
-   `automata_ci_runner_inventory_expected` for this stable `instance`. A whole
-   host or Agent loss makes `up` stale rather than zero, so the independent
-   inventory join is the authoritative host-loss signal.
+   `automata_ci_runner_inventory_expected` for this stable `instance`, `host`,
+   and `runner_slot`. Schema 3 requires exactly slots 1, 2, and 3 for the host.
+   A whole host or Agent loss makes `up` stale rather than zero, so the
+   independent inventory join is the authoritative host-loss signal.
 8. On the inventory host, render the current authoritative JSON with
    `inventory/render-runner-inventory.sh`, lint the temporary document, and
    atomically replace the node_exporter textfile. Then check the
@@ -56,14 +58,14 @@ go stale.
    `automata_ci_runner_inventory_generation_timestamp_seconds` with `time()`.
    The authoritative producer must refresh at least every sixty seconds; zero,
    a missing series, age over five minutes, or more than sixty seconds of future
-   skew is invalid. Repair the producer schedule or clock, rerender schema 2,
+   skew is invalid. Repair the producer schedule or clock, rerender schema 3,
    validate it, and atomically publish it. Never patch the timestamp value in an
    old textfile merely to clear the page.
 9. Run `inventory/validate-runner-deployment.sh` with the affected runner's
    rendered Agent, authoritative JSON, staged exposition, and final `.prom`
    destination. It Promtool-checks and publishes the same bounded snapshots;
-   do not validate one revision and separately rename another. Fix identity,
-   cluster, or environment drift at the inventory/deployment source; do not
-   add those values to application metric labels.
+   do not validate one revision and separately rename another. Fix instance,
+   host, slot, cluster, or environment drift at the inventory/deployment source;
+   do not add those values to application metric labels.
 
 Do not expose `/metrics` through a public application listener as a workaround.

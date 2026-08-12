@@ -838,7 +838,7 @@ async fn seed_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             automata_ci_core::JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,

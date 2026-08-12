@@ -880,11 +880,12 @@ pub trait ProtectedEnvironmentRepository: fmt::Debug + Send + Sync {
         request: ReviewJobEnvironment,
     ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError>;
 
-    /// Concludes a queued attempt whose durable environment gate is terminal.
+    /// Concludes an attempt whose environment authority is terminal.
     ///
-    /// Implementations must authenticate the tenant-scoped terminal gate and
-    /// make exact retries idempotent. This prevents rejected or expired work
-    /// from remaining forever queued but permanently ineligible.
+    /// Implementations must authenticate the tenant-scoped authority and make
+    /// exact retries idempotent. Rejected, expired, and cancelled gates retain
+    /// their terminal state. A stale immutable `ready` snapshot remains audit
+    /// evidence while its exact queued cancellation terminalizes the attempt.
     async fn conclude_terminal_job_environment(
         &self,
         tenant: &TenantScope,

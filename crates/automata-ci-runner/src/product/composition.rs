@@ -8,7 +8,6 @@ use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
-use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_job_executor_github::{
     ActionPreparationPort, DeterministicOperationIds, GithubJobExecutor, GithubJobExecutorConfig,
     GithubJobExecutorPorts, ImmutableJobContent, ImmutableSandboxEnvironmentCatalog,
@@ -127,39 +126,36 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
     if shutdown.is_requested() {
         return Ok(());
     }
-    let prepared = match config.provider() {
-        RunnerProviderConfig::Podman(_) => {
-            require_dedicated_rootless_user()?;
-            let options = prepare_admitted_podman(&config)?;
-            let capability_admission = verify_configured_capabilities(
-                &options,
-                config.executor().network(),
-                &shutdown.probe,
-            )
-            .await;
-            let admission = finish_capability_admission(
-                capability_admission,
-                || revalidate_podman_launch_trust(&options),
-                || shutdown.is_requested(),
-            )?;
-            if admission.is_none() {
-                return Ok(());
-            }
-            PreparedProvider::Podman(Box::new(options))
-        }
-        RunnerProviderConfig::WindowsNative(_) => {
-            if shutdown.is_requested() {
-                return Ok(());
-            }
-            PreparedProvider::WindowsNative
-        }
+    match config.provider() {
+        RunnerProviderConfig::Podman(_) => run_podman(&config, shutdown).await,
+        RunnerProviderConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
+        RunnerProviderConfig::WindowsNative(_) => run_windows_native(&config, shutdown).await,
+    }
+}
+
+async fn run_podman(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    require_dedicated_rootless_user()?;
+    let podman_options = prepare_admitted_podman(config)?;
+    let network_policy = config.executor().network();
+    let capability_admission =
+        verify_configured_capabilities(&podman_options, network_policy, &shutdown.probe).await;
+    let admission = finish_capability_admission(
+        capability_admission,
+        || revalidate_podman_launch_trust(&podman_options),
+        || shutdown.is_requested(),
+    )?;
+    let Some(admission) = admission else {
+        return Ok(());
     };
     let metrics_listener = match config.metrics() {
         Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
         None => None,
     };
     let composition =
-        compose(&config, &prepared, &shutdown.probe, CapabilityAdmission).map(|composition| {
+        compose_podman(config, &podman_options, &shutdown.probe, admission).map(|composition| {
             if shutdown.is_requested() {
                 None
             } else {
@@ -167,21 +163,96 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
             }
         });
     let started = after_admitted_value(composition, |composition| {
-        prepared.revalidate()?;
-        mark_admitted_composition_ready(&config, &composition);
+        revalidate_podman_launch_trust(&podman_options)?;
         Ok(composition)
     })?;
     let Some(composition) = started else {
         return Ok(());
     };
-    run_started_composition(composition, metrics_listener, shutdown).await
+    supervise_composition(config, composition, metrics_listener, shutdown).await
 }
 
-async fn run_started_composition(
+async fn run_kubernetes(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    require_dedicated_rootless_user()?;
+    let kubernetes = config
+        .kubernetes()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let client = kube::Client::try_default()
+        .await
+        .map_err(RunnerProductError::KubernetesClient)?;
+    if shutdown.is_requested() {
+        return Ok(());
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider: Arc<dyn automata_ci_execution::SandboxProvider> = Arc::new(
+        automata_ci_sandbox_kubernetes::KubernetesSandboxProvider::new(
+            client,
+            kubernetes.adapter().clone(),
+        )?,
+    );
+    let provider = match &metrics {
+        Some(metrics) => metrics.instrument_sandbox_provider(provider),
+        None => provider,
+    };
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition = compose_with_provider(
+        config,
+        provider,
+        metrics,
+        &shutdown.probe,
+        false,
+        false,
+        || Ok(()),
+    )?
+    .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(());
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+async fn run_windows_native(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    if shutdown.is_requested() {
+        return Ok(());
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider = build_windows_provider(config, metrics.as_ref())?;
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition = compose_with_provider(
+        config,
+        provider,
+        metrics,
+        &shutdown.probe,
+        false,
+        false,
+        || Ok(()),
+    )?
+    .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(());
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+async fn supervise_composition(
+    config: &RunnerProductConfig,
     composition: RunnerComposition,
     metrics_listener: Option<TcpListener>,
     shutdown: RunnerShutdown,
 ) -> Result<(), RunnerProductError> {
+    mark_admitted_composition_ready(config, &composition);
     let supervisor = composition.supervisor.clone();
     let runtime_shutdown = shutdown.runtime.clone();
     let runtime = async move { supervisor.run(runtime_shutdown).await };
@@ -235,20 +306,6 @@ async fn run_started_composition(
         metrics.set_ready(false);
     }
     result
-}
-
-enum PreparedProvider {
-    Podman(Box<PodmanOptions>),
-    WindowsNative,
-}
-
-impl PreparedProvider {
-    fn revalidate(&self) -> Result<(), RunnerProductError> {
-        match self {
-            Self::Podman(options) => revalidate_podman_launch_trust(options),
-            Self::WindowsNative => Ok(()),
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -332,17 +389,38 @@ fn mark_admitted_composition_ready(config: &RunnerProductConfig, composition: &R
 
 fn compose_podman(
     config: &RunnerProductConfig,
-    prepared: &PreparedProvider,
+    podman_options: &PodmanOptions,
     cancellation: &crate::podman_probe::ProbeCancellation,
     _admission: CapabilityAdmission,
 ) -> Result<Option<RunnerComposition>, RunnerProductError> {
-    let runner_cgroup = match prepared {
-        PreparedProvider::Podman(_) => config
-            .metrics()
-            .and_then(|_| PodmanCommandExecutor::delegated_no_swap_cgroup(&SystemCommandExecutor)),
-        PreparedProvider::WindowsNative => None,
-    };
-    let metrics = config
+    #[cfg(not(target_os = "linux"))]
+    return Err(RunnerProductError::UnsupportedPlatform);
+
+    let runner_cgroup = config
+        .metrics()
+        .and_then(|_| PodmanCommandExecutor::delegated_no_swap_cgroup(&SystemCommandExecutor));
+    let metrics = build_metrics(config, runner_cgroup)?;
+    revalidate_podman_launch_trust(podman_options)?;
+    let provider = build_podman_provider(podman_options.clone(), metrics.as_ref())?;
+    let podman = config
+        .podman()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    compose_with_provider(
+        config,
+        provider,
+        metrics,
+        cancellation,
+        podman.service_proxy_image().is_some(),
+        podman.buildkit_runtime().is_some(),
+        || revalidate_podman_launch_trust(podman_options),
+    )
+}
+
+fn build_metrics(
+    config: &RunnerProductConfig,
+    runner_cgroup: Option<String>,
+) -> Result<Option<RunnerMetrics>, RunnerProductError> {
+    config
         .metrics()
         .map(|_| RunnerMetrics::new(config.inventory().max_parallel_jobs(), runner_cgroup))
         .transpose()
@@ -408,21 +486,14 @@ fn compose_with_provider(
         spool_options,
     )?);
 
-    prepared.revalidate()?;
-    let provider = match prepared {
-        PreparedProvider::Podman(options) => {
-            build_podman_provider(options.as_ref().clone(), metrics.as_ref())?
-        }
-        PreparedProvider::WindowsNative => build_windows_provider(config, metrics.as_ref())?,
-    };
-    let runtime_inventory = match prepared {
-        PreparedProvider::Podman(options) => {
-            build_admitted_runtime_inventory(config, provider.as_ref(), cancellation, options)
-        }
-        PreparedProvider::WindowsNative => {
-            build_windows_admitted_runtime_inventory(config, provider.as_ref(), cancellation)
-        }
-    };
+    let runtime_inventory = build_admitted_runtime_inventory(
+        config,
+        provider.as_ref(),
+        cancellation,
+        service_proxy_configured,
+        buildkit_configured,
+        revalidate_provider_trust,
+    );
     after_admitted_value(runtime_inventory, |runtime_inventory| {
         let executor = build_executor(config, provider, ephemeral)?;
         let runtime_config = RunnerRuntimeConfig::new(
@@ -471,28 +542,11 @@ fn build_admitted_runtime_inventory(
 ) -> Result<Option<RunnerCapabilities>, RunnerProductError> {
     let admission = admit_configured_environment_profiles(config, provider, cancellation);
     after_profile_admission(admission, || {
-        revalidate_podman_launch_trust(podman_options)?;
-        let podman = config
-            .podman()
-            .ok_or(RunnerProductError::ProviderConfiguration)?;
+        revalidate_provider_trust()?;
         Ok(inventory_for_verified_provider(
             config.inventory(),
-            podman.service_proxy_image().is_some(),
-            provider.capabilities(),
-        ))
-    })
-}
-
-fn build_windows_admitted_runtime_inventory(
-    config: &RunnerProductConfig,
-    provider: &dyn automata_ci_execution::SandboxProvider,
-    cancellation: &crate::podman_probe::ProbeCancellation,
-) -> Result<Option<RunnerCapabilities>, RunnerProductError> {
-    let admission = admit_configured_environment_profiles(config, provider, cancellation);
-    after_profile_admission(admission, || {
-        Ok(inventory_for_verified_provider(
-            config.inventory(),
-            false,
+            service_proxy_configured,
+            buildkit_configured,
             provider.capabilities(),
         ))
     })
@@ -516,11 +570,15 @@ fn admit_configured_environment_profiles(
     // The provider's exact create path also provisions the attempt-scoped
     // Docker API when configured, so its advertised feature is covered by the
     // same lifecycle evidence as every environment profile.
+    let capacity = config.executor().resource_capacity();
+    let allocation = automata_ci_core::JobResourceAllocation::new(capacity, capacity)
+        .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
     let policy = ProfileAdmissionPolicy::new(
         config.executor().network(),
         config.executor().root_filesystem(),
         config.executor().privilege(),
         config.executor().resources(),
+        allocation,
     );
     let policy = if config.windows_native().is_some() {
         let toolchain = config.executor().toolchain();
@@ -617,17 +675,20 @@ fn build_podman_options(config: &RunnerProductConfig) -> Result<PodmanOptions, R
     let podman = config
         .podman()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
-    if config.state().provider().as_os_str()
-        != required_podman_state_root(podman.runtime_directory()).as_os_str()
+    let state_root = config
+        .state()
+        .podman()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    if state_root.as_os_str() != required_podman_state_root(podman.runtime_directory()).as_os_str()
     {
         return Err(RunnerProductError::PodmanProcessTrust);
     }
-    ensure_private_directory(config.state().provider())?;
-    let podman_root = PodmanStateRoot::existing(config.state().provider().to_path_buf())?;
+    ensure_private_directory(state_root)?;
+    let podman_root = PodmanStateRoot::existing(state_root.to_path_buf())?;
     let podman_environment = PodmanProcessEnvironment::new(
         podman.home().to_path_buf(),
         podman.runtime_directory().to_path_buf(),
-        config.state().provider().to_path_buf(),
+        state_root.to_path_buf(),
         podman.approved_helper_directory().to_path_buf(),
         podman.conmon_path().to_path_buf(),
         podman.oci_runtime_path().to_path_buf(),
@@ -743,7 +804,11 @@ fn build_windows_provider(
     if config.windows_native().is_none() {
         return Err(RunnerProductError::ProviderConfiguration);
     }
-    let options = WindowsSandboxProviderOptions::new(config.state().provider().to_path_buf())?;
+    let state_root = config
+        .state()
+        .windows_native()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let options = WindowsSandboxProviderOptions::new(state_root.to_path_buf())?;
     let provider: Arc<dyn automata_ci_execution::SandboxProvider> =
         Arc::new(WindowsSandboxProvider::open(options)?);
     match metrics {
@@ -810,7 +875,7 @@ fn build_action_preparer(
     config: &RunnerProductConfig,
     blobs: Arc<dyn ImmutableBlobStore>,
 ) -> Result<Arc<dyn ActionPreparationPort>, RunnerProductError> {
-    let github_endpoint = GithubHttpEndpoint::github_dot_com(config.github().user_agent())?;
+    let github_endpoint = config.github().http_endpoint()?;
     let scm: Arc<dyn ScmProvider> = Arc::new(github_endpoint);
     // Do not consult the legacy durable reference index here. Older runner
     // builds could populate it through an ambient repository credential, so a
@@ -868,28 +933,30 @@ fn build_toolchain(
 ) -> Result<StaticGithubToolchain, RunnerProductError> {
     let configured = config.executor().toolchain();
     let mut toolchain = match config.provider() {
-        RunnerProviderConfig::Podman(_) => StaticGithubToolchain::new(
-            configured
-                .bash()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-            configured
-                .sh()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-            configured
-                .install()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-            configured
-                .tar()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-            configured
-                .sha256sum()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-        )?,
+        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => {
+            StaticGithubToolchain::new(
+                configured
+                    .bash()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                configured
+                    .sh()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                configured
+                    .install()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                configured
+                    .tar()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                configured
+                    .sha256sum()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+            )?
+        }
         RunnerProviderConfig::WindowsNative(_) => StaticGithubToolchain::windows(
             configured
                 .pwsh()
@@ -908,8 +975,10 @@ fn build_toolchain(
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;
     }
-    if matches!(config.provider(), RunnerProviderConfig::Podman(_))
-        && let Some(path) = configured.pwsh()
+    if matches!(
+        config.provider(),
+        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_)
+    ) && let Some(path) = configured.pwsh()
     {
         toolchain = toolchain.with_pwsh(path.clone())?;
     }
@@ -1061,6 +1130,15 @@ pub enum RunnerProductError {
     /// Native Windows provider initialization failed.
     #[error("runner native Windows provider initialization failed")]
     WindowsProvider(#[from] automata_ci_execution::ProviderError),
+    /// Product configuration and the selected provider path disagreed.
+    #[error("runner sandbox provider composition invariant failed")]
+    SandboxProviderInvariant,
+    /// Ambient Kubernetes client discovery or authentication failed.
+    #[error("runner Kubernetes client initialization failed")]
+    KubernetesClient(#[source] kube::Error),
+    /// Kubernetes sandbox adapter configuration failed.
+    #[error("runner Kubernetes provider configuration failed")]
+    KubernetesConfiguration(#[from] automata_ci_sandbox_kubernetes::KubernetesConfigurationError),
     /// The configured Podman network admission boundary did not produce usable evidence.
     #[error("runner capability admission failed")]
     CapabilityAdmission,
@@ -1339,7 +1417,7 @@ mod tests {
     #[test]
     fn registered_helper_ceiling_is_reduced_to_the_verified_provider() {
         let config = RunnerProductConfig::from_json(include_bytes!(
-            "../../config/runner.local.example.json"
+            "../../config/runner.local-1.example.json"
         ))
         .expect("checked-in runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();

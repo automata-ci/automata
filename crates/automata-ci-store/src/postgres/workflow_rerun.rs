@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_trait::async_trait;
-use automata_ci_core::RunId;
+use automata_ci_core::{RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId};
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -762,6 +762,8 @@ async fn lock_source_run(
                concurrency.display_key AS concurrency_display_key,
                marker.root_invocation_id, marker.admission_digest,
                marker.base_context_schema,
+               marker.runner_requirements_schema AS marker_requirements_schema,
+               run.runner_requirements_schema AS run_requirements_schema,
                marker.state AS marker_state, invocation.state AS invocation_state,
                claim.state AS result_claim_state, result.finalized_at_ms,
                root_run.id AS root_run_id, attempt.attempt AS durable_attempt,
@@ -812,6 +814,17 @@ async fn lock_source_run(
     .ok_or(WorkflowRerunStoreError::NotFound)?;
 
     let root_run_id = validate_source_row(&row)?;
+    if row
+        .try_get::<Option<i16>, _>("marker_requirements_schema")
+        .map_err(operation_error)?
+        != Some(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
+        || row
+            .try_get::<i16, _>("run_requirements_schema")
+            .map_err(operation_error)?
+            != i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX)
+    {
+        return Err(WorkflowRerunStoreError::UnsupportedSelection);
+    }
     let concurrency = decode_concurrency(&row)?;
     Ok(SourceRun {
         run_id: request.source_run_id().as_uuid(),
@@ -1394,7 +1407,7 @@ async fn insert_run(
             requested_log_visibility, requested_artifact_visibility,
             publication_safety_reason, publication_safety_schema,
             concurrency_queue_policy, public_run_id_alias, triggering_actor,
-            concurrency_cancel_in_progress
+            concurrency_cancel_in_progress, runner_requirements_schema
         )
         SELECT $2, repository_id, workflow_id, snapshot_id, run_number, $3,
                event_name, event_object_key, head_sha, 'queued', $4, $4,
@@ -1406,7 +1419,7 @@ async fn insert_run(
                requested_log_visibility, requested_artifact_visibility,
                publication_safety_reason, publication_safety_schema,
                concurrency_queue_policy, public_run_id_alias, $5,
-               concurrency_cancel_in_progress
+               concurrency_cancel_in_progress, runner_requirements_schema
         FROM workflow_runs
         WHERE id = $1
         ",
@@ -1437,11 +1450,13 @@ async fn insert_marker_and_invocation(
             run_id, root_invocation_id, orchestration_schema, admission_digest,
             state, revision, admitted_at_ms, updated_at_ms,
             base_context_digest, base_context_object_key,
-            base_context_size_bytes, base_context_media_type, base_context_schema
+            base_context_size_bytes, base_context_media_type, base_context_schema,
+            runner_requirements_schema
         )
         SELECT $2, $3, orchestration_schema, $4, 'pending', 1, $5, $5,
                base_context_digest, base_context_object_key,
-               base_context_size_bytes, base_context_media_type, base_context_schema
+               base_context_size_bytes, base_context_media_type, base_context_schema,
+               runner_requirements_schema
         FROM workflow_plan_v2_runs WHERE run_id = $1
         ",
     )

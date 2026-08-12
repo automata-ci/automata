@@ -165,6 +165,7 @@ impl RootlessPodmanProvider {
                 SandboxCapability::Administrator,
                 SandboxCapability::UserNamespace,
                 SandboxCapability::ResourceLimits,
+                SandboxCapability::ProcessLimits,
             ];
             if options.service_proxy_image().is_some() {
                 declared_capabilities.push(SandboxCapability::ServiceContainers);
@@ -172,9 +173,14 @@ impl RootlessPodmanProvider {
             if options.job_container_engine() == JobContainerEngine::AttemptScopedDockerApi {
                 declared_capabilities.push(SandboxCapability::DockerCompatibleApi);
             }
-            let capabilities = ProviderCapabilities::new(declared_capabilities)
+            if options.buildkit_runtime().is_some()
+                && options.job_container_engine() != JobContainerEngine::AttemptScopedDockerApi
+            {
+                return Err(crate::PodmanConfigurationError::BuildKitUnavailable.into());
+            }
+            let capabilities = ProviderCapabilities::new(declared_capabilities.clone())
                 .map_err(|_| crate::PodmanConfigurationError::InvalidLimits)?;
-            let inner = Arc::new(PodmanInner {
+            let mut inner = PodmanInner {
                 options,
                 state,
                 executor,
@@ -183,12 +189,21 @@ impl RootlessPodmanProvider {
                 capabilities,
                 handle_locks: Mutex::new(BTreeMap::new()),
                 docker_services: Mutex::new(BTreeMap::new()),
-            });
+            };
             if inner.options.service_proxy_image().is_some() {
                 inner
                     .verify_service_proxy_image(inner.operation_deadline(), &NeverCancelled)
                     .map_err(|_| crate::PodmanConfigurationError::ServiceProxyUnavailable)?;
             }
+            if inner.options.buildkit_runtime().is_some() {
+                inner
+                    .verify_buildkit_runtime(inner.operation_deadline(), &NeverCancelled, true)
+                    .map_err(|_| crate::PodmanConfigurationError::BuildKitUnavailable)?;
+                declared_capabilities.push(SandboxCapability::BuildKit);
+                inner.capabilities = ProviderCapabilities::new(declared_capabilities)
+                    .map_err(|_| crate::PodmanConfigurationError::InvalidLimits)?;
+            }
+            let inner = Arc::new(inner);
             Ok(Self { inner })
         }
     }
@@ -4213,6 +4228,7 @@ fn validate_buildkit_archive(_path: &Path) -> Result<(), ProviderError> {
     ))
 }
 
+#[allow(clippy::too_many_lines)] // The fingerprint binds every admitted sandbox and runtime field.
 fn spec_fingerprint(
     spec: &SandboxSpec,
     job_engine: JobContainerEngine,

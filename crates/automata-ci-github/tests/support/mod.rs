@@ -160,7 +160,7 @@ impl FixtureServer {
     }
 
     pub fn endpoint_with_limits(&self, limits: GithubHttpLimits) -> GithubHttpEndpoint {
-        GithubHttpEndpoint::new_for_loopback_testing(
+        GithubHttpEndpoint::new_for_loopback_emulator(
             self.origin(),
             self.url("api/"),
             "automata-tests/0.1.0",

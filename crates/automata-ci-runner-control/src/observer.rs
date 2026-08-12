@@ -69,6 +69,36 @@ pub enum RunnerControlFailure {
     Internal,
 }
 
+/// Closed stages at which a lease-poll request can fail.
+///
+/// Values intentionally describe only application operations. They never carry
+/// runner, session, repository, request, or lease identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerLeaseRequestStage {
+    /// Local request invariants and durable-key construction.
+    RequestValidation,
+    /// Runner authorization and durable session fencing.
+    SessionAuthentication,
+    /// Admission against the durable per-session, per-slot request head.
+    DurableAdmission,
+    /// Durable session-liveness refresh.
+    SessionHeartbeat,
+    /// Resolution of an already-completed request.
+    CompletedRequestReplay,
+    /// Durable command replay before polling for work.
+    PrePollCommandReplay,
+    /// Scheduler polling and attempt claim.
+    LeasePoll,
+    /// Lease-offer construction and publication.
+    OfferBuild,
+    /// Durable command replay after polling for work.
+    PostPollCommandReplay,
+    /// Lease-offer response validation and revocation recovery.
+    ResponseValidation,
+    /// Durable request completion and response resolution.
+    DurableCompletion,
+}
+
 /// Durable runner-control mutation kinds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerDurableMessageKind {
@@ -135,6 +165,14 @@ pub trait RunnerControlObserver: fmt::Debug + Send + Sync {
 
     /// Records one bounded lease-offer publication/recovery outcome.
     fn observe_lease_offer(&self, _outcome: LeaseOfferObservation) {}
+
+    /// Records the sanitized stage and category of one failed lease request.
+    fn observe_lease_request_failure(
+        &self,
+        _stage: RunnerLeaseRequestStage,
+        _failure: RunnerControlFailure,
+    ) {
+    }
 }
 
 /// Observer used when server semantic metrics are not composed.

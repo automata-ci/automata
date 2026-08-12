@@ -11,6 +11,7 @@ use std::{
 #[cfg(unix)]
 use std::{fs::File, io::Read as _, path::Component};
 
+use http::{Uri, uri::Authority};
 use thiserror::Error;
 use url::Url;
 use zeroize::Zeroizing;
@@ -39,9 +40,11 @@ const MAX_RESULTS_SIGNING_KEY_BYTES: usize = 16 * 1024;
 const MAX_RESULTS_KEY_ID_BYTES: usize = 255;
 const MAX_GITHUB_CLIENT_SECRET_BYTES: usize = 16 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_CONFORMANCE_EXPORT_TOKEN_BYTES: usize = 4 * 1024;
 const SECRET_ENCRYPTION_KEY_BYTES: usize = 32;
 const SESSION_HASH_KEY_BYTES: usize = 32;
 const MIN_BOOTSTRAP_TOKEN_BYTES: usize = 32;
+const MIN_CONFORMANCE_EXPORT_TOKEN_BYTES: usize = 32;
 const MIN_BROWSER_SESSION_TTL_SECONDS: u64 = 5 * 60;
 const MAX_BROWSER_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 const MIN_CLI_SESSION_TTL_SECONDS: u64 = 5 * 60;
@@ -293,6 +296,7 @@ pub struct ServerConfig {
     pub(crate) http_listen: SocketAddr,
     pub(crate) metrics_listen: Option<SocketAddr>,
     pub(crate) human_auth: Option<HumanAuthConfig>,
+    pub(crate) conformance_export_token: Option<SecretSource>,
     pub(crate) secret_encryption: Option<SecretEncryptionConfig>,
     pub(crate) control_plane_encryption: ControlPlaneEncryptionConfig,
     pub(crate) runner_listen: SocketAddr,
@@ -615,6 +619,7 @@ impl ServerConfig {
             .transpose()
             .map_err(|_| ServerConfigError::InvalidGithubOidcConfiguration)?;
         let human_auth = human_auth_configuration(args)?;
+        let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
         if secret_encryption.is_some() && runner_public_authority.is_none() {
@@ -625,6 +630,7 @@ impl ServerConfig {
             http_listen: args.listen,
             metrics_listen: args.metrics_listen,
             human_auth,
+            conformance_export_token,
             secret_encryption,
             control_plane_encryption,
             runner_listen: args.runner_listen,
@@ -669,6 +675,29 @@ impl ServerConfig {
     /// Returns complete human-authentication configuration when explicitly enabled.
     pub const fn human_auth(&self) -> Option<&HumanAuthConfig> {
         self.human_auth.as_ref()
+    }
+
+    /// Loads the optional loopback-only conformance export bearer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized source error when the credential is unavailable,
+    /// malformed, or below the minimum entropy boundary.
+    pub fn load_conformance_export_token(
+        &self,
+    ) -> Result<Option<Zeroizing<String>>, SecretLoadError> {
+        self.conformance_export_token
+            .as_ref()
+            .map(|source| {
+                let token = source.load_scalar(MAX_CONFORMANCE_EXPORT_TOKEN_BYTES)?;
+                if token.len() < MIN_CONFORMANCE_EXPORT_TOKEN_BYTES {
+                    return Err(SecretLoadError::TooShort {
+                        minimum: MIN_CONFORMANCE_EXPORT_TOKEN_BYTES,
+                    });
+                }
+                Ok(token)
+            })
+            .transpose()
     }
 
     /// Returns built-in secret encryption configuration when explicitly enabled.
@@ -959,6 +988,19 @@ fn required_auth_source(source: Option<&SecretSource>) -> Result<SecretSource, S
     }
 }
 
+fn conformance_export_configuration(
+    args: &ServerArgs,
+    human_auth: Option<&HumanAuthConfig>,
+) -> Result<Option<SecretSource>, ServerConfigError> {
+    let Some(source) = args.conformance_export_token_source.as_ref() else {
+        return Ok(None);
+    };
+    if !source.is_valid_reference() || !args.listen.ip().is_loopback() || human_auth.is_some() {
+        return Err(ServerConfigError::InvalidConformanceExportConfiguration);
+    }
+    Ok(Some(source.clone()))
+}
+
 fn validate_static_runner_registration_path(path: Option<&Path>) -> Result<(), ServerConfigError> {
     if path.is_some_and(|path| !path.is_absolute()) {
         return Err(ServerConfigError::InvalidStaticRunnerRegistrationPath);
@@ -981,6 +1023,7 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         args.s3_session_token_source.as_ref(),
         args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
+        args.conformance_export_token_source.as_ref(),
     ];
     if required
         .into_iter()
@@ -1128,6 +1171,10 @@ pub enum ServerConfigError {
     /// Human/webhook listener exposure lacks one coherent isolation policy.
     #[error("human and webhook listener isolation policy is invalid")]
     InvalidHumanListenerPolicy,
+    /// Machine conformance authority requires an exact source, loopback bind,
+    /// and disabled human authentication.
+    #[error("conformance export authentication configuration is invalid")]
+    InvalidConformanceExportConfiguration,
     /// A mandatory service listener requested an ephemeral port.
     #[error("human, Results, and runner listeners require nonzero ports")]
     InvalidServiceListener,

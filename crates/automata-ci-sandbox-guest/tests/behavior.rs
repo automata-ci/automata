@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -42,12 +44,11 @@ struct TempDir {
 }
 
 impl TempDir {
-    fn new(label: &str) -> Self {
+    fn new(_label: &str) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "automata-sandbox-guest-test-{}-{sequence}-{label}",
-            std::process::id()
-        ));
+        // CI deliberately uses a repository-local TMPDIR. Keep the socket's
+        // child name short enough for Linux's fixed-size Unix path field.
+        let path = std::env::temp_dir().join(format!(".asg-{:x}-{sequence:x}", std::process::id()));
         std::fs::create_dir(&path).expect("create isolated test directory");
         Self { path }
     }
@@ -63,7 +64,7 @@ impl Drop for TempDir {
             .path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("automata-sandbox-guest-test-"));
+            .is_some_and(|name| name.starts_with(".asg-"));
         if is_owned_test_directory {
             let _ = std::fs::remove_dir_all(&self.path);
         }
@@ -1083,11 +1084,12 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
     );
 
     let socket = temp.path().join("guest.sock");
-    let mut server = Command::new(GUEST_BINARY)
+    let mut server = Command::new(&installed)
         .args(["serve", socket.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .expect("start command-line server");
     timeout(TEST_TIMEOUT, async {
@@ -1114,11 +1116,12 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
         1_000,
         64,
     );
-    let mut client = Command::new(GUEST_BINARY)
+    let mut client = Command::new(&installed)
         .args(["client", socket.to_str().unwrap()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .expect("start stdio forwarding client");
     let mut stdin = client.stdin.take().unwrap();
@@ -1142,10 +1145,11 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
     );
     assert!(!truncated);
 
-    let mut unavailable = Command::new(GUEST_BINARY)
+    let mut unavailable = Command::new(&installed)
         .args(["client", missing_socket.to_str().unwrap()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
     unavailable

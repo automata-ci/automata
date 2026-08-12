@@ -24,32 +24,48 @@ use automata_ci_store::{
     ConformanceReadRepository, ConformanceWorkflowOutcome, HumanAuthorizationTarget,
     HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
     HumanWorkflowReadRepository, JobIrMetadata, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
-    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId, StoreError, TenantScope,
-    WorkflowRunStatus,
+    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderRepositoryId, RepositoryId, StoreError,
+    TenantScope, WorkflowRunStatus, github_provider_repository_id,
 };
 use axum::{
     Router,
     body::Body,
     extract::{Path, Request, State, rejection::PathRejection},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
-use uuid::Uuid;
+use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 
 const CONFORMANCE_READ_PERMISSION: &str = "conformance:read";
 const MAX_CONFORMANCE_EXPORT_BLOB_BYTES: u64 = 128 * 1_048_576;
 
 pub(crate) const GITHUB_DELIVERY_EXPORT_PATH: &str =
-    "/api/v1/conformance/repositories/{repository_id}/github-deliveries/{delivery_id}";
+    "/api/v1/conformance/github/repositories/{provider_repository_id}/deliveries/{delivery_id}";
 
 #[derive(Clone)]
 struct ConformanceApiState {
     reads: Arc<dyn HumanWorkflowReadRepository>,
     deliveries: Arc<dyn ConformanceReadRepository>,
     blobs: Arc<dyn ImmutableBlobStore>,
+    authorization: ConformanceAuthorization,
+}
+
+#[derive(Clone)]
+enum ConformanceAuthorization {
+    HumanSession,
+    DeploymentToken {
+        tenant: TenantScope,
+        token_sha256: [u8; 32],
+    },
+}
+
+enum PresentedAuthorization {
+    HumanSession(Box<AuthenticatedRequestSnapshot>),
+    DeploymentToken(String),
 }
 
 /// Builds the private conformance-export route.
@@ -62,12 +78,46 @@ pub(crate) fn conformance_api_router(
     deliveries: Arc<dyn ConformanceReadRepository>,
     blobs: Arc<dyn ImmutableBlobStore>,
 ) -> Router {
+    conformance_router(
+        reads,
+        deliveries,
+        blobs,
+        ConformanceAuthorization::HumanSession,
+    )
+}
+
+/// Builds the loopback deployment-token conformance route.
+pub(crate) fn deployment_conformance_api_router(
+    reads: Arc<dyn HumanWorkflowReadRepository>,
+    deliveries: Arc<dyn ConformanceReadRepository>,
+    blobs: Arc<dyn ImmutableBlobStore>,
+    tenant: TenantScope,
+    token: &str,
+) -> Router {
+    conformance_router(
+        reads,
+        deliveries,
+        blobs,
+        ConformanceAuthorization::DeploymentToken {
+            tenant,
+            token_sha256: Sha256::digest(token.as_bytes()).into(),
+        },
+    )
+}
+
+fn conformance_router(
+    reads: Arc<dyn HumanWorkflowReadRepository>,
+    deliveries: Arc<dyn ConformanceReadRepository>,
+    blobs: Arc<dyn ImmutableBlobStore>,
+    authorization: ConformanceAuthorization,
+) -> Router {
     Router::new()
         .route(GITHUB_DELIVERY_EXPORT_PATH, get(export_github_delivery))
         .with_state(ConformanceApiState {
             reads,
             deliveries,
             blobs,
+            authorization,
         })
         .layer(middleware::from_fn(super::api_security::no_store))
 }
@@ -77,32 +127,27 @@ async fn export_github_delivery(
     path: Result<Path<(String, String)>, PathRejection>,
     request: Request,
 ) -> Response {
-    let (repository_id, delivery_id) = match delivery_target(path) {
+    let (provider_repository_id, delivery_id) = match delivery_target(path) {
         Ok(target) => target,
         Err(error) => return error.into_response(),
     };
     if request.uri().query().is_some() {
         return ApiError::InvalidRequest.into_response();
     }
-    let snapshot = match cli_snapshot(&request) {
-        Ok(snapshot) => snapshot,
+    let presented = match presented_authorization(&state, &request) {
+        Ok(presented) => presented,
         Err(error) => return error.into_response(),
     };
-    let Ok(tenant) = TenantScope::from_authenticated_tenant_id(
-        snapshot.session().identity().tenant_id().as_str(),
-    ) else {
-        return ApiError::Internal.into_response();
-    };
+    let (tenant, repository_id) =
+        match authorized_scope(&state, presented, provider_repository_id).await {
+            Ok(scope) => scope,
+            Err(error) => return error.into_response(),
+        };
     let Ok(query) =
         ConformanceDeliveryQuery::new(tenant.clone(), repository_id, "github", delivery_id)
     else {
         return ApiError::InvalidRequest.into_response();
     };
-    match authorize(&state, snapshot, &tenant, repository_id).await {
-        Ok(true) => {}
-        Ok(false) => return ApiError::Forbidden.into_response(),
-        Err(error) => return error.into_response(),
-    }
 
     let delivery = match state.deliveries.get_conformance_delivery(&query).await {
         Ok(Some(delivery)) => delivery,
@@ -113,6 +158,77 @@ async fn export_github_delivery(
         Ok(document) => json_response(StatusCode::OK, &document),
         Err(error) => error.into_response(),
     }
+}
+
+async fn authorized_scope(
+    state: &ConformanceApiState,
+    presented: PresentedAuthorization,
+    provider_repository_id: ProviderRepositoryId,
+) -> Result<(TenantScope, RepositoryId), ApiError> {
+    match (&state.authorization, presented) {
+        (
+            ConformanceAuthorization::HumanSession,
+            PresentedAuthorization::HumanSession(snapshot),
+        ) => {
+            let tenant = TenantScope::from_authenticated_tenant_id(
+                snapshot.session().identity().tenant_id().as_str(),
+            )
+            .map_err(|_| ApiError::Internal)?;
+            let repository_id = github_provider_repository_id(&tenant, provider_repository_id);
+            if !authorize(state, &snapshot, &tenant, repository_id).await? {
+                return Err(ApiError::Forbidden);
+            }
+            Ok((tenant, repository_id))
+        }
+        (
+            ConformanceAuthorization::DeploymentToken {
+                tenant,
+                token_sha256,
+            },
+            PresentedAuthorization::DeploymentToken(token),
+        ) => {
+            let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            if !bool::from(token_sha256.ct_eq(&candidate)) {
+                return Err(ApiError::Unauthorized);
+            }
+            let repository_id = github_provider_repository_id(tenant, provider_repository_id);
+            Ok((tenant.clone(), repository_id))
+        }
+        _ => Err(ApiError::Unauthorized),
+    }
+}
+
+fn presented_authorization(
+    state: &ConformanceApiState,
+    request: &Request,
+) -> Result<PresentedAuthorization, ApiError> {
+    match &state.authorization {
+        ConformanceAuthorization::HumanSession => Ok(PresentedAuthorization::HumanSession(
+            Box::new(cli_snapshot(request)?),
+        )),
+        ConformanceAuthorization::DeploymentToken { .. } => Ok(
+            PresentedAuthorization::DeploymentToken(exact_bearer(request.headers())?.to_owned()),
+        ),
+    }
+}
+
+fn exact_bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let value = values.next().ok_or(ApiError::Unauthorized)?;
+    if values.next().is_some() {
+        return Err(ApiError::Unauthorized);
+    }
+    let value = value.to_str().map_err(|_| ApiError::Unauthorized)?;
+    let (scheme, token) = value.split_once(' ').ok_or(ApiError::Unauthorized)?;
+    if !scheme.eq_ignore_ascii_case("bearer")
+        || token.is_empty()
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(token)
 }
 
 async fn authorize(
@@ -376,24 +492,22 @@ async fn load_attempt(
 
 fn delivery_target(
     path: Result<Path<(String, String)>, PathRejection>,
-) -> Result<(RepositoryId, String), ApiError> {
-    let Path((repository_id, delivery_id)) = path.map_err(|_| ApiError::InvalidRequest)?;
-    let repository_id = canonical_uuid(&repository_id)?;
+) -> Result<(ProviderRepositoryId, String), ApiError> {
+    let Path((provider_repository_id, delivery_id)) = path.map_err(|_| ApiError::InvalidRequest)?;
+    let parsed = provider_repository_id
+        .parse::<u64>()
+        .map_err(|_| ApiError::InvalidRequest)?;
+    if parsed.to_string() != provider_repository_id {
+        return Err(ApiError::InvalidRequest);
+    }
+    let repository_id = ProviderRepositoryId::new(parsed).map_err(|_| ApiError::InvalidRequest)?;
     if delivery_id.is_empty() {
         return Err(ApiError::InvalidRequest);
     }
-    Ok((RepositoryId::from_uuid(repository_id), delivery_id))
+    Ok((repository_id, delivery_id))
 }
 
-fn canonical_uuid(value: &str) -> Result<Uuid, ApiError> {
-    let parsed = Uuid::parse_str(value).map_err(|_| ApiError::InvalidRequest)?;
-    if parsed.is_nil() || parsed.hyphenated().to_string() != value {
-        return Err(ApiError::InvalidRequest);
-    }
-    Ok(parsed)
-}
-
-fn cli_snapshot(request: &Request) -> Result<&AuthenticatedRequestSnapshot, ApiError> {
+fn cli_snapshot(request: &Request) -> Result<AuthenticatedRequestSnapshot, ApiError> {
     let snapshot = request
         .extensions()
         .get::<AuthenticatedRequestSnapshot>()
@@ -401,7 +515,7 @@ fn cli_snapshot(request: &Request) -> Result<&AuthenticatedRequestSnapshot, ApiE
     if snapshot.session().identity().kind() != SessionKind::Cli {
         return Err(ApiError::Unauthorized);
     }
-    Ok(snapshot)
+    Ok(snapshot.clone())
 }
 
 fn store_error(error: &StoreError) -> ApiError {
@@ -692,14 +806,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn route_ids_are_canonical_and_non_nil() {
-        let canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    fn provider_repository_ids_are_canonical_and_positive() {
         assert_eq!(
-            canonical_uuid(canonical).expect("UUID").to_string(),
-            canonical
+            delivery_target(Ok(Path(("42".to_owned(), "delivery".to_owned()))))
+                .expect("target")
+                .0
+                .get(),
+            42
         );
-        assert!(canonical_uuid("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA").is_err());
-        assert!(canonical_uuid("00000000-0000-0000-0000-000000000000").is_err());
+        for invalid in ["0", "01", "+1", "-1", "not-a-number"] {
+            assert!(
+                delivery_target(Ok(Path((invalid.to_owned(), "delivery".to_owned())))).is_err()
+            );
+        }
     }
 
     #[test]
@@ -722,5 +841,33 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&conclusion).expect("JSON"), expected);
         }
+    }
+
+    #[test]
+    fn deployment_bearer_parser_accepts_one_exact_opaque_credential() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer deployment-secret"),
+        );
+        assert_eq!(exact_bearer(&headers), Ok("deployment-secret"));
+
+        for malformed in [
+            "Basic deployment-secret",
+            "Bearer",
+            "Bearer  deployment-secret",
+            "Bearer deployment-secret extra",
+        ] {
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(malformed).expect("header"),
+            );
+            assert_eq!(exact_bearer(&headers), Err(ApiError::Unauthorized));
+        }
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer second-secret"),
+        );
+        assert_eq!(exact_bearer(&headers), Err(ApiError::Unauthorized));
     }
 }

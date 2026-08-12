@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use automata_ci_core::{OperationId, RunId, UnixMillis, WorkflowId};
+use automata_ci_core::{
+    OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, UnixMillis, WorkflowId,
+};
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -639,7 +641,53 @@ async fn record_workflow_dispatch_audit(
     .await
     .map_err(operation_error)?;
     validate_workflow_dispatch_audit(transaction, command, claim, actor, command.admitted_at())
-        .await
+        .await?;
+    pin_workflow_dispatch_runtime_policy(transaction, command).await
+}
+
+async fn pin_workflow_dispatch_runtime_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_runtime_policy_pins (
+            run_id, tenant_id, repository_id, policy_revision,
+            policy_digest, pinned_at_ms
+        )
+        SELECT $1, $2, $3, manifest.runtime_policy_revision,
+               manifest.runtime_policy_digest, $4
+        FROM github_provider_manifest_current AS current_manifest
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = manifest.tenant_id
+         AND policy.repository_id = manifest.repository_id
+         AND policy.policy_revision = manifest.runtime_policy_revision
+         AND policy.policy_digest = manifest.runtime_policy_digest
+         AND policy.state = 'sealed'
+        WHERE current_manifest.tenant_id = $2
+          AND current_manifest.repository_id = $3
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.admitted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "workflow dispatch lacks one exact current runtime policy",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn validate_workflow_dispatch_audit(
@@ -1212,12 +1260,12 @@ async fn insert_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema
+            publication_safety_schema, runner_requirements_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
             $11,$12,$13,$14,$15,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,'repository_policy',1
+            $28,$29,$29,$30,$31,'repository_policy',1,$32
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -1266,6 +1314,7 @@ async fn insert_run(
     .bind(publication.dashboard())
     .bind(publication.logs())
     .bind(publication.artifacts())
+    .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1288,8 +1337,9 @@ async fn insert_logical_run_and_invocation(
             run_id, root_invocation_id, orchestration_schema,
             admission_digest, state, revision, admitted_at_ms, updated_at_ms,
             base_context_digest, base_context_object_key,
-            base_context_size_bytes, base_context_media_type, base_context_schema
-        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5,$6,$7,$8,$9,$10)
+            base_context_size_bytes, base_context_media_type, base_context_schema,
+            runner_requirements_schema
+        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5,$6,$7,$8,$9,$10,$11)
         ",
     )
     .bind(command.run_id().as_uuid())
@@ -1308,6 +1358,7 @@ async fn insert_logical_run_and_invocation(
     .bind(base_context.map(|_| {
         i16::try_from(automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)
     }))
+    .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

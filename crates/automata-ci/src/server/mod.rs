@@ -68,8 +68,8 @@ pub use github_provider_config::{
     GithubProviderAppConfig, GithubProviderAuthorityConfig, GithubProviderAuthorityId,
     GithubProviderConfig, GithubProviderConfigError, GithubProviderConnectionId,
     GithubProviderInternalRepositoryId, GithubProviderRepositoryConfig,
-    GithubProviderScheduleConfig, GithubProviderWebhookConfig, MAX_GITHUB_PROVIDER_CONFIG_BYTES,
-    MAX_GITHUB_PROVIDER_REPOSITORIES,
+    GithubProviderScheduleConfig, GithubProviderTransport, GithubProviderWebhookConfig,
+    MAX_GITHUB_PROVIDER_CONFIG_BYTES, MAX_GITHUB_PROVIDER_REPOSITORIES,
 };
 pub use github_provider_credentials::{
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,

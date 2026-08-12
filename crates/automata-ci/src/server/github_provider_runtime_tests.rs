@@ -25,6 +25,7 @@ use automata_ci_store::{
     RunnerGeneration, SessionEpoch, StableRunnerSlot,
 };
 use serde_json::{Value, json};
+use url::Url;
 
 use super::super::github_provider::authority_configuration_fingerprint;
 use super::*;
@@ -89,11 +90,11 @@ fn repository(
             }],
             "resources": {
                 "defaults": {
-                    "requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
-                    "limits": {"cpu_millis": 1000, "memory_bytes": 1073741824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+                    "requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                    "limits": {"cpu_millis": 1000, "memory_bytes": 1_073_741_824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
                 },
-                "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
-                "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8589934592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+                "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
             },
             "schema": 1
         },
@@ -108,7 +109,8 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 2,
+        "schema": 3,
+        "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider-runtime",
@@ -122,6 +124,28 @@ fn document(repositories: &[Value]) -> Value {
         },
         "repositories": repositories
     })
+}
+
+#[test]
+fn loopback_transport_builds_one_exact_emulator_origin() {
+    let api_base =
+        Url::parse("http://automata-git.localhost:18088/api/v3/").expect("emulator API base");
+    let transport = GithubProviderTransport::LoopbackEmulator {
+        api_base: api_base.clone(),
+    };
+
+    let endpoint = provider_http_endpoint(&transport).expect("provider HTTP endpoint");
+    assert_eq!(endpoint.trusted_origins().api_base(), &api_base);
+    assert_eq!(
+        endpoint.trusted_origins().oauth_origin().as_str(),
+        "http://automata-git.localhost:18088/"
+    );
+    let credential = provider_credential_config(
+        &transport,
+        GithubAppIssuer::new("Iv1.isolated-emulator").expect("issuer"),
+        GithubInstallationId::new(10).expect("installation"),
+    );
+    assert!(credential.is_ok());
 }
 
 fn config_file() -> PathBuf {

@@ -185,7 +185,7 @@ impl FixtureServer {
     }
 
     pub fn broker_with_limits(&self, limits: GithubAppHttpLimits) -> GithubAppCredentialBroker {
-        let config = GithubAppCredentialConfig::new_for_loopback_testing(
+        let config = GithubAppCredentialConfig::new_for_loopback_emulator(
             self.url("api/v3/"),
             ProviderResourceId::new(ISSUER).unwrap(),
             GithubInstallationId::new(INSTALLATION_ID).unwrap(),

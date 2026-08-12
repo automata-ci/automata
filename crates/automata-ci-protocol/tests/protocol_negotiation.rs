@@ -29,10 +29,10 @@ fn disjoint_ranges_return_typed_error() {
 }
 
 #[test]
-fn current_lease_request_chaining_protocol_is_exactly_v4_with_no_v3_downgrade() {
-    assert_eq!(PROTOCOL_MIN_VERSION, version(4));
-    assert_eq!(PROTOCOL_MAX_VERSION, version(4));
-    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(4, 4));
+fn current_resource_aware_protocol_is_exactly_v5_with_no_v4_downgrade() {
+    assert_eq!(PROTOCOL_MIN_VERSION, version(5));
+    assert_eq!(PROTOCOL_MAX_VERSION, version(5));
+    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(5, 5));
 
     let legacy = range(3, 3);
     assert_eq!(

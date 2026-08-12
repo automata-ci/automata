@@ -5,15 +5,15 @@ mod github_manifest_fixture;
 use automata_ci_core::{JobAuthorityProfile, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     ClaimGithubServerServiceMint, EnsureGithubServerServiceAuthority, GithubCheckName,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository as _, GithubServerServiceAuthoritySelector,
-    GithubServerServiceGeneration, GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
-    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryVisibility, ReconcileExpiredGithubServerServiceMint, TenantScope,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository as _,
+    GithubServerServiceAuthoritySelector, GithubServerServiceGeneration,
+    GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
+    GithubServerServiceScope, GithubServerServiceWorkerId, ProviderConnectionId,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryVisibility,
+    ReconcileExpiredGithubServerServiceMint, TenantScope,
 };
 use sqlx::{AssertSqlSafe, migrate::Migrate as _};
 use uuid::Uuid;
@@ -456,16 +456,297 @@ async fn bootstrap_manifest(
     applied_at: i64,
 ) -> TestResult {
     set_database_test_clock(database, applied_at).await?;
-    let receipt = database
-        .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(applied_at),
-            ),
-        )
+    sqlx::query(
+        "ALTER TABLE workflow_runtime_policy_revisions \
+         DISABLE TRIGGER workflow_runtime_policy_revisions_enforce",
+    )
+    .execute(database.pool())
+    .await?;
+    let seeded =
+        bootstrap_manifest_with_policy_validation_disabled(database, manifest, applied_at).await;
+    let restored = sqlx::query(
+        "ALTER TABLE workflow_runtime_policy_revisions \
+         ENABLE TRIGGER workflow_runtime_policy_revisions_enforce",
+    )
+    .execute(database.pool())
+    .await;
+    if let Err(error) = restored {
+        return Err(error.into());
+    }
+    seeded
+}
+
+async fn bootstrap_manifest_with_policy_validation_disabled(
+    database: &TestDatabase,
+    manifest: GithubProviderManifest,
+    applied_at: i64,
+) -> TestResult {
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(applied_at),
+    );
+    let canonical_policy = bootstrap.runtime_policy().policy().canonical_bytes()?;
+    let (owner, name) = manifest
+        .github_repository_name()
+        .as_str()
+        .split_once('/')
+        .ok_or("fixture repository name is not owner/name")?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) \
+         VALUES ($1, $1, $2, $2) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(manifest.tenant().as_str())
+    .bind(applied_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO repositories (
+            id, tenant_id, scm_provider, provider_repository_id,
+            owner, name, created_at_ms, updated_at_ms
+        ) VALUES ($1,$2,'github',$3,$4,$5,$6,$6)
+        ON CONFLICT (id) DO NOTHING
+        ",
+    )
+    .bind(manifest.repository_id().as_uuid())
+    .bind(manifest.tenant().as_str())
+    .bind(manifest.github_repository_id().get().to_string())
+    .bind(owner)
+    .bind(name)
+    .bind(applied_at)
+    .execute(&mut *transaction)
+    .await?;
+
+    insert_legacy_runtime_policy(&mut transaction, &manifest, &canonical_policy, applied_at)
         .await?;
-    assert_eq!(receipt.manifest().current().manifest(), &manifest);
+
+    insert_legacy_manifest_revision(&mut transaction, &manifest, applied_at).await?;
+    if manifest.revision().get() == 1 {
+        sqlx::query(
+            r"
+            INSERT INTO github_provider_manifest_current (
+                tenant_id, repository_id, provider_connection_id,
+                manifest_revision, manifest_digest, activated_at_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6)
+            ",
+        )
+        .bind(manifest.tenant().as_str())
+        .bind(manifest.repository_id().as_uuid())
+        .bind(manifest.connection_id().as_uuid())
+        .bind(i64::try_from(manifest.revision().get())?)
+        .bind(manifest.digest().as_bytes().as_slice())
+        .bind(applied_at)
+        .execute(&mut *transaction)
+        .await?;
+    } else {
+        sqlx::query(
+            r"
+            UPDATE github_provider_manifest_current
+            SET manifest_revision = $4, manifest_digest = $5, activated_at_ms = $6
+            WHERE tenant_id = $1 AND repository_id = $2
+              AND provider_connection_id = $3
+            ",
+        )
+        .bind(manifest.tenant().as_str())
+        .bind(manifest.repository_id().as_uuid())
+        .bind(manifest.connection_id().as_uuid())
+        .bind(i64::try_from(manifest.revision().get())?)
+        .bind(manifest.digest().as_bytes().as_slice())
+        .bind(applied_at)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+// This migration test intentionally runs the released schema through 0052
+// while compiling against the current product model. Seed the current
+// canonical bytes as opaque policy evidence; migration 0053 does not interpret
+// policy contents, and every relational pin remains live.
+async fn insert_legacy_runtime_policy(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    manifest: &GithubProviderManifest,
+    canonical_policy: &[u8],
+    applied_at: i64,
+) -> TestResult {
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_revisions (
+            tenant_id, repository_id, policy_revision, policy_digest,
+            canonical_policy, policy_schema, workspace_root,
+            workspace_derivation_version, mapping_count, state,
+            registered_at_ms, sealed_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,1,'/__w',1,1,'sealed',$6,$6)
+        ",
+    )
+    .bind(manifest.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .bind(i64::try_from(manifest.runtime_policy_revision().get())?)
+    .bind(manifest.runtime_policy_digest().as_bytes().as_slice())
+    .bind(canonical_policy)
+    .bind(applied_at)
+    .execute(&mut **transaction)
+    .await?;
+    if manifest.runtime_policy_revision().get() == 1 {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runtime_policy_current (
+                tenant_id, repository_id, policy_revision,
+                policy_digest, activated_at_ms
+            ) VALUES ($1,$2,$3,$4,$5)
+            ",
+        )
+        .bind(manifest.tenant().as_str())
+        .bind(manifest.repository_id().as_uuid())
+        .bind(i64::try_from(manifest.runtime_policy_revision().get())?)
+        .bind(manifest.runtime_policy_digest().as_bytes().as_slice())
+        .bind(applied_at)
+        .execute(&mut **transaction)
+        .await?;
+    } else {
+        sqlx::query(
+            r"
+            UPDATE workflow_runtime_policy_current
+            SET policy_revision = $3, policy_digest = $4, activated_at_ms = $5
+            WHERE tenant_id = $1 AND repository_id = $2
+            ",
+        )
+        .bind(manifest.tenant().as_str())
+        .bind(manifest.repository_id().as_uuid())
+        .bind(i64::try_from(manifest.runtime_policy_revision().get())?)
+        .bind(manifest.runtime_policy_digest().as_bytes().as_slice())
+        .bind(applied_at)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Released 0052 manifest columns are bound one-for-one.
+async fn insert_legacy_manifest_revision(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    manifest: &GithubProviderManifest,
+    registered_at: i64,
+) -> TestResult {
+    sqlx::query(
+        r"
+        INSERT INTO github_provider_manifest_revisions (
+            tenant_id, repository_id, provider_connection_id,
+            manifest_revision, manifest_digest, provider_installation_id,
+            github_repository_id, github_repository_name, repository_visibility,
+            github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
+            app_key_spki_sha256, app_configuration_revision,
+            webhook_verifier_fingerprint_sha256, webhook_verifier_revision,
+            policy_revision, authority_profile,
+            workflow_path, event_name, git_ref, check_subject_key, check_name,
+            github_web_origin, github_api_origin, github_archive_origin,
+            github_rest_api_version, github_rest_accept, github_archive_accept,
+            repository_source_authentication, repository_source_revision,
+            repository_archive_format,
+            webhook_max_body_bytes, webhook_accept_timeout_ms,
+            push_webhook_max_commits, path_filter_max_commits,
+            path_filter_max_changed_files,
+            archive_max_compressed_bytes, archive_max_decompressed_bytes,
+            archive_max_entries, archive_max_expanded_bytes,
+            archive_max_entry_path_bytes, archive_max_workflows,
+            workflow_max_bytes,
+            runner_policy_digest, runner_policy_object_key,
+            runner_policy_size_bytes, runner_policy_media_type,
+            runtime_policy_revision, runtime_policy_digest,
+            registered_at_ms
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+            $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
+            $35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,
+            $51
+        )
+        ",
+    )
+    .bind(manifest.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .bind(manifest.connection_id().as_uuid())
+    .bind(i64::try_from(manifest.revision().get())?)
+    .bind(manifest.digest().as_bytes().as_slice())
+    .bind(i64::try_from(manifest.installation_id().get())?)
+    .bind(i64::try_from(manifest.github_repository_id().get())?)
+    .bind(manifest.github_repository_name().as_str())
+    .bind(match manifest.repository_visibility() {
+        ProviderRepositoryVisibility::Public => "public",
+        ProviderRepositoryVisibility::Private => "private",
+    })
+    .bind(i64::try_from(manifest.github_app_id().get())?)
+    .bind(manifest.app_client_id().as_str())
+    .bind(manifest.jwt_issuer().as_str())
+    .bind(manifest.app_key_spki_sha256().as_bytes().as_slice())
+    .bind(i64::try_from(manifest.app_configuration_revision().get())?)
+    .bind(
+        manifest
+            .webhook_verifier_fingerprint()
+            .sha256()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(i64::try_from(manifest.webhook_verifier_revision().get())?)
+    .bind(i64::try_from(manifest.policy_revision().get())?)
+    .bind("standard")
+    .bind(manifest.workflow_path())
+    .bind(manifest.event_name())
+    .bind(manifest.git_ref())
+    .bind(manifest.check_subject_key().as_str())
+    .bind(manifest.check_name().as_str())
+    .bind(manifest.origins().web_origin())
+    .bind(manifest.origins().api_origin())
+    .bind(manifest.origins().archive_origin())
+    .bind(manifest.rest_api_version())
+    .bind(manifest.rest_accept())
+    .bind(manifest.archive_accept())
+    .bind(manifest.source_authentication())
+    .bind(manifest.source_revision())
+    .bind(manifest.archive_format())
+    .bind(i64::try_from(manifest.limits().webhook_max_body_bytes())?)
+    .bind(i64::try_from(
+        manifest.limits().webhook_accept_timeout_millis(),
+    )?)
+    .bind(i64::try_from(manifest.limits().push_webhook_max_commits())?)
+    .bind(i64::try_from(manifest.limits().path_filter_max_commits())?)
+    .bind(i64::try_from(
+        manifest.limits().path_filter_max_changed_files(),
+    )?)
+    .bind(i64::try_from(
+        manifest.limits().archive_max_compressed_bytes(),
+    )?)
+    .bind(i64::try_from(
+        manifest.limits().archive_max_decompressed_bytes(),
+    )?)
+    .bind(i64::try_from(manifest.limits().archive_max_entries())?)
+    .bind(i64::try_from(
+        manifest.limits().archive_max_expanded_bytes(),
+    )?)
+    .bind(i64::try_from(
+        manifest.limits().archive_max_entry_path_bytes(),
+    )?)
+    .bind(i64::try_from(manifest.limits().archive_max_workflows())?)
+    .bind(i64::try_from(manifest.limits().workflow_max_bytes())?)
+    .bind(
+        manifest
+            .runner_policy()
+            .object()
+            .digest()
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(manifest.runner_policy().object().object_key().as_str())
+    .bind(i64::try_from(
+        manifest.runner_policy().object().encoded_size(),
+    )?)
+    .bind(manifest.runner_policy().object().media_type())
+    .bind(i64::try_from(manifest.runtime_policy_revision().get())?)
+    .bind(manifest.runtime_policy_digest().as_bytes().as_slice())
+    .bind(registered_at)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 

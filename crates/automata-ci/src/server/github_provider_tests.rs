@@ -44,11 +44,11 @@ fn runner_policy() -> Value {
 fn resource_policy() -> Value {
     json!({
         "defaults": {
-            "requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
-            "limits": {"cpu_millis": 1000, "memory_bytes": 1073741824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+            "requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+            "limits": {"cpu_millis": 1000, "memory_bytes": 1_073_741_824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
         },
-        "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268435456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
-        "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8589934592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+        "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+        "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
     })
 }
 
@@ -108,7 +108,8 @@ fn mixed_document() -> Value {
         .remove("workflow_path");
     public["workflow_selection"] = json!({"mode": "all_direct"});
     json!({
-        "schema": 2,
+        "schema": 3,
+        "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",

@@ -639,7 +639,7 @@ impl GithubLogicalJobOrchestrationService {
             return Ok(activation_relational_failure());
         };
         let Ok(credential_requirements) =
-            crate::discover_job_credential_requirements(plan.logical(), logical_job)
+            crate::discover_job_credential_requirements(plan.logical(), &logical_job)
         else {
             return Ok(activation_payload_failure());
         };
@@ -653,10 +653,8 @@ impl GithubLogicalJobOrchestrationService {
         ) else {
             return Ok(activation_payload_failure());
         };
-        let reusable_secret_permission = reusable_secret_permission(
-            permission_ceiling.is_some(),
-            job_references_secret,
-        );
+        let reusable_secret_permission =
+            reusable_secret_permission(permission_ceiling.is_some(), job_references_secret);
         let gate_evidence = ActivationGateEvidence {
             event_trust,
             source_kind,
@@ -1267,6 +1265,12 @@ fn classify_github_job_source(
     {
         return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
     }
+    // workflow_run identifies only the upstream actor, while merge_group omits
+    // constituent PR provenance. Neither payload can authorize a secret-bearing
+    // job until admission durably binds the transitive source dimensions.
+    if job_may_consume_secret && matches!(event_name, "workflow_run" | "merge_group") {
+        return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
+    }
     let source = match event_name {
         "pull_request"
         | "pull_request_target"
@@ -1282,14 +1286,6 @@ fn classify_github_job_source(
                 .filter(|login| !login.is_empty())
                 .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
         )),
-        // The workflow_run payload identifies the upstream run actor, not the
-        // author of an upstream PR. A human review/label action on a
-        // Dependabot PR can therefore look like trusted same-repository work.
-        // Until admission binds the transitive PR subject, secret-bearing
-        // downstream jobs must not infer authority from this lossy payload.
-        "workflow_run" if job_may_consume_secret => {
-            return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-        }
         "workflow_run" => Some((
             event
                 .pointer("/workflow_run/head_repository/full_name")
@@ -1301,14 +1297,6 @@ fn classify_github_job_source(
                 .filter(|login| !login.is_empty())
                 .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
         )),
-        // A merge queue may contain fork or dependency-automation changes,
-        // but GitHub's merge_group payload does not carry the constituent PR
-        // provenance needed by the closed secret-policy model. Non-secret
-        // jobs may run; secret-bearing jobs fail closed until admission binds
-        // every constituent source dimension durably.
-        "merge_group" if job_may_consume_secret => {
-            return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-        }
         _ => None,
     };
     let Some((source_repository, source_actor)) = source else {
@@ -1345,10 +1333,10 @@ fn is_dependabot_actor(actor: &str) -> bool {
 mod source_evidence_tests {
     use super::*;
     use automata_ci_core::{
-        CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate,
-        LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate,
-        PlanSourceLocation, PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance,
-        WorkflowSourceProvenance, WorkflowStepKey,
+        CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate, LogicalRunStepTemplate,
+        LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, PlanSourceLocation,
+        PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance, WorkflowSourceProvenance,
+        WorkflowStepKey,
     };
 
     fn repository_plan(event_name: &str) -> WorkflowPlan {
@@ -1376,10 +1364,7 @@ mod source_evidence_tests {
         .build()
         .expect("step");
         let job = LogicalJobTemplate::builder(
-            Located::new(
-                WorkflowJobKey::new("test").expect("job key"),
-                span.clone(),
-            ),
+            Located::new(WorkflowJobKey::new("test").expect("job key"), span.clone()),
             0,
             LogicalJobKind::Steps(StepJobTemplate::new(
                 LogicalRunnerTemplate::new(
@@ -1497,7 +1482,7 @@ mod source_evidence_tests {
                 &event,
                 true,
             )
-                .expect("source evidence"),
+            .expect("source evidence"),
             (JobEventTrust::Trusted, JobSourceKind::SameRepository)
         );
     }
@@ -1518,7 +1503,7 @@ mod source_evidence_tests {
                 &fork,
                 true,
             )
-                .expect("fork evidence"),
+            .expect("fork evidence"),
             (JobEventTrust::Untrusted, JobSourceKind::Fork)
         );
         assert!(matches!(

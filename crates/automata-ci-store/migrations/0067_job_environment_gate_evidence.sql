@@ -1,6 +1,6 @@
 -- Value-free activation evidence for deterministic pre-lease environment gates.
 
--- A pre-0066 activation instance has no authenticated event/environment
+-- A pre-0067 activation instance has no authenticated event/environment
 -- evidence from which the current gate input can be reconstructed. Serialize
 -- the cut against both facts that decide whether such state is live, then
 -- refuse only nonempty active publications. Terminal history is inert and an
@@ -55,7 +55,7 @@ CREATE TABLE workflow_plan_v2_job_environment_evidence (
     CONSTRAINT job_environment_evidence_created_at CHECK (created_at_ms >= 0)
 );
 
--- The pre-0066 expansion ledger deliberately preserves caller spelling and
+-- The pre-0067 expansion ledger deliberately preserves caller spelling and
 -- can contain historical case-fold collisions or names that current managed
 -- secrets would reject. Do not rewrite or globally constrain that history.
 -- Instead, authorize one selected canonical name only when every non-root hop

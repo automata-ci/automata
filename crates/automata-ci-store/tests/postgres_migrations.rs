@@ -832,7 +832,7 @@ async fn g1_upgrade_fences_populated_legacy_execution_state_without_fake_metadat
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(current_compatibility, (4, 5, 2));
+        assert_eq!(current_compatibility, (4, 5, 3));
         Ok(())
     })
     .await
@@ -1081,7 +1081,7 @@ async fn job_ir_v4_upgrade_fences_v3_then_v5_upgrade_rejects_obsolete_history() 
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(compatibility, (4, 5, 2));
+        assert_eq!(compatibility, (4, 5, 3));
         Ok(())
     })
     .await
@@ -1240,13 +1240,13 @@ async fn protocol_v4_lease_head_upgrade_fences_old_live_sessions_and_cleans_clos
         .execute(database.pool())
         .await
         .expect_err("a protocol-v3 session cannot remain live after migration 0008");
-        assert_constraint(&rejected, "runner_sessions_live_protocol_v4");
+        assert_constraint(&rejected, "runner_sessions_live_protocol_v5");
         sqlx::query(
             r"
             INSERT INTO runner_sessions (
                 id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
                 connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch
-            ) VALUES ($1, $2, 4, 5, '{}', 7, 7, 1, 3)
+            ) VALUES ($1, $2, 5, 5, '{}', 7, 7, 1, 3)
             ",
         )
         .bind(Uuid::new_v4())
@@ -2078,7 +2078,7 @@ async fn exercise_g1_constraints(database: &TestDatabase, seed: &SeedData) -> Te
             id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
             connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch
         )
-        VALUES ($1, $2, 4, 5, '{}', 3, 3, 1, 2)
+        VALUES ($1, $2, 5, 5, '{}', 3, 3, 1, 2)
         ",
     )
     .bind(Uuid::new_v4())
@@ -2505,9 +2505,10 @@ async fn exercise_same_run_dependency_constraint(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 99, 'push', 'test/event', $5, 'queued', 1, 1)
+        VALUES ($1, $2, $3, $4, 99, 'push', 'test/event', $5, 'queued', 1, 1, 3)
         ",
     )
     .bind(other_run)
@@ -2737,9 +2738,10 @@ async fn assert_snapshot_matches_workflow(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 2, 'push', 'test/event', $5, 'queued', 1, 1)
+        VALUES ($1, $2, $3, $4, 2, 'push', 'test/event', $5, 'queued', 1, 1, 3)
         ",
     )
     .bind(Uuid::new_v4())
@@ -2786,9 +2788,10 @@ async fn exercise_repository_bound_runs(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 3, 'push', 'test/event', $5, 'queued', 1, 1)
+        VALUES ($1, $2, $3, $4, 3, 'push', 'test/event', $5, 'queued', 1, 1, 3)
         ",
     )
     .bind(Uuid::new_v4())
@@ -2837,9 +2840,10 @@ async fn exercise_repository_bound_runs(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms
+            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1)
+        VALUES ($1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1, 3)
         ",
     )
     .bind(other_run)

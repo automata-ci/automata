@@ -45,29 +45,30 @@ INSERT INTO workflow_snapshots (
 );
 INSERT INTO workflow_runs (
     id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
-    event_name, event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-    admission_epoch, event_digest, event_size_bytes, event_media_type,
+    public_run_id_alias, event_name, event_object_key, head_sha, status,
+    created_at_ms, updated_at_ms, admission_epoch, event_digest,
+    event_size_bytes, event_media_type,
     plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
-    workflow_name, git_ref, actor
+    workflow_name, git_ref, actor, runner_requirements_schema
 ) VALUES (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000001',
     '10000000-0000-0000-0000-000000000002',
     '10000000-0000-0000-0000-000000000003',
-    1, 1, 'push', 'reusable/event.json', decode(repeat('09', 20), 'hex'),
+    1, 1, 1, 'push', 'reusable/event.json', decode(repeat('09', 20), 'hex'),
     'in_progress', 1, 1, 4, decode(repeat('02', 32), 'hex'), 128,
     'application/json', decode(repeat('03', 32), 'hex'),
     'reusable/root-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2,
-    'Root', 'refs/heads/main', 'synthetic-actor'
+    'Root', 'refs/heads/main', 'synthetic-actor', 3
 );
 INSERT INTO workflow_plan_v2_runs (
     run_id, root_invocation_id, admission_digest, state, admitted_at_ms,
-    updated_at_ms, admission_graph_sealed_at_ms
+    updated_at_ms, admission_graph_sealed_at_ms, runner_requirements_schema
 ) VALUES (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000005',
-    decode(repeat('04', 32), 'hex'), 'active', 1, 1, 1
+    decode(repeat('04', 32), 'hex'), 'active', 1, 1, 1, 3
 );
 INSERT INTO workflow_plan_v2_invocations (
     id, run_id, plan_digest, plan_object_key, plan_size_bytes,
@@ -707,6 +708,16 @@ async fn reusable_secret_identity_chain_accepts_only_unambiguous_same_name_forwa
                     'two-hop/inherit-equivalent',
                     '10000000-0000-0000-0000-000000000111'::uuid,
                     'INHERITED_TOKEN', TRUE
+                ),
+                (
+                    'two-hop/omitted-parent',
+                    '10000000-0000-0000-0000-000000000113'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'two-hop/parent-casefold-ambiguity',
+                    '10000000-0000-0000-0000-000000000114'::uuid,
+                    'TOKEN', FALSE
                 ),
                 (
                     'one-hop/unrelated-target',

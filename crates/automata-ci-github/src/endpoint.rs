@@ -89,23 +89,23 @@ impl GithubHttpEndpoint {
         Self::new(GithubTrustedOrigins::github_dot_com(user_agent)?)
     }
 
-    /// Explicit test escape hatch for a deterministic HTTP fixture on a loopback
-    /// address. It rejects every non-loopback host and is never selected by
-    /// [`Self::new`].
+    /// Builds a deterministic GitHub protocol emulator client on loopback HTTP.
+    ///
+    /// This is an explicit isolated-deployment transport. It rejects every
+    /// non-loopback host and never falls back to a production origin.
     ///
     /// # Errors
     ///
     /// Returns an error unless both URLs are loopback HTTP URLs satisfying the same
     /// origin/base invariants as production configuration.
-    #[doc(hidden)]
-    pub fn new_for_loopback_testing(
+    pub fn new_for_loopback_emulator(
         oauth_origin: Url,
         api_base: Url,
         user_agent: &str,
         limits: GithubHttpLimits,
     ) -> Result<Self, GithubHttpConfigurationError> {
         let trusted =
-            GithubTrustedOrigins::loopback_for_testing(oauth_origin, api_base, user_agent, limits)?;
+            GithubTrustedOrigins::loopback_emulator(oauth_origin, api_base, user_agent, limits)?;
         let archive_origin = default_archive_origin(&trusted)?;
         Self::build(trusted, archive_origin)
     }

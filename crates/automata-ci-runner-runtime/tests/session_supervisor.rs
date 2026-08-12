@@ -602,7 +602,7 @@ async fn ignored_slot_unavailable_offer_stays_ignored_after_the_slot_is_released
         ),
     );
 
-    tokio::time::timeout(Duration::from_secs(1), runtime.run(shutdown))
+    tokio::time::timeout(support::TEST_WATCHDOG, runtime.run(shutdown))
         .await
         .expect("ignored replay must not wedge the session")
         .expect("durable ignored disposition remains authoritative");

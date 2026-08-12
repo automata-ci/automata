@@ -14,10 +14,11 @@ remote-write endpoint, cluster label, and runbook host before deployment.
 - `prometheus.yml` is a central Prometheus example using file-based target
   discovery and strict scrape limits.
 - `runner-agent.yml` is a node-local Prometheus Agent example for one outbound-
-  only runner. Replace its `instance: replace-me-unique` label with a stable,
-  globally unique inventory identity, and replace the remote-write URL and
-  credentials before starting it. It ingests and remote-writes native
-  histograms while retaining the classic form.
+  only host running exactly three runner processes. Replace its three
+  `instance` placeholders with stable globally unique process identities, its
+  shared `host` placeholder with one stable machine identity, and the
+  remote-write URL and credentials before starting it. It ingests and
+  remote-writes native histograms while retaining the classic form.
 - `inventory/` contains the bounded central runner-inventory renderer, its
   deployment validator, and an exact schema example. The renderer produces a
   node_exporter textfile-collector document; it does not run on runner hosts.
@@ -84,13 +85,13 @@ sets `send_native_histograms: true`, because native histograms are not sent by
 default in Prometheus 3.x. Production instrumentation currently emits no
 exemplars, so exemplar remote write remains disabled.
 
-Every node-local Agent scrapes `127.0.0.1:9464`. Without an explicit unique
-`instance` target label, all runners in the same cluster/environment remote
-write an identical label set. Prometheus-compatible storage then rejects
-cross-runner samples as out of order or merges unrelated runners. Treat an
-unchanged `replace-me-unique` value as a deployment validation failure. The
-identity belongs to discovery/inventory configuration, never to application
-metric labels, and must remain stable across runner restarts.
+Every node-local Agent scrapes the three fixed process listeners at
+`127.0.0.1:9464`, `:9465`, and `:9466`. Without three explicit unique
+`instance` labels, the processes remote write colliding label sets. The shared
+`host` label groups the trio without conflating their process identity. Treat
+any unchanged placeholder as a deployment validation failure. These identities
+belong to discovery/inventory configuration, never to application metric
+labels, and remain stable across runner and host restarts.
 
 Before deploying a runner Agent, render the authoritative inventory and verify
 that the Agent's exact identity tuple is present:
@@ -107,10 +108,10 @@ deploy/observability/inventory/validate-runner-deployment.sh \
 ```
 
 The validator bounds immutable non-symlink snapshots, enforces the exact
-checked-in Agent template after its four deployment substitutions, invokes
-`promtool` on those same snapshots, proves the staged metrics match the exact
-JSON revision, and atomically publishes its validated copy. It requires Python
-3 and `jq`, plus local `promtool` or
+checked-in three-target Agent template after its identity and remote-write
+substitutions, invokes `promtool` on those same snapshots, proves all three
+slots match the exact JSON revision, and atomically publishes its validated
+copy. It requires Python 3 and `jq`, plus local `promtool` or
 `AUTOMATA_METRICS_CONTAINER_RUNTIME=podman|docker`. Configure that independent
 central exporter as a dedicated textfile-only node_exporter with
 `--collector.disable-defaults --collector.textfile` and an inventory-only
@@ -126,7 +127,7 @@ node_exporter \
 Do not share this endpoint with node_exporter's default collectors or place
 unrelated textfiles in its directory. Prometheus applies the checked-in 2 MB
 `body_size_limit` before metric relabeling, so the extra payload can reject a
-valid maximum-size 10,000-runner inventory scrape even though the scrape job
+valid maximum-size 9,999-runner inventory scrape even though the scrape job
 keeps only three metric families. Populate `targets/inventory-exporter.json`
 with the dedicated exporter's private scrape address. The scrape job keeps
 `automata_ci_runner_inventory_expected`,
@@ -144,28 +145,29 @@ or out-of-order ingestion. Each Prometheus replica may independently scrape the
 same authoritative exporter, but one Prometheus must not scrape two competing
 inventory producers.
 
-The inventory JSON contract is exact and bounded: top-level `schema: 2`, a
+The inventory JSON contract is exact and bounded: top-level `schema: 3`, a
 positive integer `generated_at_seconds`, and a nonempty `runners` array of
-globally unique `{instance, cluster, environment}` objects. The authoritative
-producer must refresh the generation value and atomically republish at least
-once per minute even when membership is unchanged; evidence older than five
-minutes or more than one minute in the future fails validation and alerts.
-Values use only `[A-Za-z0-9._:-]`, are at most 128 bytes, and must not use
-`replace-me` placeholders. The renderer rejects symlinks, documents over 1 MiB,
-more than 10,000 runners, extra keys, duplicate identities, and malformed
-values. The checked-in JSON contains visibly non-production example values;
-the deployment validator rejects those too. Run the validator/publisher against
-every rendered Agent config before rollout: an Agent identity missing from
-inventory, any noncanonical YAML or additional discovery, a non-loopback target,
-port drift, stale inventory, or an example/non-TLS remote-write URL fails closed.
+globally unique `{instance, host, runner_slot, cluster, environment}` objects.
+Every stable host must have exactly slots `1`, `2`, and `3`, all in one cluster
+and environment. The authoritative producer refreshes the generation value and
+atomically republishes at least once per minute even when membership is
+unchanged; evidence older than five minutes or more than one minute in the
+future fails validation and alerts. String values use only
+`[A-Za-z0-9._:-]`, are at most 128 bytes, and must not use `replace-me`
+placeholders. The renderer rejects symlinks, documents over 1 MiB, more than
+9,999 records, extra keys, duplicate identities or slots, incomplete hosts,
+and malformed values. Run the validator/publisher against every rendered Agent
+before rollout: a missing trio member, host/slot mismatch, noncanonical YAML or
+additional discovery, target/port drift, stale inventory, or an example/non-TLS
+remote-write URL fails closed.
 
 `up == 0` detects a local exporter failure only while the node-local Agent can
 continue remote writing. If the runner host or Agent disappears, its `up`
 series becomes stale and an equality alert no longer fires. Production must
 also publish `automata_ci_runner_inventory_expected{job="automata-runner",
-instance="...",cluster="...",environment="..."} 1` from an independent
-central inventory source; the included missing-runner alert joins that durable
-expectation against `up`.
+instance="...",host="...",runner_slot="...",cluster="...",environment="..."}
+1` from an independent central inventory source; the included missing-runner
+alert joins that durable expectation against `up`.
 
 The independent inventory source is itself mandatory monitoring infrastructure.
 The supplied rules page when its scrape is zero or when Prometheus discovers no

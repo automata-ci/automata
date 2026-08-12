@@ -96,7 +96,7 @@ use super::{
     SystemMaintenanceClock,
 };
 use crate::app::{
-    conformance_api::conformance_api_router,
+    conformance_api::{conformance_api_router, deployment_conformance_api_router},
     github_auth::{
         GithubAuthHttpState, GithubProviderOrigin, GithubSetupHttpState,
         OperationalGithubAuthBackend, router as github_auth_router,
@@ -1461,7 +1461,24 @@ async fn build_human_api(
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
-    let mut router = Router::new();
+    let deployment_token = config.load_conformance_export_token()?;
+    let mut router = match deployment_token.as_deref() {
+        Some(token) => {
+            let tenant =
+                TenantScope::from_authenticated_tenant_id(fallback_tenant.as_str().to_owned())
+                    .map_err(|_| ServerCompositionError::InvalidFallbackTenant)?;
+            let reads: Arc<dyn HumanWorkflowReadRepository> = store.clone();
+            let deliveries: Arc<dyn ConformanceReadRepository> = store.clone();
+            deployment_conformance_api_router(
+                reads,
+                deliveries,
+                Arc::clone(&blob_store),
+                tenant,
+                token,
+            )
+        }
+        None => Router::new(),
+    };
 
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {

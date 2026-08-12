@@ -13,12 +13,13 @@ use crate::{
     GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
     GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
     GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
-    GithubCheckTerminalizationRepository, GithubRepositoryName, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceRevision, LinkGithubCheckWorkflowRun,
-    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, ProviderConnectionId, ProviderDeliveryId,
-    ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, StartGithubCheckProjection, TenantScope, TerminalizeGithubCheck,
+    GithubCheckTerminalizationRepository, GithubRepositoryName, GithubScheduleFireId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceRevision, LinkGithubCheckWorkflowRun, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
+    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, StartGithubCheckProjection,
+    TenantScope, TerminalizeGithubCheck,
 };
 
 use super::PostgresStore;

@@ -393,6 +393,49 @@ impl GithubJobExecutor {
             .map_err(|error| map_runtime_context_decode_error(&error))
     }
 
+    fn apply_managed_secret_bindings(
+        &self,
+        runtime_context: JobRuntimeContext,
+    ) -> Result<JobRuntimeContext, ExecutorAdapterError> {
+        let Some(bindings) = &self.managed_secret_bindings else {
+            return Ok(runtime_context);
+        };
+        if !runtime_context.secrets().is_empty() {
+            return Err(invalid_job());
+        }
+        JobRuntimeContext::new(
+            runtime_context.inputs().clone(),
+            runtime_context.vars().clone(),
+            runtime_context.matrix().clone(),
+            runtime_context.strategy(),
+            runtime_context.needs().clone(),
+            bindings.clone(),
+        )
+        .map_err(|_| invalid_job())
+    }
+
+    /// Registers every installed exact binding before evaluating user data.
+    ///
+    /// Runtime contexts carry locators only. Resolving each one here is the
+    /// point at which a per-execution secret port proves it installed the full
+    /// bounded set. No expression, environment, action, or command work is
+    /// allowed before these masks (and any post-install acknowledgement) exist.
+    fn register_runtime_context_secret_masks(
+        &self,
+        runtime_context: &JobRuntimeContext,
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        for binding in runtime_context.secrets().values() {
+            let secret = self
+                .ports
+                .secrets
+                .resolve(binding.binding_id())
+                .map_err(|error| map_port_error(error.kind()))?;
+            masker.register(secret.expose_secret())?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn validate_admission(
         &self,
@@ -440,12 +483,16 @@ impl GithubJobExecutor {
         {
             return Err(AdmissionRejection::InvalidJob);
         }
-        self.validate_provider_admission(job)?;
+        self.validate_provider_admission(job, &workspace)?;
         validate_action_step_admission(job, &workspace)?;
         Ok(environment)
     }
 
-    fn validate_provider_admission(&self, job: &JobIrEnvelope) -> Result<(), AdmissionRejection> {
+    fn validate_provider_admission(
+        &self,
+        job: &JobIrEnvelope,
+        workspace: &TargetPath,
+    ) -> Result<(), AdmissionRejection> {
         let capabilities = self.ports.provider.capabilities();
         for required in [
             SandboxCapability::WholeJob,
@@ -475,6 +522,20 @@ impl GithubJobExecutor {
         if !capabilities.supports(network) || !capabilities.supports(filesystem) {
             return Err(AdmissionRejection::CapabilityChanged);
         }
+        let allocation = job
+            .job()
+            .requirements()
+            .resource_allocation()
+            .ok_or(AdmissionRejection::InvalidJob)?;
+        let limits = allocation.limits();
+        if limits.ephemeral_disk_bytes() > 0
+            && !capabilities.supports(SandboxCapability::EphemeralStorageLimits)
+        {
+            return Err(AdmissionRejection::CapabilityChanged);
+        }
+        if limits.gpu_count() > 0 && !capabilities.supports(SandboxCapability::DeviceLimits) {
+            return Err(AdmissionRejection::CapabilityChanged);
+        }
         let privilege = match self.config.privilege() {
             automata_ci_execution::SandboxPrivilegePolicy::Unprivileged => None,
             automata_ci_execution::SandboxPrivilegePolicy::Administrator => {
@@ -498,28 +559,7 @@ impl GithubJobExecutor {
             return Err(AdmissionRejection::InvalidJob);
         }
         validate_service_admission(job, capabilities)?;
-        for step in job.job().steps() {
-            match step.kind() {
-                SemanticStep::Action { .. } if workspace.platform() == TargetPlatform::Windows => {
-                    return Err(AdmissionRejection::InvalidJob);
-                }
-                SemanticStep::Action {
-                    reference: ActionReference::Repository { .. },
-                    ..
-                }
-                | SemanticStep::Run { .. } => {}
-                SemanticStep::Action { reference, .. }
-                    if matches!(reference, ActionReference::Local { .. }) =>
-                {
-                    CheckedOutLocalActionPreparer::definition_paths(&workspace, reference)
-                        .map_err(|_| AdmissionRejection::InvalidJob)?;
-                }
-                SemanticStep::Action { .. } => {
-                    return Err(AdmissionRejection::InvalidJob);
-                }
-            }
-        }
-        Ok(environment)
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4284,6 +4324,12 @@ impl GithubJobExecutor {
             let operation_id = events
                 .begin_provider_operation(ProviderOperationKind::CreateSandbox)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+            let allocation = request
+                .job()
+                .job()
+                .requirements()
+                .resource_allocation()
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
             let mut spec = SandboxSpec::new(
                 operation_id,
                 generation,
@@ -4294,7 +4340,8 @@ impl GithubJobExecutor {
                 self.sandbox_resources(request)?,
             )
             .with_privilege(self.config.privilege())
-            .with_services(service_specs.clone());
+            .with_services(service_specs.clone())
+            .with_resource_allocation(allocation);
             if workspace.platform() == TargetPlatform::Windows {
                 spec = spec.with_scratch(scratch.clone());
             }
@@ -6650,6 +6697,9 @@ fn validate_action_step_admission(
 ) -> Result<(), AdmissionRejection> {
     for step in job.job().steps() {
         match step.kind() {
+            SemanticStep::Action { .. } if workspace.platform() == TargetPlatform::Windows => {
+                return Err(AdmissionRejection::InvalidJob);
+            }
             SemanticStep::Action {
                 reference: ActionReference::Repository { .. },
                 ..

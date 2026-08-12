@@ -24,12 +24,16 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+#[cfg(unix)]
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::{UnixListener, UnixStream},
+    task::JoinSet,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
     process::Command,
     sync::{mpsc, watch},
-    task::JoinSet,
 };
 
 /// Current guest protocol version.
@@ -366,6 +370,7 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<T, Gue
 /// # Errors
 ///
 /// Returns a sanitized transport error when the socket cannot be bound or accepted.
+#[cfg(unix)]
 pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
     let listener = bind_listener(socket).await?;
     let replay = Arc::new(Mutex::new(ReplayCache::default()));
@@ -386,11 +391,22 @@ pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
     }
 }
 
+/// Runs the guest Unix-socket server until its listener fails.
+///
+/// # Errors
+///
+/// Returns an unsupported transport error on non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn serve(_socket: &Path) -> Result<(), GuestProtocolError> {
+    Err(unsupported_unix_transport().into())
+}
+
 /// Forwards one framed request between stdio and the guest Unix socket.
 ///
 /// # Errors
 ///
 /// Returns a transport failure without including request data.
+#[cfg(unix)]
 pub async fn forward_stdio(socket: &Path) -> Result<(), GuestProtocolError> {
     let mut input = tokio::io::stdin();
     let request = read_frame(&mut input).await?;
@@ -399,16 +415,43 @@ pub async fn forward_stdio(socket: &Path) -> Result<(), GuestProtocolError> {
     let response = read_frame(&mut stream).await?;
     let mut output = tokio::io::stdout();
     output.write_all(&response).await?;
-    output.shutdown().await?;
+    output.flush().await?;
     Ok(())
+}
+
+/// Forwards one framed request between stdio and the guest Unix socket.
+///
+/// # Errors
+///
+/// Returns an unsupported transport error on non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn forward_stdio(_socket: &Path) -> Result<(), GuestProtocolError> {
+    Err(unsupported_unix_transport().into())
 }
 
 /// Checks whether the configured guest listener accepts connections.
 #[must_use]
+#[cfg(unix)]
 pub fn probe(socket: &Path) -> bool {
     connect_probe(socket).is_ok()
 }
 
+/// Checks whether the configured guest listener accepts connections.
+#[must_use]
+#[cfg(not(unix))]
+pub fn probe(_socket: &Path) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn unsupported_unix_transport() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "guest Unix-socket transport is unavailable",
+    )
+}
+
+#[cfg(unix)]
 async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     if let Some(name) = abstract_socket_name(socket) {
         #[cfg(target_os = "linux")]
@@ -432,6 +475,7 @@ async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(socket)
 }
 
+#[cfg(unix)]
 async fn connect_stream(socket: &Path) -> io::Result<UnixStream> {
     if let Some(name) = abstract_socket_name(socket) {
         #[cfg(target_os = "linux")]
@@ -450,6 +494,7 @@ async fn connect_stream(socket: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(socket).await
 }
 
+#[cfg(unix)]
 fn connect_probe(socket: &Path) -> io::Result<()> {
     if let Some(name) = abstract_socket_name(socket) {
         #[cfg(target_os = "linux")]
@@ -466,6 +511,7 @@ fn connect_probe(socket: &Path) -> io::Result<()> {
     std::os::unix::net::UnixStream::connect(socket).map(|_| ())
 }
 
+#[cfg(unix)]
 fn abstract_socket_name(socket: &Path) -> Option<&[u8]> {
     socket
         .to_str()
@@ -474,6 +520,7 @@ fn abstract_socket_name(socket: &Path) -> Option<&[u8]> {
         .map(str::as_bytes)
 }
 
+#[cfg(unix)]
 async fn serve_connection(
     mut stream: UnixStream,
     replay: Arc<Mutex<ReplayCache>>,
@@ -755,8 +802,8 @@ async fn execute(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
+        .kill_on_drop(true);
+    configure_process_group(&mut command);
     let Ok(mut child) = command.spawn() else {
         return rejected(GuestRejection::OperationFailed);
     };
@@ -878,6 +925,15 @@ async fn collect_process_output(
     (status, records, truncated)
 }
 
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
 fn terminate_process_group(process_group: u32) {
     let Ok(process_group) = i32::try_from(process_group) else {
         return;
@@ -887,6 +943,9 @@ fn terminate_process_group(process_group: u32) {
     };
     let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
 }
+
+#[cfg(not(unix))]
+fn terminate_process_group(_process_group: u32) {}
 
 async fn read_output<R: AsyncRead + Unpin>(
     mut reader: R,

@@ -1,4 +1,4 @@
-const MIGRATION: &str = include_str!("../migrations/0066_job_environment_gate_evidence.sql");
+const MIGRATION: &str = include_str!("../migrations/0067_job_environment_gate_evidence.sql");
 
 #[test]
 fn upgrade_guard_serializes_exact_state_and_refuses_only_live_instances() {
@@ -119,7 +119,7 @@ fn legacy_reusable_secret_bindings_remain_unmodified() {
     ] {
         assert!(
             !MIGRATION.contains(forbidden),
-            "0066 must not globally constrain retained reusable bindings: {forbidden}"
+            "0067 must not globally constrain retained reusable bindings: {forbidden}"
         );
     }
 }
@@ -163,6 +163,6 @@ fn database_rejects_variable_bearing_lease_bypass_without_custody() {
     }
     assert!(
         !MIGRATION.contains("CREATE TABLE job_variable_custody_receipts"),
-        "0066 must fail closed rather than inventing durable value custody"
+        "0067 must fail closed rather than inventing durable value custody"
     );
 }

@@ -54,7 +54,7 @@ fn production_requires_a_credential_free_https_base() {
 #[test]
 fn loopback_escape_hatch_rejects_non_loopback_http() {
     assert!(
-        GithubAppCredentialConfig::new_for_loopback_testing(
+        GithubAppCredentialConfig::new_for_loopback_emulator(
             Url::parse("http://example.test/api/v3/").unwrap(),
             issuer(),
             installation(),
@@ -64,7 +64,7 @@ fn loopback_escape_hatch_rejects_non_loopback_http() {
         .is_err()
     );
     assert!(
-        GithubAppCredentialConfig::new_for_loopback_testing(
+        GithubAppCredentialConfig::new_for_loopback_emulator(
             Url::parse("http://127.0.0.1:4567/api/v3/").unwrap(),
             issuer(),
             installation(),

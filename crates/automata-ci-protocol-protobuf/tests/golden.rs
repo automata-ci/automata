@@ -42,7 +42,7 @@ fn simple_no_work_frame_has_an_exact_byte_fixture() {
         .expect("no-work fixture");
     let actual = encode_server_frame(&message, &ProtocolLimits::default()).expect("encode fixture");
     let expected = [
-        66, 63, 10, 58, 8, 3, 16, 4, 26, 16, 18, 52, 86, 120, 154, 188, 222, 240, 0, 0, 0, 0, 0, 0,
+        66, 63, 10, 58, 8, 3, 16, 5, 26, 16, 18, 52, 86, 120, 154, 188, 222, 240, 0, 0, 0, 0, 0, 0,
         0, 2, 34, 16, 18, 52, 86, 120, 154, 188, 222, 240, 0, 0, 0, 0, 0, 0, 0, 63, 42, 16, 18, 52,
         86, 120, 154, 188, 222, 240, 0, 0, 0, 0, 0, 0, 0, 64, 16, 226, 9,
     ];

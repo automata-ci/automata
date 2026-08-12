@@ -1115,11 +1115,19 @@ async fn publish_child_graph(
         INSERT INTO workflow_plan_v2_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence, created_at_ms,
-            updated_at_ms, runtime_policy_revision, runtime_policy_digest
+            updated_at_ms, runtime_policy_revision, runtime_policy_digest,
+            environment_requirement_kind, environment_template_digest,
+            secret_reference_names, variable_reference_names,
+            credential_requirements_schema
         )
         SELECT planned.logical_job_id, planned.run_id, planned.invocation_id,
                planned.logical_key, planned.source_order,
-               planned.execution_kind, 'pending', 0, $3, $3, $4, $5
+               planned.execution_kind, 'pending', 0, $3, $3, $4, $5,
+               planned.environment_requirement_kind,
+               planned.environment_template_digest,
+               planned.secret_reference_names,
+               planned.variable_reference_names,
+               planned.credential_requirements_schema
         FROM workflow_plan_v2_reusable_expanded_jobs AS planned
         WHERE planned.run_id = $1 AND planned.invocation_id = $2
         ORDER BY planned.source_order

@@ -18,6 +18,7 @@ repository_root = pathlib.Path(sys.argv[1]).resolve()
 image_helper_marker = {"artifact-role": "image-helper"}
 actual = []
 image_helpers = []
+publishable_image_helpers = []
 for package in metadata["packages"]:
     package_name = package["name"]
     package_metadata = package["metadata"]
@@ -39,22 +40,35 @@ for package in metadata["packages"]:
             file=sys.stderr,
         )
         raise SystemExit(1)
-    if package["publish"] != [] or len(binaries) != 1:
+    if len(binaries) != 1:
         print(
-            f"error: image helper {package_name} must be non-publishable with exactly one binary",
+            f"error: image helper {package_name} must expose exactly one binary",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    image_helpers.extend(binaries)
+    if package["publish"] == []:
+        image_helpers.extend(binaries)
+    elif package["publish"] == ["crates-io"]:
+        publishable_image_helpers.extend(binaries)
+    else:
+        print(
+            f"error: image helper {package_name} has an invalid publication policy",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 actual.sort()
 image_helpers.sort()
+publishable_image_helpers.sort()
 expected = [
     ("automata-ci", "automata"),
     ("automata-ci-runner", "automata-runner"),
 ]
 expected_image_helpers = [
     ("automata-ci-service-proxy", "automata-ci-service-proxy"),
+]
+expected_publishable_image_helpers = [
+    ("automata-ci-sandbox-guest", "automata-ci-sandbox-guest"),
 ]
 
 if actual != expected:
@@ -63,6 +77,13 @@ if actual != expected:
 if image_helpers != expected_image_helpers:
     print(
         f"error: expected exact image-only helpers {expected_image_helpers}, found {image_helpers}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if publishable_image_helpers != expected_publishable_image_helpers:
+    print(
+        "error: expected exact publishable image helpers "
+        f"{expected_publishable_image_helpers}, found {publishable_image_helpers}",
         file=sys.stderr,
     )
     raise SystemExit(1)

@@ -6,7 +6,7 @@ harnesses must not query Automata's PostgreSQL tables or object store directly.
 
 ## Repository workflow selection
 
-Each repository in the GitHub provider configuration may set one direct
+Each repository in the GitHub provider configuration selects either one direct
 workflow path:
 
 ```json
@@ -15,20 +15,23 @@ workflow path:
 }
 ```
 
-The field defaults to `.github/workflows/ci.yml` for existing configuration.
-Only direct `.github/workflows/*.yml` and `.github/workflows/*.yaml` files are
-accepted. The path is also the delivery's Check subject, preserving the current
-one-delivery/one-workflow authority invariant.
+or every direct workflow:
 
-This first slice supports repositories such as Chalk and p-limit that each use
-one selected workflow. Multi-workflow delivery fanout requires a corresponding
-multi-subject authority model and remains separate work.
+```json
+{
+  "workflow_selection": { "mode": "all_direct" }
+}
+```
+
+Only direct `.github/workflows/*.yml` and `.github/workflows/*.yaml` files are
+accepted. Every selected workflow is retained as a separate delivery subject
+and Check Run.
 
 ## Delivery export
 
 ```text
-GET /api/v1/conformance/repositories/{repository_id}/github-deliveries/{delivery_id}
-Authorization: Bearer {cli_session_token}
+GET /api/v1/conformance/github/repositories/{github_repository_id}/deliveries/{delivery_id}
+Authorization: Bearer {bearer_token}
 Accept: application/json
 ```
 
@@ -37,6 +40,14 @@ private `conformance:read` permission for the exact repository. Browser
 sessions are rejected. Repository publication policy never grants this
 permission. The immutable installation-owner role receives it during migration
 and new installation bootstrap.
+
+An isolated loopback deployment with human authentication disabled may instead
+configure `--conformance-export-token-source`. This deployment-scoped bearer
+grants only this read surface for the configured fallback tenant. It is rejected
+on a non-loopback listener or alongside human authentication. The server derives
+the tenant-scoped internal repository identity from the positive numeric GitHub
+repository ID in the URL; clients never manufacture or discover an internal
+repository UUID.
 
 The `schemaVersion: 1` document contains:
 

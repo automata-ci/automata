@@ -893,6 +893,7 @@ impl GithubDeliverySourceCredentialProvider for RecordingCredentialProvider {
 enum RenewalBehavior {
     Succeed,
     DatabaseIssuedTimes,
+    DatabaseIssuedFutureTimes,
     ClaimLost,
     AmbiguousOnce,
     Unavailable,
@@ -993,11 +994,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
             .map_err(|_| ProviderDeliveryStoreError::CorruptData)?;
             let receipt = self.receipt(ProviderDeliveryState::Claimed);
             let requested_duration = request.expires_at().get() - request.observed_at().get();
-            let claimed_at = if self.renewal_behavior == RenewalBehavior::DatabaseIssuedTimes {
-                UnixMillis::new(request.observed_at().get() - 5)
-            } else {
-                request.observed_at()
-            };
+            let claimed_at = database_issued_at(self.renewal_behavior, request.observed_at());
             return ClaimedProviderDelivery::from_durable_parts(
                 receipt,
                 self.template.identity.clone(),
@@ -1011,11 +1008,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
             .map_err(|_| ProviderDeliveryStoreError::CorruptData);
         }
         let requested_duration = request.expires_at().get() - request.observed_at().get();
-        let claimed_at = if self.renewal_behavior == RenewalBehavior::DatabaseIssuedTimes {
-            UnixMillis::new(request.observed_at().get() - 5)
-        } else {
-            request.observed_at()
-        };
+        let claimed_at = database_issued_at(self.renewal_behavior, request.observed_at());
         *self.claimed_at.lock().expect("claimed-at lock") = Some(claimed_at);
         let claim = ProviderDeliveryClaimFence::from_durable_parts(
             self.template.delivery_id,
@@ -1200,11 +1193,7 @@ impl ProviderDeliveryClaimRenewalRepository for RecordingRepository {
             self.renewal_apply_gate.release.cancelled().await;
         }
         let requested_duration = request.expires_at().get() - request.observed_at().get();
-        let renewed_at = if self.renewal_behavior == RenewalBehavior::DatabaseIssuedTimes {
-            UnixMillis::new(request.observed_at().get() - 5)
-        } else {
-            request.observed_at()
-        };
+        let renewed_at = database_issued_at(self.renewal_behavior, request.observed_at());
         RenewedProviderDeliveryClaim::from_durable_parts(
             renewed_claim,
             if self.renewal_behavior == RenewalBehavior::WrongAttempt {
@@ -1217,6 +1206,14 @@ impl ProviderDeliveryClaimRenewalRepository for RecordingRepository {
             UnixMillis::new(renewed_at.get() + requested_duration),
         )
         .map_err(|_| ProviderDeliveryStoreError::CorruptData)
+    }
+}
+
+fn database_issued_at(behavior: RenewalBehavior, requested_at: UnixMillis) -> UnixMillis {
+    match behavior {
+        RenewalBehavior::DatabaseIssuedTimes => UnixMillis::new(requested_at.get() - 5),
+        RenewalBehavior::DatabaseIssuedFutureTimes => UnixMillis::new(requested_at.get() + 5),
+        _ => requested_at,
     }
 }
 
@@ -2391,6 +2388,40 @@ async fn database_issued_initial_claim_time_preserves_the_requested_duration() {
 }
 
 #[tokio::test]
+async fn database_issued_initial_claim_ahead_of_worker_clock_is_accepted() {
+    let harness = harness_with_visibility(
+        CredentialBehavior::Exact,
+        RenewalBehavior::DatabaseIssuedFutureTimes,
+        TerminalBehavior::Succeed,
+        None,
+        service_config(),
+        ProviderRepositoryVisibility::Public,
+    );
+
+    assert!(matches!(
+        run_once(harness.service.clone(), CancellationToken::new())
+            .await
+            .expect("database-issued future claim is accepted"),
+        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
+    ));
+    let requests = harness
+        .repository
+        .claim_calls
+        .lock()
+        .expect("claim calls lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        harness
+            .repository
+            .claimed_at
+            .lock()
+            .expect("claimed-at lock")
+            .expect("claim timestamp"),
+        UnixMillis::new(requests[0].observed_at().get() + 5),
+    );
+}
+
+#[tokio::test]
 async fn database_issued_renewal_time_preserves_duration_and_rotated_fence() {
     let (harness, processor) =
         snapshot_processor_harness(RenewalBehavior::DatabaseIssuedTimes, false);
@@ -2419,6 +2450,37 @@ async fn database_issued_renewal_time_preserves_duration_and_rotated_fence() {
         snapshots[0].claim().fence() + 1
     );
     assert_eq!(snapshots[1].renewed_at(), UnixMillis::new(RENEWED_NOW - 5));
+    assert_eq!(
+        snapshots[1].expires_at().get() - snapshots[1].renewed_at().get(),
+        CLAIM_MILLIS,
+    );
+}
+
+#[tokio::test]
+async fn database_issued_renewal_ahead_of_worker_clock_is_accepted() {
+    let (harness, processor) =
+        snapshot_processor_harness(RenewalBehavior::DatabaseIssuedFutureTimes, false);
+    let task = tokio::spawn(run_once(harness.service.clone(), CancellationToken::new()));
+    tokio::time::timeout(Duration::from_secs(2), processor.first_entered.notified())
+        .await
+        .expect("first workflow processor invocation");
+    harness.clock.set(RENEWED_NOW);
+    wait_for_renewal_count(&harness.repository, 1).await;
+    processor.first_release.cancel();
+
+    assert!(matches!(
+        task.await
+            .expect("service task")
+            .expect("database-issued future renewal is accepted"),
+        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
+    ));
+    let snapshots = processor
+        .snapshots
+        .lock()
+        .expect("snapshot observations lock");
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].claimed_at(), UnixMillis::new(INITIAL_NOW + 5));
+    assert_eq!(snapshots[1].renewed_at(), UnixMillis::new(RENEWED_NOW + 5));
     assert_eq!(
         snapshots[1].expires_at().get() - snapshots[1].renewed_at().get(),
         CLAIM_MILLIS,

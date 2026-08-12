@@ -18,21 +18,24 @@ runner-control listener.
 
 The first supported deployment binds the listener to a loopback address. A
 control-plane host may be scraped directly by a co-located collector. An
-outbound-only runner is scraped by a node-local Prometheus Agent, which sends
-samples to central storage with remote write.
+outbound-only Linux runner host starts three independent single-slot processes
+on ports 9464 through 9466. One node-local Prometheus Agent scrapes all three
+and sends their samples to central storage with remote write.
 
-Because every Agent scrapes the same loopback address, its target must carry a
-stable globally unique `instance` label supplied by deployment inventory.
-Reusing `127.0.0.1:9464` or the example `replace-me-unique` value across nodes
-causes remote-write label collisions and out-of-order samples. This inventory
-identity is a scrape target label, not an application metric label.
+Each target carries a stable globally unique process `instance`, its fixed
+`runner_slot`, and one stable `host` identity shared by the trio. Reusing an
+instance or leaving any checked-in placeholder causes remote-write label
+collisions and fails deployment validation. These inventory identities are
+scrape target labels, not application metric labels.
 
 Node-local `up == 0` remains visible when the exporter fails but the Agent can
 remote write. It cannot detect disappearance of the whole host or Agent because
 that time series becomes stale. Production monitoring therefore also needs an
 independent central inventory series,
-`automata_ci_runner_inventory_expected{job="automata-runner",instance="..."}
-1`, and the supplied rules alert when an expected identity has no current `up`.
+`automata_ci_runner_inventory_expected{job="automata-runner",instance="...",
+host="...",runner_slot="..."} 1`, and the supplied rules alert when an
+expected identity has no current `up`. Inventory schema 3 accepts a host only
+when it contains exactly slots 1, 2, and 3.
 
 Do not use Pushgateway for runners and do not carry telemetry through the
 runner-control protocol. Non-loopback exposure is unsupported by the current
@@ -55,7 +58,8 @@ automata server --metrics-listen 127.0.0.1:9464 [OTHER SERVER OPTIONS]
 ```
 
 `AUTOMATA_METRICS_LISTEN` is the equivalent control-plane environment setting.
-Enable a runner listener in its strict JSON product configuration:
+Enable each runner listener in its strict JSON product configuration. The
+first instance uses:
 
 ```json
 {
@@ -65,10 +69,11 @@ Enable a runner listener in its strict JSON product configuration:
 }
 ```
 
-The setting is omitted to disable the listener. Both products accept only a
-literal IPv4 or IPv6 loopback socket address; DNS names, non-loopback
-addresses, and port zero fail product configuration validation. Direct
-listener harnesses use port zero only in tests.
+Instances two and three use `127.0.0.1:9465` and `127.0.0.1:9466`. The setting
+is omitted to disable the listener. Both products accept only a literal IPv4
+or IPv6 loopback socket address; DNS names, non-loopback addresses, and port
+zero fail product configuration validation. Direct listener harnesses use port
+zero only in tests.
 
 ## Prometheus and OpenMetrics endpoint contract
 
@@ -138,7 +143,7 @@ Counters are process-local and reset at process start. Apply `rate()` before
 aggregating replicas:
 
 ```promql
-sum without (instance) (
+sum without (instance, host, runner_slot) (
   rate(automata_ci_control_plane_http_requests_total[5m])
 )
 ```

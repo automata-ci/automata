@@ -358,6 +358,25 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
+test("repository CI omits the hosted Windows job and retains fixture parity", () => {
+  const ci = source(".github/workflows/ci.yml");
+  const fixture = source(
+    "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
+  );
+
+  assert.equal(
+    fixture,
+    ci,
+    "the compiler fixture must exactly mirror the committed CI workflow",
+  );
+  assert.doesNotMatch(
+    ci,
+    /^  windows:[ \t]*\r?$/m,
+    "the hosted Windows CI job is temporarily disabled",
+  );
+  assert.doesNotMatch(ci, /^[ \t]+runs-on: windows-/m);
+});
+
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
   const ci = source(".github/workflows/ci.yml");
   const rustCoverage = section(

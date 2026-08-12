@@ -1105,6 +1105,7 @@ impl GithubProviderManifest {
         // otherwise external policy transition.
         let policy_evidence_changed = self.policy_revision != prior.policy_revision
             || self.repository_visibility != prior.repository_visibility
+            || self.github_repository_owner_id != prior.github_repository_owner_id
             || self.check_name != prior.check_name
             || self.workflow_selection != prior.workflow_selection
             || self.git_ref != prior.git_ref

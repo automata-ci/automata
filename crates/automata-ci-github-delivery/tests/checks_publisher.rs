@@ -620,7 +620,7 @@ impl FixtureServer {
         });
         let oauth_origin = format!("http://{address}/").parse().expect("OAuth URL");
         let api_base = format!("http://{address}/api/").parse().expect("API URL");
-        let endpoint = GithubHttpEndpoint::new_for_loopback_testing(
+        let endpoint = GithubHttpEndpoint::new_for_loopback_emulator(
             oauth_origin,
             api_base,
             "automata-checks-publisher-test",

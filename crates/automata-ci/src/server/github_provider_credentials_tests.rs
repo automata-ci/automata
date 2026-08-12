@@ -545,6 +545,62 @@ fn authority_descriptor(
     .expect("authority descriptor")
 }
 
+fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProviderManifest {
+    let runner_policy_digest = Sha256Digest::from_bytes([0x71; 32]);
+    let runner_policy = GithubProviderRunnerPolicyObject::new(
+        AdmissionObject::new(
+            runner_policy_digest,
+            ObjectKey::new(format!(
+                "github/runner-policy/v1/{runner_policy_digest}.json"
+            ))
+            .expect("runner policy key"),
+            1,
+            GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
+        )
+        .expect("runner policy object"),
+    )
+    .expect("runner policy descriptor");
+    GithubProviderManifest::new_with_workflow_selection_and_git_ref(
+        tenant(),
+        connection_id(),
+        ProviderInstallationId::new(11).expect("installation ID"),
+        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
+        visibility,
+        GithubServerServiceAppId::new(17).expect("App ID"),
+        GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([0x51; 32]),
+        GithubServerServiceRevision::new(3).expect("App revision"),
+        GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes([0x72; 32]))
+            .expect("webhook verifier fingerprint"),
+        GithubServerServiceRevision::new(3).expect("webhook revision"),
+        GithubServerServiceRevision::new(5).expect("policy revision"),
+        automata_ci_core::JobAuthorityProfile::Standard,
+        runner_policy,
+        WorkflowRuntimePolicyRevision::new(1).expect("runtime policy revision"),
+        Sha256Digest::from_bytes([0x73; 32]),
+        GithubProviderWorkflowSelection::all_direct(),
+        GithubProviderGitRef::main(),
+        GithubCheckName::new("Automata CI").expect("Check name"),
+        GithubProviderOrigins::github_dot_com(),
+        GithubProviderManifestLimits::github_dot_com_ci(),
+        GithubProviderManifestRevision::new(3).expect("manifest revision"),
+    )
+    .with_repository_owner_id(ProviderRepositoryOwnerId::new(19).expect("owner ID"))
+}
+
+fn schedule_discovery_claim() -> GithubScheduleDiscoveryClaim {
+    GithubScheduleDiscoveryClaim::from_durable_parts(
+        GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x7a)).expect("schedule registry ID"),
+        GithubScheduleWorkerId::from_uuid(Uuid::from_u128(0x7b)).expect("schedule worker ID"),
+        GithubScheduleClaimFence::new(9).expect("schedule fence"),
+        UnixMillis::new(OBSERVED_AT),
+        UnixMillis::new(OBSERVED_AT + 300_000),
+    )
+    .expect("schedule discovery claim")
+}
+
 fn concrete_release_codec() -> Arc<EnvelopeCodec> {
     let key = LocalKeyMaterial::new(
         KeyId::new("product-release-test-key-v1").expect("key ID"),

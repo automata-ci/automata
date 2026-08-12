@@ -1,6 +1,7 @@
 [package]
 name = "automata-ci-sandbox-guest"
 description = "Ephemeral in-sandbox command transport for Automata sandbox providers"
+readme = "README.md"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -10,6 +11,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[package.metadata.automata-ci]
+artifact-role = "image-helper"
+
 [lints]
 workspace = true
 
@@ -18,6 +22,8 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-rustix.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true

@@ -315,8 +315,11 @@ async fn insert_invocation_jobs(
             r"
             INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
                 run_id, invocation_id, logical_job_id, logical_key,
-                source_order, execution_kind, descriptor_digest
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                source_order, execution_kind, descriptor_digest,
+                environment_requirement_kind, environment_template_digest,
+                secret_reference_names, variable_reference_names,
+                credential_requirements_schema
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)
             ",
         )
         .bind(command.run_id().as_uuid())
@@ -330,6 +333,15 @@ async fn insert_invocation_jobs(
             "steps"
         })
         .bind(job.descriptor_digest().as_bytes().as_slice())
+        .bind(job.credential_requirements().environment().kind())
+        .bind(
+            job.credential_requirements()
+                .environment()
+                .template_digest()
+                .map(|digest| digest.as_bytes().as_slice().to_vec()),
+        )
+        .bind(job.credential_requirements().secret_names())
+        .bind(job.credential_requirements().variable_names())
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;

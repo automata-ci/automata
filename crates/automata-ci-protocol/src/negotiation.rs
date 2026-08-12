@@ -6,9 +6,9 @@ use thiserror::Error;
 use automata_ci_core::{JobIrVersion, JobIrVersionRange};
 
 /// Lowest protocol version spoken by this build.
-pub const PROTOCOL_MIN_VERSION: ProtocolVersion = ProtocolVersion(4);
+pub const PROTOCOL_MIN_VERSION: ProtocolVersion = ProtocolVersion(5);
 /// Highest protocol version spoken by this build.
-pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion(4);
+pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion(5);
 /// Complete supported range for this build.
 pub const SUPPORTED_PROTOCOL_RANGE: ProtocolRange = ProtocolRange {
     min: PROTOCOL_MIN_VERSION,

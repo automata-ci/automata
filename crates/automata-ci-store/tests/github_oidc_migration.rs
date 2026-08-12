@@ -1,7 +1,7 @@
 const BASE_MIGRATION: &str = include_str!("../migrations/0033_github_oidc_issuances.sql");
 const CURRENT_MIGRATION: &str =
     include_str!("../migrations/0039_github_oidc_signed_currentness.sql");
-const RERUN_MIGRATION: &str = include_str!("../migrations/0064_workflow_reruns.sql");
+const RERUN_MIGRATION: &str = include_str!("../migrations/0065_workflow_reruns.sql");
 const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/github_oidc.rs");
 const JOB_RUNTIME_ADAPTER: &str = include_str!("../src/postgres/github_job_runtime_authority.rs");
 const RUNTIME_AUTHORITY_ADAPTER: &str = include_str!("../src/postgres/runtime_authority.rs");

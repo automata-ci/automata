@@ -350,6 +350,12 @@ fn host_identity_is_explicit_and_profile_default_secrets_are_rejected() {
             .capabilities()
             .supports(SandboxCapability::HostIdentity)
     );
+    assert!(
+        fixture
+            .provider
+            .capabilities()
+            .supports(SandboxCapability::ProcessLimits)
+    );
     let unprivileged = fixture
         .spec()
         .with_privilege(SandboxPrivilegePolicy::Unprivileged);
@@ -834,7 +840,8 @@ impl Fixture {
         timeout: Duration,
     ) -> ExecutionCommand {
         let script = "$child = Start-Process -FilePath $env:COMSPEC \
-                      -ArgumentList '/d','/c','ping -n 30 127.0.0.1 > nul' -PassThru; \
+                      -ArgumentList '/d','/c','ping -n 30 127.0.0.1 > nul' \
+                      -PassThru -NoNewWindow; \
                       [System.IO.File]::WriteAllText(\
                         $env:AUTOMATA_PID_FILE, [string]$child.Id); \
                       [System.Threading.Thread]::Sleep(30000)";

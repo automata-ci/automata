@@ -358,7 +358,7 @@ async fn github_membership_uses_numeric_identity_and_audit_is_append_only() -> T
             .expect_err("security audit events must reject deletes");
         assert_constraint(&audit_delete, "security_audit_events_append_only");
 
-        let audit_truncate = sqlx::query("TRUNCATE security_audit_events")
+        let audit_truncate = sqlx::query("TRUNCATE security_audit_events CASCADE")
             .execute(database.pool())
             .await
             .expect_err("security audit events must reject truncation");

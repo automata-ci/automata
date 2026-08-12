@@ -91,9 +91,9 @@ async fn seed_workflow_run(
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number,
             event_name, event_object_key, head_sha, status,
-            created_at_ms, updated_at_ms
+            created_at_ms, updated_at_ms, runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', $5, $6, 'queued', 1, 1)
+        VALUES ($1, $2, $3, $4, 1, 'push', $5, $6, 'queued', 1, 1, 3)
         ",
     )
     .bind(run_id)

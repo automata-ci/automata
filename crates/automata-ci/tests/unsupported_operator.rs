@@ -5,6 +5,9 @@ use std::{io::ErrorKind, net::TcpListener, process::Command};
 const SERVER_SENTINEL: &str = "http://127.0.0.1:9";
 const SECRET_SENTINEL: &str = "WINDOWS_SECRET_SENTINEL";
 const PATH_SENTINEL: &str = "WINDOWS_PATH_SENTINEL.txt";
+const REPOSITORY_ID: &str = "11111111-1111-4111-8111-111111111111";
+const ATTEMPT_ID: &str = "22222222-2222-4222-8222-222222222222";
+const SOURCE_RUN_ID: &str = "33333333-3333-4333-8333-333333333333";
 
 #[test]
 fn authentication_commands_fail_before_using_operator_input() {
@@ -68,6 +71,38 @@ fn secret_commands_fail_before_using_operator_input() {
             "CLI secret management is not supported on this platform",
         );
     }
+}
+
+#[test]
+fn environment_review_fails_before_using_operator_input() {
+    assert_unsupported(
+        &[
+            "environment-review",
+            "--server-url",
+            SERVER_SENTINEL,
+            REPOSITORY_ID,
+            ATTEMPT_ID,
+            "--decision",
+            "approve",
+        ],
+        "CLI environment review is not supported on this platform",
+    );
+}
+
+#[test]
+fn workflow_rerun_fails_before_using_operator_input() {
+    assert_unsupported(
+        &[
+            "rerun",
+            "--server-url",
+            SERVER_SENTINEL,
+            "owner/repository",
+            SOURCE_RUN_ID,
+            "--selection",
+            "entire-workflow",
+        ],
+        "CLI workflow reruns are not supported on this platform",
+    );
 }
 
 fn assert_unsupported(arguments: &[&str], expected: &str) {

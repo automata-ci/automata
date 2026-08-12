@@ -1,5 +1,6 @@
 {
-  "schema": 2,
+  "schema": 3,
+  "transport": { "mode": "github_dot_com" },
   "app": {
     "id": 123456,
     "client_id": "Iv1.example-automata-app",

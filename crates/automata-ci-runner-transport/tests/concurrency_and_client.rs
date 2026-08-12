@@ -3,7 +3,7 @@ mod support;
 use std::{
     convert::Infallible,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use automata_ci_core::{OperationId, RunnerSessionId};
@@ -23,8 +23,8 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 use support::{
-    HandlerMode, RecordingVerifier, TestHandler, TestPki, client, hello_request, poll_request,
-    raw_h2_sender, spawn_server,
+    HandlerMode, RecordingVerifier, TestHandler, TestPki, client, heartbeat_request, hello_request,
+    poll_request, raw_h2_sender, spawn_server,
 };
 
 #[derive(Debug, Default)]
@@ -239,6 +239,38 @@ async fn invalid_and_timed_out_responses_record_dispatch_but_not_acceptance() {
         timeout_observer.bytes().as_slice(),
         [(RunnerControlClientByteDirection::Request, _)]
     ));
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn active_sync_timeout_is_shorter_than_the_long_poll_budget() {
+    let pki = TestPki::new();
+    let verifier = RecordingVerifier::accepting();
+    let handler = TestHandler::new(HandlerMode::Delay(Duration::from_millis(200)));
+    let client_limits = TransportLimits::default()
+        .with_client_timeouts(
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+            Duration::from_millis(500),
+            Duration::from_millis(40),
+        )
+        .expect("distinct active and long-poll deadlines");
+    let running = spawn_server(&pki, verifier, handler, &TransportLimits::default()).await;
+    let client = client(&running, &pki, &client_limits);
+
+    let started = Instant::now();
+    let error = client
+        .exchange(&heartbeat_request(), CancellationToken::new())
+        .await
+        .expect_err("active heartbeat must not consume the long-poll budget");
+    assert_eq!(error.kind(), ClientErrorKind::Timeout);
+    assert_eq!(error.retry_class(), RetryClass::RetrySameRequest);
+    assert!(started.elapsed() < Duration::from_millis(150));
+
+    client
+        .exchange(&poll_request(), CancellationToken::new())
+        .await
+        .expect("lease long poll retains the total request budget");
     running.stop().await;
 }
 

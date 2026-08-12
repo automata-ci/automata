@@ -1,8 +1,8 @@
 # Control-plane setup
 
-This guide starts `automata server`, PostgreSQL, RustFS, and one statically
-registered runner on a development machine. Optional sections add GitHub login,
-provider ingress, and the built-in secret provider.
+This guide starts `automata server`, PostgreSQL, RustFS, and three statically
+registered runner processes on a development machine. Optional sections add
+GitHub login, provider ingress, and the built-in secret provider.
 
 > [!CAUTION]
 > This is not a production deployment. Runner enrollment is static, production
@@ -105,170 +105,207 @@ chmod 0600 "$AUTOMATA_LOCAL_SECRET_DIR"/*-key.pem
 These files are deliberately disposable and unsuitable for a shared machine or
 production environment.
 
-### Bootstrap one static local runner
+### Bootstrap three static local runners
 
 The bootstrap composition has no enrollment API. Its supported initial
-runner-admission path is a privileged declarative fleet file loaded at server
-startup. Run the non-`sudo` commands below as the dedicated non-root runner
-account; the checked-in example assumes UID 1000. The derivation commands also
-require Python 3 and GNU coreutils `date`. First make an ignored host-specific
-configuration and review every host, resource, profile, and identity value
-before deriving its capabilities:
+runner-admission path is one privileged declarative fleet file loaded at server
+startup. A Linux host runs exactly three independent single-slot processes.
+Run the non-`sudo` derivation commands below from one private non-root staging
+account. The deployed host uses three separate service accounts (the checked-in
+units use UID/GID pairs 1001 through 1003). Python 3 and GNU coreutils `date`
+are also required.
+
+Copy all three examples to an ignored host-specific directory and review every
+host, resource, profile, and identity value:
 
 ```console
-export AUTOMATA_RUNNER_CONFIG="$(pwd -P)/target/runner-local/runner.local.json"
-install -d -m 0700 -- "$(dirname "$AUTOMATA_RUNNER_CONFIG")"
-install -m 0600 -- \
-  crates/automata-ci-runner/config/runner.local.example.json \
-  "$AUTOMATA_RUNNER_CONFIG"
+export AUTOMATA_RUNNER_CONFIG_DIR="$(pwd -P)/target/runner-local/config"
+install -d -m 0700 -- "$AUTOMATA_RUNNER_CONFIG_DIR"
+for instance in 1 2 3; do
+  install -m 0600 -- \
+    "crates/automata-ci-runner/config/runner.local-${instance}.example.json" \
+    "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json"
+done
 ```
 
 Follow the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md)
-when adapting that file. In particular, it must use a unique canonical
-`runner_id`, exactly one runner group, paths and a runtime UID belonging to the
-service account, and an inventory that the configured executor can enforce.
-The next command validates the complete configuration and emits only the exact
-derived durable-registration `RunnerCapabilities` ceiling. Optional abilities
-such as service containers appear only when their exact immutable inputs are
-configured; the runner still has to prove them during startup, and scheduling
-uses the intersection of this registered ceiling with the live session
-advertisement. The command validates credential references but does not open
-them or read their values:
+when adapting those files. Each needs a unique canonical `runner_id`, exactly
+one common runner group, instance-specific durable/transient paths and
+credentials, and `max_parallel_jobs: 1`. The next loop validates each complete
+configuration and emits its exact durable-registration `RunnerCapabilities`
+ceiling. It validates credential references but does not open their values:
 
 ```console
-automata-runner capabilities --config "$AUTOMATA_RUNNER_CONFIG" \
-  > "$AUTOMATA_LOCAL_SECRET_DIR/runner-capabilities.json"
+for instance in 1 2 3; do
+  automata-runner capabilities \
+    --config "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json" \
+    > "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-capabilities.json"
+done
 ```
 
-Create one CA-signed leaf whose extended key usage is exactly `clientAuth`.
+Issue three different CA-signed leaves whose extended key usage is exactly
+`clientAuth`. A leaf or private key must never be reused between runner IDs.
 The registration loader rejects CA leaves, CA/key-signing usage, missing or
-additional extended usages, a PEM containing a certificate chain, and an expiry
-that differs from the leaf's exact X.509 `notAfter` value:
+additional extended usages, a PEM certificate chain, and an expiry that differs
+from the leaf's exact X.509 `notAfter` value:
 
 ```console
 umask 077
-openssl req -newkey rsa:3072 -nodes -sha256 \
-  -subj '/CN=Automata local static runner' \
-  -addext 'basicConstraints=critical,CA:FALSE' \
-  -addext 'keyUsage=critical,digitalSignature' \
-  -addext 'extendedKeyUsage=critical,clientAuth' \
-  -keyout "$AUTOMATA_LOCAL_SECRET_DIR/runner-key.pem" \
-  -out "$AUTOMATA_LOCAL_SECRET_DIR/runner.csr"
+for instance in 1 2 3; do
+  openssl req -newkey rsa:3072 -nodes -sha256 \
+    -subj "/CN=Automata local static runner ${instance}" \
+    -addext 'basicConstraints=critical,CA:FALSE' \
+    -addext 'keyUsage=critical,digitalSignature' \
+    -addext 'extendedKeyUsage=critical,clientAuth' \
+    -keyout "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-key.pem" \
+    -out "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.csr"
 
-openssl x509 -req -sha256 -days 30 \
-  -in "$AUTOMATA_LOCAL_SECRET_DIR/runner.csr" \
-  -CA "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
-  -CAkey "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca-key.pem" \
-  -CAserial "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.srl" \
-  -copy_extensions copy \
-  -out "$AUTOMATA_LOCAL_SECRET_DIR/runner.pem"
+  openssl x509 -req -sha256 -days 30 \
+    -in "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.csr" \
+    -CA "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
+    -CAkey "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca-key.pem" \
+    -CAserial "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.srl" \
+    -copy_extensions copy \
+    -out "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem"
 
-runner_cert_not_after="$(
   LC_ALL=C date --utc --date="$(
-    LC_ALL=C openssl x509 -in "$AUTOMATA_LOCAL_SECRET_DIR/runner.pem" \
+    LC_ALL=C openssl x509 \
+      -in "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
       -noout -enddate | sed 's/^notAfter=//'
-  )" +%s
-)"
+  )" +%s > "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-not-after"
+done
 ```
 
-Build the static fleet document from that canonical output instead of copying
-the JSON file's input inventory. This example binds the runner to the example
-tenant `local` and requires the capabilities to name exactly one group:
+Build one static fleet document from all three canonical outputs. The builder
+requires one common group, future certificate expiries, unique runner IDs, and
+exactly one slot per process:
 
 ```console
-python3 - \
-  "$AUTOMATA_LOCAL_SECRET_DIR/runner-capabilities.json" \
-  "$runner_cert_not_after" \
+python3 - "$AUTOMATA_LOCAL_SECRET_DIR" \
   > "$AUTOMATA_LOCAL_SECRET_DIR/static-runners.json" <<'PY'
 import json
+import pathlib
 import sys
 import time
 
-with open(sys.argv[1], encoding="utf-8") as source:
-    capabilities = json.load(source)
+root = pathlib.Path(sys.argv[1])
+now = int(time.time())
+runners = []
+fleet_group = None
+seen_ids = set()
 
-groups = capabilities.get("groups")
-if not isinstance(groups, list) or len(groups) != 1:
-    raise SystemExit("runner capabilities must name exactly one group")
-expires_at_seconds = int(sys.argv[2])
-if expires_at_seconds <= int(time.time()):
-    raise SystemExit("runner certificate must expire in the future")
+for instance in range(1, 4):
+    with (root / f"runner-{instance}-capabilities.json").open(
+        encoding="utf-8"
+    ) as source:
+        capabilities = json.load(source)
 
-runner_id = capabilities["runner_id"]
-document = {
-    "schema_version": 1,
-    "tenant": "local",
-    "group": groups[0],
-    "runners": [{
+    groups = capabilities.get("groups")
+    if not isinstance(groups, list) or len(groups) != 1:
+        raise SystemExit(f"runner {instance} capabilities must name one group")
+    if fleet_group is None:
+        fleet_group = groups[0]
+    elif groups[0] != fleet_group:
+        raise SystemExit("all three runners must use one fleet group")
+    if capabilities.get("max_parallel_jobs") != 1:
+        raise SystemExit(f"runner {instance} must advertise exactly one slot")
+
+    runner_id = capabilities["runner_id"]
+    if runner_id in seen_ids:
+        raise SystemExit("runner IDs must be unique")
+    seen_ids.add(runner_id)
+    expires_at_seconds = int(
+        (root / f"runner-{instance}-not-after").read_text(encoding="ascii")
+    )
+    if expires_at_seconds <= now:
+        raise SystemExit(f"runner {instance} certificate must be current")
+
+    runners.append({
         "id": runner_id,
-        "name": "local-runner",
+        "name": f"local-runner-{instance}",
         "external_identity": f"local-static:{runner_id}",
         "labels": capabilities["labels"],
         "capabilities": capabilities,
-        "slots": capabilities["max_parallel_jobs"],
+        "slots": 1,
         "active_client_certificates": [{
-            "source": "file:/etc/automata/bootstrap/runner.pem",
+            "source": f"file:/etc/automata/bootstrap/runner-{instance}.pem",
             "expires_at_seconds": expires_at_seconds,
         }],
-    }],
+    })
+
+document = {
+    "schema_version": 1,
+    "tenant": "local",
+    "group": fleet_group,
+    "runners": runners,
 }
 json.dump(document, sys.stdout, sort_keys=True, separators=(",", ":"))
 sys.stdout.write("\n")
 PY
 ```
 
-The checked-in dogfood configuration derives exactly three durable slots for
-one runner process and one `runner_id`; it is not a three-replica deployment.
-The configured 4,000 CPU millicores, 16 GiB memory, and 4,096 PIDs are per-job
-ceilings, so a fully occupied host must provide at least 12,000 CPU millicores,
-48 GiB memory, and 12,288 PIDs, in addition to runner, Podman, and operating
-system overhead. Keep the derived static `slots` value equal to
-`max_parallel_jobs` when adapting either capacity or resources.
+The three processes expose three jobs in aggregate. At the checked-in per-job
+ceiling, the host needs at least 12,000 CPU millicores, 48 GiB of job memory,
+and 12,288 job PIDs, plus runner, Podman, and operating-system overhead. Keep
+every static `slots` value equal to its configuration's
+`max_parallel_jobs: 1`; increasing one process to three slots would create
+five host jobs rather than the requested three.
 
-The server-side leaf and fleet document have a stricter trust boundary than
+The server-side leaves and fleet document have a stricter trust boundary than
 ordinary secret files: every ancestor is root-owned and not group- or
 world-writable, and each file is root-owned, single-linked, and has no write
-bits. Install separate copies so the runner can keep its private key owner-only:
+bits. Install separate copies so each runner can keep its private key
+owner-only:
 
 ```console
-export AUTOMATA_RUNNER_USER="$(id -un)"
-export AUTOMATA_RUNNER_GROUP="$(id -gn)"
 test "$(id -u)" -ne 0
 
 sudo install -d -o root -g root -m 0755 \
   /etc/automata /etc/automata/bootstrap
-sudo install -o root -g root -m 0444 \
-  "$AUTOMATA_LOCAL_SECRET_DIR/runner.pem" \
-  /etc/automata/bootstrap/runner.pem
+for instance in 1 2 3; do
+  sudo install -o root -g root -m 0444 \
+    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
+    "/etc/automata/bootstrap/runner-${instance}.pem"
+done
 sudo install -o root -g root -m 0444 \
   "$AUTOMATA_LOCAL_SECRET_DIR/static-runners.json" \
   /etc/automata/bootstrap/static-runners.json
 
 sudo install -d -o root -g root -m 0755 \
-  /etc/automata-runner /etc/automata-runner/tls
-sudo install -o root -g root -m 0444 \
-  "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
-  /etc/automata-runner/tls/server-ca.pem
-sudo install -o root -g root -m 0444 \
-  "$AUTOMATA_LOCAL_SECRET_DIR/runner.pem" \
-  /etc/automata-runner/tls/runner.pem
-sudo install -o "$AUTOMATA_RUNNER_USER" -g "$AUTOMATA_RUNNER_GROUP" -m 0600 \
-  "$AUTOMATA_LOCAL_SECRET_DIR/runner-key.pem" \
-  /etc/automata-runner/tls/runner-key.pem
+  /etc/automata-runner /etc/automata-runner/instances
+for instance in 1 2 3; do
+  runner_account="automata-runner-${instance}"
+  sudo install -d -o root -g "$runner_account" -m 0750 \
+    "/etc/automata-runner/instances/${instance}" \
+    "/etc/automata-runner/instances/${instance}/tls" \
+    "/etc/automata-runner/instances/${instance}/secrets"
+  sudo install -o root -g root -m 0444 \
+    "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
+    "/etc/automata-runner/instances/${instance}/tls/server-ca.pem"
+  sudo install -o root -g root -m 0444 \
+    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
+    "/etc/automata-runner/instances/${instance}/tls/runner.pem"
+  sudo install \
+    -o "$runner_account" -g "$runner_account" -m 0600 \
+    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-key.pem" \
+    "/etc/automata-runner/instances/${instance}/tls/runner-key.pem"
+done
 ```
 
 The server loads this exact fleet after migrations and before readiness.
 Reapplying an unchanged document is idempotent; membership, identity, routing,
 slot, or capability drift aborts startup. Certificate rotation is coordinated:
-publish old and new leaves together (at most two), restart every server replica,
-switch and restart the runner, then omit the old leaf and restart every server
-replica again. Omission revokes the old digest and a stale document cannot
-restore it.
+publish each affected runner's old and new leaves together (at most two),
+restart every server replica, switch and restart that runner process, then omit
+the old leaf and restart every server replica again. Omission revokes the old
+digest and a stale document cannot restore it.
 
 Static registration and TLS identity alone do not make the execution host
-runnable. Before invoking `automata-runner run`, finish the runner guide's
-owner-only spool key, S3 credentials, private state roots, rootless Podman host,
-immutable profile, repository bridge, and static-binary requirements.
+runnable. Before enabling the three-process target, finish the runner guide's
+three owner-only spool keys, service credentials, private state roots, rootless
+Podman mounts, immutable profile, repository bridge, and static-binary
+requirements. The checked-in [host units](../deploy/runner-host/README.md)
+encode the exact three-service lifecycle and aggregate cgroup budget.
 
 On Unix, every ordinary server `file:` secret-source reference must be an
 absolute path. Automata opens each path component without following symbolic
@@ -374,6 +411,14 @@ only for Private source. The checked-in example uses the server-owned
 authenticated source revision; nested files and other extensions are not
 selected. Discovery is bounded by the manifest archive limits, and the sorted
 inventory and each path-local result are durable before the delivery completes.
+
+The required top-level `transport` is a closed deployment policy. Production
+uses `{"mode":"github_dot_com"}`. The isolated integration suite may instead
+use `{"mode":"loopback_emulator","api_base":"http://automata-git.localhost:PORT/api/v3/"}`.
+Emulator mode accepts only credential-free loopback HTTP URLs (including
+nonempty `.localhost` names), applies the same bounded protocol clients, and
+never falls back to GitHub.com. It is an E2E protocol-emulation lane, not
+evidence that GitHub.com networking or installation configuration works.
 
 The optional top-level `schedule` object controls the separate periodic
 workflow scheduler; omitting it uses the documented example defaults. It

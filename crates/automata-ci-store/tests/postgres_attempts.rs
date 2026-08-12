@@ -76,7 +76,15 @@ async fn queued_creation_persists_current_safety_and_retries_reuse_the_job_ceili
         .bind(lower.job_id.as_uuid())
         .execute(database.pool())
         .await?;
-        let retry = insert_attempt(&database, lower.job_id, 2, 72).await?;
+        database
+            .store()
+            .conclude_queued(conclusion_request(
+                admitted_attempt,
+                JobLifecycle::Cancelled,
+                72,
+            ))
+            .await?;
+        let retry = insert_attempt(&database, lower.job_id, 2, 73).await?;
         assert_eq!(
             load_attempt_output_safety(&database, retry).await?,
             AttemptOutputSafety {
@@ -281,14 +289,16 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
         .await;
     assert!(matches!(stale, Err(AttemptStoreError::FenceRejected(id)) if id == attempt_id));
 
+    let predating_seed = seed_control_plane(database.pool(), 1).await?;
     let current = database_now(database).await?;
     let future_state = checked_add_millis(current, 30_000)?;
-    let predating_id = insert_attempt(database, seed.job_id, 2, future_state.get()).await?;
+    let predating_id =
+        insert_attempt(database, predating_seed.job_id, 1, future_state.get()).await?;
     let predating = database
         .store()
         .acquire_lease(acquire_request(
             predating_id,
-            seed.session_fences[0],
+            predating_seed.session_fences[0],
             current.get(),
             checked_add_millis(current, LIVE_LEASE_MILLIS)?.get(),
         ))
@@ -299,7 +309,8 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
             if id == predating_id
     ));
 
-    let exhausted_id = insert_attempt(database, seed.job_id, 3, 40).await?;
+    let exhausted_seed = seed_control_plane(database.pool(), 1).await?;
+    let exhausted_id = insert_attempt(database, exhausted_seed.job_id, 1, 40).await?;
     sqlx::query("UPDATE job_attempts SET fencing_token = $2 WHERE id = $1")
         .bind(exhausted_id.as_uuid())
         .bind(i64::MAX)
@@ -311,7 +322,7 @@ async fn exercise_atomic_acquisition(database: &TestDatabase) -> TestResult {
             fresh_acquire_request(
                 database,
                 exhausted_id,
-                seed.session_fences[0],
+                exhausted_seed.session_fences[0],
                 LIVE_LEASE_MILLIS,
             )
             .await?,
@@ -584,20 +595,19 @@ async fn exercise_expired_mutations(
 }
 
 async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
-    let seed = seed_control_plane(database.pool(), 1).await?;
-    let locked_id = insert_attempt(database, seed.job_id, 1, 1).await?;
-    let available_id = insert_attempt(database, seed.job_id, 2, 2).await?;
-    for attempt_id in [locked_id, available_id] {
+    let locked_seed = seed_control_plane(database.pool(), 1).await?;
+    let available_seed = seed_control_plane(database.pool(), 1).await?;
+    let locked_id = insert_attempt(database, locked_seed.job_id, 1, 1).await?;
+    let available_id = insert_attempt(database, available_seed.job_id, 1, 2).await?;
+    let attempts = [
+        (locked_id, locked_seed.session_fences[0]),
+        (available_id, available_seed.session_fences[0]),
+    ];
+    for (attempt_id, session) in attempts {
         database
             .store()
             .acquire_lease(
-                fresh_acquire_request(
-                    database,
-                    attempt_id,
-                    seed.session_fences[0],
-                    LIVE_LEASE_MILLIS,
-                )
-                .await?,
+                fresh_acquire_request(database, attempt_id, session, LIVE_LEASE_MILLIS).await?,
             )
             .await?;
         expire_active_attempt(database, attempt_id).await?;
@@ -623,14 +633,16 @@ async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
         .await?;
     assert_eq!(processed, vec![locked_id]);
 
+    let predating_seed = seed_control_plane(database.pool(), 1).await?;
     let current = database_now(database).await?;
     let future_state = checked_add_millis(current, 30_000)?;
-    let predating_id = insert_attempt(database, seed.job_id, 3, future_state.get()).await?;
+    let predating_id =
+        insert_attempt(database, predating_seed.job_id, 1, future_state.get()).await?;
     let predating_reacquisition = database
         .store()
         .acquire_lease(acquire_request(
             predating_id,
-            seed.session_fences[0],
+            predating_seed.session_fences[0],
             current.get(),
             checked_add_millis(current, LIVE_LEASE_MILLIS)?.get(),
         ))
@@ -648,17 +660,11 @@ async fn exercise_expiry_reaper(database: &TestDatabase) -> TestResult {
         Err(AttemptStoreError::InvalidRetryPolicy)
     ));
 
-    for attempt_id in [locked_id, available_id] {
+    for (attempt_id, session) in attempts {
         let lease = database
             .store()
             .acquire_lease(
-                fresh_acquire_request(
-                    database,
-                    attempt_id,
-                    seed.session_fences[0],
-                    LIVE_LEASE_MILLIS,
-                )
-                .await?,
+                fresh_acquire_request(database, attempt_id, session, LIVE_LEASE_MILLIS).await?,
             )
             .await?;
         assert_eq!(lease.fencing_token(), FencingToken::new(2)?);
@@ -753,6 +759,12 @@ async fn exercise_queued_conclusion(database: &TestDatabase) -> TestResult {
         match (leased, concluded) {
             (Ok(_), Err(AttemptStoreError::NotQueued { lifecycle, .. })) => {
                 assert_eq!(lifecycle, JobLifecycle::Leased);
+                expire_active_attempt(database, attempt_id).await?;
+                let reaped_at = database_now(database).await?;
+                assert_eq!(
+                    database.store().requeue_expired(reaped_at, 1, 1).await?,
+                    [attempt_id]
+                );
             }
             (Err(AttemptStoreError::NotQueued { lifecycle, .. }), Ok(())) => {
                 assert_eq!(lifecycle, conclusion.conclusion());

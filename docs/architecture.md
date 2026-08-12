@@ -201,7 +201,11 @@ data or live log transport.
 Later gates add independent control-plane roles, multiple replicas,
 Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
 KubeVirt, broader Windows behavior and Hyper-V execution, and macOS native and
-Virtualization.framework execution.
+Virtualization.framework execution. The workspace contains the Rust Kubernetes
+sandbox adapter, its in-sandbox guest transport, and a runner product-config
+variant that uses ambient Kubernetes client authentication and the shared
+environment-profile startup admission. Fleet reconciliation and cluster
+provisioning remain deployment responsibilities.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their

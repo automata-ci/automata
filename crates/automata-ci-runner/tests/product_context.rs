@@ -724,7 +724,7 @@ fn fixture_runner_config() -> RunnerProductConfig {
     #[cfg(windows)]
     let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
     #[cfg(target_os = "linux")]
-    let config_bytes = include_bytes!("../config/runner.local.example.json").as_slice();
+    let config_bytes = include_bytes!("../config/runner.local-1.example.json").as_slice();
     let mut document: serde_json::Value =
         serde_json::from_slice(config_bytes).expect("runner config JSON");
     document["github"]["server_url"] = serde_json::json!("https://github.com/");

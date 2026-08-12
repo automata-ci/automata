@@ -110,6 +110,10 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
         assert_eq!(accepted.repository_owner_id().get(), OWNER_ID);
         assert_eq!(accepted.manifest_revision().get(), 1);
         assert_eq!(accepted.manifest_digest(), fixture.manifest.digest());
+        assert_eq!(
+            accepted.evidence().manifest().github_repository_owner_id(),
+            Some(ProviderRepositoryOwnerId::new(OWNER_ID)?)
+        );
         assert_eq!(accepted.accepted_at(), accepted_at);
         assert_eq!(accepted.evidence().manifest(), &fixture.manifest);
         assert_eq!(
@@ -1501,7 +1505,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
         )
         .await
         .expect_err("a bare GitHub inbox must fail at statement commit");
-        assert_constraint(&bare_error, "github_delivery_atomic_queued_check_required");
+        assert_constraint(&bare_error, "github_delivery_atomic_evidence_required");
 
         let mut no_check = database.pool().begin().await?;
         let no_check_id = Uuid::new_v4();
@@ -1529,6 +1533,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
         assert_constraint_one_of(
             &commit_error,
             &[
+                "github_delivery_atomic_evidence_required",
                 "github_delivery_atomic_queued_check_required",
                 "github_provider_delivery_evidence_check_subject",
             ],
@@ -1802,6 +1807,7 @@ fn manifest_with_selection(
         GithubProviderManifestLimits::github_dot_com_ci(),
         GithubProviderManifestRevision::new(revisions.manifest).expect("manifest revision"),
     )
+    .with_repository_owner_id(ProviderRepositoryOwnerId::new(OWNER_ID).expect("repository owner"))
 }
 
 fn authority(

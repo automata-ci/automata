@@ -75,7 +75,7 @@
         {"expr": "sum(up{job=\"automata-control-plane\",cluster=~\"$cluster\",environment=~\"$environment\"} == 0)", "legendFormat": "control down", "refId": "A"},
         {"expr": "sum(up{job=\"automata-runner\",cluster=~\"$cluster\",environment=~\"$environment\"} == 0)", "legendFormat": "runner down", "refId": "B"},
         {"expr": "sum(automata_ci_runner_session_connected{cluster=~\"$cluster\",environment=~\"$environment\"} == 0)", "legendFormat": "sessions disconnected", "refId": "C"},
-        {"expr": "count(automata_ci_runner_inventory_expected{job=\"automata-runner\",cluster=~\"$cluster\",environment=~\"$environment\"} == 1 unless on (job, instance, cluster, environment) up{job=\"automata-runner\",cluster=~\"$cluster\",environment=~\"$environment\"}) or vector(0)", "legendFormat": "inventory missing", "refId": "D"}
+        {"expr": "count(automata_ci_runner_inventory_expected{job=\"automata-runner\",cluster=~\"$cluster\",environment=~\"$environment\"} == 1 unless on (job, instance, host, runner_slot, cluster, environment) up{job=\"automata-runner\",cluster=~\"$cluster\",environment=~\"$environment\"}) or vector(0)", "legendFormat": "inventory missing", "refId": "D"}
       ],
       "title": "Unavailable targets and sessions", "type": "timeseries"
     }

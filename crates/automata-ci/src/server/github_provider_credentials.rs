@@ -31,12 +31,13 @@ use automata_ci_github_delivery::{
     GithubServerServiceCredentialRelease,
 };
 use automata_ci_store::{
-    AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubServerServiceAction,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
-    GithubServerServiceAuthorityState, GithubServerServiceConsumerClaim,
-    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey, GithubServerServiceScope,
-    GithubServerServiceStoreError, ProviderDeliveryIdentity, ProviderRepositoryOwnerId,
+    AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubProviderManifest,
+    GithubServerServiceAction, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceConsumerClaim, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    GithubServerServiceScope, GithubServerServiceStoreError, ProviderDeliveryIdentity,
+    ProviderRepositoryOwnerId,
 };
 use thiserror::Error;
 use tokio::{
@@ -991,8 +992,9 @@ impl GithubProviderCredentialAdapters {
                 request.authority_selector(),
                 GithubServerServiceScope::PrivateRepositorySourceRead,
             )
+            .await
             .map_err(schedule_source_handoff_error)?;
-        if !private_schedule_identity_matches(authority, request.manifest()) {
+        if !private_schedule_identity_matches(&authority, request.manifest()) {
             return Err(GithubScheduleSourceCredentialProviderError::Rejected);
         }
         let consumer = request
@@ -1014,7 +1016,7 @@ impl GithubProviderCredentialAdapters {
             release_invalid_handoff(handoff).await;
             return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
         }
-        let Ok(canonical_request) = github_server_service_credential_request(authority) else {
+        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
             release_invalid_handoff(handoff).await;
             return Err(GithubScheduleSourceCredentialProviderError::InvariantViolation);
         };

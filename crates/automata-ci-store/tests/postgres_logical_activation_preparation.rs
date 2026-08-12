@@ -790,6 +790,7 @@ async fn selector_quarantines_expired_max_generation_and_advances_to_newer_work(
     .await
 }
 
+#[allow(clippy::too_many_lines)] // The fixture supplies the complete immutable materialization descriptor.
 fn prepared_materialization(
     fixture: &Fixture,
     claimed: &ClaimedLogicalJobActivation,

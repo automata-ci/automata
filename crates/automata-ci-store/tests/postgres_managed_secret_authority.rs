@@ -13,10 +13,10 @@ use automata_ci_auth::{
 use automata_ci_core::{
     Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
-    JobRuntimeContext, JobSource, Lease, LeaseId, OperatingSystem, RunId, RunValueTemplates,
-    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    StrategyContext, UnixMillis, ValueTemplate, WorkflowJobKey,
+    JobRuntimeContext, JobSource, Lease, LeaseId, OperatingSystem, OperationId, RunId,
+    RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
+    RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, StrategyContext, UnixMillis, ValueTemplate, WorkflowJobKey,
 };
 use automata_ci_key_management::{
     EnvelopeCodec, KeyEncryptionContext, KeyEncryptionProvider, KeyId, KeyPurpose,
@@ -26,15 +26,16 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AcknowledgeManagedSecretDelivery,
     ActivatedLogicalInstanceDescriptor, AdmissionObject, AdmissionRepository,
     AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim,
-    BindLogicalActivationPreparation, BuiltinRepositorySecretVersion,
-    ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
-    ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization, ClaimedLogicalJobActivation,
-    CommitLogicalInstanceMaterialization, ConfirmRepositorySecretVersionMutation,
-    ConfirmRepositorySecretVersionMutationOutcome, ConsumeSelectedLogicalInstanceMaterialization,
-    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
-    EnsureGithubServerServiceAuthority, EnvironmentReviewDecision, GithubCheckHeadSha,
-    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    BindLogicalActivationPreparation, BuiltinRepositorySecretVersion, CancellationActor,
+    CancellationReason, CancellationRepository as _, ClaimNextLogicalInstanceMaterialization,
+    ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization,
+    ClaimedLogicalJobActivation, CommitLogicalInstanceMaterialization,
+    ConfirmRepositorySecretVersionMutation, ConfirmRepositorySecretVersionMutationOutcome,
+    ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
+    ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
+    EnvironmentReviewDecision, GithubCheckHeadSha, GithubCheckName, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -57,7 +58,7 @@ use automata_ci_store::{
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, PublishLogicalJobActivation, RepositoryId, RepositorySecretId,
     RepositorySecretManagementRepository as _, RepositorySecretMutationId, RepositorySecretName,
-    RepositorySecretProviderMutationResult, RepositorySecretVersionId,
+    RepositorySecretProviderMutationResult, RepositorySecretVersionId, RequestCancellation,
     ReserveRepositorySecretVersionMutation, ReserveRepositorySecretVersionMutationOutcome,
     ResolveManagedSecretAuthority, ReusableSecretPermission, ReviewJobEnvironment, RoutingDocument,
     RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _,
@@ -853,7 +854,7 @@ async fn lease_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             UnixMillis::new(database_now_ms(database).await? - 10_000),
@@ -1492,7 +1493,10 @@ async fn assert_queued_gate_concluded(
     .await?;
     assert_eq!(row.0, "cancelled");
     assert_eq!(row.1, expected_gate_state);
-    assert_eq!(row.2, "completed");
+    assert_eq!(
+        row.2, "in_progress",
+        "logical result projection, not gate cancellation, owns run finalization"
+    );
     assert_eq!(row.3, 1);
     assert_eq!(row.4, "server_cancellation");
     assert!(row.5);
@@ -1518,10 +1522,12 @@ async fn backdate_gate(
     Ok(())
 }
 
-async fn seed_repository_variable(
+async fn seed_variable(
     database: &TestDatabase,
     queued: &QueuedExecutionFixture,
     actor: &SecretActor,
+    scope_kind: &str,
+    environment_id: Option<Uuid>,
 ) -> TestResult<Uuid> {
     let variable_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
@@ -1529,15 +1535,17 @@ async fn seed_repository_variable(
     sqlx::query(
         r"
         INSERT INTO workflow_variables (
-            tenant_id, repository_id, id, scope_kind, canonical_name,
+            tenant_id, repository_id, environment_id, id, scope_kind, canonical_name,
             status, created_by_principal_id, created_at_ms, updated_at_ms
-        ) VALUES ($1, $2, $3, 'repository', 'PENDING_CONFIG',
-                  'provisioning', $4, $5, $5)
+        ) VALUES ($1, $2, $3, $4, $5, 'PENDING_CONFIG',
+                  'provisioning', $6, $7, $7)
         ",
     )
     .bind(&queued.tenant)
     .bind(queued.repository_id.as_uuid())
+    .bind(environment_id)
     .bind(variable_id)
+    .bind(scope_kind)
     .bind(actor.principal_id)
     .bind(now)
     .execute(database.pool())
@@ -1580,6 +1588,23 @@ async fn seed_repository_variable(
     .execute(database.pool())
     .await?;
     Ok(variable_id)
+}
+
+async fn seed_repository_variable(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+) -> TestResult<Uuid> {
+    seed_variable(database, queued, actor, "repository", None).await
+}
+
+async fn seed_environment_variable(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+    environment_id: Uuid,
+) -> TestResult<Uuid> {
+    seed_variable(database, queued, actor, "environment", Some(environment_id)).await
 }
 
 async fn prepare_and_resolve_unprotected_gate(
@@ -1721,7 +1746,7 @@ async fn seed_higher_precedence_secret(
     environment_id: Option<Uuid>,
 ) -> TestResult<BindingIdentity> {
     let higher = BindingIdentity::fresh();
-    let index = if scope_kind == "repository" { 0 } else { 1 };
+    let index = usize::from(scope_kind != "repository");
     seed_repository_secret(database.pool(), queued.repository_id, actor, higher, index).await?;
     if scope_kind != "repository" {
         reclassify_secret_scope_for_precedence_test(
@@ -2038,6 +2063,101 @@ async fn database_time_expires_waiting_and_unprepared_gates_and_replays_conclusi
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn terminal_conclusion_accepts_only_exact_canonical_prior_cancellation() -> TestResult {
+    run_with_database(|database| async move {
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x97)),
+            [],
+            [],
+        )?;
+        let prior = seed_queued_execution(&database, Vec::new(), requirements.clone()).await?;
+        let prior_request = RequestCancellation::new(
+            OperationId::new(),
+            prior.attempt_id,
+            CancellationActor::new("operator")?,
+            Some(CancellationReason::new(
+                "operator cancelled protected environment work",
+            )?),
+            UnixMillis::new(database_now_ms(&database).await?),
+        );
+        let cancellation = database
+            .store()
+            .request_cancellation(prior_request.clone())
+            .await?;
+        assert!(!cancellation.was_replayed());
+        assert!(cancellation.delivery().is_none());
+        assert_eq!(cancellation.request(), &prior_request);
+        let tenant = TenantScope::from_authenticated_tenant_id(&prior.tenant)?;
+        database
+            .store()
+            .conclude_terminal_job_environment(&tenant, prior.attempt_id)
+            .await?;
+        database
+            .store()
+            .conclude_terminal_job_environment(&tenant, prior.attempt_id)
+            .await?;
+        assert_queued_gate_concluded(&database, &prior, "cancelled").await?;
+        let retained_actor: String = sqlx::query_scalar(
+            "SELECT requested_by FROM attempt_cancellation_intents WHERE attempt_id = $1",
+        )
+        .bind(prior.attempt_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(retained_actor, "operator");
+
+        let corrupt = seed_queued_execution(&database, Vec::new(), requirements).await?;
+        let corrupt_now = database_now_ms(&database).await?;
+        let mut transaction = database.pool().begin().await?;
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            r"
+            INSERT INTO attempt_cancellation_intents (
+                attempt_id, operation_id, requested_by, reason, requested_at_ms,
+                delivery_session_id, delivery_command_sequence
+            ) VALUES ($1, $2, 'operator', 'uncanonical cancellation', $3, NULL, NULL)
+            ",
+        )
+        .bind(corrupt.attempt_id.as_uuid())
+        .bind(OperationId::new().as_uuid())
+        .bind(corrupt_now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE job_attempts SET lifecycle = 'cancelled', changed_at_ms = $2 WHERE id = $1",
+        )
+        .bind(corrupt.attempt_id.as_uuid())
+        .bind(corrupt_now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE job_environment_gates
+            SET state = 'cancelled', updated_at_ms = $2, revision = revision + 1
+            WHERE attempt_id = $1
+            ",
+        )
+        .bind(corrupt.attempt_id.as_uuid())
+        .bind(corrupt_now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        let corrupt_tenant = TenantScope::from_authenticated_tenant_id(&corrupt.tenant)?;
+        assert!(matches!(
+            database
+                .store()
+                .conclude_terminal_job_environment(&corrupt_tenant, corrupt.attempt_id)
+                .await,
+            Err(ProtectedEnvironmentStoreError::CorruptData)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)]
 async fn stale_ready_environment_secret_and_variable_snapshots_are_concluded() -> TestResult {
     run_with_database(|database| async move {
@@ -2209,15 +2329,16 @@ async fn stale_resolving_approval_and_environment_are_atomically_concluded() -> 
                 now + 300_000,
             )
             .await?;
+            let approval_review = ReviewJobEnvironment::new(
+                reviewer.actor(),
+                queued.repository_id,
+                queued.attempt_id,
+                EnvironmentReviewDecision::Approve,
+            )?;
             assert_eq!(
                 database
                     .store()
-                    .review_job_environment(ReviewJobEnvironment::new(
-                        reviewer.actor(),
-                        queued.repository_id,
-                        queued.attempt_id,
-                        EnvironmentReviewDecision::Approve,
-                    )?)
+                    .review_job_environment(approval_review.clone())
                     .await?,
                 JobEnvironmentGateState::Resolving
             );
@@ -2303,6 +2424,19 @@ async fn stale_resolving_approval_and_environment_are_atomically_concluded() -> 
                 "{stale_kind} must close resolving rather than poison the queue"
             );
             assert_queued_gate_concluded(&database, &queued, "cancelled").await?;
+            let stale_review = database
+                .store()
+                .review_job_environment(approval_review)
+                .await;
+            let expected = if stale_kind == "reviewer_revocation" {
+                matches!(
+                    stale_review,
+                    Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+                )
+            } else {
+                matches!(stale_review, Err(ProtectedEnvironmentStoreError::Conflict))
+            };
+            assert!(expected, "{stale_kind} stale review returned {stale_review:?}");
         }
         Ok(())
     })
@@ -2312,7 +2446,7 @@ async fn stale_resolving_approval_and_environment_are_atomically_concluded() -> 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)]
-async fn ready_secret_precedence_is_rechecked_for_scheduling_and_grant_issuance() -> TestResult {
+async fn ready_authority_is_rechecked_at_inspection_lease_and_grant_boundaries() -> TestResult {
     run_with_database(|database| async move {
         for (initial_scope, higher_scope) in [
             ("repository", "environment"),
@@ -2358,8 +2492,76 @@ async fn ready_secret_precedence_is_rechecked_for_scheduling_and_grant_issuance(
         assert!(
             lease_error
                 .to_string()
-                .contains("job secret selection no longer has highest precedence"),
+                .contains("job environment and credential authority is no longer current"),
             "unexpected lease rejection: {lease_error}"
+        );
+
+        let variable_requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x96)),
+            [],
+            ["PENDING_CONFIG".to_owned()],
+        )?;
+        let variable_shadow =
+            seed_queued_execution(&database, Vec::new(), variable_requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let variable_actor = seed_secret_actor(database.pool(), &variable_shadow.tenant, now).await?;
+        seed_repository_variable(&database, &variable_shadow, &variable_actor).await?;
+        let (variable_environment_id, _) = prepare_protected_environment_gate(
+            &database,
+            &variable_shadow,
+            &variable_actor,
+            now + 300_000,
+        )
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .review_job_environment(ReviewJobEnvironment::new(
+                    variable_actor.actor(),
+                    variable_shadow.repository_id,
+                    variable_shadow.attempt_id,
+                    EnvironmentReviewDecision::Approve,
+                )?)
+                .await?,
+            JobEnvironmentGateState::Resolving
+        );
+        let variable_tenant =
+            TenantScope::from_authenticated_tenant_id(&variable_shadow.tenant)?;
+        assert_eq!(
+            database
+                .store()
+                .resolve_job_credentials(&variable_tenant, variable_shadow.attempt_id)
+                .await?,
+            JobEnvironmentGateState::Ready
+        );
+        seed_environment_variable(
+            &database,
+            &variable_shadow,
+            &variable_actor,
+            variable_environment_id,
+        )
+        .await?;
+        // Variable value custody is independently fail-closed. Disable only
+        // that earlier guard so this case reaches the 0070 currentness proof.
+        sqlx::query(
+            "ALTER TABLE job_attempts DISABLE TRIGGER job_attempts_00_require_variable_custody_before_lease",
+        )
+        .execute(database.pool())
+        .await?;
+        let variable_lease = lease_execution(&database, variable_shadow).await;
+        sqlx::query(
+            "ALTER TABLE job_attempts ENABLE TRIGGER job_attempts_00_require_variable_custody_before_lease",
+        )
+        .execute(database.pool())
+        .await?;
+        let Err(variable_lease_error) = variable_lease else {
+            return Err("lease authority accepted a shadowed variable selection".into());
+        };
+        assert!(
+            variable_lease_error
+                .to_string()
+                .contains("job environment and credential authority is no longer current"),
+            "unexpected variable lease rejection: {variable_lease_error}"
         );
 
         let (grant_guarded, actor, environment_id) =
@@ -2375,13 +2577,13 @@ async fn ready_secret_precedence_is_rechecked_for_scheduling_and_grant_issuance(
         // Bypass only the new lease-time guard so this independent case can
         // prove grant issuance enforces the same precedence boundary.
         sqlx::query(
-            "ALTER TABLE job_attempts DISABLE TRIGGER job_attempts_require_current_secret_precedence_before_lease",
+            "ALTER TABLE job_attempts DISABLE TRIGGER job_attempts_01_require_current_environment_gate_before_lease",
         )
         .execute(database.pool())
         .await?;
         let execution = lease_execution(&database, grant_guarded).await?;
         sqlx::query(
-            "ALTER TABLE job_attempts ENABLE TRIGGER job_attempts_require_current_secret_precedence_before_lease",
+            "ALTER TABLE job_attempts ENABLE TRIGGER job_attempts_01_require_current_environment_gate_before_lease",
         )
         .execute(database.pool())
         .await?;
@@ -2431,6 +2633,65 @@ async fn ready_secret_precedence_is_rechecked_for_scheduling_and_grant_issuance(
                 .phase(),
             JobEnvironmentGatePhase::Ready
         );
+        lease_execution(&database, missing).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn in_flight_environment_authority_change_is_linearized_before_lease() -> TestResult {
+    run_with_database(|database| async move {
+        let (queued, _actor, environment_id) =
+            prepare_ready_protected_secret_gate(&database, "repository").await?;
+        let attempt_id = queued.attempt_id;
+        let mut transaction = database.pool().begin().await?;
+        let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let changed = sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET required_approvals = 2, revision = revision + 1, updated_at_ms = $4
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&queued.tenant)
+        .bind(queued.repository_id.as_uuid())
+        .bind(environment_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(&mut *transaction)
+        .await?;
+        assert_eq!(changed.rows_affected(), 1);
+
+        let lease_database = Arc::clone(&database);
+        let lease = tokio::spawn(async move { lease_execution(&lease_database, queued).await });
+        wait_for_backend_blocked_by(database.pool(), blocking_backend_pid).await?;
+        let lifecycle_while_blocked: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(attempt_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_while_blocked, "queued");
+
+        transaction.commit().await?;
+        let lease_result = tokio::time::timeout(Duration::from_secs(5), lease).await??;
+        let Err(lease_error) = lease_result else {
+            return Err("lease accepted authority that changed while its guard was blocked".into());
+        };
+        assert!(
+            lease_error
+                .to_string()
+                .contains("job environment and credential authority is no longer current"),
+            "unexpected lease rejection: {lease_error}"
+        );
+        let lifecycle_after_rejection: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(attempt_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_after_rejection, "queued");
         Ok(())
     })
     .await
@@ -3381,5 +3642,5 @@ async fn wait_for_backend_blocked_by(pool: &PgPool, blocking_backend_pid: i32) -
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Err("authority resolver did not block behind the in-flight grant insert".into())
+    Err("authority operation did not block behind the in-flight mutation".into())
 }

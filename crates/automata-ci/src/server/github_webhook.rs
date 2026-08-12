@@ -117,7 +117,20 @@ async fn accept_github_webhook(
             .await
             .map(|_| ()),
     }
-    .map_err(GithubWebhookHttpOutcome::from_ingress)?;
+    .map_err(|error| {
+        let outcome = GithubWebhookHttpOutcome::from_ingress(error);
+        if matches!(
+            outcome,
+            GithubWebhookHttpOutcome::Internal | GithubWebhookHttpOutcome::Unavailable
+        ) {
+            tracing::warn!(
+                error = %error,
+                status = outcome.status().as_u16(),
+                "GitHub webhook ingress failed"
+            );
+        }
+        outcome
+    })?;
     ensure_before_deadline(deadline)?;
     Ok(())
 }
@@ -254,7 +267,9 @@ impl GithubWebhookHttpOutcome {
             GithubDeliveryIngressError::ReplayConflict => Self::ReplayConflict,
             GithubDeliveryIngressError::InvalidTrustedTime
             | GithubDeliveryIngressError::RawObject { .. }
-            | GithubDeliveryIngressError::InboxRejected
+            | GithubDeliveryIngressError::InboxAuthorityRejected
+            | GithubDeliveryIngressError::InboxNotFound
+            | GithubDeliveryIngressError::InboxCorrupt
             | GithubDeliveryIngressError::InvariantViolation => Self::Internal,
         }
     }

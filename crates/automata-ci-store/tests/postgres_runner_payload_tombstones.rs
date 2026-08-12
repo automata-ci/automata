@@ -322,7 +322,7 @@ async fn explicit_close_and_supersession_erase_commands_and_receipts() -> TestRe
                 RunnerSessionId::new(),
                 superseded_fence.runner_id(),
                 RunnerGeneration::new(1)?,
-                RunnerProtocolVersion::new(4)?,
+                RunnerProtocolVersion::new(5)?,
                 JobIrVersion::current(),
                 runner_capability_document(database.pool(), superseded_fence.runner_id()).await?,
                 supersession_started_at,
