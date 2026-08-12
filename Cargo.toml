@@ -137,7 +137,7 @@ jiff = "0.2.35"
 k8s-openapi = { version = "0.28.0", features = ["v1_34"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "ring", "rustls-tls", "ws"] }
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
-processkit = { version = "=3.2.0", default-features = false, features = ["limits"] }
+processkit = { version = "=3.3.1", default-features = false, features = ["limits"] }
 prometheus-client = "=0.25.0"
 rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["http2", "json", "rustls-tls-webpki-roots"] }

@@ -18,7 +18,7 @@ environment values.
 
 ## Mandatory account boundary
 
-`processkit` 3.2 does **not** mint a restricted Windows access token. Every
+`processkit` 3.3.1 does **not** mint a restricted Windows access token. Every
 child retains the token of the runner process. Job Objects contain the process
 tree and enforce resource limits; they do not remove account privileges or
 provide token-based privilege isolation. The provider's explicit `Host`
