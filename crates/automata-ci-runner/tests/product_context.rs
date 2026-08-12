@@ -401,6 +401,35 @@ fn repository_authority_with_the_wrong_endpoint_fails_closed() {
 }
 
 #[test]
+fn loopback_repository_authority_requires_the_exact_emulator_origin_and_trust_class() {
+    let config = fixture_runner_config_with_github(
+        "http://automata-git.localhost:18088/",
+        "http://automata-git.localhost:18088/api/v3/",
+        "http://automata-git.localhost:18088/api/graphql",
+        true,
+    );
+    let mut fixture = ContextFixture::with_config(&config);
+    fixture.add_repository_authority_endpoint(
+        RuntimeAuthorityEndpoint::loopback_development("http://automata-git.localhost:18088/")
+            .expect("loopback repository endpoint"),
+        REPOSITORY_TOKEN,
+    );
+
+    let snapshot = fixture.snapshot().expect("loopback context snapshot");
+    let GithubValue::Object(github) = snapshot
+        .expression()
+        .named_value("github")
+        .expect("github context")
+    else {
+        panic!("github context must be an object");
+    };
+    assert_eq!(
+        github.get("token").and_then(GithubValue::as_str),
+        Some(REPOSITORY_TOKEN)
+    );
+}
+
+#[test]
 fn results_authority_is_injected_only_as_a_masked_job_secret() {
     let fixture = ContextFixture::new();
     let snapshot = fixture.snapshot().expect("context snapshot");
@@ -721,23 +750,40 @@ struct ContextFixture {
 }
 
 fn fixture_runner_config() -> RunnerProductConfig {
+    fixture_runner_config_with_github(
+        "https://github.com/",
+        "https://api.github.com/",
+        "https://api.github.com/graphql",
+        false,
+    )
+}
+
+fn fixture_runner_config_with_github(
+    server_url: &str,
+    api_url: &str,
+    graphql_url: &str,
+    allow_insecure_http: bool,
+) -> RunnerProductConfig {
     #[cfg(windows)]
     let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
     #[cfg(target_os = "linux")]
     let config_bytes = include_bytes!("../config/runner.local-1.example.json").as_slice();
     let mut document: serde_json::Value =
         serde_json::from_slice(config_bytes).expect("runner config JSON");
-    document["github"]["server_url"] = serde_json::json!("https://github.com/");
-    document["github"]["api_url"] = serde_json::json!("https://api.github.com/");
-    document["github"]["graphql_url"] = serde_json::json!("https://api.github.com/graphql");
-    document["github"]["allow_insecure_http"] = serde_json::json!(false);
+    document["github"]["server_url"] = serde_json::json!(server_url);
+    document["github"]["api_url"] = serde_json::json!(api_url);
+    document["github"]["graphql_url"] = serde_json::json!(graphql_url);
+    document["github"]["allow_insecure_http"] = serde_json::json!(allow_insecure_http);
     let encoded = serde_json::to_vec(&document).expect("runner config encoding");
     RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
 }
 
 impl ContextFixture {
     fn new() -> Self {
-        let config = fixture_runner_config();
+        Self::with_config(&fixture_runner_config())
+    }
+
+    fn with_config(config: &RunnerProductConfig) -> Self {
         let (profile, _) = config
             .environments()
             .first_key_value()
@@ -861,13 +907,24 @@ impl ContextFixture {
     }
 
     fn add_repository_authority(&mut self, endpoint: &str, token: &str) {
+        self.add_repository_authority_endpoint(
+            RuntimeAuthorityEndpoint::new(endpoint).expect("repository endpoint"),
+            token,
+        );
+    }
+
+    fn add_repository_authority_endpoint(
+        &mut self,
+        endpoint: RuntimeAuthorityEndpoint,
+        token: &str,
+    ) {
         let repository = JobRuntimeAuthority::new(
             RuntimeAuthorityName::new("github-repository").expect("authority name"),
             self.job.job().run_id(),
             self.job.job().job_id(),
             self.lease.attempt_id(),
             self.lease.fencing_token(),
-            RuntimeAuthorityEndpoint::new(endpoint).expect("repository endpoint"),
+            endpoint,
             RuntimeAuthorityCredential::new(token).expect("repository token"),
             self.lease.issued_at(),
             self.lease.expires_at(),

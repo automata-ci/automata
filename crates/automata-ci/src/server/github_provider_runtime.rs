@@ -470,8 +470,7 @@ impl GithubProviderRuntimeBuilder {
             )
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?,
         );
-        let authority_endpoint = RuntimeAuthorityEndpoint::new(GITHUB_PROVIDER_WEB_ORIGIN)
-            .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?;
+        let authority_endpoint = provider_runtime_authority_endpoint(config.transport())?;
         let mut job_authority_routes = Vec::with_capacity(brokers.len());
         for (installation_id, app_broker) in &brokers {
             let pin = job_authority_broker_pins
@@ -503,14 +502,28 @@ impl GithubProviderRuntimeBuilder {
                 mint_supervisor.clone(),
             ));
             let issuer = Arc::new(
-                GithubRepositoryRuntimeAuthorityIssuer::new(
-                    identity_resolver.clone(),
-                    coordinator,
-                    job_authority_repository.clone(),
-                    envelopes.clone(),
-                    runtime_authority_clock.clone(),
-                    authority_endpoint.clone(),
-                )
+                match config.transport() {
+                    GithubProviderTransport::GithubDotCom => {
+                        GithubRepositoryRuntimeAuthorityIssuer::new(
+                            identity_resolver.clone(),
+                            coordinator,
+                            job_authority_repository.clone(),
+                            envelopes.clone(),
+                            runtime_authority_clock.clone(),
+                            authority_endpoint.clone(),
+                        )
+                    }
+                    GithubProviderTransport::LoopbackEmulator { .. } => {
+                        GithubRepositoryRuntimeAuthorityIssuer::new_for_loopback_emulator(
+                            identity_resolver.clone(),
+                            coordinator,
+                            job_authority_repository.clone(),
+                            envelopes.clone(),
+                            runtime_authority_clock.clone(),
+                            authority_endpoint.clone(),
+                        )
+                    }
+                }
                 .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)?,
             );
             job_authority_routes.push((*installation_id, issuer));
@@ -798,6 +811,24 @@ fn provider_http_endpoint(
         }
     }
     .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)
+}
+
+fn provider_runtime_authority_endpoint(
+    transport: &GithubProviderTransport,
+) -> Result<RuntimeAuthorityEndpoint, GithubProviderRuntimeBuildError> {
+    match transport {
+        GithubProviderTransport::GithubDotCom => {
+            RuntimeAuthorityEndpoint::new(GITHUB_PROVIDER_WEB_ORIGIN)
+        }
+        GithubProviderTransport::LoopbackEmulator { api_base } => {
+            let mut server_origin = api_base.clone();
+            server_origin.set_path("/");
+            server_origin.set_query(None);
+            server_origin.set_fragment(None);
+            RuntimeAuthorityEndpoint::loopback_development(server_origin.as_str())
+        }
+    }
+    .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)
 }
 
 impl fmt::Debug for GithubProviderRuntimeBuilder {

@@ -848,6 +848,7 @@ impl GithubLogicalJobOrchestrationService {
             execution,
             profiles,
             prepared.authority_profile(),
+            prepared.runtime_policy().policy().permission_policy(),
             prepared.runtime_policy().policy().resource_policy(),
         );
         if let Some(permission_ceiling) = permission_ceiling {

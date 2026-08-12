@@ -333,13 +333,26 @@ fn prepare_admitted_podman(
     let podman = config
         .podman()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
-    let runtime_mount = capture_dedicated_runtime_mount(podman.runtime_directory())
-        .map_err(|_| RunnerProductError::PodmanProcessTrust)?;
+    let runtime_mount =
+        capture_dedicated_runtime_mount(podman.runtime_directory()).map_err(|reason| {
+            error!(
+                stage = "runtime_mount",
+                ?reason,
+                "runner Podman process trust validation failed"
+            );
+            RunnerProductError::PodmanProcessTrust
+        })?;
     let podman_options = build_podman_options(config)?;
     prepare_probe_directories(&podman_options)?;
     #[cfg(target_os = "linux")]
-    let trust = PodmanProcessTrust::capture(&podman_options, runtime_mount)
-        .map_err(|_| RunnerProductError::PodmanProcessTrust)?;
+    let trust = PodmanProcessTrust::capture(&podman_options, runtime_mount).map_err(|reason| {
+        error!(
+            stage = "process_inputs",
+            ?reason,
+            "runner Podman process trust validation failed"
+        );
+        RunnerProductError::PodmanProcessTrust
+    })?;
     #[cfg(not(target_os = "linux"))]
     let trust = PodmanProcessTrust::capture(&podman_options, runtime_mount);
     Ok(podman_options.with_launch_trust(PodmanLaunchTrustHandle::new(Arc::new(trust))))

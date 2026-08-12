@@ -1,13 +1,22 @@
 //! Immutable runner-policy evidence pinned to every WorkflowPlan-v2 run.
 
-use std::{collections::BTreeSet, fmt, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    num::NonZeroU64,
+};
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, JobResourcePolicy,
-    OperatingSystem, RunId, RunnerLabel, Sha256Digest, UnixMillis,
+    Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, JobPermissionGrant,
+    JobPermissionRequest, JobResourcePolicy, MAX_JOB_PERMISSION_GRANTS,
+    MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerLabel,
+    Sha256Digest, UnixMillis,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{MapAccess, Visitor},
+};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -17,7 +26,9 @@ use crate::{
 };
 
 /// Current immutable runner-policy schema.
-pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 1;
+pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 2;
+/// Current schema of the independently versioned workspace section.
+pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA: u16 = 1;
 /// Current pure workspace derivation contract.
 pub const WORKFLOW_WORKSPACE_DERIVATION_VERSION: u16 = 1;
 /// Maximum exact selector mappings retained by one policy.
@@ -32,7 +43,111 @@ pub const WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE: &str =
 /// The sole current workspace root supported by derivation version 1.
 pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT: &str = "/__w";
 
-const POLICY_DIGEST_DOMAIN: &[u8] = b"automata.store.workflow-runtime-policy.v1\0";
+const POLICY_DIGEST_DOMAIN: &[u8] = b"automata.store.workflow-runtime-policy.v2\0";
+
+const ID_TOKEN_PERMISSION: &str = "id-token";
+
+/// Exact repository-pinned expansions for GitHub permission shorthands.
+///
+/// Every map is total for its source shorthand: omitted names are denied. The
+/// maps are stored in canonical name order and become explicit `JobIR` grants
+/// before a job can reach a runner or credential issuer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowPermissionPolicy {
+    provider_default: BTreeMap<String, PermissionLevel>,
+    read_all: BTreeMap<String, PermissionLevel>,
+    write_all: BTreeMap<String, PermissionLevel>,
+}
+
+impl WorkflowPermissionPolicy {
+    /// Constructs exact expansions for all source permission shorthands.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty or excessive maps, malformed names, explicit `none`
+    /// entries, an invalid `id-token` read grant, non-read `read-all` entries,
+    /// a default outside the readable universe, or defaults that exceed the
+    /// configured `write-all` capability ceiling.
+    pub fn new(
+        provider_default: BTreeMap<String, PermissionLevel>,
+        read_all: BTreeMap<String, PermissionLevel>,
+        write_all: BTreeMap<String, PermissionLevel>,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        validate_permission_map(&provider_default)?;
+        validate_permission_map(&read_all)?;
+        validate_permission_map(&write_all)?;
+        if read_all
+            .iter()
+            .any(|(name, level)| *level != PermissionLevel::Read || !write_all.contains_key(name))
+            || write_all
+                .iter()
+                .any(|(name, _)| name != ID_TOKEN_PERMISSION && !read_all.contains_key(name))
+            || provider_default.iter().any(|(name, level)| {
+                !read_all.contains_key(name)
+                    || write_all.get(name).is_none_or(|maximum| {
+                        permission_level_code(*level) > permission_level_code(*maximum)
+                    })
+            })
+        {
+            return Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy);
+        }
+        Ok(Self {
+            provider_default,
+            read_all,
+            write_all,
+        })
+    }
+
+    /// Resolves one source request to a complete canonical permission map.
+    #[must_use]
+    pub fn resolve(&self, request: JobPermissionRequest) -> JobPermissionRequest {
+        let permissions = match request {
+            JobPermissionRequest::ProviderDefault => &self.provider_default,
+            JobPermissionRequest::ReadAll => &self.read_all,
+            JobPermissionRequest::WriteAll => &self.write_all,
+            JobPermissionRequest::Mapping(_) => return request,
+        };
+        JobPermissionRequest::mapping(
+            permissions
+                .iter()
+                .map(|(name, level)| JobPermissionGrant::new(name.clone(), *level)),
+        )
+    }
+
+    /// Returns the exact canonical JSON bytes persisted beside the relational
+    /// policy aggregate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if this already-validated bounded value cannot be
+    /// represented by the current canonical codec.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
+        serde_json::to_vec(&CanonicalPermissionPolicy {
+            provider_default: self.provider_default(),
+            read_all: self.read_all(),
+            write_all: self.write_all(),
+        })
+        .map_err(|_| WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+    }
+
+    /// Returns the exact repository default expansion.
+    #[must_use]
+    pub const fn provider_default(&self) -> &BTreeMap<String, PermissionLevel> {
+        &self.provider_default
+    }
+
+    /// Returns the exact `read-all` expansion.
+    #[must_use]
+    pub const fn read_all(&self) -> &BTreeMap<String, PermissionLevel> {
+        &self.read_all
+    }
+
+    /// Returns the exact `write-all` expansion.
+    #[must_use]
+    pub const fn write_all(&self) -> &BTreeMap<String, PermissionLevel> {
+        &self.write_all
+    }
+}
 
 /// Positive immutable policy revision representable by `PostgreSQL` `BIGINT`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -142,11 +257,12 @@ impl WorkflowRuntimePolicyMapping {
     }
 }
 
-/// Complete immutable non-secret runner and workspace policy.
+/// Complete immutable non-secret runner, permission, resource, and workspace policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowRuntimePolicy {
     workspace_root: String,
     mappings: Vec<WorkflowRuntimePolicyMapping>,
+    permission_policy: WorkflowPermissionPolicy,
     resource_policy: JobResourcePolicy,
     digest: Sha256Digest,
     canonical_digest: Sha256Digest,
@@ -185,7 +301,7 @@ impl WorkflowRuntimePolicy {
         let raw: RawPolicy = serde_json::from_slice(encoded)
             .map_err(|_| WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)?;
         if raw.schema != WORKFLOW_RUNTIME_POLICY_SCHEMA
-            || raw.workspace.schema != WORKFLOW_RUNTIME_POLICY_SCHEMA
+            || raw.workspace.schema != WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA
             || raw.workspace.root != WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT
             || raw.workspace.derivation != WORKFLOW_WORKSPACE_DERIVATION_VERSION
             || raw.mappings.is_empty()
@@ -198,7 +314,13 @@ impl WorkflowRuntimePolicy {
             .into_iter()
             .map(WorkflowRuntimePolicyMapping::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let policy = Self::from_parts(raw.workspace.root, mappings, raw.resources)?;
+        let permission_policy = WorkflowPermissionPolicy::try_from(raw.permissions)?;
+        let policy = Self::from_parts(
+            raw.workspace.root,
+            mappings,
+            permission_policy,
+            raw.resources,
+        )?;
         if require_canonical && policy.canonical_bytes()?.as_slice() != encoded {
             return Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy);
         }
@@ -214,14 +336,21 @@ impl WorkflowRuntimePolicy {
     pub fn new(
         workspace_root: impl Into<String>,
         mappings: impl IntoIterator<Item = WorkflowRuntimePolicyMapping>,
+        permission_policy: WorkflowPermissionPolicy,
         resource_policy: JobResourcePolicy,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
-        Self::from_parts(workspace_root.into(), mappings, resource_policy)
+        Self::from_parts(
+            workspace_root.into(),
+            mappings,
+            permission_policy,
+            resource_policy,
+        )
     }
 
     fn from_parts(
         workspace_root: String,
         mappings: impl IntoIterator<Item = WorkflowRuntimePolicyMapping>,
+        permission_policy: WorkflowPermissionPolicy,
         resource_policy: JobResourcePolicy,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         validate_workspace_root(&workspace_root)?;
@@ -239,6 +368,7 @@ impl WorkflowRuntimePolicy {
         let mut policy = Self {
             workspace_root,
             mappings,
+            permission_policy,
             resource_policy,
             digest: Sha256Digest::from_bytes([0; 32]),
             canonical_digest: Sha256Digest::from_bytes([0; 32]),
@@ -246,6 +376,7 @@ impl WorkflowRuntimePolicy {
         let canonical = encode_canonical_policy(
             policy.workspace_root(),
             policy.mappings(),
+            policy.permission_policy(),
             policy.resource_policy(),
         )?;
         validate_canonical_policy_bytes(&canonical)?;
@@ -264,6 +395,7 @@ impl WorkflowRuntimePolicy {
         let encoded = encode_canonical_policy(
             self.workspace_root(),
             self.mappings(),
+            self.permission_policy(),
             self.resource_policy(),
         )?;
         validate_canonical_policy_bytes(&encoded)?;
@@ -286,6 +418,12 @@ impl WorkflowRuntimePolicy {
     #[must_use]
     pub fn mappings(&self) -> &[WorkflowRuntimePolicyMapping] {
         &self.mappings
+    }
+
+    /// Returns the exact repository-pinned permission shorthand expansions.
+    #[must_use]
+    pub const fn permission_policy(&self) -> &WorkflowPermissionPolicy {
+        &self.permission_policy
     }
 
     /// Returns the repository-pinned job-resource defaults and bounds.
@@ -563,6 +701,9 @@ pub enum WorkflowRuntimePolicyValueError {
     /// One mapping repeated a feature before canonical set construction.
     #[error("workflow runtime policy mapping contains a duplicate feature")]
     DuplicateFeature,
+    /// Permission shorthand expansions were empty, malformed, or inconsistent.
+    #[error("workflow runtime permission policy is invalid")]
+    InvalidPermissionPolicy,
     /// The canonical JSON value was malformed, noncanonical, or exceeded 64 KiB.
     #[error("workflow runtime policy canonical representation is invalid")]
     InvalidCanonicalPolicy,
@@ -610,6 +751,87 @@ fn validate_workspace_root(value: &str) -> Result<(), WorkflowRuntimePolicyValue
     }
 }
 
+fn validate_permission_map(
+    permissions: &BTreeMap<String, PermissionLevel>,
+) -> Result<(), WorkflowRuntimePolicyValueError> {
+    if permissions.is_empty() || permissions.len() > MAX_JOB_PERMISSION_GRANTS {
+        return Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy);
+    }
+    for (name, level) in permissions {
+        if !canonical_permission_name(name)
+            || *level == PermissionLevel::None
+            || (name == ID_TOKEN_PERMISSION && *level == PermissionLevel::Read)
+        {
+            return Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy);
+        }
+    }
+    Ok(())
+}
+
+fn canonical_permission_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_JOB_PERMISSION_NAME_BYTES {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) {
+        return false;
+    }
+    let mut previous_hyphen = false;
+    for byte in bytes {
+        if byte == b'-' {
+            if previous_hyphen {
+                return false;
+            }
+            previous_hyphen = true;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    !previous_hyphen
+}
+
+const fn permission_level_code(value: PermissionLevel) -> u8 {
+    match value {
+        PermissionLevel::None => 0,
+        PermissionLevel::Read => 1,
+        PermissionLevel::Write => 2,
+    }
+}
+
+fn deserialize_permission_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, PermissionLevel>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PermissionMapVisitor;
+
+    impl<'de> Visitor<'de> for PermissionMapVisitor {
+        type Value = BTreeMap<String, PermissionLevel>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a unique permission-name map")
+        }
+
+        fn visit_map<A>(self, mut values: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut permissions = BTreeMap::new();
+            while let Some((name, level)) = values.next_entry::<String, PermissionLevel>()? {
+                if permissions.insert(name, level).is_some() {
+                    return Err(serde::de::Error::custom("duplicate permission name"));
+                }
+            }
+            Ok(permissions)
+        }
+    }
+
+    deserializer.deserialize_map(PermissionMapVisitor)
+}
+
 fn policy_digest(policy: &WorkflowRuntimePolicy) -> Sha256Digest {
     let mut hasher = Sha256::new();
     hasher.update(POLICY_DIGEST_DOMAIN);
@@ -636,6 +858,32 @@ fn policy_digest(policy: &WorkflowRuntimePolicy) -> Sha256Digest {
             hash_text(&mut hasher, feature.as_str());
         }
     }
+    hasher.update(b"permissions\0");
+    for (label, permissions) in [
+        (
+            b"provider-default\0".as_slice(),
+            policy.permission_policy().provider_default(),
+        ),
+        (
+            b"read-all\0".as_slice(),
+            policy.permission_policy().read_all(),
+        ),
+        (
+            b"write-all\0".as_slice(),
+            policy.permission_policy().write_all(),
+        ),
+    ] {
+        hasher.update(label);
+        hasher.update(
+            u64::try_from(permissions.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for (name, level) in permissions {
+            hash_text(&mut hasher, name);
+            hasher.update([permission_level_code(*level)]);
+        }
+    }
     let resources = policy.resource_policy();
     hasher.update(b"resources\0");
     for capacity in [
@@ -660,12 +908,13 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 fn encode_canonical_policy(
     workspace_root: &str,
     mappings: &[WorkflowRuntimePolicyMapping],
+    permissions: &WorkflowPermissionPolicy,
     resources: JobResourcePolicy,
 ) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
     let canonical = CanonicalPolicy {
         schema: WORKFLOW_RUNTIME_POLICY_SCHEMA,
         workspace: CanonicalWorkspace {
-            schema: WORKFLOW_RUNTIME_POLICY_SCHEMA,
+            schema: WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA,
             root: workspace_root,
             derivation: WORKFLOW_WORKSPACE_DERIVATION_VERSION,
         },
@@ -673,6 +922,11 @@ fn encode_canonical_policy(
             .iter()
             .map(CanonicalMapping::try_from)
             .collect::<Result<Vec<_>, _>>()?,
+        permissions: CanonicalPermissionPolicy {
+            provider_default: permissions.provider_default(),
+            read_all: permissions.read_all(),
+            write_all: permissions.write_all(),
+        },
         resources,
     };
     serde_json::to_vec(&canonical)
@@ -710,7 +964,27 @@ struct RawPolicy {
     schema: u16,
     workspace: RawWorkspace,
     mappings: Vec<RawMapping>,
+    permissions: RawPermissionPolicy,
     resources: JobResourcePolicy,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPermissionPolicy {
+    #[serde(deserialize_with = "deserialize_permission_map")]
+    provider_default: BTreeMap<String, PermissionLevel>,
+    #[serde(deserialize_with = "deserialize_permission_map")]
+    read_all: BTreeMap<String, PermissionLevel>,
+    #[serde(deserialize_with = "deserialize_permission_map")]
+    write_all: BTreeMap<String, PermissionLevel>,
+}
+
+impl TryFrom<RawPermissionPolicy> for WorkflowPermissionPolicy {
+    type Error = WorkflowRuntimePolicyValueError;
+
+    fn try_from(raw: RawPermissionPolicy) -> Result<Self, Self::Error> {
+        Self::new(raw.provider_default, raw.read_all, raw.write_all)
+    }
 }
 
 #[derive(Deserialize)]
@@ -809,7 +1083,15 @@ struct CanonicalPolicy<'a> {
     schema: u16,
     workspace: CanonicalWorkspace<'a>,
     mappings: Vec<CanonicalMapping<'a>>,
+    permissions: CanonicalPermissionPolicy<'a>,
     resources: JobResourcePolicy,
+}
+
+#[derive(Serialize)]
+struct CanonicalPermissionPolicy<'a> {
+    provider_default: &'a BTreeMap<String, PermissionLevel>,
+    read_all: &'a BTreeMap<String, PermissionLevel>,
+    write_all: &'a BTreeMap<String, PermissionLevel>,
 }
 
 #[derive(Serialize)]
@@ -883,6 +1165,11 @@ mod tests {
         "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
       }],
+      "permissions":{
+        "provider_default":{"contents":"read"},
+        "read_all":{"contents":"read"},
+        "write_all":{"contents":"write"}
+      },
       "resources":{
         "maximum_limits":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":17179869184,"cpu_millis":8000},
         "minimum_requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":134217728,"cpu_millis":100},
@@ -891,9 +1178,9 @@ mod tests {
           "requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":536870912,"cpu_millis":500}
         }
       },
-      "schema":1
+      "schema":2
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":2,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -913,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_resources_and_noncurrent_schemas_fail_closed() {
+    fn missing_sections_and_noncurrent_schemas_fail_closed() {
         let current: serde_json::Value =
             serde_json::from_slice(CANONICAL_POLICY).expect("canonical policy JSON");
 
@@ -929,7 +1216,19 @@ mod tests {
             Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
         );
 
-        for unsupported in [0, 2, u16::MAX] {
+        let mut missing_permissions = current.clone();
+        missing_permissions
+            .as_object_mut()
+            .expect("policy object")
+            .remove("permissions");
+        assert_eq!(
+            WorkflowRuntimePolicy::decode_configuration(
+                &serde_json::to_vec(&missing_permissions).expect("policy JSON")
+            ),
+            Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+        );
+
+        for unsupported in [0, 1, 3, u16::MAX] {
             let mut document = current.clone();
             document["schema"] = serde_json::json!(unsupported);
             assert_eq!(
@@ -952,11 +1251,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "f8c89e6d378f350201556955702d93172552abf5e76f74a792f6d0bd78b3430b"
+            "fb010d9d689b375ee94a910fa4ceb6f798465dd0602fd5e76aaf7dd0fb27dc4c"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "9ebcaea219f5ba3fe354fcbfa8ca818368b396ff1481a3f5c45f2dd354841d6b"
+            "fd71583e3ec5d867b16a7244e521d90a5d99f29ab45fc9a8995b4c0de8d660b9"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -971,6 +1270,7 @@ mod tests {
         let exact = WorkflowRuntimePolicy::new(
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             exact_mappings.clone(),
+            permission_policy(),
             resource_policy(),
         )
         .expect("exact canonical byte limit");
@@ -986,6 +1286,7 @@ mod tests {
             WorkflowRuntimePolicy::new(
                 WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
                 oversized_mappings,
+                permission_policy(),
                 resource_policy(),
             ),
             Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
@@ -999,6 +1300,7 @@ mod tests {
         let exact = WorkflowRuntimePolicy::new(
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             exact_mappings.clone(),
+            permission_policy(),
             resource_policy(),
         )
         .expect("exact mapping-count limit");
@@ -1010,6 +1312,7 @@ mod tests {
             WorkflowRuntimePolicy::new(
                 WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
                 excessive_mappings,
+                permission_policy(),
                 resource_policy(),
             ),
             Err(WorkflowRuntimePolicyValueError::InvalidMappingCount)
@@ -1020,7 +1323,7 @@ mod tests {
     fn duplicate_raw_object_fields_are_rejected_even_when_values_are_equal() {
         let canonical = std::str::from_utf8(CANONICAL_POLICY).expect("UTF-8 canonical policy");
         let duplicate_top_schema =
-            canonical.replacen(r#""schema":1"#, r#""schema":1,"schema":1"#, 1);
+            canonical.replacen(r#""schema":2"#, r#""schema":2,"schema":2"#, 1);
         let duplicate_workspace_schema = canonical.replacen(
             r#""workspace":{"schema":1"#,
             r#""workspace":{"schema":1,"schema":1"#,
@@ -1036,15 +1339,63 @@ mod tests {
             r#""environment_profile":{"id":"automata.example/ubuntu-24-04","id":"automata.example/ubuntu-24-04""#,
             1,
         );
+        let duplicate_permission = canonical.replacen(
+            r#""provider_default":{"contents":"read"}"#,
+            r#""provider_default":{"contents":"read","contents":"read"}"#,
+            1,
+        );
         for duplicate in [
             duplicate_top_schema,
             duplicate_workspace_schema,
             duplicate_selector,
             duplicate_profile_id,
+            duplicate_permission,
         ] {
             assert_eq!(
                 WorkflowRuntimePolicy::decode_configuration(duplicate.as_bytes()),
                 Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+            );
+        }
+    }
+
+    #[test]
+    fn permission_policy_rejects_ambiguous_or_inconsistent_expansions() {
+        let valid = permission_policy();
+        assert_eq!(
+            valid.resolve(JobPermissionRequest::ProviderDefault),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "contents",
+                PermissionLevel::Read,
+            )])
+        );
+        for invalid in [
+            WorkflowPermissionPolicy::new(
+                BTreeMap::new(),
+                valid.read_all().clone(),
+                valid.write_all().clone(),
+            ),
+            WorkflowPermissionPolicy::new(
+                valid.provider_default().clone(),
+                BTreeMap::from([("id-token".to_owned(), PermissionLevel::Read)]),
+                BTreeMap::from([("id-token".to_owned(), PermissionLevel::Write)]),
+            ),
+            WorkflowPermissionPolicy::new(
+                BTreeMap::from([("packages".to_owned(), PermissionLevel::Read)]),
+                valid.read_all().clone(),
+                valid.write_all().clone(),
+            ),
+            WorkflowPermissionPolicy::new(
+                BTreeMap::from([("id-token".to_owned(), PermissionLevel::Write)]),
+                valid.read_all().clone(),
+                BTreeMap::from([
+                    ("contents".to_owned(), PermissionLevel::Write),
+                    ("id-token".to_owned(), PermissionLevel::Write),
+                ]),
+            ),
+        ] {
+            assert_eq!(
+                invalid,
+                Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy)
             );
         }
     }
@@ -1108,6 +1459,7 @@ mod tests {
             WorkflowRuntimePolicy::new(
                 "/tmp",
                 policy.mappings().iter().cloned(),
+                permission_policy(),
                 resource_policy(),
             )
             .is_err()
@@ -1135,6 +1487,7 @@ mod tests {
         let base_size = encode_canonical_policy(
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             &base,
+            &permission_policy(),
             resource_policy(),
         )
         .expect("base boundary encoding")
@@ -1157,6 +1510,7 @@ mod tests {
             encode_canonical_policy(
                 WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
                 &mappings,
+                &permission_policy(),
                 resource_policy(),
             )
             .expect("boundary encoding")
@@ -1164,6 +1518,15 @@ mod tests {
             target_size
         );
         mappings
+    }
+
+    fn permission_policy() -> WorkflowPermissionPolicy {
+        WorkflowPermissionPolicy::new(
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Write)]),
+        )
+        .expect("permission policy")
     }
 
     fn resource_policy() -> JobResourcePolicy {
