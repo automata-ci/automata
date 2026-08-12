@@ -175,12 +175,12 @@ replacement.
 | `crates/automata-ci/src/cli/credential_store.rs` | Credential custody and process lock | Linux `secret-tool`, Unix file descriptors, runtime-directory lock | Define Credential Manager/DPAPI and Windows process lock |
 | `crates/automata-ci/src/cli/auth.rs` | Portable transport plus custody construction | Constructs Linux Secret Service adapter | Inject a platform custody adapter |
 | `crates/automata-ci/src/cli/secret.rs` | Portable secret API plus custody construction | Constructs Linux Secret Service adapter | Inject the same platform custody adapter |
-| `crates/automata-ci/src/server/config.rs` | Service secret source and secure file | Environment source works; non-Unix file source returns `FileSecurity` | Define Windows service sources and secure bounded files |
+| `crates/automata-ci/src/server/config.rs` | Service secret source and secure file | Environment source works; Windows file sources load through the reviewed secure-file adapter; other non-Unix platforms return `FileSecurity` | Define remaining Windows service sources |
 | `crates/automata-ci/src/server/static_registration.rs` | Privileged secure file | Returns `UnsupportedPlatform` outside Unix | Define SID/DACL/reparse/link-count contract |
 | `crates/automata-ci/src/shutdown.rs` | Service lifecycle | Ctrl-C only outside Unix | Define SCM stop and preshutdown adapter |
-| `crates/automata-ci/src/server/composition.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add native Windows composition fixtures |
-| `crates/automata-ci/src/server/github_oidc.rs` tests | Test fixture security | Applies owner-only mode only on Unix | Add Windows custody fixtures |
-| `crates/automata-ci/src/server/github_provider*_tests.rs` | Test fixture security | Unix-only private-file setup | Separate portable parsing from native custody tests |
+| `crates/automata-ci/src/server/composition.rs` tests | Test fixture security | Uses the shared owner-private fixture directory on every platform | Complete |
+| `crates/automata-ci/src/server/github_oidc.rs` tests | Test fixture security | Uses the shared owner-private fixture directory on every platform | Complete |
+| `crates/automata-ci/src/server/github_provider*_tests.rs` | Test fixture security | Uses the shared owner-private fixture directory on every platform | Complete |
 | `crates/automata-ci/Cargo.toml` Unix target dependencies | Platform dependency | `rustix` is Unix-only | Select reviewed Windows dependencies only after design approval |
 | `crates/automata-ci-metrics/src/process.rs` | Observability parity | Linux-only `/proc` snapshot source; other platforms report unavailable | Degraded process metrics accepted for the first release and documented |
 | `crates/automata-ci-service-proxy` | Container sandbox helper | Linux-only namespace-local job service proxy | Excluded with containers; no Windows work in this release |
@@ -278,17 +278,20 @@ recorded these decisions:
 5. **Safe dependency boundary** — follow the `automata-ci-sandbox-windows`
    precedent: confine Windows APIs behind pinned reviewed safe-API wrappers
    inside a dedicated adapter crate, with first-party `forbid(unsafe)` intact.
-   *Selection (2026-08-11):* `cap-primitives` (Bytecode Alliance) provides the
-   handle-anchored component-at-a-time path resolution; `winapi-util` provides
-   safe `BY_HANDLE_FILE_INFORMATION` evidence (link count, attributes, file
-   identity); `windows-permissions` provides safe SID, DACL, and
-   security-descriptor wrappers, subject to confirming handle-based
-   `GetSecurityInfo` coverage before pinning. Open-flag control, stabilized
-   file locking, bounded reads, and flushes come from std (MSRV 1.97).
-   Namespace rejection (drive-relative, ADS, device, ambiguous verbatim, and
-   prohibited UNC forms) is first-party pure path parsing with no dependency.
-   Durable atomic replacement is defined over std primitives during
-   implementation; requiring `ReplaceFileW` would reopen this boundary.
+   *Selection (2026-08-11, revised at implementation):* the adopted boundary
+   is `windows-permissions = "=0.2.4"` for SID, DACL, and security-descriptor
+   evidence — handle-based `GetSecurityInfo` coverage is confirmed — and
+   `winapi-util = "=0.1.11"` for safe `BY_HANDLE_FILE_INFORMATION` evidence
+   (link count, attributes, file identity), both confined to the dedicated
+   `automata-ci-secure-file-windows` crate with `forbid(unsafe)` intact.
+   `cap-primitives` proved unnecessary: std open-flag control provides
+   reparse-refusing opens, and each verified ancestor stays pinned by an open
+   handle without delete sharing, which denies replacement of a verified
+   component for the walk's duration. Namespace rejection (drive-relative,
+   ADS, device, ambiguous verbatim, and prohibited UNC forms) is first-party
+   pure path parsing with no dependency. Durable atomic replacement is
+   defined over std primitives during implementation; requiring `ReplaceFileW`
+   would reopen this boundary.
 6. **Environment-backed production inputs** — rejected for production Windows
    services because service environment values are registry strings readable
    by non-administrative users; development and evaluation use only.

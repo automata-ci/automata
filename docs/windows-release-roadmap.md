@@ -100,7 +100,7 @@ The first audit identified these implementation owners:
 | --- | --- | --- |
 | CLI session custody | `crates/automata-ci/src/cli/credential_store.rs` | Unsupported module selected |
 | Authentication and secret commands | `crates/automata-ci/src/cli/mod.rs` | Fixed fail-closed adapters |
-| Bounded server secret files | `crates/automata-ci/src/server/config.rs` | Returns `FileSecurity` |
+| Bounded server secret files | `crates/automata-ci/src/server/config.rs` | Windows adapter wired; other non-Unix platforms return `FileSecurity` |
 | Static registration custody | `crates/automata-ci/src/server/static_registration.rs` | Returns `UnsupportedPlatform` |
 | Process shutdown | `crates/automata-ci/src/shutdown.rs` | Ctrl-C only; no SCM contract |
 | Runner durable journal | `crates/automata-ci-runner-journal` | Windows adapter implemented |
@@ -155,22 +155,35 @@ The first audit identified these implementation owners:
 
   Evidence: design decision 5 in the
   [control-plane proposal](windows-control-plane-design-proposal.md) records
-  the selected boundary — `cap-primitives` for handle-anchored path
-  resolution, `winapi-util` for by-handle file evidence, and
-  `windows-permissions` for SID/DACL inspection, all confined to a dedicated
-  `forbid(unsafe)` adapter crate with exact version pins at adoption. Handle
-  APIs missing from `windows-permissions` must be confirmed before pinning.
-- [ ] Open files without following reparse points.
-- [ ] Verify every path ancestor from a trusted handle.
-- [ ] Reject drive-relative, device, ambiguous verbatim, ADS, and prohibited UNC
+  the adopted boundary — `windows-permissions = "=0.2.4"` (handle-based
+  `GetSecurityInfo` confirmed) and `winapi-util = "=0.1.11"`, confined to the
+  dedicated `forbid(unsafe)` crate `automata-ci-secure-file-windows`.
+  `cap-primitives` proved unnecessary: std no-follow opens plus pinned
+  ancestor handles cover the walk.
+- [x] Open files without following reparse points.
+- [x] Verify every path ancestor from a trusted handle.
+- [x] Reject drive-relative, device, ambiguous verbatim, ADS, and prohibited UNC
   paths.
-- [ ] Inspect owner SID and DACL entries.
-- [ ] Reject broad read or write access where custody requires exclusivity.
-- [ ] Inspect hard-link count.
-- [ ] Support exclusive locking and bounded reads.
+- [x] Inspect owner SID and DACL entries.
+- [x] Reject broad read or write access where custody requires exclusivity.
+
+  Evidence: `crates/automata-ci-secure-file-windows/src/reader.rs` walks each
+  ancestor with reparse-refusing opens, pins every verified directory handle
+  without delete sharing until the read completes, rejects ambiguous
+  namespace forms by pure parsing, and accepts only files owned by the
+  process user whose DACL grants access solely to the owner, `SYSTEM`, and
+  `Administrators`.
+
+- [ ] Inspect hard-link count. (`winapi-util` exposes it; the owner-private
+  profile matches the Unix bounded-read profile and does not yet enforce it.)
+- [ ] Support exclusive locking and bounded reads. (Bounded reads with
+  write-denying share modes are implemented; write-side exclusive locking is
+  not.)
 - [ ] Support staged writes, atomic replacement, and required flushes.
-- [ ] Test sharing and lock violations.
-- [ ] Test junction, symlink, ADS, hard-link, and ACL attacks.
+- [x] Test sharing and lock violations.
+- [ ] Test junction, symlink, ADS, hard-link, and ACL attacks. (Junction,
+  ADS-syntax, broad-ACL, and sharing-violation attacks are covered by
+  `tests/owner_private.rs`; privileged symlink and hard-link fixtures remain.)
 - [ ] Test process crash and machine reboot recovery.
 
 ### CLI credential custody
@@ -322,5 +335,17 @@ The first audit identified these implementation owners:
    separated configuration/state/log roots under `%ProgramData%\Automata`,
    the explicit owner-plus-SYSTEM-plus-Administrators DACL shape, and the
    ACL fixture pattern the native adapter tests emulate and attack.
-8. [ ] Implement the secure filesystem adapter before enabling any
+8. [x] Implement the secure filesystem adapter before enabling any
    credential-bearing server path.
+
+   Evidence: `automata-ci-secure-file-windows` implements the owner-private
+   read contract behind `server::secure_file`, with adversarial junction,
+   ADS, broad-ACL, namespace, bounds, and sharing-violation tests passing
+   natively. Server startup remains fail-closed behind the platform gate, so
+   no credential-bearing server path is reachable in production. The full
+   native `automata-ci` suite is green except the pre-existing
+   `metrics_schema` contract test, which belongs to the accepted
+   process-metrics boundary. Native custody fixtures now build owner-private
+   directories on every platform, and static-registration document parsing
+   accepts disk-prefixed certificate sources while loading remains
+   unavailable pending the privileged adapter.
