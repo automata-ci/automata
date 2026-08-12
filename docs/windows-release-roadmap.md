@@ -196,7 +196,17 @@ The first audit identified these implementation owners:
 
 ## W4 — durable Windows control plane
 
-- [ ] Add a failing Windows composition test that enumerates missing adapters.
+- [x] Add a failing Windows composition test that enumerates missing adapters.
+
+  Evidence: `serve` refuses startup on platforms without every reviewed
+  adapter after sanitized argument validation and before any listener binds,
+  enumerating the missing custody, secure-file, static-registration, and
+  lifecycle boundaries. The native
+  `server_startup_fails_closed_and_enumerates_missing_adapters` test in
+  `crates/automata-ci/tests/unsupported_operator.rs` asserts the exact
+  sanitized error, and the pre-existing `server_process` sanitization tests
+  still pass unchanged.
+
 - [ ] Enable `automata server` only when all required adapters are present.
 - [ ] Validate external PostgreSQL connectivity.
 - [ ] Validate external S3-compatible storage.
@@ -304,7 +314,7 @@ The first audit identified these implementation owners:
    742 bytes. Direct records are adopted; no indirection file is needed.
 4. [ ] Draft custody and secure-file adapter interfaces.
 5. [ ] Select the safe Windows API boundary for ACL and handle inspection.
-6. [ ] Add the fail-closed Windows server composition test fixture.
+6. [x] Add the fail-closed Windows server composition test fixture.
 7. [ ] Define service identities, directories, and ACL fixtures.
 8. [ ] Implement the secure filesystem adapter before enabling any
    credential-bearing server path.

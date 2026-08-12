@@ -70,6 +70,29 @@ fn secret_commands_fail_before_using_operator_input() {
     }
 }
 
+#[test]
+fn server_startup_fails_closed_and_enumerates_missing_adapters() {
+    let output = Command::new(env!("CARGO_BIN_EXE_automata"))
+        .args([
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+        ])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("server command must start");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr must be UTF-8");
+    assert_eq!(
+        stderr.trim(),
+        "Error: the automata server is unavailable on this platform pending reviewed adapters: \
+         service secret custody, secure bounded-file input, static runner registration, \
+         service lifecycle shutdown"
+    );
+}
+
 fn assert_unsupported(arguments: &[&str], expected: &str) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("sentinel server must bind");
     listener

@@ -107,6 +107,7 @@ const LOGICAL_RESULT_PROJECTION_MAX_CONSECUTIVE_FAILURES: u8 = 8;
 #[allow(clippy::too_many_lines)] // One cancellation tree keeps listener startup and teardown ordering explicit.
 pub async fn serve(args: &ServerArgs) -> Result<()> {
     let config = ServerConfig::from_args(args).context("invalid server configuration")?;
+    require_platform_adapters()?;
     let build = BuildInfo::current();
     let metrics = ControlPlaneMetrics::new(build).context("failed to initialize metrics")?;
     let BoundListeners {
@@ -240,6 +241,35 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
     process_cancellation.cancel();
     let _ = signal_task.await;
     result
+}
+
+/// Reviewed adapter boundaries the durable server requires from a platform.
+#[cfg(not(unix))]
+const MISSING_PLATFORM_ADAPTERS: [&str; 4] = [
+    "service secret custody",
+    "secure bounded-file input",
+    "static runner registration",
+    "service lifecycle shutdown",
+];
+
+/// Refuses startup on a platform missing a reviewed server adapter.
+///
+/// Runs after argument validation so sanitized configuration errors keep
+/// precedence, and before any listener binds or dependency is contacted. The
+/// sanitized error enumerates each missing adapter boundary. The
+/// dependency-free preview must not become a server fallback.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Unix branch has every reviewed adapter and keeps the fallible platform contract"
+)]
+fn require_platform_adapters() -> Result<()> {
+    #[cfg(not(unix))]
+    anyhow::bail!(
+        "the automata server is unavailable on this platform pending reviewed adapters: {}",
+        MISSING_PLATFORM_ADAPTERS.join(", ")
+    );
+    #[cfg(unix)]
+    Ok(())
 }
 
 fn router_with_optional_github_webhook(
