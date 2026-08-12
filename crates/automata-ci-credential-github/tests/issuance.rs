@@ -170,6 +170,54 @@ async fn permission_drift_and_duplicate_keys_are_rejected() {
 }
 
 #[tokio::test]
+async fn accepts_only_github_implicit_metadata_read_permission() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(support::token_response(
+        "ghs_implicit_metadata",
+        EXPIRATION,
+        r#"{"contents":"read","metadata":"read","statuses":"write"}"#,
+        REPOSITORY_ID,
+        "automata-ci/automata",
+        "selected",
+    ));
+    for permissions in [
+        r#"{"contents":"read","metadata":"write","statuses":"write"}"#,
+        r#"{"contents":"read","issues":"read","metadata":"read","statuses":"write"}"#,
+    ] {
+        fixture.enqueue(support::token_response(
+            "ghs_excess_permission",
+            EXPIRATION,
+            permissions,
+            REPOSITORY_ID,
+            "automata-ci/automata",
+            "selected",
+        ));
+    }
+
+    let broker = fixture.broker();
+    let accepted = broker.mint_once(&request()).await;
+    let GithubInstallationTokenMintOutcome::Ready(accepted) = accepted else {
+        panic!("expected GitHub implicit metadata permission to be accepted: {accepted:?}");
+    };
+    assert_eq!(accepted.secret().expose_secret(), "ghs_implicit_metadata");
+
+    for _ in 0..2 {
+        let rejected = broker.mint_once(&request()).await;
+        let GithubInstallationTokenMintOutcome::RevokePending(rejected) = rejected else {
+            panic!("expected excess permission to require revocation: {rejected:?}");
+        };
+        assert_eq!(
+            rejected.reason().kind(),
+            CredentialErrorKind::PermissionMismatch
+        );
+        assert_eq!(
+            rejected.candidate().secret().expose_secret(),
+            "ghs_excess_permission"
+        );
+    }
+}
+
+#[tokio::test]
 async fn expiration_and_token_format_fail_closed() {
     let fixture = FixtureServer::spawn().await;
     fixture.enqueue(support::token_response(

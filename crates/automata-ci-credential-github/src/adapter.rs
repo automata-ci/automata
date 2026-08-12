@@ -5,8 +5,8 @@ use automata_ci_auth::{
     time::{Clock, SystemClock, UnixTimestamp},
 };
 use automata_ci_credential::{
-    CredentialError, CredentialErrorKind, CredentialProvenance, PermissionSet, ProviderResourceId,
-    RepositoryCredentialRequest,
+    CredentialError, CredentialErrorKind, CredentialProvenance, PermissionLevel, PermissionSet,
+    ProviderResourceId, RepositoryCredentialRequest,
 };
 use automata_ci_scm::ScmProviderId;
 use reqwest::{
@@ -428,7 +428,7 @@ impl GithubAppCredentialBroker {
             )));
         }
         let returned_permissions = response.permissions.into_inner();
-        if &returned_permissions != request.permissions() {
+        if !permissions_match_github_response(request.permissions(), &returned_permissions) {
             return Err(failure(CredentialError::new(
                 CredentialErrorKind::PermissionMismatch,
             )));
@@ -530,6 +530,24 @@ impl GithubAppCredentialBroker {
         }
         Ok(endpoint)
     }
+}
+
+fn permissions_match_github_response(requested: &PermissionSet, returned: &PermissionSet) -> bool {
+    if returned == requested {
+        return true;
+    }
+    if returned.len() != requested.len().saturating_add(1) {
+        return false;
+    }
+
+    returned.iter().all(|(returned_name, returned_level)| {
+        if returned_name.as_str() == "metadata" {
+            return returned_level == PermissionLevel::Read;
+        }
+        requested.iter().any(|(requested_name, requested_level)| {
+            requested_name == returned_name && requested_level == returned_level
+        })
+    })
 }
 
 fn update_fingerprint_part(digest: &mut Sha256, value: &[u8]) {
