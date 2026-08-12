@@ -39,6 +39,11 @@ It does not connect to repositories or execute workflows.
   and trust boundaries.
 - [Compatibility](compatibility.md) lists the supported GitHub Actions subsets
   and the evidence required for broader claims.
+- [GitHub Actions parity backlog](github-actions-parity-backlog.md) records the
+  dated documentation-to-implementation gap audit and implementation checklist.
+- [GitHub Actions parity execution plan](github-actions-parity-execution-plan.md)
+  turns that audit into dependency-aware work packages for a team of four to
+  six developers.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
