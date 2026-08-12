@@ -21,6 +21,7 @@ use automata_ci_runner_control::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
+    RunnerLeaseRequestStage,
 };
 use automata_ci_runner_transport::{
     RunnerTransportApplicationRejection, RunnerTransportAuthenticationRejection,
@@ -1596,6 +1597,18 @@ impl RunnerControlObserver for ControlPlaneMetrics {
             .runner_lease_offers
             .get_or_create(&OutcomeLabels { outcome })
             .inc();
+    }
+
+    fn observe_lease_request_failure(
+        &self,
+        stage: RunnerLeaseRequestStage,
+        failure: RunnerControlFailure,
+    ) {
+        tracing::warn!(
+            ?stage,
+            ?failure,
+            "runner lease request failed at application stage"
+        );
     }
 }
 

@@ -59,7 +59,7 @@ use crate::{
     LeaseOfferObservation, NoopRunnerControlObserver, RunnerControlFailure,
     RunnerControlMessageKind, RunnerControlMessageOutcome, RunnerControlObserver,
     RunnerDurableDisposition, RunnerDurableMessageKind, RunnerHandshakeOutcome,
-    RunnerHandshakeRejection,
+    RunnerHandshakeRejection, RunnerLeaseRequestStage,
 };
 
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
@@ -630,11 +630,33 @@ impl DurableRunnerControlHandler {
         canonical_bytes: &[u8],
         cancellation: &CancellationToken,
     ) -> Result<ServerToRunner, ApplicationError> {
-        Self::not_cancelled(cancellation)?;
         let runner_message = message.message();
-        let header =
-            runner_header(runner_message).ok_or_else(|| app(ApplicationErrorKind::Conflict))?;
-        let (fence, snapshot) = self.authenticated_sync_session(machine, header).await?;
+        Self::not_cancelled(cancellation).map_err(|error| {
+            self.observe_lease_request_message_failure(
+                runner_message,
+                RunnerLeaseRequestStage::RequestValidation,
+                error,
+            )
+        })?;
+        let header = runner_header(runner_message)
+            .ok_or_else(|| app(ApplicationErrorKind::Conflict))
+            .map_err(|error| {
+                self.observe_lease_request_message_failure(
+                    runner_message,
+                    RunnerLeaseRequestStage::RequestValidation,
+                    error,
+                )
+            })?;
+        let (fence, snapshot) = self
+            .authenticated_sync_session(machine, header)
+            .await
+            .map_err(|error| {
+                self.observe_lease_request_message_failure(
+                    runner_message,
+                    RunnerLeaseRequestStage::SessionAuthentication,
+                    error,
+                )
+            })?;
         let is_command_ack = matches!(runner_message, RunnerToServer::CommandAck(_));
         let replay_after = match runner_message {
             RunnerToServer::CommandAck(ack) => protocol_cursor_to_store(ack.command_cursor())?,
@@ -864,96 +886,135 @@ impl DurableRunnerControlHandler {
         replay_after: StoreCommandCursor,
         cancellation: &CancellationToken,
     ) -> Result<ServerToRunner, ApplicationError> {
-        Self::not_cancelled(cancellation)?;
-        let slot = StableRunnerSlot::new(request.slot().get())
-            .map_err(|_| app(ApplicationErrorKind::Conflict))?;
-        let request_key = match request.acknowledges_operation_id() {
-            Some(predecessor) => LeaseRequestKey::successor(
-                fence,
-                request.header().operation_id(),
-                slot,
-                predecessor,
-            )
-            .map_err(|_| app(ApplicationErrorKind::Conflict))?,
-            None => LeaseRequestKey::first(fence, request.header().operation_id(), slot),
-        };
-        let begin = BeginLeaseRequest::new(request_key, digest);
-        let admission = self
-            .ports
-            .durability
-            .lease_requests
-            .begin_lease_request(begin)
-            .await
-            .map_err(store_application_error)?;
-        Self::not_cancelled(cancellation)?;
-        self.ports
-            .identity
-            .sessions
-            .heartbeat_session(HeartbeatRunnerSession::new(
-                fence,
-                snapshot.command_cursor(),
-                self.ports.clock.now(),
-            ))
-            .await
-            .map_err(store_application_error)?;
-        if let Some(completion) = admission.completion() {
-            return self
-                .resolve_lease_request_completion(fence, request.header(), completion)
-                .await;
-        }
-        match self
-            .next_pending_command(fence, snapshot.protocol_version(), replay_after)
-            .await?
-        {
-            PendingCommand::Found(command) => {
+        let mut stage = RunnerLeaseRequestStage::RequestValidation;
+        let result = async {
+            Self::not_cancelled(cancellation)?;
+            let slot = StableRunnerSlot::new(request.slot().get())
+                .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+            let request_key = match request.acknowledges_operation_id() {
+                Some(predecessor) => LeaseRequestKey::successor(
+                    fence,
+                    request.header().operation_id(),
+                    slot,
+                    predecessor,
+                )
+                .map_err(|_| app(ApplicationErrorKind::Conflict))?,
+                None => LeaseRequestKey::first(fence, request.header().operation_id(), slot),
+            };
+            let begin = BeginLeaseRequest::new(request_key, digest);
+
+            stage = RunnerLeaseRequestStage::DurableAdmission;
+            let admission = self
+                .ports
+                .durability
+                .lease_requests
+                .begin_lease_request(begin)
+                .await
+                .map_err(store_application_error)?;
+
+            stage = RunnerLeaseRequestStage::SessionHeartbeat;
+            Self::not_cancelled(cancellation)?;
+            self.ports
+                .identity
+                .sessions
+                .heartbeat_session(HeartbeatRunnerSession::new(
+                    fence,
+                    snapshot.command_cursor(),
+                    self.ports.clock.now(),
+                ))
+                .await
+                .map_err(store_application_error)?;
+            if let Some(completion) = admission.completion() {
+                stage = RunnerLeaseRequestStage::CompletedRequestReplay;
                 return self
-                    .complete_lease_request(begin, request.header(), command)
+                    .resolve_lease_request_completion(fence, request.header(), completion)
                     .await;
             }
-            PendingCommand::Empty => {}
-            PendingCommand::Saturated => {
-                return Err(app(ApplicationErrorKind::Unavailable));
+
+            stage = RunnerLeaseRequestStage::PrePollCommandReplay;
+            match self
+                .next_pending_command(fence, snapshot.protocol_version(), replay_after)
+                .await?
+            {
+                PendingCommand::Found(command) => {
+                    stage = RunnerLeaseRequestStage::DurableCompletion;
+                    return self
+                        .complete_lease_request(begin, request.header(), command)
+                        .await;
+                }
+                PendingCommand::Empty => {}
+                PendingCommand::Saturated => {
+                    return Err(app(ApplicationErrorKind::Unavailable));
+                }
             }
+
+            stage = RunnerLeaseRequestStage::LeasePoll;
+            Self::not_cancelled(cancellation)?;
+            let outcome = self
+                .ports
+                .lease
+                .lease_poller
+                .poll(
+                    AuthenticatedRunnerSession::new(
+                        fence,
+                        request.header().protocol_version(),
+                        snapshot.job_ir_version(),
+                    ),
+                    request,
+                )
+                .await
+                .map_err(lease_poll_application_error)?;
+            let response = match outcome {
+                LeasePollOutcome::NoWork { .. } | LeasePollOutcome::Rejected { .. } => {
+                    self.no_work_response(request.header())
+                }
+                LeasePollOutcome::Claimed(claimed) => {
+                    stage = RunnerLeaseRequestStage::OfferBuild;
+                    self.build_lease_offer(fence, snapshot, request, digest, claimed, cancellation)
+                        .await?
+                }
+            };
+
+            stage = RunnerLeaseRequestStage::PostPollCommandReplay;
+            let actual_response = match self
+                .next_pending_command(fence, snapshot.protocol_version(), replay_after)
+                .await?
+            {
+                PendingCommand::Found(command) => command,
+                PendingCommand::Empty => response,
+                PendingCommand::Saturated => {
+                    return Err(app(ApplicationErrorKind::Unavailable));
+                }
+            };
+
+            stage = RunnerLeaseRequestStage::ResponseValidation;
+            let actual_response = self
+                .validate_lease_offer_response(fence, request.header(), actual_response, None, true)
+                .await?;
+
+            stage = RunnerLeaseRequestStage::DurableCompletion;
+            self.complete_lease_request(begin, request.header(), actual_response)
+                .await
         }
-        Self::not_cancelled(cancellation)?;
-        let outcome = self
-            .ports
-            .lease
-            .lease_poller
-            .poll(
-                AuthenticatedRunnerSession::new(
-                    fence,
-                    request.header().protocol_version(),
-                    snapshot.job_ir_version(),
-                ),
-                request,
-            )
-            .await
-            .map_err(lease_poll_application_error)?;
-        let response = match outcome {
-            LeasePollOutcome::NoWork { .. } | LeasePollOutcome::Rejected { .. } => {
-                self.no_work_response(request.header())
-            }
-            LeasePollOutcome::Claimed(claimed) => {
-                self.build_lease_offer(fence, snapshot, request, digest, claimed, cancellation)
-                    .await?
-            }
-        };
-        let actual_response = match self
-            .next_pending_command(fence, snapshot.protocol_version(), replay_after)
-            .await?
-        {
-            PendingCommand::Found(command) => command,
-            PendingCommand::Empty => response,
-            PendingCommand::Saturated => {
-                return Err(app(ApplicationErrorKind::Unavailable));
-            }
-        };
-        let actual_response = self
-            .validate_lease_offer_response(fence, request.header(), actual_response, None, true)
-            .await?;
-        self.complete_lease_request(begin, request.header(), actual_response)
-            .await
+        .await;
+        if let Err(error) = &result {
+            self.observer
+                .observe_lease_request_failure(stage, control_failure(error.kind()));
+        }
+        result
+    }
+
+    fn observe_lease_request_message_failure(
+        &self,
+        message: &RunnerToServer,
+        stage: RunnerLeaseRequestStage,
+        error: ApplicationError,
+    ) -> ApplicationError {
+        if matches!(message, RunnerToServer::LeaseRequest(_)) {
+            self.observer
+                .observe_lease_request_failure(stage, control_failure(error.kind()));
+        }
+        error
     }
 
     async fn complete_lease_request(
