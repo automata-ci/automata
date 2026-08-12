@@ -10,14 +10,14 @@ use std::{
 
 use automata_ci_core::{
     CompiledBooleanTemplate, CompiledExpressionTemplate, CompiledPositiveIntegerTemplate,
-    CompiledValueTemplate, ContextValue, ExpressionContext, JobConclusion, JobInstanceIdentity,
-    JobRuntimeContext, JobValidationError, LogicalJobKind, LogicalJobTemplate,
+    CompiledValueTemplate, ContextValue, ExpressionContext, ExpressionSegment, JobConclusion,
+    JobInstanceIdentity, JobRuntimeContext, JobValidationError, LogicalJobKind, LogicalJobTemplate,
     MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, MAX_LOGICAL_FIELD_BYTES,
     MAX_MATRIX_AXES, MAX_MATRIX_AXIS_VALUES, MAX_MATRIX_OBJECT_ENTRIES, MAX_MATRIX_PATCHES,
     MAX_MATRIX_TEXT_BYTES, MAX_MATRIX_VALUE_DEPTH, MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES,
     MatrixAxisValues, MatrixPatch, MatrixPatchSet, MatrixValue, MatrixValueTemplate, NeedContext,
     RunnerGroup, RunnerLabel, RuntimeContextError, SecretBinding, Sha256Digest, StrategyContext,
-    WorkflowJobKey, WorkflowPlan, WorkflowPlanError,
+    WorkflowJobKey, WorkflowPlan, WorkflowPlanError, parse_cpu_quantity, parse_storage_quantity,
 };
 use automata_ci_protocol::ProtocolLimits;
 use sha2::{Digest as _, Sha256};
@@ -147,6 +147,8 @@ pub enum ActivationEvaluationSite {
     JobCondition,
     /// The concrete job display name.
     JobName,
+    /// The deployment environment selected for one concrete job instance.
+    DeploymentEnvironment,
     /// The runner-group selector.
     RunnerGroup,
     /// One runner-label selector.
@@ -167,6 +169,10 @@ pub enum ActivationEvaluationSite {
     MatrixExclude,
     /// The job-level continue-on-error setting.
     JobContinueOnError,
+    /// A job resource request or limit quantity.
+    JobResourceQuantity,
+    /// One reusable-workflow input binding.
+    ReusableWorkflowInput,
 }
 
 impl fmt::Display for ActivationEvaluationSite {
@@ -174,6 +180,7 @@ impl fmt::Display for ActivationEvaluationSite {
         formatter.write_str(match self {
             Self::JobCondition => "job condition",
             Self::JobName => "job name",
+            Self::DeploymentEnvironment => "deployment environment",
             Self::RunnerGroup => "runner group",
             Self::RunnerLabel => "runner label",
             Self::JobTimeout => "job timeout",
@@ -184,6 +191,8 @@ impl fmt::Display for ActivationEvaluationSite {
             Self::MatrixInclude => "matrix include",
             Self::MatrixExclude => "matrix exclude",
             Self::JobContinueOnError => "job continue-on-error",
+            Self::JobResourceQuantity => "job resource quantity",
+            Self::ReusableWorkflowInput => "reusable workflow input",
         })
     }
 }
@@ -236,6 +245,24 @@ impl fmt::Debug for ActivationEvaluationContext<'_> {
 }
 
 impl ActivationEvaluationContext<'_> {
+    pub(crate) const fn reusable_input<'a>(
+        job_key: &'a WorkflowJobKey,
+        inputs: &'a ContextValue,
+        vars: &'a ContextValue,
+        needs: &'a BTreeMap<String, NeedContext>,
+        status: ActivationStatus,
+    ) -> ActivationEvaluationContext<'a> {
+        ActivationEvaluationContext {
+            job_key,
+            inputs,
+            vars,
+            needs,
+            status,
+            matrix: None,
+            strategy: None,
+        }
+    }
+
     /// Returns the logical job being evaluated.
     #[must_use]
     pub const fn job_key(&self) -> &WorkflowJobKey {
@@ -557,7 +584,9 @@ pub struct ActivatedJobInstance {
     identity: JobInstanceIdentity,
     runtime_context: JobRuntimeContext,
     name: String,
+    deployment_environment: Option<ActivatedDeploymentEnvironment>,
     runner: Option<ActivatedRunnerSelection>,
+    resources: Option<ActivatedJobResources>,
     timeout_seconds: Option<u32>,
     continue_on_error: bool,
 }
@@ -581,10 +610,25 @@ impl ActivatedJobInstance {
         &self.name
     }
 
+    /// Returns the activation-resolved deployment environment, if selected.
+    ///
+    /// The value is intentionally redacted by its `Debug` implementation so
+    /// callers cannot accidentally include it in workflow diagnostics.
+    #[must_use]
+    pub const fn deployment_environment(&self) -> Option<&ActivatedDeploymentEnvironment> {
+        self.deployment_environment.as_ref()
+    }
+
     /// Returns resolved selectors for a step job, or `None` for a reusable call.
     #[must_use]
     pub const fn runner(&self) -> Option<&ActivatedRunnerSelection> {
         self.runner.as_ref()
+    }
+
+    /// Returns activation-resolved resource quantities before policy defaults.
+    #[must_use]
+    pub const fn resources(&self) -> Option<&ActivatedJobResources> {
+        self.resources.as_ref()
     }
 
     /// Returns the activation-resolved timeout in seconds, when configured.
@@ -597,6 +641,122 @@ impl ActivatedJobInstance {
     #[must_use]
     pub const fn continue_on_error(&self) -> bool {
         self.continue_on_error
+    }
+}
+
+/// Activation-resolved deployment environment retained outside the runner
+/// `JobIR` and redacted from ordinary diagnostics.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ActivatedDeploymentEnvironment(String);
+
+impl ActivatedDeploymentEnvironment {
+    fn new(value: String) -> Option<Self> {
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+            || value.len() > automata_ci_store::MAX_DEPLOYMENT_ENVIRONMENT_NAME_BYTES
+        {
+            return None;
+        }
+        Some(Self(value))
+    }
+
+    /// Returns the activation-resolved provider-facing environment name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ActivatedDeploymentEnvironment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ActivatedDeploymentEnvironment([REDACTED])")
+    }
+}
+
+/// Activation-resolved optional values for one resource vector.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ActivatedResourceVector {
+    cpu_millis: Option<u32>,
+    memory_bytes: Option<u64>,
+    ephemeral_storage_bytes: Option<u64>,
+    gpu_count: Option<u16>,
+}
+
+impl ActivatedResourceVector {
+    pub(crate) const fn new(
+        cpu_millis: Option<u32>,
+        memory_bytes: Option<u64>,
+        ephemeral_storage_bytes: Option<u64>,
+        gpu_count: Option<u16>,
+    ) -> Self {
+        Self {
+            cpu_millis,
+            memory_bytes,
+            ephemeral_storage_bytes,
+            gpu_count,
+        }
+    }
+
+    /// Returns the requested CPU in millicores, when explicitly configured.
+    #[must_use]
+    pub const fn cpu_millis(self) -> Option<u32> {
+        self.cpu_millis
+    }
+
+    /// Returns memory bytes, when explicitly configured.
+    #[must_use]
+    pub const fn memory_bytes(self) -> Option<u64> {
+        self.memory_bytes
+    }
+
+    /// Returns ephemeral-storage bytes, when explicitly configured.
+    #[must_use]
+    pub const fn ephemeral_storage_bytes(self) -> Option<u64> {
+        self.ephemeral_storage_bytes
+    }
+
+    /// Returns the GPU count, when explicitly configured.
+    #[must_use]
+    pub const fn gpu_count(self) -> Option<u16> {
+        self.gpu_count
+    }
+}
+
+/// Activation-resolved job resource requests and limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActivatedJobResources {
+    requests: Option<ActivatedResourceVector>,
+    limits: Option<ActivatedResourceVector>,
+}
+
+impl ActivatedJobResources {
+    pub(crate) const fn new(
+        requests: Option<ActivatedResourceVector>,
+        limits: Option<ActivatedResourceVector>,
+    ) -> Self {
+        Self { requests, limits }
+    }
+
+    /// Returns an allocation template with no explicitly supplied values.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            requests: None,
+            limits: None,
+        }
+    }
+
+    /// Returns values explicitly supplied under `requests`.
+    #[must_use]
+    pub const fn requests(self) -> Option<ActivatedResourceVector> {
+        self.requests
+    }
+
+    /// Returns values explicitly supplied under `limits`.
+    #[must_use]
+    pub const fn limits(self) -> Option<ActivatedResourceVector> {
+        self.limits
     }
 }
 
@@ -753,6 +913,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_lines)] // One pass preserves matrix ordering and exact per-instance context.
     fn activate_instances<S>(
         request: ActivateLogicalJobRequest<'_>,
         resolved: ResolvedActivationStrategy,
@@ -807,7 +968,25 @@ where
             {
                 return Err(LogicalActivationError::InvalidActivatedJobName);
             }
+            let deployment_environment = request
+                .job
+                .deployment()
+                .map(|deployment| {
+                    resolve_string(
+                        Some(deployment.name().value()),
+                        "",
+                        session,
+                        &evaluation_context,
+                        ActivationEvaluationSite::DeploymentEnvironment,
+                    )
+                    .and_then(|value| {
+                        ActivatedDeploymentEnvironment::new(value)
+                            .ok_or(LogicalActivationError::InvalidActivatedDeploymentEnvironment)
+                    })
+                })
+                .transpose()?;
             let runner = resolve_runner(request.job, session, &evaluation_context)?;
+            let resources = resolve_resources(request.job, session, &evaluation_context)?;
             let timeout_seconds = resolve_timeout(request.job, session, &evaluation_context)?;
             let continue_on_error = resolve_boolean(
                 request
@@ -831,28 +1010,14 @@ where
                 public_needs,
                 request.secrets.clone(),
             )?;
-            let encoded = automata_ci_protocol_protobuf::encode_job_runtime_context(
-                &runtime_context,
-                &activation_protocol_limits(),
-            )
-            .map_err(LogicalActivationError::RuntimeContextEncoding)?;
-            output_bytes = output_bytes.checked_add(encoded.len()).ok_or(
-                LogicalActivationError::LimitExceeded {
-                    field: "activation output bytes",
-                    maximum: MAX_ACTIVATION_OUTPUT_BYTES,
-                },
-            )?;
-            if output_bytes > MAX_ACTIVATION_OUTPUT_BYTES {
-                return Err(LogicalActivationError::LimitExceeded {
-                    field: "activation output bytes",
-                    maximum: MAX_ACTIVATION_OUTPUT_BYTES,
-                });
-            }
+            charge_runtime_context_output(&mut output_bytes, &runtime_context)?;
             instances.push(ActivatedJobInstance {
                 identity,
                 runtime_context,
                 name,
+                deployment_environment,
                 runner,
+                resources,
                 timeout_seconds,
                 continue_on_error,
             });
@@ -862,6 +1027,34 @@ where
             instances,
         })
     }
+}
+
+fn charge_runtime_context_output<E>(
+    output_bytes: &mut usize,
+    runtime_context: &JobRuntimeContext,
+) -> Result<(), LogicalActivationError<E>>
+where
+    E: Error + Send + Sync + 'static,
+{
+    let encoded = automata_ci_protocol_protobuf::encode_job_runtime_context(
+        runtime_context,
+        &activation_protocol_limits(),
+    )
+    .map_err(LogicalActivationError::RuntimeContextEncoding)?;
+    *output_bytes =
+        output_bytes
+            .checked_add(encoded.len())
+            .ok_or(LogicalActivationError::LimitExceeded {
+                field: "activation output bytes",
+                maximum: MAX_ACTIVATION_OUTPUT_BYTES,
+            })?;
+    if *output_bytes > MAX_ACTIVATION_OUTPUT_BYTES {
+        return Err(LogicalActivationError::LimitExceeded {
+            field: "activation output bytes",
+            maximum: MAX_ACTIVATION_OUTPUT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn public_runtime_needs<E>(
@@ -961,6 +1154,120 @@ where
         .checked_mul(timeout.value().unit().seconds_multiplier())
         .map(Some)
         .ok_or(LogicalActivationError::TimeoutScaleOverflow)
+}
+
+fn resolve_resources<E, S>(
+    job: ValidatedLogicalJob<'_>,
+    session: &S,
+    context: &ActivationEvaluationContext<'_>,
+) -> Result<Option<ActivatedJobResources>, LogicalActivationError<E>>
+where
+    E: Error + Send + Sync + 'static,
+    S: LogicalActivationSession<Error = E>,
+{
+    let LogicalJobKind::Steps(step_job) = job.execution() else {
+        return Ok(None);
+    };
+    let Some(resources) = step_job.resources() else {
+        return Ok(None);
+    };
+    Ok(Some(ActivatedJobResources::new(
+        resources
+            .requests()
+            .map(|values| resolve_resource_vector(values, session, context))
+            .transpose()?,
+        resources
+            .limits()
+            .map(|values| resolve_resource_vector(values, session, context))
+            .transpose()?,
+    )))
+}
+
+fn resolve_resource_vector<E, S>(
+    values: &automata_ci_core::LogicalResourceVectorTemplate,
+    session: &S,
+    context: &ActivationEvaluationContext<'_>,
+) -> Result<ActivatedResourceVector, LogicalActivationError<E>>
+where
+    E: Error + Send + Sync + 'static,
+    S: LogicalActivationSession<Error = E>,
+{
+    Ok(ActivatedResourceVector::new(
+        values
+            .cpu()
+            .map(|value| {
+                resolve_string(
+                    Some(value.value()),
+                    "",
+                    session,
+                    context,
+                    ActivationEvaluationSite::JobResourceQuantity,
+                )
+                .and_then(|value| {
+                    parse_cpu_quantity(&value).map_err(|_| {
+                        LogicalActivationError::InvalidActivatedResourceQuantity { resource: "cpu" }
+                    })
+                })
+            })
+            .transpose()?,
+        values
+            .memory()
+            .map(|value| {
+                resolve_string(
+                    Some(value.value()),
+                    "",
+                    session,
+                    context,
+                    ActivationEvaluationSite::JobResourceQuantity,
+                )
+                .and_then(|value| {
+                    parse_storage_quantity(&value).map_err(|_| {
+                        LogicalActivationError::InvalidActivatedResourceQuantity {
+                            resource: "memory",
+                        }
+                    })
+                })
+            })
+            .transpose()?,
+        values
+            .ephemeral_storage()
+            .map(|value| {
+                resolve_string(
+                    Some(value.value()),
+                    "",
+                    session,
+                    context,
+                    ActivationEvaluationSite::JobResourceQuantity,
+                )
+                .and_then(|value| {
+                    parse_storage_quantity(&value).map_err(|_| {
+                        LogicalActivationError::InvalidActivatedResourceQuantity {
+                            resource: "ephemeral-storage",
+                        }
+                    })
+                })
+            })
+            .transpose()?,
+        values
+            .gpu()
+            .map(|value| {
+                resolve_string(
+                    Some(value.value()),
+                    "",
+                    session,
+                    context,
+                    ActivationEvaluationSite::JobResourceQuantity,
+                )
+                .and_then(|value| {
+                    value.parse::<u16>().ok().filter(|value| *value > 0).ok_or(
+                        LogicalActivationError::InvalidActivatedResourceQuantity {
+                            resource: "gpu",
+                        },
+                    )
+                })
+            })
+            .transpose()?,
+    ))
 }
 
 fn activation_protocol_limits() -> ProtocolLimits {
@@ -1166,6 +1473,38 @@ where
         .map_err(|source| LogicalActivationError::Evaluation { site, source })
 }
 
+pub(crate) fn evaluate_reusable_input_template<E>(
+    evaluator: &E,
+    template: &CompiledValueTemplate,
+    context: &ActivationEvaluationContext<'_>,
+) -> Result<ActivationValue, LogicalActivationError<E::Error>>
+where
+    E: LogicalActivationSession,
+{
+    let expression = match template {
+        CompiledValueTemplate::Literal(value) => {
+            return Ok(ActivationValue::String(value.clone()));
+        }
+        CompiledValueTemplate::Expression(expression) => expression,
+    };
+    let site = ActivationEvaluationSite::ReusableWorkflowInput;
+    validate_site_contexts(expression, site)?;
+    validate_provider_site(evaluator, expression, site)?;
+    if matches!(
+        expression.expression().segments(),
+        [ExpressionSegment::Evaluation(_)]
+    ) {
+        evaluator
+            .evaluate_value(expression, context)
+            .map_err(|source| LogicalActivationError::Evaluation { site, source })
+    } else {
+        evaluator
+            .evaluate_string(expression, context)
+            .map(ActivationValue::String)
+            .map_err(|source| LogicalActivationError::Evaluation { site, source })
+    }
+}
+
 fn validate_site_contexts<E>(
     expression: &CompiledExpressionTemplate,
     site: ActivationEvaluationSite,
@@ -1174,35 +1513,7 @@ where
     E: Error + Send + Sync + 'static,
 {
     for context in expression.contexts() {
-        let allowed = match site {
-            ActivationEvaluationSite::JobName
-            | ActivationEvaluationSite::RunnerGroup
-            | ActivationEvaluationSite::RunnerLabel
-            | ActivationEvaluationSite::JobTimeout
-            | ActivationEvaluationSite::JobContinueOnError => matches!(
-                context,
-                ExpressionContext::Github
-                    | ExpressionContext::Inputs
-                    | ExpressionContext::Vars
-                    | ExpressionContext::Needs
-                    | ExpressionContext::Strategy
-                    | ExpressionContext::Matrix
-            ),
-            ActivationEvaluationSite::JobCondition
-            | ActivationEvaluationSite::StrategyFailFast
-            | ActivationEvaluationSite::StrategyMaxParallel
-            | ActivationEvaluationSite::WholeMatrix
-            | ActivationEvaluationSite::MatrixAxis
-            | ActivationEvaluationSite::MatrixInclude
-            | ActivationEvaluationSite::MatrixExclude => matches!(
-                context,
-                ExpressionContext::Github
-                    | ExpressionContext::Inputs
-                    | ExpressionContext::Vars
-                    | ExpressionContext::Needs
-            ),
-        };
-        if !allowed {
+        if !evaluation_site_allows_context(site, *context) {
             return Err(LogicalActivationError::UnavailableExpressionContext {
                 site,
                 context: context.as_str(),
@@ -1210,6 +1521,43 @@ where
         }
     }
     Ok(())
+}
+
+const fn evaluation_site_allows_context(
+    site: ActivationEvaluationSite,
+    context: ExpressionContext,
+) -> bool {
+    match site {
+        ActivationEvaluationSite::JobName
+        | ActivationEvaluationSite::DeploymentEnvironment
+        | ActivationEvaluationSite::RunnerGroup
+        | ActivationEvaluationSite::RunnerLabel
+        | ActivationEvaluationSite::JobTimeout
+        | ActivationEvaluationSite::JobContinueOnError
+        | ActivationEvaluationSite::JobResourceQuantity => matches!(
+            context,
+            ExpressionContext::Github
+                | ExpressionContext::Inputs
+                | ExpressionContext::Vars
+                | ExpressionContext::Needs
+                | ExpressionContext::Strategy
+                | ExpressionContext::Matrix
+        ),
+        ActivationEvaluationSite::JobCondition
+        | ActivationEvaluationSite::ReusableWorkflowInput
+        | ActivationEvaluationSite::StrategyFailFast
+        | ActivationEvaluationSite::StrategyMaxParallel
+        | ActivationEvaluationSite::WholeMatrix
+        | ActivationEvaluationSite::MatrixAxis
+        | ActivationEvaluationSite::MatrixInclude
+        | ActivationEvaluationSite::MatrixExclude => matches!(
+            context,
+            ExpressionContext::Github
+                | ExpressionContext::Inputs
+                | ExpressionContext::Vars
+                | ExpressionContext::Needs
+        ),
+    }
 }
 
 fn validate_provider_site<E>(
@@ -2083,9 +2431,18 @@ where
     /// The resolved job name violates bounded text rules.
     #[error("activated job name is empty, overlong, or contains control characters")]
     InvalidActivatedJobName,
+    /// A resolved deployment environment violates bounded text rules.
+    #[error("activated deployment environment is empty, overlong, or contains control characters")]
+    InvalidActivatedDeploymentEnvironment,
     /// A resolved runner group or label violates its domain grammar.
     #[error("activated runner selector is invalid")]
     InvalidActivatedRunnerSelector,
+    /// A dynamic resource quantity violated the stable quantity grammar.
+    #[error("activated {resource} resource quantity is invalid")]
+    InvalidActivatedResourceQuantity {
+        /// Stable resource dimension name.
+        resource: &'static str,
+    },
     /// Scaling the configured timeout into seconds overflowed.
     #[error("activated job timeout overflows seconds")]
     TimeoutScaleOverflow,
@@ -2150,4 +2507,39 @@ where
     /// Canonical protobuf encoding for a runtime context failed.
     #[error("canonical runtime-context encoding failed")]
     RuntimeContextEncoding(#[source] automata_ci_protocol_protobuf::EncodeError),
+}
+
+#[cfg(test)]
+mod reusable_input_policy_tests {
+    use super::*;
+
+    #[test]
+    fn reusable_inputs_allow_only_pre_job_and_direct_need_contexts() {
+        for context in [
+            ExpressionContext::Github,
+            ExpressionContext::Inputs,
+            ExpressionContext::Vars,
+            ExpressionContext::Needs,
+        ] {
+            assert!(evaluation_site_allows_context(
+                ActivationEvaluationSite::ReusableWorkflowInput,
+                context,
+            ));
+        }
+        for context in [
+            ExpressionContext::Strategy,
+            ExpressionContext::Matrix,
+            ExpressionContext::Secrets,
+            ExpressionContext::Env,
+            ExpressionContext::Job,
+            ExpressionContext::Runner,
+            ExpressionContext::Steps,
+            ExpressionContext::Jobs,
+        ] {
+            assert!(!evaluation_site_allows_context(
+                ActivationEvaluationSite::ReusableWorkflowInput,
+                context,
+            ));
+        }
+    }
 }

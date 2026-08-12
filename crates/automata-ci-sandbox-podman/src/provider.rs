@@ -1,9 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fmt,
+    fmt, fs,
     ops::Deref,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     thread,
     time::{Duration, Instant},
@@ -53,6 +53,9 @@ const MAX_SERVICE_PROXY_PORTS: usize = 128;
 const SERVICE_PROXY_IMAGE_FORMAT: &str =
     "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy.protocol-version\" }}";
 const SERVICE_PROXY_IMAGE_VERSION: &str = "1";
+const BUILDKIT_IMAGE_FORMAT: &str = "{{.Digest}}";
+const BUILDKIT_PROBE_OUTPUT_PREFIX: &str = "buildkitd github.com/moby/buildkit ";
+const BUILDKIT_ARCHIVE_NAME: &str = "automata-buildkit-image.oci";
 const SERVICE_PROXY_CONFIG_FORMAT: &str =
     "{{.ImageName}}\n{{.Pod}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}";
 const CONTAINER_POD_FORMAT: &str = "{{.Pod}}";
@@ -216,6 +219,20 @@ impl SandboxProvider for RootlessPodmanProvider {
         spec: &SandboxSpec,
         cancellation: &dyn Cancellation,
     ) -> Result<SandboxRecord, ProviderError> {
+        if !spec.has_coherent_resource_contract() {
+            return Err(provider_error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            ));
+        }
+        if spec.resource_allocation().is_some_and(|allocation| {
+            allocation.limits().ephemeral_disk_bytes() > 0 || allocation.limits().gpu_count() > 0
+        }) {
+            return Err(provider_error::known(
+                ProviderErrorKind::UnsupportedCapability,
+                ProviderStage::Validate,
+            ));
+        }
         self.inner
             .require_provider_trust(ProviderStage::CreateSandbox)?;
         let handle = ResourceNames::for_create(spec.operation_id(), spec.generation()).handle();
@@ -379,6 +396,7 @@ impl PodmanInner {
             self.options.job_container_engine(),
             self.options.host_gateway_alias(),
             self.options.service_proxy_image(),
+            self.options.buildkit_runtime(),
         );
         let labels = names.labels(spec.profile().attestation(), &fingerprint);
         let labels = ProvisionLabels {
@@ -2840,6 +2858,16 @@ impl PodmanInner {
                 names.handle(),
             )
         })?;
+        if self.options.buildkit_runtime().is_some() {
+            self.prepare_job_buildkit_image(paths, deadline, cancellation)
+                .map_err(|_| {
+                    provider_error::uncertain(
+                        ProviderErrorKind::AdapterUnavailable,
+                        ProviderStage::CreateContainer,
+                        names.handle(),
+                    )
+                })?;
+        }
         let mut service = JobDockerService::start(
             &self.options,
             paths,
@@ -3095,6 +3123,190 @@ impl PodmanInner {
             ));
         }
         Ok(())
+    }
+
+    fn verify_buildkit_runtime(
+        &self,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+        active_probe: bool,
+    ) -> Result<(), ProviderError> {
+        let runtime = self.options.buildkit_runtime().ok_or_else(|| {
+            provider_error::known(
+                ProviderErrorKind::UnsupportedCapability,
+                ProviderStage::Validate,
+            )
+        })?;
+        self.verify_buildkit_image_in_engine(
+            self.base_arguments(),
+            runtime.image(),
+            deadline,
+            cancellation,
+        )?;
+        if !active_probe {
+            return Ok(());
+        }
+
+        let mut arguments = self.base_arguments();
+        arguments.extend(os_args([
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=64",
+            "--memory=268435456",
+            "--entrypoint=buildkitd",
+        ]));
+        arguments.push(runtime.image().reference().into());
+        arguments.push("--version".into());
+        let output = Self::require_success(
+            self.run(arguments, deadline, cancellation, ProviderStage::Validate),
+            ProviderStage::Validate,
+            None,
+        )?;
+        let valid = std::str::from_utf8(output.stdout())
+            .ok()
+            .map(str::trim)
+            .is_some_and(|value| {
+                value.starts_with(BUILDKIT_PROBE_OUTPUT_PREFIX)
+                    && !value[BUILDKIT_PROBE_OUTPUT_PREFIX.len()..].is_empty()
+                    && !value.contains(['\r', '\n'])
+            });
+        if !valid {
+            return Err(provider_error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_buildkit_image_in_engine(
+        &self,
+        arguments: Vec<OsString>,
+        image: &automata_ci_execution::ImmutableImage,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), ProviderError> {
+        let reference = image.reference();
+        let mut exists_arguments = arguments.clone();
+        exists_arguments.extend(os_args(["image", "exists"]));
+        exists_arguments.push(reference.into());
+        let exists = self.run(
+            exists_arguments,
+            deadline,
+            cancellation,
+            ProviderStage::Validate,
+        );
+        match exists.termination() {
+            CommandTermination::Exited(Some(0)) if !exists.was_truncated() => {}
+            CommandTermination::Exited(Some(1)) if !exists.was_truncated() => {
+                return Err(provider_error::known(
+                    ProviderErrorKind::InvalidConfiguration,
+                    ProviderStage::Validate,
+                ));
+            }
+            _ => {
+                Self::require_success(exists, ProviderStage::Validate, None)?;
+            }
+        }
+
+        let mut arguments = arguments;
+        arguments.extend(os_args([
+            "image",
+            "inspect",
+            "--format",
+            BUILDKIT_IMAGE_FORMAT,
+        ]));
+        arguments.push(reference.into());
+        let output = Self::require_success(
+            self.run(arguments, deadline, cancellation, ProviderStage::Validate),
+            ProviderStage::Validate,
+            None,
+        )?;
+        let expected = reference.rsplit_once('@').map(|(_, digest)| digest);
+        let actual = std::str::from_utf8(output.stdout()).ok().map(str::trim);
+        if actual != expected {
+            return Err(provider_error::known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_job_buildkit_image(
+        &self,
+        paths: &JobEnginePaths,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), ProviderError> {
+        let runtime = self.options.buildkit_runtime().ok_or_else(|| {
+            provider_error::known(
+                ProviderErrorKind::UnsupportedCapability,
+                ProviderStage::Validate,
+            )
+        })?;
+        let job_arguments =
+            self.options
+                .global_arguments(paths.graph_root(), paths.run_root(), paths.tmp_dir());
+        if self
+            .verify_buildkit_image_in_engine(
+                job_arguments.clone(),
+                runtime.image(),
+                deadline,
+                cancellation,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        self.verify_buildkit_runtime(deadline, cancellation, false)?;
+        let archive = paths.tmp_dir().join(BUILDKIT_ARCHIVE_NAME);
+        prepare_buildkit_archive_path(&archive)?;
+        let archive_guard = BuildKitArchiveGuard(archive.clone());
+
+        let mut arguments = self.base_arguments();
+        arguments.extend(os_args([
+            "image",
+            "save",
+            "--format",
+            "oci-archive",
+            "--output",
+        ]));
+        arguments.push(archive.as_os_str().to_owned());
+        arguments.push(runtime.image().reference().into());
+        Self::require_success(
+            self.run(
+                arguments,
+                deadline,
+                cancellation,
+                ProviderStage::CreateContainer,
+            ),
+            ProviderStage::CreateContainer,
+            None,
+        )?;
+        validate_buildkit_archive(&archive)?;
+
+        let mut arguments = job_arguments.clone();
+        arguments.extend(os_args(["image", "load", "--input"]));
+        arguments.push(archive.as_os_str().to_owned());
+        Self::require_success(
+            self.run(
+                arguments,
+                deadline,
+                cancellation,
+                ProviderStage::CreateContainer,
+            ),
+            ProviderStage::CreateContainer,
+            None,
+        )?;
+        drop(archive_guard);
+        self.verify_buildkit_image_in_engine(job_arguments, runtime.image(), deadline, cancellation)
     }
 
     fn verify_owned_for_spec(
@@ -3954,11 +4166,59 @@ fn job_engine_ownership_format(container: bool) -> String {
     )
 }
 
+struct BuildKitArchiveGuard(PathBuf);
+
+impl Drop for BuildKitArchiveGuard {
+    fn drop(&mut self) {
+        let _ignored = fs::remove_file(&self.0);
+    }
+}
+
+fn prepare_buildkit_archive_path(path: &Path) -> Result<(), ProviderError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            validate_buildkit_archive(path)?;
+            fs::remove_file(path)
+                .map_err(|_| provider_error::local_storage(ProviderStage::CreateContainer))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(provider_error::local_storage(
+            ProviderStage::CreateContainer,
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn validate_buildkit_archive(path: &Path) -> Result<(), ProviderError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| provider_error::local_storage(ProviderStage::CreateContainer))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.nlink() != 1
+    {
+        return Err(provider_error::local_storage(
+            ProviderStage::CreateContainer,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_buildkit_archive(_path: &Path) -> Result<(), ProviderError> {
+    Err(provider_error::known(
+        ProviderErrorKind::UnsupportedCapability,
+        ProviderStage::CreateContainer,
+    ))
+}
+
 fn spec_fingerprint(
     spec: &SandboxSpec,
     job_engine: JobContainerEngine,
     host_gateway_alias: Option<&PodmanHostGatewayAlias>,
     service_proxy_image: Option<&automata_ci_execution::ImmutableImage>,
+    buildkit_runtime: Option<&crate::BuildKitRuntime>,
 ) -> String {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, spec.profile().id().as_str().as_bytes());
@@ -3995,6 +4255,18 @@ fn spec_fingerprint(
     hash_field(&mut hasher, &spec.resources().memory_bytes().to_be_bytes());
     hash_field(&mut hasher, &spec.resources().cpu_millis().to_be_bytes());
     hash_field(&mut hasher, &spec.resources().pids().to_be_bytes());
+    match spec.resource_allocation() {
+        Some(allocation) => {
+            hash_field(&mut hasher, &[1]);
+            for resources in [allocation.requests(), allocation.limits()] {
+                hash_field(&mut hasher, &resources.cpu_millis().to_be_bytes());
+                hash_field(&mut hasher, &resources.memory_bytes().to_be_bytes());
+                hash_field(&mut hasher, &resources.ephemeral_disk_bytes().to_be_bytes());
+                hash_field(&mut hasher, &resources.gpu_count().to_be_bytes());
+            }
+        }
+        None => hash_field(&mut hasher, &[0]),
+    }
     hash_field(&mut hasher, &[job_engine as u8]);
     match host_gateway_alias {
         Some(alias) => {
@@ -4013,6 +4285,13 @@ fn spec_fingerprint(
             hash_field(&mut hasher, image.reference().as_bytes());
         }
         _ => hash_field(&mut hasher, &[0]),
+    }
+    match buildkit_runtime {
+        Some(runtime) => {
+            hash_field(&mut hasher, &[1]);
+            hash_field(&mut hasher, runtime.image().reference().as_bytes());
+        }
+        None => hash_field(&mut hasher, &[0]),
     }
     hash_field(
         &mut hasher,

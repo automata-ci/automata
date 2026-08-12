@@ -27,20 +27,20 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LogicalActivationObject, LogicalActivationPreparationStore as _,
-    LogicalActivationPreparationStoreError, LogicalActivationPreparationTarget,
-    LogicalActivationRepository as _, LogicalActivationWorkerId,
-    LogicalInstanceMaterializationSelectionOutcome, LogicalJobOrchestrationSelectionOutcome,
-    LogicalJobResultClaimOutcome, LogicalJobResultRepository as _, LogicalJobResultTarget,
-    LogicalJobResultWorkerId, LogicalMaterializationRepository as _,
-    LogicalMaterializationWorkerId, LogicalWorkSelectionId, LogicalWorkSelectionRepository as _,
-    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, RenewLogicalActivationPreparation, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind, LogicalActivationObject,
+    LogicalActivationPreparationStore as _, LogicalActivationPreparationStoreError,
+    LogicalActivationPreparationTarget, LogicalActivationRepository as _,
+    LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
+    LogicalJobOrchestrationSelectionOutcome, LogicalJobResultClaimOutcome,
+    LogicalJobResultRepository as _, LogicalJobResultTarget, LogicalJobResultWorkerId,
+    LogicalMaterializationRepository as _, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
+    LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
+    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, PublishLogicalJobActivation, RenewLogicalActivationPreparation,
+    ReusableSecretPermission, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -886,6 +886,12 @@ fn prepared_materialization(
         )
         .expect("JobIR descriptor"),
         runtime,
+        JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
     .expect("activated instance");
     PreparedMaterialization {

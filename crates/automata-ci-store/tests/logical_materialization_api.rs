@@ -297,6 +297,7 @@ fn fixture_with_authority_profile(
         WorkflowId::from_uuid(Uuid::from_u128(4)),
         "CI".to_owned(),
         "refs/heads/main".to_owned(),
+        "push".to_owned(),
         Some("octocat".to_owned()),
         automata_ci_core::RunIdAlias::new(11).expect("run ID alias"),
         7,

@@ -339,6 +339,34 @@ fn logical_plan_round_trips_with_strategy_contracts_and_result_references() {
 }
 
 #[test]
+fn current_plan_requires_an_explicit_resource_selection() {
+    let encoded = serde_json::to_vec(&valid_plan()).expect("serialize plan");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("decode JSON value");
+    assert!(
+        value["logical"]["jobs"][0]["execution"]["value"]
+            .get("resources")
+            .is_some_and(serde_json::Value::is_null),
+        "policy defaults are represented by an explicit null resource selection"
+    );
+
+    let decoded: WorkflowPlan = serde_json::from_slice(&encoded).expect("decode workflow plan");
+    assert_eq!(
+        serde_json::to_vec(&decoded).expect("re-encode plan"),
+        encoded
+    );
+
+    let mut missing = value;
+    missing["logical"]["jobs"][0]["execution"]["value"]
+        .as_object_mut()
+        .expect("step-job object")
+        .remove("resources");
+    assert!(
+        serde_json::from_value::<WorkflowPlan>(missing).is_err(),
+        "documents predating the current resource-aware plan shape must fail closed"
+    );
+}
+
+#[test]
 fn only_the_current_version_and_required_logical_body_decode() {
     let encoded = serde_json::to_value(valid_plan()).expect("serialize");
 

@@ -1162,10 +1162,23 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
     run_with_database(|database| async move {
         let seed = seed_control_plane(database.pool(), 0).await?;
         let actor = seed_human(database.pool(), &seed.tenant_id, "401", "approver").await?;
+        let actor = grant_environment_review_authority(
+            database.pool(),
+            &seed.tenant_id,
+            seed.repository_id,
+            actor,
+        )
+        .await?;
         let principal = actor.principal_id;
-        let second_principal = seed_human(database.pool(), &seed.tenant_id, "402", "reviewer")
-            .await?
-            .principal_id;
+        let reviewer = seed_human(database.pool(), &seed.tenant_id, "402", "reviewer").await?;
+        let reviewer = grant_environment_review_authority(
+            database.pool(),
+            &seed.tenant_id,
+            seed.repository_id,
+            reviewer,
+        )
+        .await?;
+        let second_principal = reviewer.principal_id;
         activate_builtin(database.pool(), &seed.tenant_id).await?;
         insert_custody_canary(database.pool(), "secret-kek-v1").await?;
         let attempt = Uuid::new_v4();
@@ -1201,6 +1214,34 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .bind(principal)
         .execute(database.pool())
         .await?;
+        let database_now_ms: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let approval_created_at = database_now_ms - 1_000;
+        let approval_expires_at = database_now_ms + 60_000;
+        sqlx::query(
+            r"
+            INSERT INTO repository_environment_reviewers (
+                tenant_id, repository_id, environment_id, environment_revision,
+                principal_id, principal_authorization_revision,
+                granted_by_principal_id, grantor_authorization_revision, granted_at_ms
+            ) VALUES
+                ($1, $2, $3, 1, $4, $5, $4, $5, $6),
+                ($1, $2, $3, 1, $7, $8, $7, $8, $6)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(principal)
+        .bind(actor.authorization_revision)
+        .bind(database_now_ms)
+        .bind(second_principal)
+        .bind(reviewer.authorization_revision)
+        .execute(database.pool())
+        .await?;
 
         let (secret, version) =
             create_tenant_secret(database.pool(), &seed.tenant_id, actor, "DEPLOY_TOKEN").await?;
@@ -1211,7 +1252,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             attempt,
             secret,
             version,
-            environment,
+            None,
             None,
             vec![21_u8; 32],
         )
@@ -1240,7 +1281,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             attempt,
             secret,
             version,
-            environment,
+            Some(environment),
             None,
             vec![22_u8; 32],
         )
@@ -1248,7 +1289,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .expect_err("protected environments require an approved exact workload request");
         assert_constraint(
             &without_approval,
-            "secret_workload_grants_environment_approval",
+            "secret_workload_grants_environment_current",
         );
 
         let freeform_resolution = sqlx::query(
@@ -1277,7 +1318,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .expect_err("approval resolution persists only a closed nonsecret code");
         assert_constraint(
             &freeform_resolution,
-            "protected_environment_approval_requests_status_shape",
+            "protected_environment_approval_snapshot",
         );
 
         let approval = Uuid::new_v4();
@@ -1287,10 +1328,10 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
                 tenant_id, repository_id, environment_id, run_id, job_id,
                 attempt_id, id, required_approvals, prevent_self_review,
                 requested_by_principal_id, status, created_at_ms, expires_at_ms,
-                resolved_at_ms, resolution_reason
+                resolved_at_ms, resolution_reason, revision
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 1, TRUE, $8,
-                'approved', 2, 100, 3, 'approval_threshold_met'
+                'pending', $9, $10, NULL, NULL, 1
             )
             ",
         )
@@ -1302,6 +1343,34 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .bind(attempt)
         .bind(approval)
         .bind(principal)
+        .bind(approval_created_at)
+        .bind(approval_expires_at)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, reason, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', 'policy_reviewed', $4)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(second_principal)
+        .bind(database_now_ms)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'approved', resolved_at_ms = $3,
+                resolution_reason = 'approval_threshold_met', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(database_now_ms)
         .execute(database.pool())
         .await?;
 
@@ -1311,11 +1380,115 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             attempt,
             secret,
             version,
-            environment,
+            Some(environment),
             Some(approval),
             vec![23_u8; 32],
         )
         .await?;
+
+        let short_attempt =
+            insert_succeeded_attempt(database.pool(), seed.job_id.as_uuid(), 2).await?;
+        let short_approval = Uuid::new_v4();
+        let short_created_at: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let short_expires_at = short_created_at + 1_000;
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_requests (
+                tenant_id, repository_id, environment_id, run_id, job_id,
+                attempt_id, id, required_approvals, prevent_self_review,
+                requested_by_principal_id, created_at_ms, expires_at_ms
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, TRUE, $8, $9, $10)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(seed.run_id.as_uuid())
+        .bind(seed.job_id.as_uuid())
+        .bind(short_attempt)
+        .bind(short_approval)
+        .bind(principal)
+        .bind(short_created_at - 1)
+        .bind(short_expires_at)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', $4)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(short_approval)
+        .bind(second_principal)
+        .bind(short_created_at)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'approved', resolved_at_ms = $3,
+                resolution_reason = 'approval_threshold_met', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(short_approval)
+        .bind(short_created_at)
+        .execute(database.pool())
+        .await?;
+        loop {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if current >= short_expires_at {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let backdated_grant = sqlx::query(
+            r"
+            INSERT INTO secret_workload_grants (
+                tenant_id, repository_id, run_id, job_id, attempt_id, id,
+                fencing_token, secret_id, secret_version_id,
+                secret_version_number, provider_id,
+                environment_id, environment_approval_request_id, grant_mode,
+                event_trust, source_kind, authority_digest, authority_digest_key_id,
+                issued_at_ms, expires_at_ms
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, 9, $7, $8, 1, 'builtin', $9, $10,
+                'readable_secret', 'trusted', 'same_repository', $11,
+                'backdated-workload-authority-v1', $12,
+                floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 60000
+            )
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(seed.run_id.as_uuid())
+        .bind(seed.job_id.as_uuid())
+        .bind(short_attempt)
+        .bind(Uuid::new_v4())
+        .bind(secret)
+        .bind(version)
+        .bind(environment)
+        .bind(short_approval)
+        .bind(vec![25_u8; 32])
+        .bind(short_created_at)
+        .execute(database.pool())
+        .await
+        .expect_err("an expired approval cannot issue a backdated workload grant");
+        assert_constraint(
+            &backdated_grant,
+            "secret_workload_grants_environment_current",
+        );
 
         let freeform_grant_revocation = sqlx::query(
             r"
@@ -1433,6 +1606,8 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             "secret_cleanup_outbox_failure_kind",
         );
 
+        let pending_attempt =
+            insert_succeeded_attempt(database.pool(), seed.job_id.as_uuid(), 3).await?;
         let pending_approval = Uuid::new_v4();
         sqlx::query(
             r"
@@ -1440,7 +1615,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
                 tenant_id, repository_id, environment_id, run_id, job_id,
                 attempt_id, id, required_approvals, prevent_self_review,
                 requested_by_principal_id, created_at_ms, expires_at_ms
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, TRUE, $8, 4, 100)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, TRUE, $8, $9, $10)
             ",
         )
         .bind(&seed.tenant_id)
@@ -1448,21 +1623,48 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .bind(environment)
         .bind(seed.run_id.as_uuid())
         .bind(seed.job_id.as_uuid())
-        .bind(attempt)
+        .bind(pending_attempt)
         .bind(pending_approval)
         .bind(principal)
+        .bind(approval_created_at)
+        .bind(approval_expires_at)
         .execute(database.pool())
         .await?;
+        let mutate_pending_revision = sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET revision = revision + 1
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .execute(database.pool())
+        .await
+        .expect_err("pending approval revisions are immutable");
+        assert_constraint(
+            &mutate_pending_revision,
+            "protected_environment_approval_revision_guard",
+        );
+        let truncate_decisions = sqlx::query("TRUNCATE protected_environment_approval_decisions")
+            .execute(database.pool())
+            .await
+            .expect_err("approval decisions are append-only under TRUNCATE");
+        assert_constraint(
+            &truncate_decisions,
+            "protected_environment_approval_decisions_immutable",
+        );
         let freeform_decision_reason = sqlx::query(
             r"
             INSERT INTO protected_environment_approval_decisions (
                 tenant_id, request_id, principal_id, decision, reason, decided_at_ms
-            ) VALUES ($1, $2, $3, 'approve', 'password=sentinel-secret', 5)
+            ) VALUES ($1, $2, $3, 'approve', 'password=sentinel-secret', $4)
             ",
         )
         .bind(&seed.tenant_id)
         .bind(pending_approval)
         .bind(second_principal)
+        .bind(database_now_ms)
         .execute(database.pool())
         .await
         .expect_err("approval decisions persist only closed nonsecret reason codes");
@@ -1474,12 +1676,13 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             r"
             INSERT INTO protected_environment_approval_decisions (
                 tenant_id, request_id, principal_id, decision, decided_at_ms
-            ) VALUES ($1, $2, $3, 'approve', 5)
+            ) VALUES ($1, $2, $3, 'approve', $4)
             ",
         )
         .bind(&seed.tenant_id)
         .bind(pending_approval)
         .bind(principal)
+        .bind(database_now_ms)
         .execute(database.pool())
         .await
         .expect_err("protected environments can prevent self-review");
@@ -1487,6 +1690,239 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
             &self_review,
             "protected_environment_approval_decisions_self_review",
         );
+
+        let expired_attempt =
+            insert_succeeded_attempt(database.pool(), seed.job_id.as_uuid(), 4).await?;
+        let expired_approval = Uuid::new_v4();
+        let expired_created_at: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        let expired_at = expired_created_at + 1_000;
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_requests (
+                tenant_id, repository_id, environment_id, run_id, job_id,
+                attempt_id, id, required_approvals, prevent_self_review,
+                requested_by_principal_id, created_at_ms, expires_at_ms
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, TRUE, $8, $9, $10)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(seed.run_id.as_uuid())
+        .bind(seed.job_id.as_uuid())
+        .bind(expired_attempt)
+        .bind(expired_approval)
+        .bind(principal)
+        .bind(expired_created_at)
+        .bind(expired_at)
+        .execute(database.pool())
+        .await?;
+        loop {
+            let current: i64 = sqlx::query_scalar(
+                "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if current >= expired_at {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let expired_decision = sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', $4)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(expired_approval)
+        .bind(second_principal)
+        .bind(expired_created_at)
+        .execute(database.pool())
+        .await
+        .expect_err("an expired request cannot accept a backdated decision");
+        assert_constraint(
+            &expired_decision,
+            "protected_environment_approval_decisions_lifetime",
+        );
+        let expired_resolution = sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'approved', resolved_at_ms = $3,
+                resolution_reason = 'approval_threshold_met', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(expired_approval)
+        .bind(expired_created_at)
+        .execute(database.pool())
+        .await
+        .expect_err("an expired request cannot be approved with a backdated resolution");
+        assert_constraint(
+            &expired_resolution,
+            "protected_environment_approval_resolution_current",
+        );
+
+        sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET required_approvals = 2, revision = 2, updated_at_ms = 6
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .execute(database.pool())
+        .await?;
+        let stale_decision = sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', 6)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(second_principal)
+        .execute(database.pool())
+        .await
+        .expect_err("a policy revision invalidates pending review evidence");
+        assert_constraint(
+            &stale_decision,
+            "protected_environment_approval_decisions_current_policy",
+        );
+        let stale_resolution = sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'approved', resolved_at_ms = $3,
+                resolution_reason = 'approval_threshold_met', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(database_now_ms)
+        .execute(database.pool())
+        .await
+        .expect_err("stale policy evidence cannot become approved");
+        assert_constraint(
+            &stale_resolution,
+            "protected_environment_approval_resolution_current",
+        );
+        let stale_approved_grant = insert_workload_grant(
+            database.pool(),
+            &seed,
+            attempt,
+            secret,
+            version,
+            Some(environment),
+            Some(approval),
+            vec![24_u8; 32],
+        )
+        .await
+        .expect_err("a previously approved request cannot survive a policy revision");
+        assert_constraint(
+            &stale_approved_grant,
+            "secret_workload_grants_environment_current",
+        );
+
+        sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET required_approvals = 1, revision = 3, updated_at_ms = 7
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .execute(database.pool())
+        .await?;
+        let aba_decision = sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', 7)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(second_principal)
+        .execute(database.pool())
+        .await
+        .expect_err("restoring visible policy settings does not restore an old revision");
+        assert_constraint(
+            &aba_decision,
+            "protected_environment_approval_decisions_current_policy",
+        );
+
+        sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET status = 'disabled', revision = 4, updated_at_ms = 8
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .execute(database.pool())
+        .await?;
+        let disabled_decision = sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', 8)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(second_principal)
+        .execute(database.pool())
+        .await
+        .expect_err("disabled environments cannot accept review decisions");
+        assert_constraint(
+            &disabled_decision,
+            "protected_environment_approval_decisions_current_policy",
+        );
+        let mistyped_stale_cancellation = sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'cancelled', resolved_at_ms = $3,
+                resolution_reason = 'policy_changed', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(database_now_ms)
+        .execute(database.pool())
+        .await
+        .expect_err("disabled policy evidence requires the exact cancellation code");
+        assert_constraint(
+            &mistyped_stale_cancellation,
+            "protected_environment_approval_stale_resolution",
+        );
+        sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'cancelled', resolved_at_ms = $3,
+                resolution_reason = 'environment_disabled', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(pending_approval)
+        .bind(database_now_ms)
+        .execute(database.pool())
+        .await?;
 
         let rotation = Uuid::new_v4();
         sqlx::query(
@@ -1535,6 +1971,185 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
         .bind(secret)
         .execute(database.pool())
         .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One transaction preserves the full grantor-revision proof.
+async fn protected_environment_approval_rechecks_reviewer_grantor_authorization_revision()
+-> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 0).await?;
+        let grantor = grant_environment_review_authority(
+            database.pool(),
+            &seed.tenant_id,
+            seed.repository_id,
+            seed_human(
+                database.pool(),
+                &seed.tenant_id,
+                "review-grantor",
+                "grantor",
+            )
+            .await?,
+        )
+        .await?;
+        let reviewer = grant_environment_review_authority(
+            database.pool(),
+            &seed.tenant_id,
+            seed.repository_id,
+            seed_human(
+                database.pool(),
+                &seed.tenant_id,
+                "review-reviewer",
+                "reviewer",
+            )
+            .await?,
+        )
+        .await?;
+        let attempt = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO job_attempts (
+                id, job_id, attempt_number, lifecycle, fencing_token,
+                queued_at_ms, changed_at_ms
+            ) VALUES ($1, $2, 1, 'succeeded', 1, 1, 1)
+            ",
+        )
+        .bind(attempt)
+        .bind(seed.job_id.as_uuid())
+        .execute(database.pool())
+        .await?;
+        let environment = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO repository_environments (
+                tenant_id, repository_id, id, name, normalized_name,
+                protection_mode, required_approvals, prevent_self_review,
+                created_by_principal_id, created_at_ms, updated_at_ms
+            ) VALUES (
+                $1, $2, $3, 'Release', 'release', 'required_approvals', 1,
+                TRUE, $4, 1, 1
+            )
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(grantor.principal_id)
+        .execute(database.pool())
+        .await?;
+        let now: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO repository_environment_reviewers (
+                tenant_id, repository_id, environment_id, environment_revision,
+                principal_id, principal_authorization_revision,
+                granted_by_principal_id, grantor_authorization_revision, granted_at_ms
+            ) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(reviewer.principal_id)
+        .bind(reviewer.authorization_revision)
+        .bind(grantor.principal_id)
+        .bind(grantor.authorization_revision)
+        .bind(now)
+        .execute(database.pool())
+        .await?;
+        let approval = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_requests (
+                tenant_id, repository_id, environment_id, run_id, job_id,
+                attempt_id, id, required_approvals, prevent_self_review,
+                requested_by_principal_id, status, created_at_ms, expires_at_ms,
+                resolved_at_ms, resolution_reason, revision
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, 1, TRUE,
+                $8, 'pending', $9, $10, NULL, NULL, 1
+            )
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.repository_id)
+        .bind(environment)
+        .bind(seed.run_id.as_uuid())
+        .bind(seed.job_id.as_uuid())
+        .bind(attempt)
+        .bind(approval)
+        .bind(grantor.principal_id)
+        .bind(now)
+        .bind(now + 60_000)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', $4)
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(reviewer.principal_id)
+        .bind(now)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE protected_environment_approval_requests
+            SET status = 'approved', resolved_at_ms = $3,
+                resolution_reason = 'approval_threshold_met', revision = 2
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(now)
+        .execute(database.pool())
+        .await?;
+        let current: bool = sqlx::query_scalar(
+            "SELECT automata_protected_environment_approval_is_current($1, $2, $3)",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(now)
+        .fetch_one(database.pool())
+        .await?;
+        assert!(current, "the exact reviewer/grantor proof starts current");
+
+        sqlx::query(
+            r"
+            UPDATE tenant_human_memberships
+            SET authorization_revision = authorization_revision + 1
+            WHERE tenant_id = $1 AND principal_id = $2
+            ",
+        )
+        .bind(&seed.tenant_id)
+        .bind(grantor.principal_id)
+        .execute(database.pool())
+        .await?;
+        let current_after_grantor_aba: bool = sqlx::query_scalar(
+            "SELECT automata_protected_environment_approval_is_current($1, $2, $3)",
+        )
+        .bind(&seed.tenant_id)
+        .bind(approval)
+        .bind(now)
+        .fetch_one(database.pool())
+        .await?;
+        assert!(
+            !current_after_grantor_aba,
+            "grantor authorization ABA invalidates prior reviewer assignment evidence",
+        );
         Ok(())
     })
     .await
@@ -1628,6 +2243,105 @@ async fn seed_human(
         principal_id: principal,
         session_id,
         authorization_revision,
+    })
+}
+
+async fn grant_environment_review_authority(
+    pool: &PgPool,
+    tenant_id: &str,
+    repository_id: Uuid,
+    actor: SeededHuman,
+) -> TestResult<SeededHuman> {
+    let role_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO rbac_roles (
+            tenant_id, id, name, display_name, role_kind, immutable,
+            created_by_principal_id, created_at_ms, updated_at_ms
+        ) VALUES ($1, $2, $3, 'Environment reviewer', 'custom', FALSE, $4, 1, 1)
+        ",
+    )
+    .bind(tenant_id)
+    .bind(role_id)
+    .bind(format!("environment-reviewer-{}", role_id.simple()))
+    .bind(actor.principal_id)
+    .execute(pool)
+    .await?;
+    for permission in ["environments:approve", "environments:manage"] {
+        sqlx::query(
+            r"
+            INSERT INTO rbac_role_permissions (
+                tenant_id, role_id, permission_name,
+                granted_by_principal_id, granted_at_ms
+            ) VALUES ($1, $2, $3, $4, 1)
+            ",
+        )
+        .bind(tenant_id)
+        .bind(role_id)
+        .bind(permission)
+        .bind(actor.principal_id)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        r"
+        INSERT INTO rbac_role_bindings (
+            tenant_id, id, principal_id, role_id, scope_kind, repository_id,
+            assignment_source, created_by_principal_id, created_at_ms
+        ) VALUES ($1, $2, $3, $4, 'repository', $5, 'manual', $3, 1)
+        ",
+    )
+    .bind(tenant_id)
+    .bind(Uuid::new_v4())
+    .bind(actor.principal_id)
+    .bind(role_id)
+    .bind(repository_id)
+    .execute(pool)
+    .await?;
+    let authorization_revision: i64 = sqlx::query_scalar(
+        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id = $1 AND principal_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(actor.principal_id)
+    .fetch_one(pool)
+    .await?;
+    // Role bindings advance the durable authorization revision.  Issue a
+    // fresh browser session rather than mutating the historical session, so
+    // later fixture writes carry current authorization evidence.
+    let provider_subject: String =
+        sqlx::query_scalar("SELECT provider_subject FROM human_sessions WHERE id = $1")
+            .bind(actor.session_id)
+            .fetch_one(pool)
+            .await?;
+    let session_id = Uuid::new_v4();
+    let mut token_hash = [0_u8; 32];
+    token_hash[..16].copy_from_slice(session_id.as_bytes());
+    token_hash[16..].copy_from_slice(session_id.as_bytes());
+    sqlx::query(
+        r"
+        INSERT INTO human_sessions (
+            id, tenant_id, principal_id, provider_id, provider_subject,
+            session_kind, audience, token_hash, token_hash_key_id,
+            authorization_revision, issued_at_ms, last_seen_at_ms,
+            idle_expires_at_ms, expires_at_ms
+        ) VALUES (
+            $1, $2, $3, 'github', $4, 'browser', 'automata.web',
+            $5, 'secret-output-session-v1', $6, 1, 1, 700000, 750000
+        )
+        ",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(actor.principal_id)
+    .bind(provider_subject)
+    .bind(token_hash.as_slice())
+    .bind(authorization_revision)
+    .execute(pool)
+    .await?;
+    Ok(SeededHuman {
+        session_id,
+        authorization_revision,
+        ..actor
     })
 }
 
@@ -2061,7 +2775,7 @@ async fn insert_workload_grant(
     attempt_id: Uuid,
     secret_id: Uuid,
     secret_version_id: Uuid,
-    environment_id: Uuid,
+    environment_id: Option<Uuid>,
     approval_id: Option<Uuid>,
     authority_digest: Vec<u8>,
 ) -> Result<Uuid, sqlx::Error> {
@@ -2077,7 +2791,9 @@ async fn insert_workload_grant(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 9, $7, $8, 1, 'builtin', $9, $10,
             'readable_secret', 'trusted', 'same_repository', $11,
-            'workload-authority-v1', 3, 100
+            'workload-authority-v1',
+            floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT,
+            floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 60000
         ) RETURNING id
         ",
     )
@@ -2094,6 +2810,28 @@ async fn insert_workload_grant(
     .bind(authority_digest)
     .fetch_one(pool)
     .await
+}
+
+async fn insert_succeeded_attempt(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt_number: i32,
+) -> Result<Uuid, sqlx::Error> {
+    let attempt_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO job_attempts (
+            id, job_id, attempt_number, lifecycle, fencing_token,
+            queued_at_ms, changed_at_ms
+        ) VALUES ($1, $2, $3, 'succeeded', 9, 1, 2)
+        ",
+    )
+    .bind(attempt_id)
+    .bind(job_id)
+    .bind(attempt_number)
+    .execute(pool)
+    .await?;
+    Ok(attempt_id)
 }
 
 fn assert_constraint(error: &sqlx::Error, expected: &str) {

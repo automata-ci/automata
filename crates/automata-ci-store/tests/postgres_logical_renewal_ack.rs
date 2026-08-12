@@ -28,7 +28,8 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LogicalActivationClaimFence, LogicalActivationObject, LogicalActivationPreparationClaimFence,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind, LogicalActivationClaimFence,
+    LogicalActivationObject, LogicalActivationPreparationClaimFence,
     LogicalActivationPreparationStore as _, LogicalActivationPreparationStoreError,
     LogicalActivationRepository as _, LogicalActivationStoreError, LogicalActivationWorkerId,
     LogicalInstanceMaterializationSelectionOutcome, LogicalJobOrchestrationSelectionOutcome,
@@ -44,7 +45,7 @@ use automata_ci_store::{
     QuarantineLogicalJobOrchestration, RenewLogicalActivationPreparation,
     RenewLogicalInstanceMaterialization, RenewLogicalJobActivation,
     RenewedLogicalActivationPreparation, RenewedLogicalInstanceMaterialization,
-    RenewedLogicalJobActivation, SelectedLogicalInstanceMaterialization,
+    RenewedLogicalJobActivation, ReusableSecretPermission, SelectedLogicalInstanceMaterialization,
     SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowAdmissionIdempotency,
     WorkflowSnapshotId,
 };
@@ -112,7 +113,8 @@ async fn renewal_ack_is_replayable_but_never_authorizes_work() -> TestResult {
         seed_tenant(&database, &terminal.tenant).await?;
         admit_authenticated_fixture(&database, &mut terminal).await?;
         exercise_terminal_preparation(&database, &terminal).await?;
-        let terminal_instance = exercise_terminal_activation(&database, &terminal).await?;
+        let terminal_instance =
+            Box::pin(exercise_terminal_activation(&database, &terminal)).await?;
         exercise_terminal_materialization(&database, &terminal, &terminal_instance).await?;
 
         let mut quarantined_preparation =
@@ -2367,6 +2369,12 @@ fn prepared_instance(
         )
         .expect("JobIR descriptor"),
         runtime,
+        JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
     .expect("activated instance");
     PreparedInstance {

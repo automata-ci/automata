@@ -1,15 +1,16 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
+use uuid::Uuid;
 
-use super::{OutputFormat, SecretScope};
+use super::{OutputFormat, RepositoryRef, SecretScope};
 use crate::server::{SecretSource, VersionedSecretSource};
 
 #[derive(Debug, Subcommand)]
 /// Top-level service and operator command selection.
 ///
-/// Server, preview, authentication, repository-secret, and administrative
-/// status operations are implemented in the product.
+/// Server, preview, authentication, repository-secret, environment-review,
+/// workflow-rerun, and administrative status operations are implemented.
 pub enum Command {
     /// Run the human API, runner control, Results gateway, and SSR interface.
     Server(Box<ServerArgs>),
@@ -22,6 +23,10 @@ pub enum Command {
     Auth(AuthArgs),
     /// Manage encrypted Actions secrets.
     Secret(SecretArgs),
+    /// Approve or reject one protected-environment gate.
+    EnvironmentReview(EnvironmentReviewArgs),
+    /// Create an authenticated rerun of one completed workflow run.
+    Rerun(RerunArgs),
     /// Inspect control-plane status.
     Admin(AdminArgs),
 }
@@ -33,10 +38,95 @@ impl Command {
         match self {
             Self::Auth(args) => Some(&args.operator),
             Self::Secret(args) => Some(&args.operator),
+            Self::EnvironmentReview(args) => Some(&args.operator),
+            Self::Rerun(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
             Self::Server(_) | Self::Preview(_) => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "kebab-case")]
+/// Exact decision recorded for a protected-environment gate.
+pub enum EnvironmentReviewDecision {
+    /// Count this reviewer toward the environment's approval threshold.
+    Approve,
+    /// Reject the protected-environment request.
+    Reject,
+}
+
+impl EnvironmentReviewDecision {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+/// Authenticated protected-environment review request.
+pub struct EnvironmentReviewArgs {
+    /// Connection and output policy for this operator command.
+    #[command(flatten)]
+    pub operator: OperatorArgs,
+    /// Exact canonical repository UUID containing the gated attempt.
+    #[arg(value_parser = parse_canonical_uuid)]
+    pub repository_id: Uuid,
+    /// Exact canonical gated job-attempt UUID.
+    #[arg(value_parser = parse_canonical_uuid)]
+    pub attempt_id: Uuid,
+    /// Approval decision to record for the current reviewer.
+    #[arg(long, value_enum)]
+    pub decision: EnvironmentReviewDecision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+/// Exact workflow subset selected for a rerun.
+pub enum RerunSelection {
+    /// Re-execute every job in the workflow.
+    EntireWorkflow,
+    /// Re-execute failed or timed-out jobs and their dependents.
+    FailedJobsAndDependents,
+    /// Re-execute one logical job and all of its dependents.
+    JobAndDependents,
+}
+
+#[derive(Debug, Args)]
+/// Authenticated workflow-rerun request.
+pub struct RerunArgs {
+    /// Connection and output policy for this operator command.
+    #[command(flatten)]
+    pub operator: OperatorArgs,
+    /// GitHub repository in canonical OWNER/REPOSITORY form.
+    pub repository: RepositoryRef,
+    /// Exact canonical completed source-run UUID.
+    #[arg(value_parser = parse_canonical_uuid)]
+    pub source_run_id: Uuid,
+    /// Workflow subset to re-execute.
+    #[arg(long, value_enum)]
+    pub selection: RerunSelection,
+    /// Exact canonical logical-job UUID; required only for job-and-dependents.
+    #[arg(
+        long,
+        value_parser = parse_canonical_uuid,
+        required_if_eq("selection", "job-and-dependents")
+    )]
+    pub job_id: Option<Uuid>,
+    /// Stable operation UUID for an exact retry; generated once when omitted.
+    #[arg(long, value_parser = parse_canonical_uuid)]
+    pub operation_id: Option<Uuid>,
+}
+
+fn parse_canonical_uuid(value: &str) -> Result<Uuid, String> {
+    let parsed = Uuid::parse_str(value).map_err(|_| "expected a canonical UUID".to_owned())?;
+    if parsed.is_nil() || parsed.hyphenated().to_string() != value {
+        return Err("expected a non-nil lowercase hyphenated UUID".to_owned());
+    }
+    Ok(parsed)
 }
 
 #[derive(Debug, Args)]
@@ -255,6 +345,10 @@ pub struct ServerArgs {
     /// Dedicated direct-mTLS HTTP/2 runner-control listen address.
     #[arg(long, env = "AUTOMATA_RUNNER_LISTEN", default_value = "127.0.0.1:9090")]
     pub runner_listen: SocketAddr,
+
+    /// Public HTTPS runner-control origin used by direct mTLS clients.
+    #[arg(long, env = "AUTOMATA_RUNNER_PUBLIC_URL", value_name = "URL")]
+    pub runner_public_url: Option<String>,
 
     /// Dedicated GitHub Actions Results HTTP listen address.
     ///

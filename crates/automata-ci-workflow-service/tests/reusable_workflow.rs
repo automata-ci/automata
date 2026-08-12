@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use automata_ci_core::{
-    InvocationInputDefault, InvocationInputType, PermissionLevel, PlanSourceOrigin, RunId,
-    WorkflowEventProvenance,
+    InvocationInputDefault, InvocationInputType, OutputSensitivity, PermissionLevel,
+    PlanSourceOrigin, RunId, WorkflowEventProvenance,
 };
 use automata_ci_store::LogicalWorkflowInvocationId;
 use automata_ci_workflow_github::{
@@ -128,9 +128,23 @@ fn expand(
     limits: Option<ReusableWorkflowLimits>,
 ) -> Result<automata_ci_workflow_service::ReusableWorkflowExpansion, ReusableWorkflowExpansionError>
 {
+    expand_with_secrets(
+        root_source,
+        catalog,
+        &BTreeSet::from(["ROOT_TOKEN".to_owned()]),
+        limits,
+    )
+}
+
+fn expand_with_secrets(
+    root_source: &str,
+    catalog: &GithubReusableWorkflowCatalog,
+    secrets: &BTreeSet<String>,
+    limits: Option<ReusableWorkflowLimits>,
+) -> Result<automata_ci_workflow_service::ReusableWorkflowExpansion, ReusableWorkflowExpansionError>
+{
     let root_plan = compile_root(root_source);
     let (run_id, root_invocation_id) = ids();
-    let secrets = BTreeSet::from(["ROOT_TOKEN".to_owned()]);
     let permissions = root_permissions();
     let request = ExpandReusableWorkflowRequest::new(
         run_id,
@@ -139,13 +153,96 @@ fn expand(
         root_source.as_bytes(),
         &root_plan,
         catalog,
-        &secrets,
+        secrets,
         &permissions,
     );
     limits.map_or_else(
         || ReusableWorkflowExpander::new().expand(request),
         |limits| ReusableWorkflowExpander::with_limits(limits).expand(request),
     )
+}
+
+#[test]
+fn inherit_forwards_undeclared_secrets_across_each_explicit_direct_call_only() {
+    const MIDDLE_PATH: &str = ".github/workflows/middle.yml";
+    const LEAF_PATH: &str = ".github/workflows/leaf.yml";
+    const INHERITING_ROOT: &str = r"on: workflow_dispatch
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    secrets: inherit
+";
+    const INHERITING_MIDDLE: &str = r"on:
+  workflow_call: {}
+jobs:
+  leaf:
+    uses: ./.github/workflows/leaf.yml
+    secrets: inherit
+";
+    const NON_FORWARDING_MIDDLE: &str = r"on:
+  workflow_call: {}
+jobs:
+  leaf:
+    uses: ./.github/workflows/leaf.yml
+";
+    const LEAF: &str = r"on:
+  workflow_call: {}
+jobs:
+  consume:
+    runs-on: linux
+    steps:
+      - run: echo inherited
+";
+    let available = BTreeSet::from(["UNDECLARED_ALPHA".to_owned(), "UNDECLARED_ZETA".to_owned()]);
+    let inherited_edges = [
+        ("UNDECLARED_ALPHA", "UNDECLARED_ALPHA"),
+        ("UNDECLARED_ZETA", "UNDECLARED_ZETA"),
+    ];
+
+    let inheriting_catalog = catalog([
+        (MIDDLE_PATH, INHERITING_MIDDLE.to_owned()),
+        (LEAF_PATH, LEAF.to_owned()),
+    ]);
+    let inherited = expand_with_secrets(INHERITING_ROOT, &inheriting_catalog, &available, None)
+        .expect("both direct calls inherit every caller secret");
+    assert_eq!(inherited.invocations().len(), 3);
+    for invocation in &inherited.invocations()[1..] {
+        assert_eq!(
+            invocation
+                .secrets()
+                .iter()
+                .map(|edge| (edge.target(), edge.source()))
+                .collect::<Vec<_>>(),
+            inherited_edges,
+            "{} receives undeclared secrets from its direct caller",
+            invocation.workflow_path(),
+        );
+    }
+
+    let boundary_catalog = catalog([
+        (MIDDLE_PATH, NON_FORWARDING_MIDDLE.to_owned()),
+        (LEAF_PATH, LEAF.to_owned()),
+    ]);
+    let bounded = expand_with_secrets(INHERITING_ROOT, &boundary_catalog, &available, None)
+        .expect("omitting inherit on the next edge is valid");
+    assert_eq!(bounded.invocations()[1].secrets().len(), 2);
+    assert!(
+        bounded.invocations()[2].secrets().is_empty(),
+        "root secrets must not jump across a direct call that omitted inherit",
+    );
+
+    let required_catalog = catalog([(CALLEE_PATH, CALLEE.to_owned())]);
+    let required_inherit = ROOT.replace(
+        "    secrets:\n      token: ${{ secrets.ROOT_TOKEN }}\n",
+        "    secrets: inherit\n",
+    );
+    assert_eq!(
+        expand_with_secrets(&required_inherit, &required_catalog, &BTreeSet::new(), None,),
+        Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
+            "token".to_owned(),
+        )),
+        "inherit must still satisfy every required declared secret",
+    );
 }
 
 #[test]
@@ -181,6 +278,13 @@ fn exact_catalog_expands_typed_least_authority_call_deterministically() {
     assert_eq!(child.secrets()[0].target(), "token");
     assert_eq!(child.secrets()[0].source(), "ROOT_TOKEN");
     assert_eq!(child.outputs()[0].key(), "digest");
+    assert_eq!(child.caller_outputs().len(), 1);
+    assert_eq!(child.caller_outputs()[0].parent_key(), "digest");
+    assert_eq!(child.caller_outputs()[0].child_key(), "digest");
+    assert_eq!(
+        child.caller_outputs()[0].sensitivity(),
+        OutputSensitivity::SecretDerived
+    );
     assert_eq!(child.permissions().default_level(), PermissionLevel::None);
     assert_eq!(child.permissions().level("contents"), PermissionLevel::Read);
     assert_eq!(child.permissions().level("issues"), PermissionLevel::Read);
@@ -410,4 +514,42 @@ fn catalog_plan_provenance_is_bound_to_one_exact_repository_revision() {
     assert_eq!(repository, REPOSITORY);
     assert_eq!(revision, REVISION);
     assert_eq!(path, CALLEE_PATH);
+}
+
+#[test]
+fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
+    let root_plan = compile_root(ROOT);
+    let catalog = GithubReusableWorkflowCatalog::compile_reachable(
+        REPOSITORY,
+        REVISION,
+        &root_plan,
+        [
+            RepositoryWorkflowSource::new(CALLEE_PATH, Bytes::from_static(CALLEE.as_bytes())),
+            RepositoryWorkflowSource::new(
+                ".github/workflows/unrelated.yml",
+                Bytes::from_static(b"this is deliberately not a workflow"),
+            ),
+        ],
+    )
+    .expect("only reachable sources are compiled");
+    assert_eq!(catalog.entries().len(), 1);
+    assert_eq!(
+        catalog.entries().next().expect("callee").path(),
+        CALLEE_PATH
+    );
+
+    assert_eq!(
+        GithubReusableWorkflowCatalog::compile_reachable(
+            REPOSITORY,
+            REVISION,
+            &root_plan,
+            [RepositoryWorkflowSource::new(
+                ".github/workflows/unrelated.yml",
+                Bytes::from_static(b"on: workflow_dispatch\njobs: {}\n"),
+            )],
+        ),
+        Err(ReusableWorkflowExpansionError::MissingCatalogPath(
+            CALLEE_PATH.to_owned(),
+        )),
+    );
 }

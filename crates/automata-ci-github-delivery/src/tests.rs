@@ -19,20 +19,23 @@ use automata_ci_github::{
     X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
-    AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery,
-    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN,
-    GithubAuthenticatedEventKind, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
-    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
-    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRepository, ProviderDeliveryStoreError, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RejectProviderDelivery, RepositoryId, RetryProviderDelivery,
+    AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
+    AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
+    CompleteProviderDelivery, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
+    GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN, GithubAuthenticatedEventKind,
+    GithubCheckName, GithubCheckSubjectId, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchEvidence,
+    PendingGithubRepositoryDispatchReceipt, ProviderConnectionId, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryStoreError, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RejectProviderDelivery, RepositoryId, ResolveGithubRepositoryDispatch, RetryProviderDelivery,
     TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision,
 };
 use bytes::Bytes;
@@ -63,7 +66,7 @@ const FIXTURE_RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"schema":1
+  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 pub(crate) struct FixtureGithubRuntimePolicy {
@@ -235,51 +238,12 @@ fn fixture_manifest_receipt(
 ) -> ManifestPinnedGithubDeliveryReceipt {
     let delivery = request.delivery();
     let identity = delivery.identity();
-    let app_revision = GithubServerServiceRevision::new(1).expect("App revision");
-    let policy_revision = GithubServerServiceRevision::new(1).expect("policy revision");
-    let runtime_policy = fixture_github_runtime_policy(1);
-    let manifest = GithubProviderManifest::new(
-        identity.tenant().clone(),
-        identity.connection_id(),
-        identity.installation_id(),
-        identity.repository_id(),
-        GithubRepositoryName::new(identity.repository_identity().to_owned())
-            .expect("repository name"),
-        identity.repository_visibility(),
-        GithubServerServiceAppId::new(42).expect("App ID"),
-        GithubServerServiceAppClientId::new("Iv1.delivery-fixture").expect("App client ID"),
-        GithubServerServiceJwtIssuer::AppClientId,
-        Sha256Digest::from_bytes([0x51; 32]),
-        app_revision,
+    let (manifest, checks_authority, private_source_authority) = fixture_manifest_authorities(
+        identity,
         request.authenticated_webhook_verifier_fingerprint(),
         request.authenticated_webhook_verifier_revision(),
-        policy_revision,
-        automata_ci_core::JobAuthorityProfile::Standard,
-        runtime_policy.runner_policy,
-        runtime_policy.revision,
-        runtime_policy.semantic_digest,
-        GithubCheckName::new("Automata CI").expect("Check name"),
-        GithubProviderOrigins::github_dot_com(),
-        GithubProviderManifestLimits::github_dot_com_ci(),
-        GithubProviderManifestRevision::new(1).expect("manifest revision"),
+        ordinal,
     );
-    let checks_authority = fixture_authority_selector(
-        identity.tenant(),
-        Uuid::from_u128(300 + ordinal),
-        [0x61; 32],
-        app_revision,
-        policy_revision,
-    );
-    let private_source_authority =
-        (identity.repository_visibility() == ProviderRepositoryVisibility::Private).then(|| {
-            fixture_authority_selector(
-                identity.tenant(),
-                Uuid::from_u128(400 + ordinal),
-                [0x62; 32],
-                app_revision,
-                policy_revision,
-            )
-        });
     let check_subject_id =
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(200 + ordinal)).expect("check subject");
     let evidence = match request.authenticated_event_v1() {
@@ -313,6 +277,64 @@ fn fixture_manifest_receipt(
     }
     .expect("manifest evidence");
     ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence)
+}
+
+fn fixture_manifest_authorities(
+    identity: &ProviderDeliveryIdentity,
+    webhook_fingerprint: automata_ci_store::GithubProviderWebhookVerifierFingerprint,
+    webhook_revision: GithubServerServiceRevision,
+    ordinal: u128,
+) -> (
+    GithubProviderManifest,
+    GithubServerServiceAuthoritySelector,
+    Option<GithubServerServiceAuthoritySelector>,
+) {
+    let app_revision = GithubServerServiceRevision::new(1).expect("App revision");
+    let policy_revision = GithubServerServiceRevision::new(1).expect("policy revision");
+    let runtime_policy = fixture_github_runtime_policy(1);
+    let manifest = GithubProviderManifest::new(
+        identity.tenant().clone(),
+        identity.connection_id(),
+        identity.installation_id(),
+        identity.repository_id(),
+        GithubRepositoryName::new(identity.repository_identity().to_owned())
+            .expect("repository name"),
+        identity.repository_visibility(),
+        GithubServerServiceAppId::new(42).expect("App ID"),
+        GithubServerServiceAppClientId::new("Iv1.delivery-fixture").expect("App client ID"),
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([0x51; 32]),
+        app_revision,
+        webhook_fingerprint,
+        webhook_revision,
+        policy_revision,
+        automata_ci_core::JobAuthorityProfile::Standard,
+        runtime_policy.runner_policy,
+        runtime_policy.revision,
+        runtime_policy.semantic_digest,
+        GithubCheckName::new("Automata CI").expect("Check name"),
+        GithubProviderOrigins::github_dot_com(),
+        GithubProviderManifestLimits::github_dot_com_ci(),
+        GithubProviderManifestRevision::new(1).expect("manifest revision"),
+    );
+    let checks_authority = fixture_authority_selector(
+        identity.tenant(),
+        Uuid::from_u128(300 + ordinal),
+        [0x61; 32],
+        app_revision,
+        policy_revision,
+    );
+    let private_source_authority =
+        (identity.repository_visibility() == ProviderRepositoryVisibility::Private).then(|| {
+            fixture_authority_selector(
+                identity.tenant(),
+                Uuid::from_u128(400 + ordinal),
+                [0x62; 32],
+                app_revision,
+                policy_revision,
+            )
+        });
+    (manifest, checks_authority, private_source_authority)
 }
 
 fn fixture_authority_selector(
@@ -422,6 +444,136 @@ impl GithubSubjectEvidenceRepository for RecordingDeliveryAcceptance {
         _run_id: automata_ci_core::RunId,
     ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
         panic!("run evidence is outside delivery ingress")
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingRepositoryDispatchAcceptance {
+    calls: AtomicUsize,
+    deliveries: Mutex<BTreeMap<(String, Uuid, String), RecordedRepositoryDispatch>>,
+}
+
+#[derive(Clone, Debug)]
+struct RecordedRepositoryDispatch {
+    identity: ProviderDeliveryIdentity,
+    request_digest: Sha256Digest,
+    raw_event: AdmissionObject,
+    repository_owner_id: ProviderRepositoryOwnerId,
+    event: automata_ci_store::GithubAuthenticatedEventV1,
+    verifier_fingerprint: automata_ci_store::GithubProviderWebhookVerifierFingerprint,
+    verifier_revision: GithubServerServiceRevision,
+    receipt: PendingGithubRepositoryDispatchReceipt,
+}
+
+impl RecordingRepositoryDispatchAcceptance {
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+fn fixture_repository_dispatch_receipt(
+    request: &AcceptManifestPinnedGithubRepositoryDispatch,
+    delivery_id: ProviderDeliveryId,
+    ordinal: u128,
+) -> PendingGithubRepositoryDispatchReceipt {
+    let delivery = request.delivery();
+    let (manifest, checks_authority, private_source_authority) = fixture_manifest_authorities(
+        delivery.identity(),
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+        ordinal,
+    );
+    let evidence = PendingGithubRepositoryDispatchEvidence::from_durable_parts(
+        delivery_id,
+        request.repository_owner_id(),
+        manifest,
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+        checks_authority,
+        private_source_authority,
+        request.event().clone(),
+        delivery.accepted_at(),
+    )
+    .expect("pending repository dispatch evidence");
+    PendingGithubRepositoryDispatchReceipt::from_durable_parts(evidence)
+}
+
+#[async_trait]
+impl GithubRepositoryDispatchEvidenceRepository for RecordingRepositoryDispatchAcceptance {
+    async fn accept_manifest_pinned_github_repository_dispatch(
+        &self,
+        request: AcceptManifestPinnedGithubRepositoryDispatch,
+    ) -> Result<PendingGithubRepositoryDispatchReceipt, GithubSubjectEvidenceStoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let delivery = request.delivery();
+        let key = (
+            delivery.identity().provider().to_owned(),
+            delivery.identity().connection_id().as_uuid(),
+            delivery.identity().delivery_id().to_owned(),
+        );
+        let mut deliveries = self.deliveries.lock().expect("dispatch lock is healthy");
+        match deliveries.get(&key) {
+            Some(existing)
+                if existing.identity == *delivery.identity()
+                    && existing.request_digest == delivery.request_digest()
+                    && existing.raw_event == *delivery.raw_event()
+                    && existing.repository_owner_id == request.repository_owner_id()
+                    && existing.event == *request.event()
+                    && existing.verifier_fingerprint
+                        == request.authenticated_webhook_verifier_fingerprint()
+                    && existing.verifier_revision
+                        == request.authenticated_webhook_verifier_revision() =>
+            {
+                Ok(existing.receipt.clone())
+            }
+            Some(_) => Err(GithubSubjectEvidenceStoreError::ReplayConflict),
+            None => {
+                let ordinal = u128::try_from(deliveries.len())
+                    .expect("bounded fixture delivery count fits u128")
+                    + 1;
+                let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x700 + ordinal))
+                    .expect("fixture dispatch UUID");
+                let receipt = fixture_repository_dispatch_receipt(&request, delivery_id, ordinal);
+                deliveries.insert(
+                    key,
+                    RecordedRepositoryDispatch {
+                        identity: delivery.identity().clone(),
+                        request_digest: delivery.request_digest(),
+                        raw_event: delivery.raw_event().clone(),
+                        repository_owner_id: request.repository_owner_id(),
+                        event: request.event().clone(),
+                        verifier_fingerprint: request.authenticated_webhook_verifier_fingerprint(),
+                        verifier_revision: request.authenticated_webhook_verifier_revision(),
+                        receipt: receipt.clone(),
+                    },
+                );
+                Ok(receipt)
+            }
+        }
+    }
+
+    async fn load_pending_github_repository_dispatch_evidence(
+        &self,
+        tenant: &TenantScope,
+        delivery_id: ProviderDeliveryId,
+    ) -> Result<PendingGithubRepositoryDispatchEvidence, GithubSubjectEvidenceStoreError> {
+        self.deliveries
+            .lock()
+            .expect("dispatch lock is healthy")
+            .values()
+            .find(|delivery| {
+                delivery.receipt.evidence().tenant() == tenant
+                    && delivery.receipt.delivery_id() == delivery_id
+            })
+            .map(|delivery| delivery.receipt.evidence().clone())
+            .ok_or(GithubSubjectEvidenceStoreError::NotFound)
+    }
+
+    async fn resolve_github_repository_dispatch(
+        &self,
+        _request: ResolveGithubRepositoryDispatch,
+    ) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
+        panic!("resolution is outside delivery ingress")
     }
 }
 
@@ -656,6 +808,12 @@ fn pull_request_body(action: &str, merged: bool) -> Bytes {
 fn merge_group_body() -> Bytes {
     Bytes::from(format!(
         r#"{{"action":"checks_requested","merge_group":{{"head_sha":"{AFTER_COMMIT}","head_ref":"refs/heads/merge-queue/main/group-7","base_sha":"{BEFORE_COMMIT}","base_ref":"refs/heads/main","head_commit":{{}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+    ))
+}
+
+fn repository_dispatch_body(branch: &str, sequence: u64) -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"synthetic_signal","branch":"{branch}","client_payload":{{"sequence":{sequence}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","default_branch":"{branch}","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -939,6 +1097,135 @@ async fn one_verifier_dispatches_mixed_public_and_private_repositories_exactly()
     );
     assert_eq!(objects.object_count(), 2);
     assert_eq!(deliveries.call_count(), 2);
+}
+
+#[tokio::test]
+async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay() {
+    let objects = Arc::new(RecordingBlobStore::default());
+    let deliveries = Arc::new(RecordingDeliveryAcceptance::default());
+    let dispatches = Arc::new(RecordingRepositoryDispatchAcceptance::default());
+    let configured = connection(
+        ProviderRepositoryVisibility::Private,
+        "octo-private",
+        "private-repository",
+    )
+    .expect("fixture connection")
+    .with_default_branch_ref("refs/heads/main")
+    .expect("configured default branch");
+    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+        GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
+        GithubServerServiceRevision::new(1).expect("verifier revision"),
+        vec![configured],
+        objects.clone(),
+        deliveries.clone(),
+        dispatches.clone(),
+        Arc::new(FixedClock(UnixMillis::new(100))),
+    )
+    .expect("dispatch ingress");
+    let body = repository_dispatch_body("main", 3);
+    let headers = signed_event_headers(
+        SECRET,
+        &body,
+        "repository_dispatch",
+        "delivery-repository-dispatch",
+    );
+
+    let accepted = ingress
+        .accept_repository_dispatch(&headers, body.clone())
+        .await
+        .expect("repository dispatch accepted");
+    let replay = ingress
+        .accept_repository_dispatch(&headers, body.clone())
+        .await
+        .expect("exact repository dispatch replay");
+
+    assert_eq!(accepted.receipt(), replay.receipt());
+    assert_eq!(accepted.request_digest(), replay.request_digest());
+    assert_eq!(accepted.raw_event(), replay.raw_event());
+    assert_eq!(
+        accepted.receipt().evidence().event().kind(),
+        GithubAuthenticatedEventKind::RepositoryDispatch
+    );
+    assert_eq!(
+        accepted.receipt().evidence().event().git_ref(),
+        "refs/heads/main"
+    );
+    assert!(
+        accepted
+            .receipt()
+            .evidence()
+            .private_source_authority()
+            .is_some()
+    );
+    assert_eq!(
+        accepted.raw_event().media_type(),
+        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+    );
+    assert_eq!(
+        objects
+            .bytes_at(accepted.raw_event().object_key().as_str())
+            .expect("authenticated raw event"),
+        body
+    );
+    assert_eq!(objects.object_count(), 1);
+    assert_eq!(deliveries.call_count(), 0);
+    assert_eq!(dispatches.call_count(), 2);
+
+    let changed_body = repository_dispatch_body("main", 4);
+    let changed_headers = signed_event_headers(
+        SECRET,
+        &changed_body,
+        "repository_dispatch",
+        "delivery-repository-dispatch",
+    );
+    assert_eq!(
+        ingress
+            .accept_repository_dispatch(&changed_headers, changed_body)
+            .await,
+        Err(GithubDeliveryIngressError::ReplayConflict)
+    );
+    assert_eq!(dispatches.call_count(), 3);
+    assert_eq!(objects.object_count(), 2);
+}
+
+#[tokio::test]
+async fn repository_dispatch_default_branch_mismatch_performs_no_writes() {
+    let objects = Arc::new(RecordingBlobStore::default());
+    let deliveries = Arc::new(RecordingDeliveryAcceptance::default());
+    let dispatches = Arc::new(RecordingRepositoryDispatchAcceptance::default());
+    let configured = connection(
+        ProviderRepositoryVisibility::Private,
+        "octo-private",
+        "private-repository",
+    )
+    .expect("fixture connection")
+    .with_default_branch_ref("refs/heads/main")
+    .expect("configured default branch");
+    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+        GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
+        GithubServerServiceRevision::new(1).expect("verifier revision"),
+        vec![configured],
+        objects.clone(),
+        deliveries.clone(),
+        dispatches.clone(),
+        Arc::new(FixedClock(UnixMillis::new(100))),
+    )
+    .expect("dispatch ingress");
+    let body = repository_dispatch_body("release", 3);
+    let headers = signed_event_headers(
+        SECRET,
+        &body,
+        "repository_dispatch",
+        "delivery-wrong-default-branch",
+    );
+
+    assert_eq!(
+        ingress.accept_repository_dispatch(&headers, body).await,
+        Err(GithubDeliveryIngressError::ConfiguredIdentityMismatch)
+    );
+    assert_eq!(objects.put_count(), 0);
+    assert_eq!(deliveries.call_count(), 0);
+    assert_eq!(dispatches.call_count(), 0);
 }
 
 fn fixture_body() -> Bytes {
@@ -1627,18 +1914,45 @@ fn configuration_and_debug_surfaces_do_not_expose_sensitive_text() {
             GithubDeliveryConfigurationError::InvalidRepositoryIdentity
         );
     }
+    for invalid in [
+        "",
+        "main",
+        "refs/tags/main",
+        "refs/heads/",
+        "refs/heads/@",
+        "refs/heads/.hidden",
+        "refs/heads/feature//nested",
+        "refs/heads/feature..nested",
+        "refs/heads/component.lock",
+        "refs/heads/with space",
+    ] {
+        assert_eq!(
+            connection(
+                ProviderRepositoryVisibility::Private,
+                "octo-private",
+                "private-repository",
+            )
+            .expect("fixture connection")
+            .with_default_branch_ref(invalid)
+            .unwrap_err(),
+            GithubDeliveryConfigurationError::InvalidDefaultBranchRef
+        );
+    }
 
     let configured = connection(
         ProviderRepositoryVisibility::Private,
         "octo-private",
         "private-repository",
     )
-    .expect("fixture connection is valid");
+    .expect("fixture connection is valid")
+    .with_default_branch_ref("refs/heads/refs/release")
+    .expect("canonical default branch");
     let configured_debug = format!("{configured:?}");
     assert!(!configured_debug.contains("delivery-test-secret"));
     assert!(!configured_debug.contains("tenant-private"));
     assert!(!configured_debug.contains("octo-private"));
     assert!(!configured_debug.contains("private-repository"));
+    assert!(!configured_debug.contains("refs/release"));
 
     let service = ingress_for_connections(
         SECRET,

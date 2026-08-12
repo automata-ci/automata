@@ -71,9 +71,10 @@ it with event provenance into logical state. Activation evaluates the
 run-dependent parts, expands bounded strategies, and projects executable
 JobIR. The scheduler and runner do not parse YAML or evaluate provider syntax.
 
-An Automata-only `concurrency.queue` field is under development in this
-frontend and the durable concurrency model. It is an optional extension, not a
-GitHub Actions compatibility feature, and is not supported by the product yet.
+Automata-only `concurrency.queue` and per-job `resources` fields are extensions,
+not GitHub Actions compatibility features. Resource templates cross activation
+into a resolved request/limit contract; the pinned repository runtime policy
+supplies defaults and bounds before scheduling.
 
 The remaining internal boundaries have narrower jobs:
 
@@ -100,6 +101,15 @@ transactions and fencing rather than process-local locks.
 
 S3-compatible storage owns immutable workflow and action bundles, log segments,
 artifacts, cache objects, and final manifests. It is not used for coordination.
+
+Scheduled GitHub workflows use a separate durable path from webhooks. A
+manifest-pinned discovery claim binds an owner-bound provider revision, exact
+default-branch commit, source archive, and sorted schedule inventory before a
+registry revision becomes current. Due occurrences are fenced database-time
+claims; retries retain the same occurrence, while a terminal result advances
+only to its next calendar instant. A scheduled Check and workflow admission
+carry the exact fire identity, so no synthetic delivery or generic GitHub
+credential proxy is introduced.
 
 The Results listener serves job-scoped log, artifact, result, cache, and OIDC
 boundaries. Cache lookup checks the current ref first, then the server-owned
@@ -157,9 +167,22 @@ it never grants Automata administrator access by itself.
 
 Jobs do not receive the host Podman socket, provider-control credentials, or
 control-plane credentials. CredentialFree jobs receive no repository
-credential. Managed-secret administration is implemented, but managed values
-are not delivered to jobs yet. See [Authentication and authorization](authentication.md)
-for the current interfaces and limits.
+credential. Eligible Standard jobs may receive approved managed-secret
+bindings from the built-in provider at exact pinned versions. Durable lease
+state records only a value-free binding overlay; the runner fetches values over
+a direct mTLS-bound ephemeral channel after leasing, holds them in zeroizing
+custody, and installs every log mask before acknowledging delivery or starting
+work. External or dynamic providers and variable-value delivery remain
+unsupported. This path does not make every workflow eligible, and protected-
+environment acceptance remains a separate boundary. See
+[Authentication and authorization](authentication.md) for the current
+interfaces and limits.
+
+Workflow variables currently have durable, value-free selection metadata but
+no execution-local value-custody receipt. Variable-bearing attempts therefore
+remain queued: both the bounded pre-scheduling gate and PostgreSQL's direct
+queued-to-leased transition reject them until a future migration introduces an
+explicit custody proof.
 
 ## Web interface
 

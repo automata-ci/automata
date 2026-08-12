@@ -1,6 +1,6 @@
 use automata_ci::cli::{
-    AuthCommand, Cli, Command, OutputFormat, RepositoryRef, SecretCommand, SecretProviderCommand,
-    SecretScope,
+    AuthCommand, Cli, Command, EnvironmentReviewDecision, OutputFormat, RepositoryRef,
+    RerunSelection, SecretCommand, SecretProviderCommand, SecretScope,
 };
 use automata_ci::server::{ServerConfig, ServerConfigError};
 use clap::{CommandFactory as _, Parser as _};
@@ -156,7 +156,18 @@ fn only_operational_top_level_commands_are_advertised() {
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
 
-    assert_eq!(names, ["server", "preview", "auth", "secret", "admin"]);
+    assert_eq!(
+        names,
+        [
+            "server",
+            "preview",
+            "auth",
+            "secret",
+            "environment-review",
+            "rerun",
+            "admin"
+        ]
+    );
     for unavailable in [
         "workflow",
         "run",
@@ -210,7 +221,7 @@ fn stale_runner_session_timeout_help_states_its_maintenance_constraint() {
 
 #[test]
 fn nested_operator_options_are_retained_for_every_operator_tree() {
-    let cases: [&[&str]; 3] = [
+    let cases: [&[&str]; 5] = [
         &[
             "automata",
             "auth",
@@ -239,12 +250,269 @@ fn nested_operator_options_are_retained_for_every_operator_tree() {
             "--output",
             "json",
         ],
+        &[
+            "automata",
+            "environment-review",
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "--decision",
+            "approve",
+            "--server-url",
+            "https://ci.example.test",
+            "--output",
+            "json",
+        ],
+        &[
+            "automata",
+            "rerun",
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "entire-workflow",
+            "--server-url",
+            "https://ci.example.test",
+            "--output",
+            "json",
+        ],
     ];
     for arguments in cases {
         let cli = Cli::try_parse_from(arguments).expect("nested operator syntax must parse");
         let operator = cli.command.operator().expect("operator options");
         assert_eq!(operator.server_url, "https://ci.example.test");
         assert_eq!(operator.output, OutputFormat::Json);
+    }
+}
+
+#[test]
+fn environment_review_parses_both_exact_decisions() {
+    for (decision, expected) in [
+        ("approve", EnvironmentReviewDecision::Approve),
+        ("reject", EnvironmentReviewDecision::Reject),
+    ] {
+        let cli = Cli::try_parse_from([
+            "automata",
+            "environment-review",
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "--decision",
+            decision,
+        ])
+        .expect("environment review must parse");
+        let Command::EnvironmentReview(args) = cli.command else {
+            panic!("environment-review command expected");
+        };
+        assert_eq!(
+            args.repository_id.to_string(),
+            "aaaaaaaa-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            args.attempt_id.to_string(),
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(args.decision, expected);
+    }
+}
+
+#[test]
+fn environment_review_rejects_ambiguous_or_missing_arguments() {
+    for arguments in [
+        [
+            "00000000-0000-0000-0000-000000000000",
+            "22222222-2222-4222-8222-222222222222",
+            "approve",
+        ],
+        [
+            "AAAAAAAA-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "approve",
+        ],
+        [
+            "aaaaaaaa111141118111111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "approve",
+        ],
+        [
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            "{22222222-2222-4222-8222-222222222222}",
+            "approve",
+        ],
+        [
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "allow",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from([
+                "automata",
+                "environment-review",
+                arguments[0],
+                arguments[1],
+                "--decision",
+                arguments[2],
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "environment-review",
+            "aaaaaaaa-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn rerun_parses_exact_selection_and_retry_identity() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "rerun",
+        "Automata-CI/Automata",
+        "20000000-0000-4000-8000-000000000002",
+        "--selection",
+        "job-and-dependents",
+        "--job-id",
+        "30000000-0000-4000-8000-000000000003",
+        "--operation-id",
+        "40000000-0000-4000-8000-000000000004",
+    ])
+    .expect("rerun command must parse");
+    let Command::Rerun(args) = cli.command else {
+        panic!("rerun command expected");
+    };
+    assert_eq!(args.selection, RerunSelection::JobAndDependents);
+    assert_eq!(args.repository.owner(), "Automata-CI");
+    assert_eq!(args.repository.name(), "Automata");
+    assert_eq!(
+        args.source_run_id.to_string(),
+        "20000000-0000-4000-8000-000000000002"
+    );
+    assert_eq!(
+        args.job_id.expect("job ID").to_string(),
+        "30000000-0000-4000-8000-000000000003"
+    );
+    assert_eq!(
+        args.operation_id.expect("operation ID").to_string(),
+        "40000000-0000-4000-8000-000000000004"
+    );
+}
+
+#[test]
+fn rerun_parses_all_three_exact_selection_modes() {
+    for (mode, job_id, expected) in [
+        ("entire-workflow", None, RerunSelection::EntireWorkflow),
+        (
+            "failed-jobs-and-dependents",
+            None,
+            RerunSelection::FailedJobsAndDependents,
+        ),
+        (
+            "job-and-dependents",
+            Some("30000000-0000-4000-8000-000000000003"),
+            RerunSelection::JobAndDependents,
+        ),
+    ] {
+        let mut arguments = vec![
+            "automata",
+            "rerun",
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            mode,
+        ];
+        if let Some(job_id) = job_id {
+            arguments.extend(["--job-id", job_id]);
+        }
+        let cli = Cli::try_parse_from(arguments).expect("selection must parse");
+        let Command::Rerun(args) = cli.command else {
+            panic!("rerun command expected");
+        };
+        assert_eq!(args.selection, expected);
+        assert_eq!(args.job_id.is_some(), job_id.is_some());
+        assert!(args.operation_id.is_none());
+    }
+}
+
+#[test]
+fn rerun_rejects_ambiguous_identifiers_and_inconsistent_job_selection() {
+    let invalid_arguments: [&[&str]; 6] = [
+        &[
+            "owner/repository/extra",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "entire-workflow",
+        ],
+        &[
+            "owner only",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "entire-workflow",
+        ],
+        &[
+            "automata-ci/automata",
+            "00000000-0000-0000-0000-000000000000",
+            "--selection",
+            "entire-workflow",
+        ],
+        &[
+            "automata-ci/automata",
+            "AAAAAAAA-1111-4111-8111-111111111111",
+            "--selection",
+            "entire-workflow",
+        ],
+        &[
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "job-and-dependents",
+            "--job-id",
+            "30000000000040008000000000000003",
+        ],
+        &[
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "entire-workflow",
+            "--operation-id",
+            "{40000000-0000-4000-8000-000000000004}",
+        ],
+    ];
+    for arguments in invalid_arguments {
+        let mut command = vec!["automata", "rerun"];
+        command.extend_from_slice(arguments);
+        assert!(
+            Cli::try_parse_from(command).is_err(),
+            "ambiguous rerun coordinate or UUID must fail"
+        );
+    }
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "rerun",
+            "automata-ci/automata",
+            "20000000-0000-4000-8000-000000000002",
+            "--selection",
+            "job-and-dependents",
+        ])
+        .is_err()
+    );
+    for selection in ["entire-workflow", "failed-jobs-and-dependents"] {
+        assert!(
+            Cli::try_parse_from([
+                "automata",
+                "rerun",
+                "automata-ci/automata",
+                "20000000-0000-4000-8000-000000000002",
+                "--selection",
+                selection,
+                "--job-id",
+                "30000000-0000-4000-8000-000000000003",
+            ])
+            .is_err()
+        );
     }
 }
 
@@ -444,6 +712,8 @@ fn repository_references_reject_ambiguous_paths() {
     assert!("owner/name".parse::<RepositoryRef>().is_ok());
     assert!("owner/name/extra".parse::<RepositoryRef>().is_err());
     assert!("owner only".parse::<RepositoryRef>().is_err());
+    assert!("./name".parse::<RepositoryRef>().is_err());
+    assert!("owner/..".parse::<RepositoryRef>().is_err());
 }
 
 #[test]

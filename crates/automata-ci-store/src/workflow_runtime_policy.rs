@@ -4,8 +4,8 @@ use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, OperatingSystem,
-    RunId, RunnerLabel, Sha256Digest, UnixMillis,
+    Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, JobResourcePolicy,
+    OperatingSystem, RunId, RunnerLabel, Sha256Digest, UnixMillis,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -147,6 +147,7 @@ impl WorkflowRuntimePolicyMapping {
 pub struct WorkflowRuntimePolicy {
     workspace_root: String,
     mappings: Vec<WorkflowRuntimePolicyMapping>,
+    resource_policy: JobResourcePolicy,
     digest: Sha256Digest,
     canonical_digest: Sha256Digest,
 }
@@ -197,7 +198,7 @@ impl WorkflowRuntimePolicy {
             .into_iter()
             .map(WorkflowRuntimePolicyMapping::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let policy = Self::new(raw.workspace.root, mappings)?;
+        let policy = Self::from_parts(raw.workspace.root, mappings, raw.resources)?;
         if require_canonical && policy.canonical_bytes()?.as_slice() != encoded {
             return Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy);
         }
@@ -213,8 +214,16 @@ impl WorkflowRuntimePolicy {
     pub fn new(
         workspace_root: impl Into<String>,
         mappings: impl IntoIterator<Item = WorkflowRuntimePolicyMapping>,
+        resource_policy: JobResourcePolicy,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
-        let workspace_root = workspace_root.into();
+        Self::from_parts(workspace_root.into(), mappings, resource_policy)
+    }
+
+    fn from_parts(
+        workspace_root: String,
+        mappings: impl IntoIterator<Item = WorkflowRuntimePolicyMapping>,
+        resource_policy: JobResourcePolicy,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         validate_workspace_root(&workspace_root)?;
         let mut mappings = mappings.into_iter().collect::<Vec<_>>();
         if mappings.is_empty() || mappings.len() > MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS {
@@ -230,10 +239,15 @@ impl WorkflowRuntimePolicy {
         let mut policy = Self {
             workspace_root,
             mappings,
+            resource_policy,
             digest: Sha256Digest::from_bytes([0; 32]),
             canonical_digest: Sha256Digest::from_bytes([0; 32]),
         };
-        let canonical = encode_canonical_policy(policy.workspace_root(), policy.mappings())?;
+        let canonical = encode_canonical_policy(
+            policy.workspace_root(),
+            policy.mappings(),
+            policy.resource_policy(),
+        )?;
         validate_canonical_policy_bytes(&canonical)?;
         policy.digest = policy_digest(&policy);
         policy.canonical_digest = Sha256Digest::from_bytes(Sha256::digest(canonical).into());
@@ -247,7 +261,11 @@ impl WorkflowRuntimePolicy {
     /// Returns an error if the value cannot be represented by the bounded
     /// current canonical policy format.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
-        let encoded = encode_canonical_policy(self.workspace_root(), self.mappings())?;
+        let encoded = encode_canonical_policy(
+            self.workspace_root(),
+            self.mappings(),
+            self.resource_policy(),
+        )?;
         validate_canonical_policy_bytes(&encoded)?;
         Ok(encoded)
     }
@@ -258,10 +276,22 @@ impl WorkflowRuntimePolicy {
         &self.workspace_root
     }
 
+    /// Returns the immutable policy schema represented by this value.
+    #[must_use]
+    pub const fn schema(&self) -> u16 {
+        WORKFLOW_RUNTIME_POLICY_SCHEMA
+    }
+
     /// Returns mappings in canonical selector order.
     #[must_use]
     pub fn mappings(&self) -> &[WorkflowRuntimePolicyMapping] {
         &self.mappings
+    }
+
+    /// Returns the repository-pinned job-resource defaults and bounds.
+    #[must_use]
+    pub const fn resource_policy(&self) -> JobResourcePolicy {
+        self.resource_policy
     }
 
     /// Returns the content-addressed policy digest.
@@ -583,7 +613,7 @@ fn validate_workspace_root(value: &str) -> Result<(), WorkflowRuntimePolicyValue
 fn policy_digest(policy: &WorkflowRuntimePolicy) -> Sha256Digest {
     let mut hasher = Sha256::new();
     hasher.update(POLICY_DIGEST_DOMAIN);
-    hasher.update(WORKFLOW_RUNTIME_POLICY_SCHEMA.to_be_bytes());
+    hasher.update(policy.schema().to_be_bytes());
     hasher.update(WORKFLOW_WORKSPACE_DERIVATION_VERSION.to_be_bytes());
     hash_text(&mut hasher, policy.workspace_root());
     hasher.update(
@@ -606,6 +636,19 @@ fn policy_digest(policy: &WorkflowRuntimePolicy) -> Sha256Digest {
             hash_text(&mut hasher, feature.as_str());
         }
     }
+    let resources = policy.resource_policy();
+    hasher.update(b"resources\0");
+    for capacity in [
+        resources.defaults().requests(),
+        resources.defaults().limits(),
+        resources.minimum_requests(),
+        resources.maximum_limits(),
+    ] {
+        hasher.update(capacity.cpu_millis().to_be_bytes());
+        hasher.update(capacity.memory_bytes().to_be_bytes());
+        hasher.update(capacity.ephemeral_disk_bytes().to_be_bytes());
+        hasher.update(capacity.gpu_count().to_be_bytes());
+    }
     Sha256Digest::from_bytes(hasher.finalize().into())
 }
 
@@ -617,6 +660,7 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 fn encode_canonical_policy(
     workspace_root: &str,
     mappings: &[WorkflowRuntimePolicyMapping],
+    resources: JobResourcePolicy,
 ) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
     let canonical = CanonicalPolicy {
         schema: WORKFLOW_RUNTIME_POLICY_SCHEMA,
@@ -629,6 +673,7 @@ fn encode_canonical_policy(
             .iter()
             .map(CanonicalMapping::try_from)
             .collect::<Result<Vec<_>, _>>()?,
+        resources,
     };
     serde_json::to_vec(&canonical)
         .map_err(|_| WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
@@ -665,6 +710,7 @@ struct RawPolicy {
     schema: u16,
     workspace: RawWorkspace,
     mappings: Vec<RawMapping>,
+    resources: JobResourcePolicy,
 }
 
 #[derive(Deserialize)]
@@ -763,6 +809,7 @@ struct CanonicalPolicy<'a> {
     schema: u16,
     workspace: CanonicalWorkspace<'a>,
     mappings: Vec<CanonicalMapping<'a>>,
+    resources: JobResourcePolicy,
 }
 
 #[derive(Serialize)]
@@ -824,7 +871,9 @@ impl<'a> TryFrom<&'a WorkflowRuntimePolicyMapping> for CanonicalMapping<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use automata_ci_core::MAX_CAPABILITY_ID_LENGTH;
+    use automata_ci_core::{
+        JobResourceAllocation, JobResourcePolicy, MAX_CAPABILITY_ID_LENGTH, ResourceCapacity,
+    };
 
     const POLICY: &[u8] = br#"{
       "workspace":{"derivation":1,"root":"/__w","schema":1},
@@ -833,12 +882,67 @@ mod tests {
         "architecture":"x86_64","operating_system":"linux",
         "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
-      }],"schema":1
+      }],
+      "resources":{
+        "maximum_limits":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":17179869184,"cpu_millis":8000},
+        "minimum_requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":134217728,"cpu_millis":100},
+        "defaults":{
+          "limits":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":2147483648,"cpu_millis":2000},
+          "requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":536870912,"cpu_millis":500}
+        }
+      },
+      "schema":1
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}]}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
-    fn canonical_bytes_and_both_digest_domains_have_exact_golden_identities() {
+    fn resource_policy_is_canonical_pinned_evidence() {
+        let policy = WorkflowRuntimePolicy::decode_configuration(POLICY).expect("policy");
+        let resources = resource_policy();
+        assert_eq!(policy.schema(), WORKFLOW_RUNTIME_POLICY_SCHEMA);
+        let canonical = policy.canonical_bytes().expect("canonical");
+        let decoded = WorkflowRuntimePolicy::decode_canonical(&canonical).expect("decode");
+        assert_eq!(decoded.schema(), WORKFLOW_RUNTIME_POLICY_SCHEMA);
+        assert_eq!(decoded.resource_policy(), resources);
+        assert_eq!(decoded.digest(), policy.digest());
+        assert!(
+            std::str::from_utf8(&canonical)
+                .expect("UTF-8")
+                .contains("\"minimum_requests\"")
+        );
+    }
+
+    #[test]
+    fn missing_resources_and_noncurrent_schemas_fail_closed() {
+        let current: serde_json::Value =
+            serde_json::from_slice(CANONICAL_POLICY).expect("canonical policy JSON");
+
+        let mut missing_resources = current.clone();
+        missing_resources
+            .as_object_mut()
+            .expect("policy object")
+            .remove("resources");
+        assert_eq!(
+            WorkflowRuntimePolicy::decode_configuration(
+                &serde_json::to_vec(&missing_resources).expect("policy JSON")
+            ),
+            Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+        );
+
+        for unsupported in [0, 2, u16::MAX] {
+            let mut document = current.clone();
+            document["schema"] = serde_json::json!(unsupported);
+            assert_eq!(
+                WorkflowRuntimePolicy::decode_configuration(
+                    &serde_json::to_vec(&document).expect("policy JSON")
+                ),
+                Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_bytes_and_digest_have_exact_golden_identities() {
         let policy = WorkflowRuntimePolicy::decode_configuration(POLICY).expect("configuration");
         let encoded = policy.canonical_bytes().expect("canonical bytes");
         assert_eq!(encoded, CANONICAL_POLICY);
@@ -848,11 +952,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "e3eec3e76e41a5f430fe3558fadb4018fc271145cb621ed2b20ee1342bc53471"
+            "f8c89e6d378f350201556955702d93172552abf5e76f74a792f6d0bd78b3430b"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "5347b0931418cda5e4b5f7de7860a1659ef829dfe3781103d206a7aa9a338d58"
+            "9ebcaea219f5ba3fe354fcbfa8ca818368b396ff1481a3f5c45f2dd354841d6b"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -867,6 +971,7 @@ mod tests {
         let exact = WorkflowRuntimePolicy::new(
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             exact_mappings.clone(),
+            resource_policy(),
         )
         .expect("exact canonical byte limit");
         let exact_bytes = exact.canonical_bytes().expect("exact canonical bytes");
@@ -878,7 +983,11 @@ mod tests {
 
         let oversized_mappings = boundary_mappings(MAX_WORKFLOW_RUNTIME_POLICY_BYTES + 1);
         assert_eq!(
-            WorkflowRuntimePolicy::new(WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT, oversized_mappings,),
+            WorkflowRuntimePolicy::new(
+                WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
+                oversized_mappings,
+                resource_policy(),
+            ),
             Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
         );
     }
@@ -890,6 +999,7 @@ mod tests {
         let exact = WorkflowRuntimePolicy::new(
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             exact_mappings.clone(),
+            resource_policy(),
         )
         .expect("exact mapping-count limit");
         assert_eq!(exact.mappings().len(), MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS);
@@ -897,7 +1007,11 @@ mod tests {
         let excessive_padding = vec![vec![0]; 65];
         let excessive_mappings = build_boundary_mappings(&excessive_padding);
         assert_eq!(
-            WorkflowRuntimePolicy::new(WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT, excessive_mappings,),
+            WorkflowRuntimePolicy::new(
+                WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
+                excessive_mappings,
+                resource_policy(),
+            ),
             Err(WorkflowRuntimePolicyValueError::InvalidMappingCount)
         );
     }
@@ -990,7 +1104,14 @@ mod tests {
     fn workspace_and_policy_selector_grammar_are_closed() {
         let policy = WorkflowRuntimePolicy::decode_configuration(POLICY).expect("configuration");
         assert_eq!(policy.workspace_root(), "/__w");
-        assert!(WorkflowRuntimePolicy::new("/tmp", policy.mappings().iter().cloned()).is_err());
+        assert!(
+            WorkflowRuntimePolicy::new(
+                "/tmp",
+                policy.mappings().iter().cloned(),
+                resource_policy(),
+            )
+            .is_err()
+        );
         let unicode = RunnerLabel::new("İstanbul").expect("general runner label");
         let mapping = &policy.mappings()[0];
         assert_eq!(
@@ -1011,9 +1132,13 @@ mod tests {
 
         let mut padding = vec![vec![0_usize; FEATURE_COUNT]; MAPPING_COUNT];
         let base = build_boundary_mappings(&padding);
-        let base_size = encode_canonical_policy(WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT, &base)
-            .expect("base boundary encoding")
-            .len();
+        let base_size = encode_canonical_policy(
+            WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
+            &base,
+            resource_policy(),
+        )
+        .expect("base boundary encoding")
+        .len();
         let mut remaining = target_size
             .checked_sub(base_size)
             .expect("boundary fixture starts below target");
@@ -1029,12 +1154,30 @@ mod tests {
         assert_eq!(remaining, 0, "boundary fixture has sufficient padding");
         let mappings = build_boundary_mappings(&padding);
         assert_eq!(
-            encode_canonical_policy(WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT, &mappings)
-                .expect("boundary encoding")
-                .len(),
+            encode_canonical_policy(
+                WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
+                &mappings,
+                resource_policy(),
+            )
+            .expect("boundary encoding")
+            .len(),
             target_size
         );
         mappings
+    }
+
+    fn resource_policy() -> JobResourcePolicy {
+        let defaults = JobResourceAllocation::new(
+            ResourceCapacity::new(500, 512 * 1_024 * 1_024, 0, 0),
+            ResourceCapacity::new(2_000, 2 * 1_024 * 1_024 * 1_024, 0, 0),
+        )
+        .expect("defaults");
+        JobResourcePolicy::new(
+            defaults,
+            ResourceCapacity::new(100, 128 * 1_024 * 1_024, 0, 0),
+            ResourceCapacity::new(8_000, 16 * 1_024 * 1_024 * 1_024, 0, 0),
+        )
+        .expect("resource policy")
     }
 
     fn build_boundary_mappings(padding: &[Vec<usize>]) -> Vec<WorkflowRuntimePolicyMapping> {

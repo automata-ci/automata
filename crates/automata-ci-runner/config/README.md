@@ -12,6 +12,71 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
+Product schema v2 accepts exactly one sandbox provider. Host runners use the
+top-level `podman` object and require `state.podman`. Kubernetes runners omit
+both fields and use a top-level `kubernetes` object. The runner loads
+credentials through Kubernetes' standard in-cluster or ambient kubeconfig
+discovery; the JSON remains secret-free.
+
+The Podman BuildKit surface is a separate, default-off opt-in. Configure it
+only with the attempt-scoped Docker API and one locally preloaded, untagged
+digest pin:
+
+```json
+{
+  "podman": {
+    "job_container_engine": "attempt_scoped_docker_api",
+    "buildkit_runtime_image": "registry.example.invalid/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  }
+}
+```
+
+Omit the field or set it to `null` to keep BuildKit disabled. Startup refuses
+a tag, a tagged digest, a missing local image, a mismatched inspected digest,
+or a failed no-network `buildkitd --version` probe. Only after the provider has
+passed that immutable-image gate does the runner register
+`automata.core/buildkit@v1`; configured inventory alone is not sufficient.
+Server-side runtime-policy mappings used by Buildx jobs must request that
+container feature explicitly so those jobs cannot be leased to a runner where
+the opt-in is absent. Action names are not inferred as scheduling requirements.
+
+The admitted surface targets unchanged default `docker/setup-buildx-action`
+`docker-container` operation and `docker/build-push-action`, including
+CacheService v2 traffic carried through the BuildKit session. It does not
+expose a host Podman/Docker socket or registry credentials. Custom images,
+driver resource/network options, host mounts/devices, additional privileged
+containers, custom BuildKit configuration, and cross-attempt objects are
+rejected. Because Buildx and Podman request shapes evolve, validate the exact
+deployed versions with the opt-in live rootless fixture before enabling this
+field; an unreviewed future Docker create field fails closed.
+
+A Kubernetes selection has this provider-specific shape:
+
+```json
+{
+  "kubernetes": {
+    "namespace": "automata-runners",
+    "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>",
+    "network_isolation_verified": true,
+    "ephemeral_storage_enforcement_verified": true,
+    "process_limit_enforcement": 4096,
+    "gpu_resource_name": "nvidia.com/gpu",
+    "node_selector": { "automata.dev/pool": "jobs" },
+    "runtime_class_name": "kata"
+  }
+}
+```
+
+`executor.network` must be `disabled`, `executor.privilege` must be
+`unprivileged`, and `process_limit_enforcement` must equal the executor PID
+limit. A dedicated non-empty node selector is mandatory. Nonzero ephemeral
+storage or GPU inventory is admitted only with its corresponding verified
+enforcement field or resource mapping. The runner creates the authenticated
+client, exercises every configured environment through create/inspect/destroy,
+and registers only after that lifecycle succeeds. These assertions do not
+replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
+or kubelet verification.
+
 > [!WARNING]
 > Runner enrollment and certificate lifecycle are not yet a turnkey user flow.
 > This guide is for contributors integrating the G1 end-to-end path, not for a
@@ -73,6 +138,21 @@ The remainder of this guide describes the rootless-Podman Linux example.
 Copy the example to an ignored, host-specific path. Update, at minimum,
 `runner_id`, `control_endpoint`, account paths, runtime UID, resources, and the
 Git bridge URLs. Do not edit the checked-in example with machine credentials.
+
+`control_endpoint` is also the only managed-secret delivery origin. Values are
+fetched after lease acceptance through its direct mTLS connection, retained
+only in bounded execution-local zeroizing custody, registered with the output
+masker, and acknowledged separately before user work. No runner-wide secret
+cache or durable secret spool is configured.
+
+The checked-in dogfood configuration starts one `automata-runner` process with
+one runner identity and three parallel job slots. It does not create three
+replicas or identities. Each slot can independently consume the complete
+`resources_per_job` ceiling, so full occupancy requires host and cgroup capacity
+for at least 12,000 CPU millicores, 48 GiB of memory, and 12,288 PIDs, plus the
+runner, Podman, and operating-system overhead. Review those aggregate bounds
+before copying the example to a smaller host; reducing available host resources
+without reducing either the slot count or the per-job ceiling is unsupported.
 
 Both `ephemeral_disk_bytes` fields must remain `0`. The current Podman adapter
 does not provide a proven per-job storage quota, so the runner deliberately

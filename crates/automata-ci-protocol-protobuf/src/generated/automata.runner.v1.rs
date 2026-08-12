@@ -249,6 +249,13 @@ pub struct ResourceCapacity {
     #[prost(uint32, tag = "4")]
     pub gpu_count: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct JobResourceAllocation {
+    #[prost(message, optional, tag = "1")]
+    pub requests: ::core::option::Option<ResourceCapacity>,
+    #[prost(message, optional, tag = "2")]
+    pub limits: ::core::option::Option<ResourceCapacity>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SandboxCapabilities {
     #[prost(enumeration = "IsolationLevel", tag = "1")]
@@ -322,6 +329,9 @@ pub struct RunnerRequirements {
     pub features: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "11")]
     pub environment_profile: ::core::option::Option<EnvironmentProfile>,
+    /// Present when a workflow selected explicit requests and limits.
+    #[prost(message, optional, tag = "12")]
+    pub resource_allocation: ::core::option::Option<JobResourceAllocation>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LeaseRequest {
@@ -384,6 +394,35 @@ pub struct LeaseOffer {
     pub job: ::core::option::Option<JobIrEnvelope>,
     #[prost(message, optional, tag = "5")]
     pub runtime_authorities: ::core::option::Option<JobRuntimeAuthorities>,
+    #[prost(message, optional, tag = "6")]
+    pub managed_secret_bindings: ::core::option::Option<ManagedSecretBindingOverlay>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ManagedSecretBindingOverlayEntry {
+    #[prost(string, tag = "1")]
+    pub canonical_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub version_id: ::prost::alloc::string::String,
+}
+/// Value-free binding locators committed to one exact leased attempt. Secret
+/// values and delivery credentials are forbidden from this durable message.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ManagedSecretBindingOverlay {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub attempt_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub lease_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub fencing_token: u64,
+    /// Canonical map: strictly ascending and duplicate-free by canonical name.
+    #[prost(message, repeated, tag = "5")]
+    pub bindings: ::prost::alloc::vec::Vec<ManagedSecretBindingOverlayEntry>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub sha256_digest: ::prost::alloc::vec::Vec<u8>,
 }
 /// Short-lived bearer material is sent only over the authenticated runner
 /// transport and must be protected in the runner spool before lease acceptance.
@@ -527,6 +566,9 @@ pub struct JobExecutionContext {
     /// Stable positive numeric alias for the internal UUID run identity.
     #[prost(uint64, optional, tag = "9")]
     pub run_id_alias: ::core::option::Option<u64>,
+    /// Current attempt initiator; actor remains the original run actor on reruns.
+    #[prost(string, optional, tag = "10")]
+    pub triggering_actor: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExpressionDialect {

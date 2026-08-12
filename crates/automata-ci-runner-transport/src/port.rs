@@ -7,8 +7,9 @@ use automata_ci_protocol::{
 };
 use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
-use crate::{ApplicationError, ClientError, PreparedRequest};
+use crate::{ApplicationError, ClientError, PreparedEphemeralRequest, PreparedRequest};
 
 /// Immutable protocol, `JobIR`, and session identity selected by a successful handshake.
 ///
@@ -171,6 +172,159 @@ pub trait RunnerControlHandler: fmt::Debug + Send + Sync {
 
     /// Handles one decoded post-handshake operation or long poll.
     fn sync(&self, request: AuthenticatedRunnerRequest) -> HandlerFuture<'_>;
+}
+
+/// Freshly authenticated request on the private ephemeral-value route.
+///
+/// The body aggregate is bounded by the transport before construction and
+/// zeroized when dropped. This type is intentionally non-cloneable and its
+/// diagnostics never expose body bytes or authenticated identities. Network
+/// framing remains owned by the TLS/HTTP implementation and is outside this
+/// application's zeroization guarantee.
+pub struct AuthenticatedRunnerEphemeralRequest {
+    machine: AuthenticatedMachine,
+    body: Zeroizing<Vec<u8>>,
+    cancellation: CancellationToken,
+}
+
+impl AuthenticatedRunnerEphemeralRequest {
+    pub(crate) const fn new(
+        machine: AuthenticatedMachine,
+        body: Zeroizing<Vec<u8>>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            machine,
+            body,
+            cancellation,
+        }
+    }
+
+    /// Returns the independently authenticated runner machine.
+    #[must_use]
+    pub const fn machine(&self) -> &AuthenticatedMachine {
+        &self.machine
+    }
+
+    /// Exposes the bounded request only to the application decoder.
+    #[must_use]
+    pub fn expose_body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Returns request-scoped cancellation.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+}
+
+impl fmt::Debug for AuthenticatedRunnerEphemeralRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedRunnerEphemeralRequest")
+            .field("body", &"[REDACTED]")
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded value-bearing application reply owned in zeroizing memory until it
+/// is transferred to the HTTP response boundary.
+pub struct RunnerEphemeralReply(Zeroizing<Vec<u8>>);
+
+impl RunnerEphemeralReply {
+    /// Creates a non-empty reply within the private response ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty or oversized bytes and zeroizes rejected input.
+    pub fn new(mut body: Vec<u8>) -> Result<Self, ApplicationError> {
+        if body.is_empty() || body.len() > crate::MAX_EPHEMERAL_RESPONSE_BYTES {
+            use zeroize::Zeroize as _;
+            body.zeroize();
+            return Err(ApplicationError::new(crate::ApplicationErrorKind::Internal));
+        }
+        Ok(Self(Zeroizing::new(body)))
+    }
+
+    pub(crate) fn into_body(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(std::mem::take(&mut *self.0))
+    }
+}
+
+impl fmt::Debug for RunnerEphemeralReply {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunnerEphemeralReply([REDACTED])")
+    }
+}
+
+/// Boxed future returned by [`RunnerEphemeralHandler`].
+pub type EphemeralHandlerFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RunnerEphemeralReply, ApplicationError>> + Send + 'a>>;
+
+/// Private mTLS application port for ephemeral runner values.
+pub trait RunnerEphemeralHandler: fmt::Debug + Send + Sync {
+    /// Handles one freshly authenticated bounded request.
+    fn handle(&self, request: AuthenticatedRunnerEphemeralRequest) -> EphemeralHandlerFuture<'_>;
+}
+
+/// Bounded application-owned response from the private ephemeral route.
+///
+/// The aggregate is non-cloneable, redacted in diagnostics, and zeroized on
+/// drop. TLS and HTTP frame buffers remain outside this guarantee.
+pub struct RunnerEphemeralResponse(Zeroizing<Vec<u8>>);
+
+impl RunnerEphemeralResponse {
+    pub(crate) const fn new(body: Zeroizing<Vec<u8>>) -> Self {
+        Self(body)
+    }
+
+    /// Creates a bounded response for alternate client adapters and tests.
+    ///
+    /// # Errors
+    ///
+    /// Rejects and zeroizes an empty or oversized aggregate.
+    pub fn from_body(mut body: Vec<u8>) -> Result<Self, crate::PrepareEphemeralError> {
+        if body.is_empty() || body.len() > crate::MAX_EPHEMERAL_RESPONSE_BYTES {
+            use zeroize::Zeroize as _;
+            body.zeroize();
+            return Err(crate::PrepareEphemeralError);
+        }
+        Ok(Self(Zeroizing::new(body)))
+    }
+
+    /// Exposes the response only to the caller's private wire decoder.
+    #[must_use]
+    pub fn expose_body(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Transfers the aggregate into the next zeroizing custody boundary.
+    #[must_use]
+    pub fn into_body(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(std::mem::take(&mut *self.0))
+    }
+}
+
+impl fmt::Debug for RunnerEphemeralResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunnerEphemeralResponse([REDACTED])")
+    }
+}
+
+/// Boxed future returned by [`RunnerEphemeralClient`].
+pub type EphemeralClientFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RunnerEphemeralResponse, ClientError>> + Send + 'a>>;
+
+/// Object-safe outbound client for the dedicated mTLS ephemeral-value route.
+pub trait RunnerEphemeralClient: fmt::Debug + Send + Sync {
+    /// Exchanges the exact same prepared bytes across ambiguous transport loss.
+    fn exchange<'a>(
+        &'a self,
+        request: &'a PreparedEphemeralRequest,
+        cancellation: CancellationToken,
+    ) -> EphemeralClientFuture<'a>;
 }
 
 /// Validated server response together with its canonical protobuf bytes.

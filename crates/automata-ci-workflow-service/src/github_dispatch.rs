@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use automata_ci_auth::management::ManagementActor;
 use automata_ci_core::{
     ContextValue, JobRuntimeContext, OperationId, SecretBinding, WorkflowEventProvenance,
-    WorkflowId,
+    WorkflowId, canonical_git_ref,
 };
 use automata_ci_store::ResolveAuthenticatedWorkflowDispatchSource;
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
@@ -32,11 +32,21 @@ const EVIDENCE_KIND: &str = "automata_workflow_dispatch";
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
 /// Exact, authenticated target authorized for a control-plane manual dispatch.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct WorkflowDispatchAuthorization {
     actor: ManagementActor,
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
+}
+
+impl fmt::Debug for WorkflowDispatchAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowDispatchAuthorization")
+            .field("repository_id", &self.repository_id)
+            .field("workflow_id", &self.workflow_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WorkflowDispatchAuthorization {
@@ -80,7 +90,7 @@ impl WorkflowDispatchAuthorization {
 }
 
 /// Trusted, exact-source request to the Automata manual-dispatch application service.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GithubWorkflowDispatchRequest {
     authorization: WorkflowDispatchAuthorization,
     repository: AdmissionRepositoryCoordinates,
@@ -97,9 +107,23 @@ pub struct GithubWorkflowDispatchRequest {
     commit_subject: Option<String>,
 }
 
+impl fmt::Debug for GithubWorkflowDispatchRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubWorkflowDispatchRequest")
+            .field("repository_id", &self.authorization.repository_id)
+            .field("workflow_id", &self.authorization.workflow_id)
+            .field("operation_id", &self.operation_id)
+            .field("source_size_bytes", &self.source.len())
+            .field("input_count", &self.inputs.values().len())
+            .field("secret_binding_count", &self.secrets.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Exact control-plane request whose workflow bytes must be recovered from a
 /// prior signed GitHub admission rather than accepted from the caller.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DurableGithubWorkflowDispatchRequest {
     authorization: WorkflowDispatchAuthorization,
     git_ref: String,
@@ -107,6 +131,18 @@ pub struct DurableGithubWorkflowDispatchRequest {
     inputs: GithubWorkflowDispatchInputsV1,
     operation_id: OperationId,
     display_title: Option<String>,
+}
+
+impl fmt::Debug for DurableGithubWorkflowDispatchRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurableGithubWorkflowDispatchRequest")
+            .field("repository_id", &self.authorization.repository_id)
+            .field("workflow_id", &self.authorization.workflow_id)
+            .field("operation_id", &self.operation_id)
+            .field("input_count", &self.inputs.values().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DurableGithubWorkflowDispatchRequest {
@@ -214,7 +250,7 @@ impl GithubWorkflowDispatchRequest {
             || !valid_text(&self.workflow_path)
             || !valid_text(&self.workflow_name)
             || self.source.is_empty()
-            || self.git_ref.strip_prefix("refs/").is_none_or(str::is_empty)
+            || !canonical_workflow_dispatch_ref(&self.git_ref)
             || !valid_text(&self.git_ref)
             || !valid_commit_sha(&self.commit_sha)
             || self
@@ -259,10 +295,7 @@ impl GithubWorkflowDispatchService {
         request: DurableGithubWorkflowDispatchRequest,
     ) -> Result<WorkflowAdmissionResult, GithubWorkflowDispatchError> {
         if request.operation_id.as_uuid().is_nil()
-            || request
-                .git_ref
-                .strip_prefix("refs/")
-                .is_none_or(str::is_empty)
+            || !canonical_workflow_dispatch_ref(&request.git_ref)
             || !valid_text(&request.git_ref)
             || !valid_commit_sha(&request.commit_sha)
             || request
@@ -433,7 +466,7 @@ impl GithubWorkflowDispatchEvidenceV1 {
         request: &GithubWorkflowDispatchRequest,
     ) -> Result<Self, GithubWorkflowDispatchEvidenceError> {
         let actor = request.authorization.actor();
-        let inputs = evidence_inputs(&request.inputs);
+        let inputs = evidence_inputs(&request.inputs)?;
         let document = EvidenceDocument {
             schema: EVIDENCE_SCHEMA,
             kind: EVIDENCE_KIND.to_owned(),
@@ -514,13 +547,9 @@ impl GithubWorkflowDispatchEvidenceV1 {
             || document.operation_id.is_nil()
             || document.repository.provider != "github"
             || texts.into_iter().any(|value| !valid_text(value))
-            || document
-                .workflow
-                .git_ref
-                .strip_prefix("refs/")
-                .is_none_or(str::is_empty)
+            || !canonical_workflow_dispatch_ref(&document.workflow.git_ref)
             || !valid_commit_sha(&document.workflow.commit_sha)
-            || evidence_inputs(&inputs) != document.inputs
+            || evidence_inputs(&inputs)? != document.inputs
         {
             return Err(GithubWorkflowDispatchEvidenceError::InvalidDocument);
         }
@@ -623,17 +652,21 @@ enum EvidenceInputValue {
 
 fn evidence_inputs(
     inputs: &GithubWorkflowDispatchInputsV1,
-) -> BTreeMap<String, EvidenceInputValue> {
+) -> Result<BTreeMap<String, EvidenceInputValue>, GithubWorkflowDispatchEvidenceError> {
     inputs
         .values()
         .iter()
         .map(|(key, value)| {
-            let value = if let Some(value) = value.as_boolean() {
-                EvidenceInputValue::Boolean(value)
-            } else {
-                EvidenceInputValue::String(value.as_string().unwrap_or_default().to_owned())
+            let value = match value {
+                GithubWorkflowDispatchInputValue::Boolean(value) => {
+                    EvidenceInputValue::Boolean(*value)
+                }
+                GithubWorkflowDispatchInputValue::String(value) => {
+                    EvidenceInputValue::String(value.clone())
+                }
+                _ => return Err(GithubWorkflowDispatchEvidenceError::InvalidDocument),
             };
-            (key.as_str().to_owned(), value)
+            Ok((key.as_str().to_owned(), value))
         })
         .collect()
 }
@@ -660,6 +693,15 @@ fn valid_commit_sha(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn canonical_workflow_dispatch_ref(value: &str) -> bool {
+    canonical_git_ref(value)
+        && ["refs/heads/", "refs/tags/"].iter().any(|prefix| {
+            value
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| !suffix.is_empty())
+        })
 }
 
 /// Invalid control-plane dispatch request or exact target.

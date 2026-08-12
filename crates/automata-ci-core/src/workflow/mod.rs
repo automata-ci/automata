@@ -27,10 +27,10 @@ pub use invocation::{
 };
 pub use logical::{
     DeploymentSelection, LogicalConcurrencyTemplate, LogicalJobKind, LogicalJobOutputDefinition,
-    LogicalJobOutputSource, LogicalJobTemplate, LogicalJobTemplateBuilder,
-    LogicalOutputMergePolicy, LogicalResultReference, LogicalResultValue,
-    LogicalRunDefaultsTemplate, LogicalRunStepTemplate, LogicalRunnerTemplate,
-    LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate,
+    LogicalJobOutputSource, LogicalJobResourcesTemplate, LogicalJobTemplate,
+    LogicalJobTemplateBuilder, LogicalOutputMergePolicy, LogicalResourceVectorTemplate,
+    LogicalResultReference, LogicalResultValue, LogicalRunDefaultsTemplate, LogicalRunStepTemplate,
+    LogicalRunnerTemplate, LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate,
     LogicalStepTemplateBuilder, LogicalTimeoutTemplate, LogicalTimeoutUnit,
     LogicalUsesStepTemplate, LogicalWorkflowPlan, MAX_LOGICAL_FIELD_BYTES, MAX_LOGICAL_JOB_NEEDS,
     MAX_LOGICAL_JOB_OUTPUTS, MAX_LOGICAL_JOBS, MAX_LOGICAL_RESULT_REFERENCES,

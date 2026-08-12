@@ -55,6 +55,7 @@ use crate::{
             DIRECT_BINDING_PATH, DIRECT_BINDINGS_PATH, ROLE_PATH, ROLE_PERMISSION_PATH, ROLES_PATH,
             USER_PATH, USERS_PATH,
         },
+        protected_environment_review_api::PROTECTED_ENVIRONMENT_REVIEW_PATH,
         repository_secrets::{
             REPOSITORY_SECRET_DELETE_PATH, REPOSITORY_SECRET_PROVIDER_ACTIVATE_PATH,
             REPOSITORY_SECRET_REPLACE_PATH, REPOSITORY_SECRETS_SETTINGS_PATH,
@@ -64,6 +65,7 @@ use crate::{
             GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH, REPOSITORY_SECRET_BY_NAME_PATH,
             REPOSITORY_SECRET_PATH, REPOSITORY_SECRETS_PATH,
         },
+        workflow_rerun_api::WORKFLOW_RERUN_PATH,
     },
     build_info::BuildInfo,
 };
@@ -98,7 +100,7 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 39] = [
+const HTTP_ROUTE_LABELS: [&str; 41] = [
     "/healthz",
     "/readyz",
     "/",
@@ -130,6 +132,8 @@ const HTTP_ROUTE_LABELS: [&str; 39] = [
     ROLE_PERMISSION_PATH,
     DIRECT_BINDINGS_PATH,
     DIRECT_BINDING_PATH,
+    PROTECTED_ENVIRONMENT_REVIEW_PATH,
+    WORKFLOW_RERUN_PATH,
     GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH,
     REPOSITORY_SECRETS_PATH,
     REPOSITORY_SECRET_PATH,
@@ -814,6 +818,53 @@ impl ControlSemanticMetrics {
                     .runner_transport_bytes
                     .get_or_create(&RunnerTransportByteLabels { route, direction });
             }
+        }
+        let route = "ephemeral_secrets";
+        self.preinitialize_transport_request(route, "cancelled", "cancelled");
+        for (stage, outcomes) in [
+            (
+                "head",
+                &[
+                    "http_version",
+                    "method",
+                    "not_found",
+                    "unsupported_media_type",
+                    "length_required",
+                    "invalid_content_length",
+                    "body_too_large",
+                ][..],
+            ),
+            (
+                "authentication",
+                &["untrusted", "expired", "unavailable", "timeout"][..],
+            ),
+            (
+                "body",
+                &["too_large", "invalid", "transport", "timeout"][..],
+            ),
+            (
+                "application",
+                &[
+                    "forbidden",
+                    "conflict",
+                    "unavailable",
+                    "internal",
+                    "timeout",
+                ][..],
+            ),
+            ("response", &["too_large", "success"][..]),
+        ] {
+            for outcome in outcomes {
+                self.preinitialize_transport_request(route, stage, outcome);
+            }
+        }
+        self.runner_transport_in_flight
+            .get_or_create(&RunnerTransportRouteLabels { route })
+            .set(0);
+        for direction in ["request", "response"] {
+            let _ = self
+                .runner_transport_bytes
+                .get_or_create(&RunnerTransportByteLabels { route, direction });
         }
     }
 
@@ -1765,6 +1816,8 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
         Some(ROLE_PERMISSION_PATH) => ROLE_PERMISSION_PATH,
         Some(DIRECT_BINDINGS_PATH) => DIRECT_BINDINGS_PATH,
         Some(DIRECT_BINDING_PATH) => DIRECT_BINDING_PATH,
+        Some(PROTECTED_ENVIRONMENT_REVIEW_PATH) => PROTECTED_ENVIRONMENT_REVIEW_PATH,
+        Some(WORKFLOW_RERUN_PATH) => WORKFLOW_RERUN_PATH,
         Some(GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH) => GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH,
         Some(REPOSITORY_SECRETS_PATH) => REPOSITORY_SECRETS_PATH,
         Some(REPOSITORY_SECRET_PATH) => REPOSITORY_SECRET_PATH,
@@ -2275,6 +2328,7 @@ const fn runner_transport_route(route: RunnerTransportRoute) -> &'static str {
         RunnerTransportRoute::Unknown => "unknown",
         RunnerTransportRoute::Handshake => "handshake",
         RunnerTransportRoute::Sync => "sync",
+        RunnerTransportRoute::EphemeralSecrets => "ephemeral_secrets",
     }
 }
 
@@ -2354,6 +2408,13 @@ mod tests {
 
     use super::*;
 
+    mod schema_contract {
+        include!("../../../automata-ci-metrics/tests/support/schema_contract.rs");
+    }
+
+    const CARDINALITY_MANIFEST: &str =
+        include_str!("../../../../deploy/observability/cardinality.json");
+
     #[test]
     fn production_histogram_preserves_classic_buckets_and_exports_native_spans() {
         let mut registry = Registry::default();
@@ -2393,7 +2454,13 @@ mod tests {
             .exporter()
             .encode_openmetrics()
             .expect("OpenMetrics exposition");
-        assert_eq!(openmetrics_histogram_label_sets(exposition.as_str()), 137);
+        assert_eq!(
+            openmetrics_histogram_label_sets(exposition.as_str()),
+            schema_contract::expected_histogram_label_sets(
+                CARDINALITY_MANIFEST,
+                &["common", "control_plane"],
+            )
+        );
     }
 
     fn openmetrics_histogram_label_sets(exposition: &str) -> usize {
@@ -2453,6 +2520,8 @@ mod tests {
             ROLE_PERMISSION_PATH,
             DIRECT_BINDINGS_PATH,
             DIRECT_BINDING_PATH,
+            PROTECTED_ENVIRONMENT_REVIEW_PATH,
+            WORKFLOW_RERUN_PATH,
             GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH,
             REPOSITORY_SECRETS_PATH,
             REPOSITORY_SECRET_PATH,
@@ -2465,6 +2534,13 @@ mod tests {
             assert_eq!(http_route(Some(route)), route);
             assert!(HTTP_ROUTE_LABELS.contains(&route));
         }
+        assert_eq!(
+            http_route(Some(
+                "/api/v1/repositories/aaaaaaaa-1111-4111-8111-111111111111/attempts/22222222-2222-4222-8222-222222222222/environment/reviews"
+            )),
+            "other",
+            "raw protected-environment identities must never become metric labels"
+        );
         for route in [GITHUB_DEVICE_BEGIN_PATH, GITHUB_DEVICE_POLL_PATH] {
             assert_eq!(http_route(Some(route)), GITHUB_DEVICE_ROUTE);
             assert!(!HTTP_ROUTE_LABELS.contains(&route));

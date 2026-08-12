@@ -111,14 +111,14 @@ scrape. Initial limits are:
 | Concurrent scrapes | 2 | 2 |
 | Handler deadline | 5 seconds | 5 seconds |
 | Encoded response | 2 MiB | 2 MiB |
-| Series per target | 5,000 | 1,000 |
+| Series per target | 5,250 | 1,000 |
 
-The canonical schema currently uses at most 4,779 control-plane series and 939
+The canonical schema currently uses at most 5,024 control-plane series and 939
 runner series per Linux target. With native and classic histograms ingested
-together, the Prometheus maxima are 4,916 control-plane samples and 969 runner
-samples per scrape. Both remain below the
-same 5,000 and 1,000 limits. The limits are release gates; remaining headroom
-is not an invitation to add unbounded labels.
+together, the Prometheus maxima are 5,169 control-plane samples and 969 runner
+samples per scrape. Both remain below the same 5,250 and 1,000 limits. The
+limits are release gates; remaining headroom is not an invitation to add
+unbounded labels.
 
 ## Naming and values
 

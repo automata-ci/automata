@@ -18,17 +18,17 @@ use automata_ci_core::{
     JobPermissionRequest, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
     LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId,
     RunValueTemplates, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode, JobRuntimeAuthorities,
     JobRuntimeAuthority, JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
-    LeaseRejectionReason, LeaseRequest, LeaseResponse, LogBatch, MessageHeader, NoWork,
-    ProtocolLimits, ProtocolRange, ProtocolVersion, RemoteErrorCode, RunnerHello,
-    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
-    RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerToRunner,
-    SessionDisposition, SessionResume, ValidatedRunnerToServer,
+    LeaseRejectionReason, LeaseRequest, LeaseResponse, LogBatch, ManagedSecretBindingOverlay,
+    MessageHeader, NoWork, ProtocolLimits, ProtocolRange, ProtocolVersion, RemoteErrorCode,
+    RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential,
+    RuntimeAuthorityEndpoint, RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
+    ServerToRunner, SessionDisposition, SessionResume, ValidatedRunnerToServer,
 };
 use automata_ci_protocol_protobuf::{encode_job_ir, encode_runner_frame, encode_server_frame};
 use automata_ci_runner_control::{
@@ -512,6 +512,39 @@ fn test_offer_command(
     )
 }
 
+fn test_offer_command_v3(
+    fence: RunnerSessionFence,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+    slot: RunnerSlotOrdinal,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+    managed_secret_bindings: &ManagedSecretBindingOverlay,
+) -> DurableRunnerCommand {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "job": job,
+        "lease": lease,
+        "managed_secret_bindings": managed_secret_bindings,
+        "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
+        "runtime_authorities": claimed_runtime_authorities(job, lease),
+        "schema": 3,
+        "slot": slot.get(),
+    }))
+    .expect("offer payload");
+    DurableRunnerCommand::new(
+        EnqueueRunnerCommand::new(
+            fence,
+            operation_id,
+            RunnerOperationKind::new("automata.runner.lease-offer.v3").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(3).expect("schema"), payload)
+                .expect("offer payload"),
+            UnixMillis::new(2_000),
+        ),
+        StoreCommandSequence::new(sequence.get()).expect("sequence"),
+        true,
+    )
+}
+
 fn test_offer_response(
     fence: RunnerSessionFence,
     operation_id: OperationId,
@@ -844,6 +877,69 @@ async fn retryable_claim_offer_failures_leave_the_current_poll_head_incomplete()
 }
 
 #[tokio::test]
+async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape() {
+    for schema in [2_u16, 3] {
+        let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+        let fence = install_session(&harness, runner_id, generation);
+        let slot = RunnerSlotOrdinal::new(1).expect("slot");
+        let job = claimed_job();
+        let lease = Lease::new(
+            LeaseId::new(),
+            AttemptId::new(),
+            runner_id,
+            FencingToken::new(5).expect("fencing token"),
+            UnixMillis::new(1_500),
+            UnixMillis::new(10_000),
+        )
+        .expect("lease");
+        let overlay = ManagedSecretBindingOverlay::new(
+            &lease,
+            [(
+                "DATABASE_TOKEN".to_owned(),
+                SecretBinding::new("00000000-0000-4000-8000-000000000001")
+                    .expect("grant")
+                    .with_version_id("00000000-0000-4000-8000-000000000011")
+                    .expect("version"),
+            )],
+        )
+        .expect("managed-secret overlay");
+        let operation_id = OperationId::new();
+        let sequence = CommandSequence::new(1).expect("sequence");
+        let command = if schema == 2 {
+            test_offer_command(fence, operation_id, sequence, slot, &job, &lease)
+        } else {
+            test_offer_command_v3(fence, operation_id, sequence, slot, &job, &lease, &overlay)
+        };
+        harness
+            .commands
+            .values
+            .lock()
+            .expect("commands lock")
+            .push(command.clone());
+        *harness.publisher.replay.lock().expect("offer replay lock") =
+            Some(Ok(LeaseOfferReplayResolution::Published(command)));
+        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+            MessageHeader::request(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                fence.session_id(),
+                OperationId::new(),
+            ),
+            slot,
+        ));
+
+        let ServerToRunner::LeaseOffer(replayed) = exchange(&harness, &identity, &request).await
+        else {
+            panic!("schema {schema} durable lease offer");
+        };
+        if schema == 2 {
+            assert_eq!(replayed.managed_secret_bindings(), None);
+        } else {
+            assert_eq!(replayed.managed_secret_bindings(), Some(&overlay));
+        }
+    }
+}
+
+#[tokio::test]
 async fn pending_offer_replay_requires_two_way_publication_provenance() {
     for published_command_was_corrupted_to_cancel in [false, true] {
         let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
@@ -1037,14 +1133,16 @@ async fn post_kms_offer_revocation_commits_no_work_before_admitting_successor() 
         .expect("publication result lock") = Some(Ok(LeaseOfferPublishOutcome::Published(
         PublishedCommand::new(offer_operation_id, offer_sequence, false),
     )));
+    let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command(
+        LeaseOfferReplayResolution::Published(test_offer_command_v3(
             fence,
             offer_operation_id,
             offer_sequence,
             slot,
             &job,
             &lease,
+            &empty_overlay,
         )),
     ));
     harness
@@ -1428,14 +1526,16 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
         .expect("publication result lock") = Some(Ok(LeaseOfferPublishOutcome::Published(
         PublishedCommand::new(published_operation_id, published_sequence, false),
     )));
+    let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command(
+        LeaseOfferReplayResolution::Published(test_offer_command_v3(
             fence,
             published_operation_id,
             published_sequence,
             slot,
             &job,
             &lease,
+            &empty_overlay,
         )),
     ));
     let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
@@ -1541,7 +1641,16 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
             .expect("authority result lock") = Some(Ok(claimed_runtime_authorities(&job, &lease)));
         let operation_id = OperationId::new();
         let sequence = CommandSequence::new(1).expect("sequence");
-        let command = test_offer_command(fence, operation_id, sequence, slot, &job, &lease);
+        let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
+        let command = test_offer_command_v3(
+            fence,
+            operation_id,
+            sequence,
+            slot,
+            &job,
+            &lease,
+            &empty_overlay,
+        );
         match scenario {
             ObservedOfferScenario::Published => {
                 *harness

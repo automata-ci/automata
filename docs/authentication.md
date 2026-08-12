@@ -6,8 +6,10 @@ browser and CLI sessions, tenant RBAC, management APIs, and repository access
 settings. Authentication is optional, but a partial configuration stops the
 server at startup.
 
-Managed-secret administration is also implemented for the built-in PostgreSQL
-provider. Managed values are not delivered to jobs yet.
+Managed-secret administration and exact-version delivery are implemented for
+the built-in PostgreSQL provider. Eligible leased jobs receive values only over
+the direct mTLS runner listener; external and dynamically leased providers and
+variable-value delivery remain unsupported.
 
 ## Capability map
 
@@ -20,9 +22,11 @@ provider. Managed values are not delivered to jobs yet.
 | RBAC management | Available in browser and JSON API | There are no dedicated RBAC CLI commands. Organization/team mapping management is not exposed. |
 | Repository visibility | Available in browser | Dashboard, logs, and artifacts have separate audiences. |
 | Repository secret management | Available in browser, JSON API, and a bounded CLI | The CLI cannot replace a value; the browser can. |
+| Protected-environment review | Available through the bounded CLI | Requires `environments:approve` plus a current reviewer assignment for the exact repository and environment revision. |
+| Workflow reruns | Available through the bounded CLI | Requires `runs:rerun`; only exact completed-run selections within the current retention and attempt limits are admitted. |
 | Built-in secret provider | Component complete | Values are envelope-encrypted in PostgreSQL; wrapping keys remain outside the database. |
 | External secret providers | Planned | No external adapter is available. |
-| Secret delivery to jobs | Unsupported | Jobs receive no Automata-managed secret values. |
+| Secret delivery to jobs | Experimental | Eligible Standard jobs can receive exact pinned versions from the built-in provider over an mTLS-only ephemeral exchange. Durable lease state remains value-free, and the runner masks every value before acknowledgement. External/dynamic providers and variable-value delivery are unsupported. |
 | GitHub workload credentials | Experimental | Standard jobs may receive lease-bound repository authority; CredentialFree jobs receive none. |
 
 ## Enable GitHub human authentication
@@ -99,6 +103,52 @@ but before receiving the activation response. `auth logout` revokes an active
 session or removes local custody while an unusable pending session expires. A
 local storage failure triggers a bounded revocation attempt and is never
 reported as a successful login.
+
+## Rerun a completed workflow from the CLI
+
+The authenticated `automata rerun` command accepts a bounded
+`OWNER/REPOSITORY` coordinate and an exact source-run UUID plus one of
+`entire-workflow`, `failed-jobs-and-dependents`, or `job-and-dependents`. The
+last selection also requires an exact `--job-id`.
+
+```console
+automata rerun --server-url https://ci.example.test \
+  automata-ci/automata \
+  20000000-0000-4000-8000-000000000002 \
+  --selection entire-workflow --output json
+```
+
+The client loads the server-scoped CLI session from Secret Service, applies a
+bounded retry policy, and uses one operation UUID throughout. Successful output
+includes that UUID. If the final result is indeterminate, retry the exact same
+request with the error's `--operation-id` value. See
+[workflow reruns](workflow-reruns.md) for selection and retention constraints.
+
+## Review a protected environment from the CLI
+
+The authenticated `automata environment-review` command records one exact
+approval or rejection for a repository UUID and gated job-attempt UUID:
+
+```console
+automata environment-review --server-url https://ci.example.test \
+  aaaaaaaa-1111-4111-8111-111111111111 \
+  22222222-2222-4222-8222-222222222222 \
+  --decision approve --output json
+```
+
+Use `--decision reject` to reject the request. Both UUIDs must use non-nil,
+lowercase, hyphenated canonical form. The client loads only the server-scoped
+Secret Service session and returns the current closed gate state: `waiting`,
+`resolving`, `ready`, `rejected`, `expired`, or `cancelled`.
+
+The command sends a mutation only once. If transport fails or the server cannot
+return a trustworthy result, the outcome may be indeterminate because the
+decision or subsequent credential resolution could already be durable. An exact
+same-decision replay by the same reviewer is idempotent only when that decision
+was durably applied. Retry only the same repository UUID, attempt UUID, and
+decision; a different decision conflicts. A review of an expired or cancelled
+gate conflicts on every retry, even when terminalizing the gated attempt is a
+durable side effect of that request.
 
 ## Manage repository secrets from the CLI
 
@@ -241,5 +291,10 @@ Repository source credentials use a separate broker. For a materialized
 Standard job, the GitHub adapter can mint a short-lived installation token for
 one provider repository and a minimum permission map after revalidating the
 lease, runner session, fence, and JobIR identity. CredentialFree jobs bypass the
-issuer. This does not enable managed-secret delivery or establish end-to-end
-workflow compatibility.
+issuer. Managed-secret delivery is independent: an eligible Standard job's
+durable lease carries only a value-free, exact-version binding overlay. The
+runner fetches built-in-provider values through the direct mTLS ephemeral route,
+keeps them in zeroizing execution-local custody, registers every value with the
+output masker, and acknowledges only after complete custody. This boundary does
+not establish end-to-end workflow compatibility; external/dynamic providers and
+variable-value delivery remain unsupported.

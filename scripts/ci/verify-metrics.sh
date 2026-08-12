@@ -417,10 +417,20 @@ verify_canonical_prometheus_inventory_job() {
 
   awk '
   /job_name/ { raw_job_keys += 1 }
-  $1 == "-" && $2 == "job_name:" { total_jobs += 1 }
-  $0 == "  - job_name: automata-control-plane" { control_jobs += 1 }
-  $0 == "  - job_name: automata-runner" { runner_jobs += 1 }
+  $1 == "-" && $2 == "job_name:" {
+    total_jobs += 1
+    current_job = "other"
+  }
+  $0 == "  - job_name: automata-control-plane" {
+    control_jobs += 1
+    current_job = "control-plane"
+  }
+  $0 == "  - job_name: automata-runner" {
+    runner_jobs += 1
+    current_job = "runner"
+  }
   $0 == "  - job_name: automata-runner-inventory" {
+    current_job = "inventory"
     inventory_job = 1
     jobs += 1
     inventory_lines += 1
@@ -436,6 +446,18 @@ verify_canonical_prometheus_inventory_job() {
   inventory_job && $0 == "      - PrometheusText0.0.4" { prometheus_protocols += 1 }
   inventory_job && $0 == "    body_size_limit: 2MB" { body_limits += 1 }
   inventory_job && $0 == "    sample_limit: 10002" { sample_limits += 1 }
+  current_job == "control-plane" && $1 == "sample_limit:" {
+    control_raw_sample_limits += 1
+  }
+  current_job == "control-plane" && $0 == "    sample_limit: 5250" {
+    control_sample_limits += 1
+  }
+  current_job == "runner" && $1 == "sample_limit:" {
+    runner_raw_sample_limits += 1
+  }
+  current_job == "runner" && $0 == "    sample_limit: 1000" {
+    runner_sample_limits += 1
+  }
   inventory_job && $0 == "    target_limit: 1" { target_limits += 1 }
   inventory_job && $0 == "    label_limit: 24" { label_limits += 1 }
   inventory_job && $0 == "    label_name_length_limit: 128" { label_name_limits += 1 }
@@ -458,7 +480,7 @@ verify_canonical_prometheus_inventory_job() {
     global_inventory_keep_rules += 1
   }
   END {
-    valid = raw_job_keys == 3 && total_jobs == 3 && control_jobs == 1 && runner_jobs == 1 && jobs == 1 && inventory_lines == 22 && metrics_paths == 1 && schemes == 1 && honor_labels == 1 && protocol_blocks == 1 && openmetrics_protocols == 1 && prometheus_protocols == 1 && body_limits == 1 && sample_limits == 1 && target_limits == 1 && label_limits == 1 && label_name_limits == 1 && label_value_limits == 1 && metric_relabel_configs == 1 && source_label_blocks == 1 && name_sources == 1 && keep_rules == 1 && keep_actions == 1 && file_sd_configs == 1 && file_blocks == 1 && inventory_files == 1 && refresh_intervals == 1 && global_honor_labels == 1 && global_inventory_files == 1 && global_inventory_keep_rules == 1 && invalid == 0
+    valid = raw_job_keys == 3 && total_jobs == 3 && control_jobs == 1 && runner_jobs == 1 && jobs == 1 && control_raw_sample_limits == 1 && control_sample_limits == 1 && runner_raw_sample_limits == 1 && runner_sample_limits == 1 && inventory_lines == 22 && metrics_paths == 1 && schemes == 1 && honor_labels == 1 && protocol_blocks == 1 && openmetrics_protocols == 1 && prometheus_protocols == 1 && body_limits == 1 && sample_limits == 1 && target_limits == 1 && label_limits == 1 && label_name_limits == 1 && label_value_limits == 1 && metric_relabel_configs == 1 && source_label_blocks == 1 && name_sources == 1 && keep_rules == 1 && keep_actions == 1 && file_sd_configs == 1 && file_blocks == 1 && inventory_files == 1 && refresh_intervals == 1 && global_honor_labels == 1 && global_inventory_files == 1 && global_inventory_keep_rules == 1 && invalid == 0
     exit !valid
   }
 ' "$config_path"
@@ -882,15 +904,15 @@ jq --exit-status '
   )
   and (
   .profiles as $profiles
-  | ($profiles.control_plane.series_budget == 5000)
+  | ($profiles.control_plane.series_budget == 5250)
     and ($profiles.runner.series_budget == 1000)
     and (($profiles.common.families | map(.maximum_series) | add) == 49)
-    and (($profiles.control_plane.families | map(.maximum_series) | add) == 4731)
+    and (($profiles.control_plane.families | map(.maximum_series) | add) == 4975)
     and (($profiles.runner.families | map(.maximum_series) | add) == 890)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add))
-      == 4780
+      == 5024
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)
@@ -898,14 +920,14 @@ jq --exit-status '
       == 939
     )
     and (($profiles.common | native_label_sets) == 2)
-    and (($profiles.control_plane | native_label_sets) == 135)
+    and (($profiles.control_plane | native_label_sets) == 143)
     and (($profiles.runner | native_label_sets) == 28)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add)
        + ($profiles.common | native_label_sets)
        + ($profiles.control_plane | native_label_sets))
-      == 4917
+      == 5169
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)
@@ -920,6 +942,14 @@ jq --exit-status '
        + ($profiles.common | native_label_sets)
        + ($profiles.control_plane | native_label_sets))
       <= $profiles.control_plane.series_budget
+    )
+    and (
+      $profiles.control_plane.series_budget
+      - (($profiles.common.families | map(.maximum_series) | add)
+         + ($profiles.control_plane.families | map(.maximum_series) | add)
+         + ($profiles.common | native_label_sets)
+         + ($profiles.control_plane | native_label_sets))
+      == 81
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)

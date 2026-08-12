@@ -1,8 +1,9 @@
 use crate::{
     ActionStep, DetailedJobEnvironment, EnvironmentVariables, Job, JobEnvironment, JobId,
-    JobOutputs, Needs, PreservedField, ReusableWorkflowCall, ReusableWorkflowInputs,
-    ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunStep, RunnerSelection, SourceSpan,
-    Spanned, Step, StepExecution, StepId, ValueMap, WorkflowJob, YamlNode,
+    JobOutputs, JobResourceVector, JobResources, Needs, PreservedField, ReusableWorkflowCall,
+    ReusableWorkflowInputs, ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunStep,
+    RunnerSelection, SourceSpan, Spanned, Step, StepExecution, StepId, ValueMap, WorkflowJob,
+    YamlNode,
 };
 
 use super::{
@@ -11,7 +12,9 @@ use super::{
     field_name, sequence_text,
     strategy::strategy,
     valid_identifier,
-    value::{boolean, concurrency, defaults, permissions, positive_integer, value_map},
+    value::{
+        boolean, concurrency, defaults, permissions, positive_integer, scalar_value, value_map,
+    },
 };
 
 pub(super) fn jobs(
@@ -79,6 +82,8 @@ fn job(node: &YamlNode, path: &str, context: &mut DecodeContext<'_>) -> Option<J
     let mut deployment_environment_source_span = None;
     let mut job_defaults = None;
     let mut runner = None;
+    let mut resources = None;
+    let mut resources_source_span = None;
     let mut container = None;
     let mut container_source_span = None;
     let mut services = None;
@@ -181,6 +186,15 @@ fn job(node: &YamlNode, path: &str, context: &mut DecodeContext<'_>) -> Option<J
                 };
                 runner = runner_selection(&entry.value, &field_path, context);
             }
+            Some("resources") if resources_source_span.is_none() => {
+                step_job_fields.push(("resources", entry.key.span.clone()));
+                resources_source_span = Some(entry.value.span.clone());
+                let Some(field_path) = context.child_path(path, "resources", &entry.key.span)
+                else {
+                    break;
+                };
+                resources = job_resources(&entry.value, &field_path, context);
+            }
             Some("container") if container_source_span.is_none() => {
                 step_job_fields.push(("container", entry.key.span.clone()));
                 container_source_span = Some(entry.value.span.clone());
@@ -253,9 +267,9 @@ fn job(node: &YamlNode, path: &str, context: &mut DecodeContext<'_>) -> Option<J
             }
             Some(
                 "name" | "needs" | "if" | "permissions" | "concurrency" | "strategy" | "env"
-                | "defaults" | "outputs" | "environment" | "runs-on" | "timeout-minutes"
-                | "container" | "services" | "continue-on-error" | "steps" | "uses" | "with"
-                | "secrets",
+                | "defaults" | "outputs" | "environment" | "runs-on" | "resources"
+                | "timeout-minutes" | "container" | "services" | "continue-on-error" | "steps"
+                | "uses" | "with" | "secrets",
             ) => {}
             _ => {
                 if let Some(extension) = context.preserve_unknown(path, entry) {
@@ -309,6 +323,8 @@ fn job(node: &YamlNode, path: &str, context: &mut DecodeContext<'_>) -> Option<J
         deployment_environment_source_span,
         defaults: job_defaults,
         runner,
+        resources,
+        resources_source_span,
         container,
         container_source_span,
         services,
@@ -317,6 +333,107 @@ fn job(node: &YamlNode, path: &str, context: &mut DecodeContext<'_>) -> Option<J
         continue_on_error,
         steps,
         reusable_workflow_call,
+        extensions,
+        span: node.span.clone(),
+    })
+}
+
+fn job_resources(
+    node: &YamlNode,
+    path: &str,
+    context: &mut DecodeContext<'_>,
+) -> Option<JobResources> {
+    let entries = context.expect_mapping(node, path)?;
+    let mut requests = None;
+    let mut limits = None;
+    let mut extensions = Vec::new();
+    for entry in entries {
+        if context.is_exhausted() {
+            break;
+        }
+        match field_name(entry) {
+            Some("requests") if requests.is_none() => {
+                let Some(field_path) = context.child_path(path, "requests", &entry.key.span) else {
+                    break;
+                };
+                requests = resource_vector(&entry.value, &field_path, context);
+            }
+            Some("limits") if limits.is_none() => {
+                let Some(field_path) = context.child_path(path, "limits", &entry.key.span) else {
+                    break;
+                };
+                limits = resource_vector(&entry.value, &field_path, context);
+            }
+            Some("requests" | "limits") => {}
+            _ => {
+                if let Some(extension) = context.preserve_unknown(path, entry) {
+                    extensions.push(extension);
+                }
+            }
+        }
+    }
+    if requests.is_none() && limits.is_none() {
+        context.semantic(
+            "github.empty_job_resources",
+            format!("`{path}` must contain `requests` or `limits`"),
+            node.span.clone(),
+        );
+    }
+    Some(JobResources {
+        requests,
+        limits,
+        extensions,
+        span: node.span.clone(),
+    })
+}
+
+fn resource_vector(
+    node: &YamlNode,
+    path: &str,
+    context: &mut DecodeContext<'_>,
+) -> Option<JobResourceVector> {
+    let entries = context.expect_mapping(node, path)?;
+    let mut cpu = None;
+    let mut memory = None;
+    let mut ephemeral_storage = None;
+    let mut gpu = None;
+    let mut extensions = Vec::new();
+    for entry in entries {
+        if context.is_exhausted() {
+            break;
+        }
+        let (target, field) = match field_name(entry) {
+            Some("cpu") if cpu.is_none() => (&mut cpu, "cpu"),
+            Some("memory") if memory.is_none() => (&mut memory, "memory"),
+            Some("ephemeral-storage") if ephemeral_storage.is_none() => {
+                (&mut ephemeral_storage, "ephemeral-storage")
+            }
+            Some("gpu") if gpu.is_none() => (&mut gpu, "gpu"),
+            Some("cpu" | "memory" | "ephemeral-storage" | "gpu") => continue,
+            _ => {
+                if let Some(extension) = context.preserve_unknown(path, entry) {
+                    extensions.push(extension);
+                }
+                continue;
+            }
+        };
+        let Some(field_path) = context.child_path(path, field, &entry.key.span) else {
+            break;
+        };
+        *target = scalar_value(&entry.value, &field_path, context);
+    }
+    if cpu.is_none() && memory.is_none() && ephemeral_storage.is_none() && gpu.is_none() {
+        context.semantic(
+            "github.empty_job_resource_vector",
+            format!("`{path}` must contain at least one resource quantity"),
+            node.span.clone(),
+        );
+    }
+    Some(JobResourceVector {
+        cpu,
+        memory,
+        ephemeral_storage,
+        gpu,
         extensions,
         span: node.span.clone(),
     })

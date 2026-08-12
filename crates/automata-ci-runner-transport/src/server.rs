@@ -8,7 +8,10 @@ use automata_ci_protocol::{ProtocolLimits, RunnerToServer, ServerToRunner};
 use bytes::{Bytes, BytesMut};
 use http::{
     HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Version,
-    header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+    header::{
+        ACCEPT, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING,
+    },
+    uri::{Authority, Scheme},
 };
 use http_body_util::{BodyExt as _, Full};
 use hyper::{body::Incoming, server::conn::http2, service::service_fn};
@@ -21,10 +24,13 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use crate::{
-    ApplicationErrorKind, AuthenticatedRunnerRequest, ConfigurationError, ControlRoute,
-    NoopRunnerTransportObserver, PROTOBUF_CONTENT_TYPE, RunnerControlHandler,
+    ApplicationErrorKind, AuthenticatedRunnerEphemeralRequest, AuthenticatedRunnerRequest,
+    ConfigurationError, ControlRoute, EPHEMERAL_SECRETS_CONTENT_TYPE, EPHEMERAL_SECRETS_PATH,
+    MAX_EPHEMERAL_REQUEST_BYTES, MAX_EPHEMERAL_RESPONSE_BYTES, NoopRunnerTransportObserver,
+    PROTOBUF_CONTENT_TYPE, RunnerControlHandler, RunnerEphemeralHandler,
     RunnerTransportApplicationRejection, RunnerTransportAuthenticationRejection,
     RunnerTransportBodyRejection, RunnerTransportByteDirection, RunnerTransportConnectionEvent,
     RunnerTransportDecodeRejection, RunnerTransportHeadRejection, RunnerTransportObserver,
@@ -32,7 +38,55 @@ use crate::{
     RunnerTransportTlsOutcome, ServeError, ServerTlsConfig, TransportLimits,
 };
 
-type HttpResponse = Response<Full<Bytes>>;
+type HttpResponse = Response<Full<ResponseBytes>>;
+
+struct ResponseBytes {
+    storage: ResponseStorage,
+    position: usize,
+}
+
+enum ResponseStorage {
+    Ordinary(Bytes),
+    Sensitive(Zeroizing<Vec<u8>>),
+}
+
+impl ResponseBytes {
+    const fn ordinary(bytes: Bytes) -> Self {
+        Self {
+            storage: ResponseStorage::Ordinary(bytes),
+            position: 0,
+        }
+    }
+
+    const fn sensitive(bytes: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            storage: ResponseStorage::Sensitive(bytes),
+            position: 0,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.storage {
+            ResponseStorage::Ordinary(bytes) => bytes,
+            ResponseStorage::Sensitive(bytes) => bytes,
+        }
+    }
+}
+
+impl bytes::Buf for ResponseBytes {
+    fn remaining(&self) -> usize {
+        self.bytes().len().saturating_sub(self.position)
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.bytes()[self.position..]
+    }
+
+    fn advance(&mut self, count: usize) {
+        assert!(count <= self.remaining(), "response cursor overflow");
+        self.position += count;
+    }
+}
 
 /// Dedicated runner-control listener using mandatory mTLS and HTTP/2 only.
 pub struct RunnerControlServer {
@@ -40,6 +94,7 @@ pub struct RunnerControlServer {
     tls_acceptor: TlsAcceptor,
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
+    ephemeral_route: Option<EphemeralRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     protocol_limits: ProtocolLimits,
     transport_limits: TransportLimits,
@@ -75,6 +130,7 @@ impl RunnerControlServer {
             tls_acceptor: tls.acceptor(),
             verifier,
             handler,
+            ephemeral_route: None,
             observer: Arc::new(NoopRunnerTransportObserver),
             protocol_limits,
             transport_limits,
@@ -91,6 +147,24 @@ impl RunnerControlServer {
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn RunnerTransportObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Installs the only value-bearing route on this dedicated mTLS listener.
+    ///
+    /// The route is absent unless explicitly composed. It reauthenticates the
+    /// peer certificate for every request and receives no connection-cached
+    /// session authority.
+    #[must_use]
+    pub fn with_ephemeral_handler(
+        mut self,
+        expected_authority: Authority,
+        handler: Arc<dyn RunnerEphemeralHandler>,
+    ) -> Self {
+        self.ephemeral_route = Some(EphemeralRouteConfig {
+            expected_authority,
+            handler,
+        });
         self
     }
 
@@ -147,6 +221,7 @@ impl RunnerControlServer {
                         tls_acceptor: self.tls_acceptor.clone(),
                         verifier: Arc::clone(&self.verifier),
                         handler: Arc::clone(&self.handler),
+                        ephemeral_route: self.ephemeral_route.clone(),
                         observer: Arc::clone(&self.observer),
                         protocol_limits: self.protocol_limits,
                         transport_limits: self.transport_limits,
@@ -203,6 +278,7 @@ struct ConnectionState {
     tls_acceptor: TlsAcceptor,
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
+    ephemeral_route: Option<EphemeralRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     protocol_limits: ProtocolLimits,
     transport_limits: TransportLimits,
@@ -258,6 +334,7 @@ async fn serve_connection(
     let request_state = Arc::new(RequestState {
         verifier: state.verifier,
         handler: state.handler,
+        ephemeral_route: state.ephemeral_route,
         observer: Arc::clone(&state.observer),
         evidence,
         protocol_limits: state.protocol_limits,
@@ -327,6 +404,7 @@ fn peer_evidence(tls: &TlsStream<TcpStream>) -> Option<MachineAuthenticationEvid
 struct RequestState {
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
+    ephemeral_route: Option<EphemeralRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     evidence: Arc<MachineAuthenticationEvidence>,
     protocol_limits: ProtocolLimits,
@@ -349,6 +427,10 @@ async fn handle_request(request: Request<Incoming>, state: Arc<RequestState>) ->
             StatusCode::SERVICE_UNAVAILABLE,
         );
     };
+
+    if request.uri().path() == EPHEMERAL_SECRETS_PATH && state.ephemeral_route.is_some() {
+        return handle_ephemeral_request(request, &state, &mut request_observation).await;
+    }
 
     let (route, declared_length) = match validate_request_head(&request, &state.transport_limits) {
         Ok(value) => value,
@@ -408,6 +490,209 @@ async fn handle_request(request: Request<Incoming>, state: Arc<RequestState>) ->
     );
     request_observation.finish(RunnerTransportRequestObservation::Succeeded { route: route_label });
     protobuf_response(encoded)
+}
+
+async fn handle_ephemeral_request(
+    request: Request<Incoming>,
+    state: &RequestState,
+    request_observation: &mut RequestObservationGuard,
+) -> HttpResponse {
+    let route = RunnerTransportRoute::EphemeralSecrets;
+    request_observation.set_route(route);
+    let Some(route_config) = state.ephemeral_route.as_ref() else {
+        return RequestFailure::new(
+            RunnerTransportRequestObservation::ApplicationRejected {
+                route,
+                reason: RunnerTransportApplicationRejection::Unavailable,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .respond(request_observation);
+    };
+    let declared_length = match validate_ephemeral_request_head(
+        &request,
+        &state.transport_limits,
+        &route_config.expected_authority,
+    ) {
+        Ok(length) => length,
+        Err((reason, status)) => {
+            return RequestFailure::new(
+                RunnerTransportRequestObservation::HeadRejected { route, reason },
+                status,
+            )
+            .respond(request_observation);
+        }
+    };
+    let _in_flight = RequestInFlight::new(Arc::clone(&state.observer), route);
+    let machine = match authenticate_request(state, route).await {
+        Ok(machine) => machine,
+        Err(failure) => return failure.respond(request_observation),
+    };
+    let (_, body) = request.into_parts();
+    let body = match receive_ephemeral_request_body(body, declared_length, state, route).await {
+        Ok(body) => body,
+        Err(failure) => return failure.respond(request_observation),
+    };
+    state.observer.observe_bytes(
+        route,
+        RunnerTransportByteDirection::Request,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+    );
+    let cancellation = state.shutdown.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    let request = AuthenticatedRunnerEphemeralRequest::new(machine, body, cancellation);
+    let reply = match timeout(
+        state.transport_limits.handler_timeout(),
+        route_config.handler.handle(request),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => {
+            return RequestFailure::new(
+                RunnerTransportRequestObservation::ApplicationRejected {
+                    route,
+                    reason: transport_application_rejection(error.kind()),
+                },
+                application_status(error.kind()),
+            )
+            .respond(request_observation);
+        }
+        Err(_) => {
+            return RequestFailure::new(
+                RunnerTransportRequestObservation::ApplicationRejected {
+                    route,
+                    reason: RunnerTransportApplicationRejection::Timeout,
+                },
+                StatusCode::GATEWAY_TIMEOUT,
+            )
+            .respond(request_observation);
+        }
+    };
+    let body = reply.into_body();
+    if body.len() > MAX_EPHEMERAL_RESPONSE_BYTES
+        || body.len() > state.transport_limits.response_body_bytes()
+    {
+        return RequestFailure::response_rejected(
+            route,
+            RunnerTransportResponseRejection::TooLarge,
+        )
+        .respond(request_observation);
+    }
+    state.observer.observe_bytes(
+        route,
+        RunnerTransportByteDirection::Response,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+    );
+    request_observation.finish(RunnerTransportRequestObservation::Succeeded { route });
+    ephemeral_response(body)
+}
+
+fn validate_ephemeral_request_head<B>(
+    request: &Request<B>,
+    limits: &TransportLimits,
+    expected_authority: &Authority,
+) -> Result<usize, (RunnerTransportHeadRejection, StatusCode)> {
+    if request.version() != Version::HTTP_2 {
+        return Err((
+            RunnerTransportHeadRejection::HttpVersion,
+            StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+        ));
+    }
+    if request.method() != Method::POST {
+        return Err((
+            RunnerTransportHeadRejection::Method,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ));
+    }
+    if request.uri().scheme() != Some(&Scheme::HTTPS)
+        || request.uri().authority() != Some(expected_authority)
+        || request.uri().query().is_some()
+        || request.uri().path() != EPHEMERAL_SECRETS_PATH
+    {
+        return Err((
+            RunnerTransportHeadRejection::NotFound,
+            StatusCode::NOT_FOUND,
+        ));
+    }
+    validate_exact_media_type(request.headers(), EPHEMERAL_SECRETS_CONTENT_TYPE)
+        .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
+    validate_exact_header(
+        request.headers(),
+        ACCEPT,
+        EPHEMERAL_SECRETS_CONTENT_TYPE.as_bytes(),
+    )
+    .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
+    validate_exact_header(request.headers(), CACHE_CONTROL, b"no-store")
+        .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
+    if request.headers().contains_key(CONTENT_ENCODING)
+        || request.headers().contains_key(TRANSFER_ENCODING)
+    {
+        return Err((
+            RunnerTransportHeadRejection::UnsupportedMediaType,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ));
+    }
+    let length = strict_content_length(request.headers()).map_err(|status| {
+        (
+            if status == StatusCode::LENGTH_REQUIRED {
+                RunnerTransportHeadRejection::LengthRequired
+            } else {
+                RunnerTransportHeadRejection::InvalidContentLength
+            },
+            status,
+        )
+    })?;
+    if length == 0 || length > MAX_EPHEMERAL_REQUEST_BYTES || length > limits.request_body_bytes() {
+        return Err((
+            RunnerTransportHeadRejection::BodyTooLarge,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ));
+    }
+    Ok(length)
+}
+
+#[derive(Clone)]
+struct EphemeralRouteConfig {
+    expected_authority: Authority,
+    handler: Arc<dyn RunnerEphemeralHandler>,
+}
+
+async fn receive_ephemeral_request_body(
+    body: Incoming,
+    declared_length: usize,
+    state: &RequestState,
+    route: RunnerTransportRoute,
+) -> Result<Zeroizing<Vec<u8>>, RequestFailure> {
+    let maximum = MAX_EPHEMERAL_REQUEST_BYTES.min(state.transport_limits.request_body_bytes());
+    let result = timeout(
+        state.transport_limits.request_body_timeout(),
+        read_secret_body(body, declared_length, maximum),
+    )
+    .await;
+    let (reason, status) = match result {
+        Ok(Ok(body)) => return Ok(body),
+        Ok(Err(BodyReadError::TooLarge)) => (
+            RunnerTransportBodyRejection::TooLarge,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        Ok(Err(BodyReadError::Invalid)) => (
+            RunnerTransportBodyRejection::Invalid,
+            StatusCode::BAD_REQUEST,
+        ),
+        Ok(Err(BodyReadError::Transport)) => (
+            RunnerTransportBodyRejection::Transport,
+            StatusCode::BAD_REQUEST,
+        ),
+        Err(_) => (
+            RunnerTransportBodyRejection::Timeout,
+            StatusCode::REQUEST_TIMEOUT,
+        ),
+    };
+    Err(RequestFailure::new(
+        RunnerTransportRequestObservation::BodyRejected { route, reason },
+        status,
+    ))
 }
 
 async fn authenticate_request(
@@ -707,14 +992,35 @@ impl RequestHeadRejection {
 }
 
 fn validate_exact_content_type(headers: &HeaderMap) -> Result<(), StatusCode> {
+    validate_exact_media_type(headers, PROTOBUF_CONTENT_TYPE)
+}
+
+fn validate_exact_media_type(headers: &HeaderMap, media_type: &str) -> Result<(), StatusCode> {
     let mut values = headers.get_all(CONTENT_TYPE).iter();
     let Some(value) = values.next() else {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     };
-    if values.next().is_some() || value.as_bytes() != PROTOBUF_CONTENT_TYPE.as_bytes() {
+    if values.next().is_some() || value.as_bytes() != media_type.as_bytes() {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     Ok(())
+}
+
+fn validate_exact_header(
+    headers: &HeaderMap,
+    name: http::header::HeaderName,
+    expected: &[u8],
+) -> Result<(), StatusCode> {
+    let mut values = headers.get_all(name).iter();
+    if values
+        .next()
+        .is_some_and(|value| value.as_bytes() == expected)
+        && values.next().is_none()
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    }
 }
 
 fn strict_content_length(headers: &HeaderMap) -> Result<usize, StatusCode> {
@@ -765,6 +1071,30 @@ async fn read_body(
         return Err(BodyReadError::Invalid);
     }
     Ok(collected.freeze())
+}
+
+async fn read_secret_body(
+    mut body: Incoming,
+    declared_length: usize,
+    maximum: usize,
+) -> Result<Zeroizing<Vec<u8>>, BodyReadError> {
+    let mut collected = Zeroizing::new(Vec::with_capacity(declared_length.min(maximum)));
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| BodyReadError::Transport)?;
+        let data = frame.into_data().map_err(|_| BodyReadError::Invalid)?;
+        let next = collected
+            .len()
+            .checked_add(data.len())
+            .ok_or(BodyReadError::TooLarge)?;
+        if next > maximum || next > declared_length {
+            return Err(BodyReadError::TooLarge);
+        }
+        collected.extend_from_slice(&data);
+    }
+    if collected.len() != declared_length {
+        return Err(BodyReadError::Invalid);
+    }
+    Ok(collected)
 }
 
 const fn request_matches_route(route: ControlRoute, message: &RunnerToServer) -> bool {
@@ -939,7 +1269,7 @@ fn observed_error(
 
 fn protobuf_response(body: Bytes) -> HttpResponse {
     let content_length = HeaderValue::from(body.len());
-    let mut response = Response::new(Full::new(body));
+    let mut response = Response::new(Full::new(ResponseBytes::ordinary(body)));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -954,8 +1284,25 @@ fn protobuf_response(body: Bytes) -> HttpResponse {
     response
 }
 
+fn ephemeral_response(body: Zeroizing<Vec<u8>>) -> HttpResponse {
+    let content_length = HeaderValue::from(body.len());
+    let mut response = Response::new(Full::new(ResponseBytes::sensitive(body)));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE),
+    );
+    response
+        .headers_mut()
+        .insert(CONTENT_LENGTH, content_length);
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
+    response
+}
+
 fn error_response(status: StatusCode) -> HttpResponse {
-    let mut response = Response::new(Full::new(Bytes::new()));
+    let mut response = Response::new(Full::new(ResponseBytes::ordinary(Bytes::new())));
     *response.status_mut() = status;
     response
         .headers_mut()
@@ -964,4 +1311,90 @@ fn error_response(status: StatusCode) -> HttpResponse {
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(uri: &str) -> Request<()> {
+        let mut request = Request::new(());
+        *request.method_mut() = Method::POST;
+        *request.version_mut() = Version::HTTP_2;
+        *request.uri_mut() = uri.parse().expect("test URI");
+        for (name, value) in [
+            (CONTENT_TYPE, EPHEMERAL_SECRETS_CONTENT_TYPE),
+            (ACCEPT, EPHEMERAL_SECRETS_CONTENT_TYPE),
+            (CACHE_CONTROL, "no-store"),
+            (CONTENT_LENGTH, "1"),
+        ] {
+            request
+                .headers_mut()
+                .insert(name, HeaderValue::from_static(value));
+        }
+        request
+    }
+
+    #[test]
+    fn ephemeral_head_requires_one_canonical_content_length() {
+        let authority: Authority = "runner.example:8443".parse().expect("authority");
+        let mut request = request(&format!("https://{authority}{EPHEMERAL_SECRETS_PATH}"));
+        assert!(
+            validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority)
+                .is_ok()
+        );
+
+        request
+            .headers_mut()
+            .append(CONTENT_LENGTH, HeaderValue::from_static("1"));
+        assert_eq!(
+            validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority),
+            Err((
+                RunnerTransportHeadRejection::InvalidContentLength,
+                StatusCode::BAD_REQUEST
+            ))
+        );
+    }
+
+    #[test]
+    fn ephemeral_head_forbids_content_and_transfer_encodings() {
+        let authority: Authority = "runner.example:8443".parse().expect("authority");
+        for header in [CONTENT_ENCODING, TRANSFER_ENCODING] {
+            let mut request = request(&format!("https://{authority}{EPHEMERAL_SECRETS_PATH}"));
+            request
+                .headers_mut()
+                .insert(header, HeaderValue::from_static("identity"));
+            assert_eq!(
+                validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority),
+                Err((
+                    RunnerTransportHeadRejection::UnsupportedMediaType,
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn ephemeral_head_requires_exact_https_authority_and_absolute_form() {
+        let authority: Authority = "runner.example:8443".parse().expect("authority");
+        for uri in [
+            EPHEMERAL_SECRETS_PATH.to_owned(),
+            format!("https://other.example:8443{EPHEMERAL_SECRETS_PATH}"),
+            format!("https://runner.example:9443{EPHEMERAL_SECRETS_PATH}"),
+            format!("http://{authority}{EPHEMERAL_SECRETS_PATH}"),
+        ] {
+            assert_eq!(
+                validate_ephemeral_request_head(
+                    &request(&uri),
+                    &TransportLimits::default(),
+                    &authority
+                ),
+                Err((
+                    RunnerTransportHeadRejection::NotFound,
+                    StatusCode::NOT_FOUND
+                )),
+                "URI unexpectedly accepted: {uri}"
+            );
+        }
+    }
 }

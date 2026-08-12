@@ -17,9 +17,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AdmissionObject, LogicalActivationPreparationReceipt, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES, ObjectKey, StoreError,
-    TenantScope, WorkflowRuntimePolicyPin,
+    AdmissionObject, JobEnvironmentActivationEvidence, LogicalActivationPreparationReceipt,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES,
+    ObjectKey, ReusableWorkflowPermissionSnapshot, StoreError, TenantScope,
+    WorkflowRuntimePolicyPin,
 };
 
 /// Maximum duration of one logical-job activation claim.
@@ -706,7 +707,9 @@ pub struct LogicalActivationExecutionContext {
     workflow_id: WorkflowId,
     workflow_name: String,
     git_ref: String,
+    root_event_name: String,
     actor: Option<String>,
+    triggering_actor: Option<String>,
     run_id_alias: RunIdAlias,
     run_number: u64,
     run_attempt: u32,
@@ -723,10 +726,12 @@ impl LogicalActivationExecutionContext {
     ///
     /// Rejects nil workflow identity, invalid execution text or Git ref, and
     /// zero run-number/attempt sentinels.
+    #[allow(clippy::too_many_arguments)] // Mirrors immutable workflow-run execution evidence.
     pub fn new(
         workflow_id: WorkflowId,
         workflow_name: String,
         git_ref: String,
+        root_event_name: String,
         actor: Option<String>,
         run_id_alias: RunIdAlias,
         run_number: u64,
@@ -737,6 +742,7 @@ impl LogicalActivationExecutionContext {
         }
         validate_bounded_text(&workflow_name, "workflow name")?;
         validate_bounded_text(&git_ref, "Git ref")?;
+        validate_bounded_text(&root_event_name, "root event name")?;
         if !git_ref.starts_with("refs/") || git_ref == "refs/" {
             return Err(LogicalActivationValueError::InvalidGitRef);
         }
@@ -753,7 +759,9 @@ impl LogicalActivationExecutionContext {
             workflow_id,
             workflow_name,
             git_ref,
+            root_event_name,
             actor,
+            triggering_actor: None,
             run_id_alias,
             run_number,
             run_attempt,
@@ -778,10 +786,41 @@ impl LogicalActivationExecutionContext {
         &self.git_ref
     }
 
+    /// Returns the immutable authenticated event name admitted for the root run.
+    ///
+    /// Reusable-workflow plans use the synthetic `workflow_call` trigger, so
+    /// security policy must use this run-level provenance rather than the
+    /// child plan trigger when classifying fork and automation trust.
+    #[must_use]
+    pub fn root_event_name(&self) -> &str {
+        &self.root_event_name
+    }
+
     /// Returns the authenticated event actor when one was admitted.
     #[must_use]
     pub fn actor(&self) -> Option<&str> {
         self.actor.as_deref()
+    }
+
+    /// Returns the current physical-attempt initiator when this is a rerun.
+    #[must_use]
+    pub fn triggering_actor(&self) -> Option<&str> {
+        self.triggering_actor.as_deref()
+    }
+
+    /// Attaches the store-authenticated current physical-attempt initiator.
+    ///
+    /// # Errors
+    ///
+    /// Rejects blank, oversized, or control-bearing actor identities.
+    pub fn with_triggering_actor(
+        mut self,
+        triggering_actor: impl Into<String>,
+    ) -> Result<Self, LogicalActivationValueError> {
+        let triggering_actor = triggering_actor.into();
+        validate_bounded_text(&triggering_actor, "triggering actor")?;
+        self.triggering_actor = Some(triggering_actor);
+        Ok(self)
     }
 
     /// Returns the stable positive numeric alias for the internal run ID.
@@ -924,6 +963,7 @@ pub struct ActivatedLogicalInstanceDescriptor {
     workspace: String,
     job_ir: LogicalActivationObject,
     runtime_context: LogicalActivationObject,
+    environment_gate: Option<JobEnvironmentActivationEvidence>,
 }
 
 impl ActivatedLogicalInstanceDescriptor {
@@ -934,13 +974,16 @@ impl ActivatedLogicalInstanceDescriptor {
     /// # Errors
     ///
     /// Rejects a logical key that does not match the claimed job or object
-    /// descriptors of the wrong kind.
+    /// descriptors of the wrong kind. Value-free environment-gate evidence is
+    /// mandatory for every newly constructed instance; only historical durable
+    /// decoding may represent a pre-evidence row.
     pub fn new(
         claimed: &ClaimedLogicalJobActivation,
         identity: &JobInstanceIdentity,
         workspace: impl Into<String>,
         job_ir: LogicalActivationObject,
         runtime_context: LogicalActivationObject,
+        environment_gate: JobEnvironmentActivationEvidence,
     ) -> Result<Self, LogicalActivationValueError> {
         if identity.logical_job_key() != claimed.logical_key().as_str() {
             return Err(LogicalActivationValueError::LogicalKeyMismatch);
@@ -967,9 +1010,22 @@ impl ActivatedLogicalInstanceDescriptor {
             workspace,
             job_ir,
             runtime_context,
+            environment_gate: Some(environment_gate),
         })
     }
 
+    /// Replaces the value-free evidence while constructing a divergent test or
+    /// retry candidate. A descriptor can never transition back to no evidence.
+    #[must_use]
+    pub fn with_environment_gate(mut self, evidence: JobEnvironmentActivationEvidence) -> Self {
+        self.environment_gate = Some(evidence);
+        self
+    }
+
+    /// Decodes either a current instance or retained pre-evidence history.
+    ///
+    /// `None` is accepted only on this internal durable path so terminal rows
+    /// written before the evidence migration remain readable.
     #[allow(clippy::too_many_arguments)] // Mirrors one immutable durable descriptor row exactly.
     pub(crate) fn from_durable(
         id: LogicalWorkflowInstanceId,
@@ -982,6 +1038,7 @@ impl ActivatedLogicalInstanceDescriptor {
         workspace: String,
         job_ir: LogicalActivationObject,
         runtime_context: LogicalActivationObject,
+        environment_gate: Option<JobEnvironmentActivationEvidence>,
     ) -> Result<Self, LogicalActivationValueError> {
         let maximum_instances = u32::try_from(MAX_LOGICAL_ACTIVATED_INSTANCES)
             .map_err(|_| LogicalActivationValueError::NoncanonicalMatrixInstances)?;
@@ -1005,6 +1062,7 @@ impl ActivatedLogicalInstanceDescriptor {
             workspace,
             job_ir,
             runtime_context,
+            environment_gate,
         })
     }
 
@@ -1048,6 +1106,12 @@ impl ActivatedLogicalInstanceDescriptor {
     #[must_use]
     pub const fn runtime_context(&self) -> &LogicalActivationObject {
         &self.runtime_context
+    }
+
+    /// Returns value-free activation evidence retained outside `JobIR`.
+    #[must_use]
+    pub const fn environment_gate(&self) -> Option<&JobEnvironmentActivationEvidence> {
+        self.environment_gate.as_ref()
     }
 }
 
@@ -1305,6 +1369,17 @@ pub enum LogicalActivationStoreError {
 /// Persistence boundary for current logical-job activation descriptors.
 #[async_trait]
 pub trait LogicalActivationRepository: std::fmt::Debug + Send + Sync {
+    /// Loads the immutable permission ceiling for one sealed reusable child.
+    /// Root invocations and unpublished children return no snapshot.
+    async fn reusable_workflow_permission_snapshot(
+        &self,
+        _tenant: &TenantScope,
+        _run_id: RunId,
+        _invocation_id: LogicalWorkflowInvocationId,
+    ) -> Result<Option<ReusableWorkflowPermissionSnapshot>, LogicalActivationStoreError> {
+        Ok(None)
+    }
+
     /// Replaces an exact live claim with the next generation and a new bounded
     /// interval. Concurrent exact retries replay the replacement fence; stale
     /// or divergent renewals fail closed.
@@ -1371,8 +1446,38 @@ pub(crate) fn rederive_publication_digest(
         hasher.update(workspace);
         hash_object(&mut hasher, instance.job_ir());
         hash_object(&mut hasher, instance.runtime_context());
+        hash_environment_gate(&mut hasher, instance.environment_gate());
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn hash_environment_gate(hasher: &mut Sha256, evidence: Option<&JobEnvironmentActivationEvidence>) {
+    let Some(evidence) = evidence else {
+        return;
+    };
+    hasher.update(b"automata.store.logical-activation-environment-gate.v1\0");
+    match evidence.environment() {
+        Some(environment) => {
+            hasher.update([1]);
+            let value = environment.normalized().as_bytes();
+            hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value);
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update([match evidence.event_trust() {
+        crate::JobEventTrust::Trusted => 1,
+        crate::JobEventTrust::Untrusted => 2,
+    }]);
+    hasher.update([match evidence.source_kind() {
+        crate::JobSourceKind::SameRepository => 1,
+        crate::JobSourceKind::Fork => 2,
+        crate::JobSourceKind::Dependabot => 3,
+    }]);
+    hasher.update([match evidence.reusable_secret_permission() {
+        crate::ReusableSecretPermission::None => 1,
+        crate::ReusableSecretPermission::Explicit => 2,
+    }]);
 }
 
 fn hash_object(hasher: &mut Sha256, object: &LogicalActivationObject) {
@@ -1439,4 +1544,105 @@ fn validate_workspace(value: &str) -> Result<(), LogicalActivationValueError> {
         return Err(LogicalActivationValueError::InvalidWorkspace);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DeploymentEnvironmentName, JobEventTrust, JobSourceKind, ReusableSecretPermission,
+    };
+
+    fn activation_evidence(
+        event_trust: JobEventTrust,
+        source_kind: JobSourceKind,
+        reusable_secret_permission: ReusableSecretPermission,
+    ) -> JobEnvironmentActivationEvidence {
+        JobEnvironmentActivationEvidence::new(
+            Some(DeploymentEnvironmentName::new("Production").expect("environment")),
+            event_trust,
+            source_kind,
+            reusable_secret_permission,
+        )
+    }
+
+    fn instance(
+        evidence: Option<JobEnvironmentActivationEvidence>,
+    ) -> ActivatedLogicalInstanceDescriptor {
+        ActivatedLogicalInstanceDescriptor::from_durable(
+            LogicalWorkflowInstanceId::from_uuid(Uuid::from_u128(4)).expect("instance"),
+            RunId::from_uuid(Uuid::from_u128(1)),
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
+            LogicalWorkflowJobId::from_uuid(Uuid::from_u128(3)).expect("job"),
+            0,
+            1,
+            Sha256Digest::from_bytes([4; 32]),
+            "/work/job".to_owned(),
+            LogicalActivationObject::job_ir(
+                Sha256Digest::from_bytes([5; 32]),
+                ObjectKey::new("jobs/ir").expect("job IR key"),
+                1,
+            )
+            .expect("job IR"),
+            LogicalActivationObject::runtime_context(
+                Sha256Digest::from_bytes([6; 32]),
+                ObjectKey::new("jobs/context").expect("runtime-context key"),
+                1,
+            )
+            .expect("runtime context"),
+            evidence,
+        )
+        .expect("instance")
+    }
+
+    fn digest(instance: ActivatedLogicalInstanceDescriptor) -> Sha256Digest {
+        rederive_publication_digest(
+            RunId::from_uuid(Uuid::from_u128(1)),
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
+            LogicalWorkflowJobId::from_uuid(Uuid::from_u128(3)).expect("job"),
+            Sha256Digest::from_bytes([7; 32]),
+            true,
+            &[instance],
+        )
+    }
+
+    #[test]
+    fn activation_gate_evidence_is_retry_stable_and_digest_bound() {
+        let trusted = activation_evidence(
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        );
+        let expected = digest(instance(Some(trusted.clone())));
+        assert_eq!(expected, digest(instance(Some(trusted))));
+
+        for substitution in [
+            Some(activation_evidence(
+                JobEventTrust::Untrusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::None,
+            )),
+            Some(activation_evidence(
+                JobEventTrust::Trusted,
+                JobSourceKind::Fork,
+                ReusableSecretPermission::None,
+            )),
+            Some(activation_evidence(
+                JobEventTrust::Trusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::Explicit,
+            )),
+            None,
+        ] {
+            assert_ne!(expected, digest(instance(substitution)));
+        }
+    }
+
+    #[test]
+    fn evidence_free_descriptor_retains_legacy_publication_digest() {
+        assert_eq!(
+            digest(instance(None)).to_string(),
+            "a05f7087a3ced475fb5b9e37a66379be12793b004f4d104520fea8bf7c7fd1f1"
+        );
+    }
 }

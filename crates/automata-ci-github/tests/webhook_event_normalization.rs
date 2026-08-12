@@ -103,6 +103,89 @@ fn merge_group_normalization_retains_exact_dispatch_evidence() {
 }
 
 #[test]
+fn repository_dispatch_normalization_retains_bounded_custom_evidence() {
+    let body = encode(&repository_dispatch_payload());
+    let event = normalize_bytes(&body, "repository_dispatch", "delivery-custom-3")
+        .expect("normalized repository dispatch");
+
+    assert_eq!(event.delivery_id(), "delivery-custom-3");
+    assert_eq!(event.event_name(), "repository_dispatch");
+    assert_eq!(event.raw_body().as_ref(), body);
+    assert_eq!(event.installation_id().get(), 71);
+    let VerifiedGithubWebhook::RepositoryDispatch(event) = event else {
+        panic!("expected repository-dispatch evidence");
+    };
+    assert_eq!(event.event_type(), "synthetic_signal");
+    assert_eq!(event.branch(), "main");
+    assert_eq!(event.git_ref(), "refs/heads/main");
+    assert_eq!(
+        event
+            .client_payload()
+            .and_then(|payload| payload.get("sequence")),
+        Some(&json!(3))
+    );
+}
+
+#[test]
+fn repository_dispatch_contract_is_strict_and_fail_closed() {
+    for (pointer, value) in [
+        ("/action", json!("")),
+        ("/action", json!("x".repeat(101))),
+        ("/action", json!("bad\nevent")),
+        ("/branch", json!("release")),
+        ("/branch", json!("bad..branch")),
+        ("/client_payload", json!([])),
+    ] {
+        let mut payload = repository_dispatch_payload();
+        *payload.pointer_mut(pointer).expect("fixture pointer") = value;
+        assert_payload_error(
+            &payload,
+            "repository_dispatch",
+            GithubWebhookError::InvalidPayload,
+        );
+    }
+
+    let mut missing_default_branch = repository_dispatch_payload();
+    missing_default_branch["repository"]
+        .as_object_mut()
+        .expect("repository object")
+        .remove("default_branch");
+    assert_payload_error(
+        &missing_default_branch,
+        "repository_dispatch",
+        GithubWebhookError::InvalidPayload,
+    );
+
+    let mut too_many_properties = repository_dispatch_payload();
+    too_many_properties["client_payload"] = Value::Object(
+        (0..11)
+            .map(|index| (format!("key_{index}"), json!(index)))
+            .collect(),
+    );
+    assert_payload_error(
+        &too_many_properties,
+        "repository_dispatch",
+        GithubWebhookError::InvalidPayload,
+    );
+
+    let mut excessive_payload = repository_dispatch_payload();
+    excessive_payload["client_payload"] = json!({ "data": "x".repeat(65_536) });
+    assert_payload_error(
+        &excessive_payload,
+        "repository_dispatch",
+        GithubWebhookError::InvalidPayload,
+    );
+
+    let mut null_payload = repository_dispatch_payload();
+    null_payload["client_payload"] = Value::Null;
+    let event = normalize_payload(&null_payload, "repository_dispatch").expect("null payload");
+    let VerifiedGithubWebhook::RepositoryDispatch(event) = event else {
+        panic!("expected repository-dispatch evidence");
+    };
+    assert!(event.client_payload().is_none());
+}
+
+#[test]
 fn only_documented_event_actions_are_admitted() {
     let mut pull_request = pull_request_payload();
     pull_request["action"] = json!("future_activity");
@@ -155,6 +238,15 @@ fn duplicate_or_malformed_json_is_rejected_before_typed_decoding() {
     assert_bytes_error(
         b"{\"action\":",
         "pull_request",
+        GithubWebhookError::MalformedPayload,
+    );
+
+    let dispatch = String::from_utf8(encode(&repository_dispatch_payload())).expect("UTF-8 JSON");
+    let duplicate_client_value =
+        dispatch.replacen("\"sequence\":3", "\"sequence\":3,\"sequence\":4", 1);
+    assert_bytes_error(
+        duplicate_client_value.as_bytes(),
+        "repository_dispatch",
         GithubWebhookError::MalformedPayload,
     );
 }
@@ -269,13 +361,26 @@ fn normalized_debug_redacts_authenticated_and_selector_values() {
 }
 
 #[test]
+fn repository_dispatch_debug_redacts_custom_values() {
+    let body = encode(&repository_dispatch_payload());
+    let event = normalize_bytes(&body, "repository_dispatch", "private-custom-delivery")
+        .expect("normalized event");
+    let debug = format!("{event:?}");
+
+    for marker in [
+        "private-custom-delivery",
+        "synthetic_signal",
+        "private-payload-marker",
+        "refs/heads/main",
+    ] {
+        assert!(!debug.contains(marker), "leaked marker: {marker}");
+    }
+}
+
+#[test]
 fn unsupported_event_headers_fail_closed_after_authentication() {
     let payload = pull_request_payload();
-    assert_payload_error(
-        &payload,
-        "repository_dispatch",
-        GithubWebhookError::UnsupportedEvent,
-    );
+    assert_payload_error(&payload, "issues", GithubWebhookError::UnsupportedEvent);
 }
 
 #[test]
@@ -284,6 +389,11 @@ fn durable_event_v1_rehydrates_each_supported_kind_without_reserialization() {
         (push_payload(), "push", "durable-push-5"),
         (pull_request_payload(), "pull_request", "durable-pr-7"),
         (merge_group_payload(), "merge_group", "durable-group-9"),
+        (
+            repository_dispatch_payload(),
+            "repository_dispatch",
+            "durable-custom-3",
+        ),
     ] {
         let body = encode(&payload);
         let stored = stored_event_v1(&body, event_name, delivery_id);
@@ -372,6 +482,22 @@ fn merge_group_payload() -> Value {
             "head_commit": {}
         },
         "repository": base_repository(),
+        "installation": { "id": 71 },
+        "sender": { "id": 301 }
+    })
+}
+
+fn repository_dispatch_payload() -> Value {
+    let mut repository = base_repository();
+    repository["default_branch"] = json!("main");
+    json!({
+        "action": "synthetic_signal",
+        "branch": "main",
+        "client_payload": {
+            "sequence": 3,
+            "marker": "private-payload-marker"
+        },
+        "repository": repository,
         "installation": { "id": 71 },
         "sender": { "id": 301 }
     })

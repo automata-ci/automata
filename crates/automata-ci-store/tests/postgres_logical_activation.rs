@@ -3,7 +3,8 @@ mod common;
 mod github_manifest_fixture;
 
 use automata_ci_core::{
-    JobAuthorityProfile, JobInstanceIdentity, RunId, Sha256Digest, UnixMillis, WorkflowId,
+    JOB_IR_SCHEMA_VERSION, JobAuthorityProfile, JobInstanceIdentity,
+    RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, Sha256Digest, UnixMillis, WorkflowId,
     WorkflowJobKey,
 };
 use automata_ci_store::{
@@ -19,16 +20,16 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LogicalActivationObject, LogicalActivationPreparationStore as _,
-    LogicalActivationPreparationTarget, LogicalActivationRepository as _,
-    LogicalActivationStoreError, LogicalActivationWorkerId,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind, LogicalActivationObject,
+    LogicalActivationPreparationStore as _, LogicalActivationPreparationTarget,
+    LogicalActivationRepository as _, LogicalActivationStoreError, LogicalActivationWorkerId,
     LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
     ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, RenewLogicalJobActivation, TenantScope,
+    PublishLogicalJobActivation, RenewLogicalJobActivation, ReusableSecretPermission, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sqlx::migrate::Migrate as _;
@@ -443,14 +444,17 @@ fn instance(
             512,
         )
         .expect("runtime descriptor"),
+        JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
     .expect("instance descriptor")
 }
 
-async fn claim_first_logical_job(
-    database: &TestDatabase,
-    fixture: &Fixture,
-) -> TestResult<ClaimedLogicalJobActivation> {
+async fn assert_current_cluster_compatibility(database: &TestDatabase) -> TestResult {
     let compatibility: (i32, i32, i32) = sqlx::query_as(
         r"
         SELECT minimum_admission_epoch, job_ir_schema,
@@ -460,7 +464,23 @@ async fn claim_first_logical_job(
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(compatibility, (4, 5, 2));
+    assert_eq!(
+        compatibility,
+        (
+            4,
+            i32::from(JOB_IR_SCHEMA_VERSION),
+            i32::from(RUNNER_REQUIREMENTS_SCHEMA_VERSION),
+        ),
+        "logical activation must use the current admission and payload schemas"
+    );
+    Ok(())
+}
+
+async fn claim_first_logical_job(
+    database: &TestDatabase,
+    fixture: &Fixture,
+) -> TestResult<ClaimedLogicalJobActivation> {
+    assert_current_cluster_compatibility(database).await?;
 
     let preparation = prepare_job(database, fixture, fixture.first_job, 1_000).await?;
     let observed_at = database_now_ms(database).await?;
@@ -684,6 +704,177 @@ async fn concurrent_claim_takeover_and_stale_generation_are_fenced() -> TestResu
         Ok(())
     })
     .await
+}
+
+fn assert_constraint(error: &sqlx::Error, expected: &str) {
+    let actual = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint);
+    assert_eq!(actual, Some(expected), "unexpected database error: {error}");
+}
+
+async fn assert_environment_evidence_contract(
+    database: &TestDatabase,
+    publication: &PublishLogicalJobActivation,
+) -> TestResult {
+    let stored: Vec<(Uuid, Option<String>, String, String, String)> = sqlx::query_as(
+        r"
+        SELECT instance_id, environment_normalized_name, event_trust, source_kind,
+               reusable_secret_permission
+        FROM workflow_plan_v2_job_environment_evidence
+        ORDER BY instance_id
+        ",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    let mut expected = publication
+        .instances()
+        .iter()
+        .map(|instance| {
+            (
+                instance.id().as_uuid(),
+                None,
+                "trusted".to_owned(),
+                "same_repository".to_owned(),
+                "none".to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort_unstable_by_key(|row| row.0);
+    assert_eq!(stored, expected);
+    let columns: Vec<String> = sqlx::query_scalar(
+        r"
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'workflow_plan_v2_job_environment_evidence'
+        ORDER BY ordinal_position
+        ",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        columns,
+        [
+            "instance_id",
+            "environment_normalized_name",
+            "event_trust",
+            "source_kind",
+            "reusable_secret_permission",
+            "created_at_ms",
+        ]
+    );
+    for (event_trust, source_kind, reusable_permission, expected_constraint) in [
+        (
+            "trusted",
+            "fork",
+            "none",
+            "job_environment_evidence_source_trust",
+        ),
+        (
+            "trusted",
+            "same_repository",
+            "explicit",
+            "job_environment_evidence_exact",
+        ),
+    ] {
+        let error = sqlx::query(
+            r"
+            INSERT INTO workflow_plan_v2_job_environment_evidence (
+                instance_id, environment_normalized_name, event_trust,
+                source_kind, reusable_secret_permission, created_at_ms
+            ) VALUES ($1, NULL, $2, $3, $4, $5)
+            ",
+        )
+        .bind(publication.instances()[0].id().as_uuid())
+        .bind(event_trust)
+        .bind(source_kind)
+        .bind(reusable_permission)
+        .bind(publication.published_at().get())
+        .execute(database.pool())
+        .await
+        .expect_err("invalid activation evidence must fail closed");
+        assert_constraint(&error, expected_constraint);
+    }
+    for mutation in [
+        "UPDATE workflow_plan_v2_job_environment_evidence SET event_trust = event_trust",
+        "DELETE FROM workflow_plan_v2_job_environment_evidence",
+        "TRUNCATE workflow_plan_v2_job_environment_evidence",
+    ] {
+        let error = sqlx::query(mutation)
+            .execute(database.pool())
+            .await
+            .expect_err("environment evidence is append-only");
+        assert_constraint(&error, "job_environment_evidence_append_only");
+    }
+    Ok(())
+}
+
+fn publication_with_changed_environment_evidence(
+    publication: &PublishLogicalJobActivation,
+) -> PublishLogicalJobActivation {
+    let mut instances = publication.instances().to_vec();
+    let original_evidence = instances[0]
+        .environment_gate()
+        .expect("original environment evidence")
+        .clone();
+    instances[0] =
+        instances[0]
+            .clone()
+            .with_environment_gate(JobEnvironmentActivationEvidence::new(
+                original_evidence.environment().cloned(),
+                JobEventTrust::Untrusted,
+                original_evidence.source_kind(),
+                original_evidence.reusable_secret_permission(),
+            ));
+    PublishLogicalJobActivation::new(
+        publication.claim().clone(),
+        publication.condition_matched(),
+        instances,
+        publication.published_at(),
+    )
+    .expect("evidence-only publication change")
+}
+
+fn publication_with_changed_job_ir_reference(
+    claimed: &ClaimedLogicalJobActivation,
+    publication: &PublishLogicalJobActivation,
+) -> PublishLogicalJobActivation {
+    let original = &publication.instances()[0];
+    let identity = JobInstanceIdentity::new(
+        claimed.logical_key().as_str(),
+        original.matrix_index(),
+        original.matrix_total(),
+        original.matrix_digest(),
+    )
+    .expect("original matrix identity");
+    let changed_job_ir = LogicalActivationObject::job_ir(
+        Sha256Digest::from_bytes([0xee; 32]),
+        original.job_ir().object_key().clone(),
+        original.job_ir().encoded_size(),
+    )
+    .expect("changed JobIR reference");
+    let changed_descriptor = ActivatedLogicalInstanceDescriptor::new(
+        claimed,
+        &identity,
+        original.workspace(),
+        changed_job_ir,
+        original.runtime_context().clone(),
+        original
+            .environment_gate()
+            .expect("original environment evidence")
+            .clone(),
+    )
+    .expect("content-reference-only publication change");
+    let mut instances = publication.instances().to_vec();
+    instances[0] = changed_descriptor;
+    PublishLogicalJobActivation::new(
+        publication.claim().clone(),
+        publication.condition_matched(),
+        instances,
+        publication.published_at(),
+    )
+    .expect("changed content reference publication")
 }
 
 #[tokio::test]
@@ -919,9 +1110,15 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
             }
         };
         assert_eq!(claimed.claim().input_digest(), preparation.input_digest());
+        let gate_evidence = JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        );
         let instances = vec![
-            instance(&claimed, 0, 2, 2_000, 100),
-            instance(&claimed, 1, 2, 2_000, 110),
+            instance(&claimed, 0, 2, 2_000, 100).with_environment_gate(gate_evidence.clone()),
+            instance(&claimed, 1, 2, 2_000, 110).with_environment_gate(gate_evidence),
         ];
         let publication = PublishLogicalJobActivation::new(
             claimed.claim().clone(),
@@ -942,16 +1139,18 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
         assert_eq!(left.output_digest(), right.output_digest());
         assert_eq!(left.instance_count(), 2);
 
-        let changed = PublishLogicalJobActivation::new(
-            claimed.claim().clone(),
-            true,
-            vec![
-                instance(&claimed, 0, 2, 2_001, 120),
-                instance(&claimed, 1, 2, 2_001, 130),
-            ],
-            left.published_at(),
-        )
-        .expect("changed publication");
+        assert_environment_evidence_contract(&database, &publication).await?;
+
+        let changed_evidence = publication_with_changed_environment_evidence(&publication);
+        assert!(matches!(
+            database
+                .store()
+                .publish_logical_job_activation(changed_evidence)
+                .await,
+            Err(LogicalActivationStoreError::PublicationConflict)
+        ));
+
+        let changed = publication_with_changed_job_ir_reference(&claimed, &publication);
         assert!(matches!(
             database
                 .store()

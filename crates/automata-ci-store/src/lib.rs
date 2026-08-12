@@ -7,11 +7,14 @@ mod attempt;
 mod blocked;
 mod bootstrap;
 mod cancellation;
+mod conformance;
 mod error;
 mod github_checks;
 mod github_job_runtime_authority;
 mod github_oidc;
 mod github_provider_manifest;
+mod github_repository_dispatch;
+mod github_schedule;
 mod github_service_authority;
 mod github_subject_evidence;
 mod logical_activation;
@@ -30,10 +33,13 @@ mod operation;
 mod outbox;
 mod plan;
 mod postgres;
+mod protected_environment;
 mod provider_delivery;
 mod publication;
 mod receipt;
 mod reconciliation;
+mod reusable_workflow_admission;
+mod reusable_workflow_runtime;
 mod routing;
 mod runnable;
 mod runner_control;
@@ -47,6 +53,7 @@ mod store_error;
 mod tenant;
 mod value;
 mod web;
+mod workflow_rerun;
 mod workflow_runtime_policy;
 
 pub use admission::{
@@ -75,6 +82,11 @@ pub use cancellation::{
     CancellationIntent, CancellationIntentError, CancellationReason, CancellationRepository,
     CancellationValueError, DEFAULT_CANCELLATION_REASON, RequestCancellation,
 };
+pub use conformance::{
+    ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
+    ConformanceReadRepository, ConformanceReadValueError, ConformanceWorkflowOutcome,
+    ConformanceWorkflowResult, MAX_CONFORMANCE_DELIVERY_ID_BYTES,
+};
 pub use error::{
     AttemptCommandError, AttemptSnapshotError, AttemptStoreError, RepositoryOperationError,
 };
@@ -87,9 +99,9 @@ pub use github_checks::{
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubCheckSubjectReceipt, GithubCheckSubjectRepository, GithubCheckSubjectTarget,
-    GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository,
-    GithubCheckValueError, LinkGithubCheckWorkflowRun,
+    GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
+    GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
+    GithubCheckTerminalizationRepository, GithubCheckValueError, LinkGithubCheckWorkflowRun,
     MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
     MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
     RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, ResolveGithubCheckRunCreate,
@@ -112,7 +124,8 @@ pub use github_oidc::{
     ReservedGithubOidcAuthority, RetainGithubOidcKey, github_oidc_rs256_public_key_fingerprint,
 };
 pub use github_provider_manifest::{
-    BootstrapGithubProviderManifest, BootstrapGithubProviderRepository, GITHUB_PROVIDER_API_ORIGIN,
+    BootstrapGithubProviderManifest, BootstrapGithubProviderRepository,
+    GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY, GITHUB_PROVIDER_API_ORIGIN,
     GITHUB_PROVIDER_ARCHIVE_ACCEPT, GITHUB_PROVIDER_ARCHIVE_FORMAT,
     GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES, GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES,
     GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES, GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES,
@@ -125,12 +138,31 @@ pub use github_provider_manifest::{
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_SOURCE_REVISION,
     GITHUB_PROVIDER_WEB_ORIGIN, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
     GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN,
-    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GITHUB_PROVIDER_WORKFLOW_PATH, GithubProviderManifest,
-    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
+    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GITHUB_PROVIDER_WORKFLOW_PATH, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, github_provider_repository_id,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    github_provider_repository_id,
+};
+pub use github_repository_dispatch::{
+    AcceptManifestPinnedGithubRepositoryDispatch, GithubRepositoryDispatchEvidenceRepository,
+    GithubRepositoryDispatchValueError, PendingGithubRepositoryDispatchEvidence,
+    PendingGithubRepositoryDispatchReceipt, ResolveGithubRepositoryDispatch,
+};
+pub use github_schedule::{
+    ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery, ClaimedGithubScheduleFire,
+    CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
+    GITHUB_SCHEDULE_ATTEMPTS_EXHAUSTED_FAILURE, GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE,
+    GITHUB_SCHEDULE_SERVICE_ACTOR, GithubScheduleArchive, GithubScheduleClaimFence,
+    GithubScheduleDiscoveryClaim, GithubScheduleFireClaim, GithubScheduleFireConclusion,
+    GithubScheduleFireId, GithubScheduleFireReceipt, GithubScheduleRegistryEntry,
+    GithubScheduleRegistryId, GithubScheduleRegistryReceipt, GithubScheduleRepository,
+    GithubScheduleSourceAuthority, GithubScheduleStoreError, GithubScheduleValueError,
+    GithubScheduleWorkerId, MAX_GITHUB_REGISTERED_SCHEDULES, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
+    MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, MAX_GITHUB_SCHEDULE_RETRY_MILLIS,
+    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire,
 };
 pub use github_service_authority::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
@@ -166,7 +198,8 @@ pub use github_service_authority::{
 };
 pub use github_subject_evidence::{
     AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubSubjectEvidenceRepository,
+    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubRepositoryDispatchResolution,
+    GithubRepositoryDispatchResolutionAuthority, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
     GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, RecordGithubWorkflowRunSubjectEvidence,
@@ -269,11 +302,13 @@ pub use maintenance::{
     StaleSessionTimeoutMillis,
 };
 pub use managed_secret_authority::{
-    MANAGED_SECRET_AUTHORITY_SCHEMA, MAX_MANAGED_SECRET_BINDINGS, ManagedSecretAuthorityBinding,
-    ManagedSecretAuthorityReceipt, ManagedSecretAuthorityRepository,
+    AcknowledgeManagedSecretDelivery, MANAGED_SECRET_AUTHORITY_SCHEMA, MAX_MANAGED_SECRET_BINDINGS,
+    ManagedSecretAuthorityBinding, ManagedSecretAuthorityReceipt, ManagedSecretAuthorityRepository,
     ManagedSecretAuthorityStoreError, ManagedSecretAuthorityValueError, ManagedSecretBinding,
-    ManagedSecretBindingSet, ManagedSecretGrantMode, ResolveManagedSecretAuthority,
-    SecretWorkloadGrantId,
+    ManagedSecretBindingSet, ManagedSecretDeliveryAcknowledgement, ManagedSecretDeliveryMachine,
+    ManagedSecretDeliveryOperationId, ManagedSecretDeliveryProposal, ManagedSecretExecutionScope,
+    ManagedSecretGrantMode, ManagedSecretScope, ResolveManagedSecretAuthority,
+    ResolveManagedSecretDeliverySession, ResolveManagedSecretExecutionScope, SecretWorkloadGrantId,
 };
 pub use observability::{
     ArtifactCounts, ArtifactReservationKind, ArtifactReservations, ArtifactState,
@@ -308,6 +343,16 @@ pub use postgres::{
     PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
     PostgresStoreError, PostgresTransportSecurity,
 };
+pub use protected_environment::{
+    BindLeasedJobSecrets, DeploymentEnvironmentName, EnvironmentReviewDecision,
+    InspectLeasedJobSecretBindings, IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding,
+    JobCredentialRequirements, JobEnvironmentActivationEvidence, JobEnvironmentGatePhase,
+    JobEnvironmentGateSnapshot, JobEnvironmentGateState, JobEnvironmentRequirement, JobEventTrust,
+    JobSourceKind, MAX_DEPLOYMENT_ENVIRONMENT_NAME_BYTES, MAX_JOB_CREDENTIAL_REFERENCES,
+    PrepareJobEnvironment, ProtectedEnvironmentRepository, ProtectedEnvironmentStoreError,
+    ProtectedEnvironmentValueError, ReusableSecretPermission, ReviewJobEnvironment,
+    SecretLeaseAuthority,
+};
 pub use provider_delivery::{
     AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
@@ -317,9 +362,12 @@ pub use provider_delivery::{
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryValueError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowOutcome, ProviderInstallationId,
+    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderDeliveryWorkflowSourceState, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RejectProviderDelivery, RenewProviderDeliveryClaim,
+    ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
+    RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery, RenewProviderDeliveryClaim,
     RenewedProviderDeliveryClaim, RetryProviderDelivery,
 };
 pub use publication::{
@@ -331,6 +379,22 @@ pub use receipt::{
     RunnerOperationRequest, RunnerOperationResponse, RunnerReceiptValueError,
 };
 pub use reconciliation::{RunReconciliation, RunReconciliationRepository, WorkflowRunStatus};
+pub use reusable_workflow_admission::{
+    AdmittedReusableInput, AdmittedReusableInputKind, AdmittedReusableInvocation,
+    AdmittedReusableJob, AdmittedReusableOutput, AdmittedReusablePermissions,
+    AdmittedReusableSecret, AdmittedReusableWorkflowCatalogEntry,
+    AdmittedReusableWorkflowExpansion,
+};
+pub use reusable_workflow_runtime::{
+    CompleteReusableWorkflowCall, EvaluatedReusableWorkflowOutput, MAX_REUSABLE_CALL_OUTPUTS,
+    PublishReusableWorkflowCall, ReadyReusableWorkflowCall, ReadyReusableWorkflowCompletion,
+    ReusableCallOutputMapping, ReusableWorkflowCompletionReceipt,
+    ReusableWorkflowInputBindingEvidence, ReusableWorkflowOperationId,
+    ReusableWorkflowPermissionSnapshot, ReusableWorkflowPublicationReceipt,
+    ReusableWorkflowResultOutput, ReusableWorkflowRuntimeRepository,
+    ReusableWorkflowRuntimeStoreError, ReusableWorkflowRuntimeValueError,
+    ReusableWorkflowSecretBindingEvidence,
+};
 pub use routing::{
     RoutingSnapshotError, RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot,
     RunnerSlotAvailability, RunnerSlotAvailabilityRepository,
@@ -440,6 +504,11 @@ pub use web::{
     HumanTerminalResult, HumanWorkflow, HumanWorkflowCursor, HumanWorkflowListQuery,
     HumanWorkflowPage, HumanWorkflowProjectedName, HumanWorkflowReadRepository,
     MAX_HUMAN_LOG_SEGMENT_PAGE_SIZE, MAX_HUMAN_PAGE_SIZE, RepositoryCoordinate,
+};
+pub use workflow_rerun::{
+    MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow, RerunWorkflowByName,
+    WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
+    WorkflowRerunValueError,
 };
 pub use workflow_runtime_policy::{
     MAX_WORKFLOW_RUNTIME_POLICY_BYTES, MAX_WORKFLOW_RUNTIME_POLICY_FEATURES,

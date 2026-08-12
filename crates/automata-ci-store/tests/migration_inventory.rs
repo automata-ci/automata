@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, ffi::OsStr, fs, path::Path};
 
 type InventoryEntry = (String, bool);
+const RESERVED_MIGRATION_VERSIONS: &[i64] = &[57, 63];
 
 fn validate_migration_entries(
     entries: impl IntoIterator<Item = InventoryEntry>,
@@ -64,9 +65,11 @@ fn validate_migration_entries(
                 "noncontiguous SQLx migration versions: `{previous_file_name}` uses the maximum supported version and cannot be followed by `{file_name}`"
             )
         })?;
-        if version != expected_version {
+        let first_unreserved_gap = (expected_version..version)
+            .find(|missing| !RESERVED_MIGRATION_VERSIONS.contains(missing));
+        if let Some(missing) = first_unreserved_gap {
             return Err(format!(
-                "noncontiguous SQLx migration versions: expected version {expected_version} after `{previous_file_name}` but found version {version} in `{file_name}`"
+                "noncontiguous SQLx migration versions: expected version {missing} after `{previous_file_name}` but found version {version} in `{file_name}`"
             ));
         }
         previous_version = version;
@@ -146,6 +149,25 @@ fn noncontiguous_versions_report_gap_adjacent_filenames() {
     assert_eq!(
         error,
         "noncontiguous SQLx migration versions: expected version 2 after `0001_first.sql` but found version 3 in `0003_third.sql`"
+    );
+}
+
+#[test]
+fn only_explicit_retired_versions_may_be_absent() {
+    let reserved_inventory = (1_i64..=64)
+        .filter(|version| !RESERVED_MIGRATION_VERSIONS.contains(version))
+        .map(|version| (format!("{version:04}_migration.sql"), true));
+    validate_migration_entries(reserved_inventory)
+        .expect("the two explicit retired migration slots may remain absent");
+
+    let unreviewed_gap = (1_i64..=64)
+        .filter(|version| ![42, 57, 63].contains(version))
+        .map(|version| (format!("{version:04}_migration.sql"), true));
+    let error = validate_migration_entries(unreviewed_gap)
+        .expect_err("an unreviewed migration gap must still be rejected");
+    assert_eq!(
+        error,
+        "noncontiguous SQLx migration versions: expected version 42 after `0041_migration.sql` but found version 43 in `0043_migration.sql`"
     );
 }
 

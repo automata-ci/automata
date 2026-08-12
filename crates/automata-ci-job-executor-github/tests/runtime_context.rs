@@ -3,7 +3,10 @@ mod support;
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -16,22 +19,81 @@ use automata_ci_core::{
 use automata_ci_expression_github::{GithubObject, GithubValue, MapContext};
 use automata_ci_job_executor_github::{
     GithubContextPort, GithubContextRequest, GithubContextSnapshot, JobContentPort, PortError,
-    PortErrorKind,
+    PortErrorKind, SecretCustodyAcknowledger,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_runner_runtime::{
-    ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
+    ExecutionCancellation, ExecutionEvents, ExecutorError, ExecutorErrorKind, JobExecutor,
 };
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 
 use support::{
-    Fixture, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, PhaseResponse, encode_runtime_context,
-    envelope_with_runtime_context_and_working_directory, envelope_with_runtime_context_reference,
-    runtime_context_reference,
+    FakeProvider, Fixture, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, PhaseResponse, SECRET,
+    encode_runtime_context, envelope_with_runtime_context_and_working_directory,
+    envelope_with_runtime_context_reference, runtime_context_reference,
 };
 
 const SECRET_DERIVED_SENTINEL: &str = "classified-need-output-must-stay-opaque";
+
+#[derive(Debug)]
+struct PreExecutionAcknowledger {
+    provider: Arc<FakeProvider>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SecretCustodyAcknowledger for PreExecutionAcknowledger {
+    async fn acknowledge(&self, cancellation: CancellationToken) -> Result<(), ExecutorError> {
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(self.provider.counts(), (0, 0, 0));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn complete_custody_is_masked_and_acknowledged_before_provider_work() {
+    let runtime_context_with_bindings = rich_runtime_context();
+    let bindings = runtime_context_with_bindings.secrets().clone();
+    let runtime_context = JobRuntimeContext::new(
+        runtime_context_with_bindings.inputs().clone(),
+        runtime_context_with_bindings.vars().clone(),
+        runtime_context_with_bindings.matrix().clone(),
+        runtime_context_with_bindings.strategy(),
+        runtime_context_with_bindings.needs().clone(),
+        BTreeMap::new(),
+    )
+    .expect("secretless immutable context");
+    let encoded = encode_runtime_context(&runtime_context);
+    let reference = runtime_context_reference(&encoded);
+    let content = Arc::new(RecordingContent::bytes(encoded));
+    let contexts = Arc::new(CapturingContexts::default());
+    let fixture = Fixture::with_content_and_contexts(
+        Vec::new(),
+        vec![PhaseResponse::success().with_stdout(format!("{SECRET}\n"))],
+        content,
+        contexts,
+    );
+    let acknowledger = Arc::new(PreExecutionAcknowledger {
+        provider: Arc::clone(&fixture.provider),
+        calls: AtomicUsize::new(0),
+    });
+    let fixture = fixture.with_managed_secret_custody(acknowledger.clone(), bindings);
+    let job = envelope_with_runtime_context_reference(vec![minimal_step()], reference);
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    fixture
+        .executor
+        .execute(fixture.request(job), events, ExecutionCancellation::new())
+        .await
+        .expect("masked custody executes");
+
+    assert_eq!(acknowledger.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.provider.counts(), (1, 1, 0));
+    assert_eq!(fixture.events.logs()[0].payload(), b"***\n");
+}
 
 #[tokio::test]
 async fn exact_runtime_context_is_fetched_once_and_borrowed_by_phase_snapshots() {
