@@ -32,23 +32,22 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestError, TestResult, run_with_database};
 
-const MIGRATION_SQL: &str =
-    include_str!("../migrations/0043_workflow_runtime_policy_and_selection.sql");
+const MIGRATION_SQL: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn migration_closes_reciprocal_quarantine_custody() {
     for required in [
-        "workflow_plan_v2_activation_quarantine_selection_unique UNIQUE (selection_id)",
-        "workflow_plan_v2_materialization_quarantine_selection_unique UNIQUE (selection_id)",
+        "logical_workflow_activation_quarantine_selection_unique UNIQUE (selection_id)",
+        "logical_workflow_materialization_quarantine_selection_unique UNIQUE (selection_id)",
         "CREATE FUNCTION automata_require_final_activation_work_quarantine()",
         "CREATE FUNCTION automata_require_final_materialization_work_quarantine()",
         "WHEN NEW.failure_kind = 'generation_exhausted' THEN 'quarantined'",
-        "workflow_plan_v2_activation_quarantine_selection_closure",
-        "workflow_plan_v2_materialization_quarantine_selection_closure",
+        "logical_workflow_activation_quarantine_selection_closure",
+        "logical_workflow_materialization_quarantine_selection_closure",
         "DEFERRABLE INITIALLY DEFERRED",
         "CREATE FUNCTION automata_require_pristine_logical_job_admission()",
-        "workflow_plan_v2_jobs_activation_admission_pristine",
-        "CREATE TRIGGER workflow_plan_v2_jobs_00_activation_admission",
+        "logical_workflow_jobs_activation_admission_pristine",
+        "CREATE TRIGGER logical_workflow_jobs_00_activation_admission",
     ] {
         assert!(
             MIGRATION_SQL.contains(required),
@@ -78,7 +77,7 @@ async fn authenticated_admission_is_pristine_and_direct_authority_inserts_fail()
                    AND activation_input_digest IS NULL
                    AND authority_profile IS NULL
                    AND activation_origin_selection_id IS NULL
-            FROM workflow_plan_v2_jobs
+            FROM logical_workflow_jobs
             WHERE id = $1
             ",
         )
@@ -242,10 +241,10 @@ async fn empty_queues_replay_exactly_and_never_leave_selecting_receipts() -> Tes
             r"
             SELECT
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_activation_work_selections
+                 FROM logical_workflow_activation_work_selections
                  WHERE outcome = 'selecting'),
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_materialization_work_selections
+                 FROM logical_workflow_materialization_work_selections
                  WHERE outcome = 'selecting')
             ",
         )
@@ -263,7 +262,7 @@ async fn assert_nonpristine_job_inserts_rejected(
 ) -> TestResult {
     let pending_error = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_jobs (
+        INSERT INTO logical_workflow_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence,
             activation_owner_id, activation_claimed_at_ms,
@@ -277,7 +276,7 @@ async fn assert_nonpristine_job_inserts_rejected(
                NULL, NULL, NULL, NULL, NULL, NULL,
                created_at_ms, updated_at_ms,
                runtime_policy_revision, runtime_policy_digest
-        FROM workflow_plan_v2_jobs
+        FROM logical_workflow_jobs
         WHERE id = $1
         ",
     )
@@ -288,13 +287,13 @@ async fn assert_nonpristine_job_inserts_rejected(
     .expect_err("pending admission may not smuggle a nonzero activation fence");
     assert_database_constraint(
         &pending_error,
-        "workflow_plan_v2_jobs_activation_admission_pristine",
+        "logical_workflow_jobs_activation_admission_pristine",
     );
 
     let now = database_now_ms(database).await?;
     let activating_error = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_jobs (
+        INSERT INTO logical_workflow_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence,
             activation_owner_id, activation_claimed_at_ms,
@@ -308,7 +307,7 @@ async fn assert_nonpristine_job_inserts_rejected(
                $3, $4, $5, $6, 'standard', $7,
                created_at_ms, $4,
                runtime_policy_revision, runtime_policy_digest
-        FROM workflow_plan_v2_jobs
+        FROM logical_workflow_jobs
         WHERE id = $1
         ",
     )
@@ -324,11 +323,11 @@ async fn assert_nonpristine_job_inserts_rejected(
     .expect_err("admission may not insert already-active authority");
     assert_database_constraint(
         &activating_error,
-        "workflow_plan_v2_jobs_activation_admission_pristine",
+        "logical_workflow_jobs_activation_admission_pristine",
     );
 
     let forged_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*)::BIGINT FROM workflow_plan_v2_jobs WHERE id IN ($1,$2)",
+        "SELECT count(*)::BIGINT FROM logical_workflow_jobs WHERE id IN ($1,$2)",
     )
     .bind(Uuid::from_u128(0x790_200))
     .bind(Uuid::from_u128(0x790_201))
@@ -514,6 +513,10 @@ async fn authenticate_fixture(
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([9; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -597,8 +600,8 @@ async fn assert_quarantine_catalog(database: &TestDatabase) -> TestResult {
           ON catalog_namespace.oid = catalog_constraint.connamespace
         WHERE catalog_namespace.nspname = current_schema()
           AND catalog_constraint.conname IN (
-            'workflow_plan_v2_activation_quarantine_selection_unique',
-            'workflow_plan_v2_materialization_quarantine_selection_unique'
+            'logical_workflow_activation_quarantine_selection_unique',
+            'logical_workflow_materialization_quarantine_selection_unique'
           )
           AND catalog_constraint.contype = 'u'
         ORDER BY catalog_constraint.conname
@@ -619,8 +622,8 @@ async fn assert_quarantine_catalog(database: &TestDatabase) -> TestResult {
           ON catalog_namespace.oid = catalog_relation.relnamespace
         WHERE catalog_namespace.nspname = current_schema()
           AND catalog_trigger.tgname IN (
-            'workflow_plan_v2_activation_quarantine_selection_closure',
-            'workflow_plan_v2_materialization_quarantine_selection_closure'
+            'logical_workflow_activation_quarantine_selection_closure',
+            'logical_workflow_materialization_quarantine_selection_closure'
           )
         ORDER BY catalog_trigger.tgname
         ",

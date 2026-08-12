@@ -405,6 +405,10 @@ async fn admit_signed_workflow(
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new(head_sha)?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -838,7 +842,7 @@ async fn seed_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             automata_ci_core::JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,
@@ -1034,9 +1038,9 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "missing preparation origin",
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims AS preparation
+            UPDATE logical_workflow_activation_preparation_claims AS preparation
             SET origin_selection_id = NULL
-            FROM workflow_plan_v2_concrete_jobs AS concrete
+            FROM logical_workflow_concrete_jobs AS concrete
             WHERE concrete.job_id = $1
               AND preparation.run_id = concrete.run_id
               AND preparation.invocation_id = concrete.invocation_id
@@ -1046,10 +1050,10 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "swapped preparation origin",
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims AS preparation
+            UPDATE logical_workflow_activation_preparation_claims AS preparation
             SET origin_selection_id = logical_job.activation_origin_selection_id
-            FROM workflow_plan_v2_concrete_jobs AS concrete
-            JOIN workflow_plan_v2_jobs AS logical_job
+            FROM logical_workflow_concrete_jobs AS concrete
+            JOIN logical_workflow_jobs AS logical_job
               ON logical_job.run_id = concrete.run_id
              AND logical_job.invocation_id = concrete.invocation_id
              AND logical_job.id = concrete.logical_job_id
@@ -1062,9 +1066,9 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "missing activation origin",
             r"
-            UPDATE workflow_plan_v2_jobs AS logical_job
+            UPDATE logical_workflow_jobs AS logical_job
             SET activation_origin_selection_id = NULL
-            FROM workflow_plan_v2_concrete_jobs AS concrete
+            FROM logical_workflow_concrete_jobs AS concrete
             WHERE concrete.job_id = $1
               AND logical_job.run_id = concrete.run_id
               AND logical_job.invocation_id = concrete.invocation_id
@@ -1074,10 +1078,10 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "swapped activation origin",
             r"
-            UPDATE workflow_plan_v2_jobs AS logical_job
+            UPDATE logical_workflow_jobs AS logical_job
             SET activation_origin_selection_id = preparation.origin_selection_id
-            FROM workflow_plan_v2_concrete_jobs AS concrete
-            JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+            FROM logical_workflow_concrete_jobs AS concrete
+            JOIN logical_workflow_activation_preparation_claims AS preparation
               ON preparation.run_id = concrete.run_id
              AND preparation.invocation_id = concrete.invocation_id
              AND preparation.logical_job_id = concrete.logical_job_id
@@ -1090,7 +1094,7 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "missing materialization origin",
             r"
-            UPDATE workflow_plan_v2_materialization_claims
+            UPDATE logical_workflow_materialization_claims
             SET origin_selection_id = NULL
             WHERE expected_job_id = $1
             ",
@@ -1098,10 +1102,10 @@ async fn assert_phase_selection_origins_are_immutable(
         (
             "swapped materialization origin",
             r"
-            UPDATE workflow_plan_v2_materialization_claims AS materialization
+            UPDATE logical_workflow_materialization_claims AS materialization
             SET origin_selection_id = logical_job.activation_origin_selection_id
-            FROM workflow_plan_v2_concrete_jobs AS concrete
-            JOIN workflow_plan_v2_jobs AS logical_job
+            FROM logical_workflow_concrete_jobs AS concrete
+            JOIN logical_workflow_jobs AS logical_job
               ON logical_job.run_id = concrete.run_id
              AND logical_job.invocation_id = concrete.invocation_id
              AND logical_job.id = concrete.logical_job_id
@@ -1409,22 +1413,22 @@ const INSERT_EXACT_RUNTIME_AUTHORITY_CANDIDATE_SQL: &str = r"
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.job_id = job.id
          AND concrete.initial_attempt_id = attempt.id
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+        JOIN logical_workflow_activation_preparation_claims AS preparation
           ON preparation.run_id = concrete.run_id
          AND preparation.invocation_id = concrete.invocation_id
          AND preparation.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = concrete.run_id
          AND publication.invocation_id = concrete.invocation_id
          AND publication.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.expected_job_id = concrete.job_id
          AND materialization.expected_attempt_id = concrete.initial_attempt_id
@@ -1794,8 +1798,8 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
         let preparation_and_materialization_are_distinct: bool = sqlx::query_scalar(
             r"
             SELECT preparation.descriptor_digest <> concrete.descriptor_digest
-            FROM workflow_plan_v2_concrete_jobs AS concrete
-            JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+            FROM logical_workflow_concrete_jobs AS concrete
+            JOIN logical_workflow_activation_preparation_claims AS preparation
               ON preparation.run_id = concrete.run_id
              AND preparation.invocation_id = concrete.invocation_id
              AND preparation.logical_job_id = concrete.logical_job_id
@@ -2331,7 +2335,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                 identity.repository_id().as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_activation_work_selections \
+                "SELECT selection_id FROM logical_workflow_activation_work_selections \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .preparation_selection_tail()
@@ -2339,7 +2343,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                     .as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_activation_work_selections \
+                "SELECT selection_id FROM logical_workflow_activation_work_selections \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .activation_selection_tail()
@@ -2347,7 +2351,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                     .as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_materialization_work_selections \
+                "SELECT selection_id FROM logical_workflow_materialization_work_selections \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .materialization_selection_tail()
@@ -2355,7 +2359,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                     .as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_activation_renewal_receipts \
+                "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .preparation_selection_tail()
@@ -2363,7 +2367,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                     .as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_activation_renewal_receipts \
+                "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .activation_selection_tail()
@@ -2371,7 +2375,7 @@ async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manife
                     .as_uuid(),
             ),
             (
-                "SELECT selection_id FROM workflow_plan_v2_materialization_renewal_receipts \
+                "SELECT selection_id FROM logical_workflow_materialization_renewal_receipts \
                  WHERE selection_id = $1 FOR UPDATE",
                 identity
                     .materialization_selection_tail()

@@ -1,4 +1,4 @@
-//! Deterministic activation of schema-v2 logical jobs into concrete contexts.
+//! Deterministic activation of logical-workflow logical jobs into concrete contexts.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -412,7 +412,7 @@ pub trait LogicalActivationSession: fmt::Debug + Send + Sync {
     fn matrix_value_matches(&self, original: &ActivationValue, patch: &ActivationValue) -> bool;
 }
 
-/// Schema-v2 plan validated once before any logical-job activation.
+/// Logical-workflow plan validated once before any logical-job activation.
 #[derive(Clone, Copy)]
 pub struct ValidatedLogicalPlan<'a> {
     plan: &'a WorkflowPlan,
@@ -461,7 +461,7 @@ impl<'a> ValidatedLogicalPlan<'a> {
     }
 }
 
-/// Logical job borrowed from a fully validated schema-v2 workflow plan.
+/// Logical job borrowed from a fully validated logical-workflow workflow plan.
 #[derive(Clone, Copy)]
 pub struct ValidatedLogicalJob<'a> {
     plan: &'a WorkflowPlan,

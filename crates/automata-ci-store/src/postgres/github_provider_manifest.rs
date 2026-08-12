@@ -11,8 +11,8 @@ use super::{
     },
 };
 use crate::{
-    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderManifest, GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
+    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName, GithubProviderManifest,
+    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
@@ -968,21 +968,11 @@ fn decode_manifest_record(
     if workflow_path != check_subject_key {
         return Err(GithubProviderManifestStoreError::CorruptData);
     }
-    let workflow_selection = match row
-        .try_get::<String, _>("workflow_selection_kind")
-        .map_err(operation_error)?
-        .as_str()
-    {
-        "exact" => {
-            let path = GithubCheckSubjectKey::new(workflow_path)
-                .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-            GithubProviderWorkflowSelection::exact(path)
-        }
-        "all_direct" if workflow_path == crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY => {
-            GithubProviderWorkflowSelection::all_direct()
-        }
-        _ => return Err(GithubProviderManifestStoreError::CorruptData),
-    };
+    require_exact_text(row, "workflow_selection_kind", "all_direct")?;
+    if workflow_path != crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY {
+        return Err(GithubProviderManifestStoreError::CorruptData);
+    }
+    let workflow_selection = GithubProviderWorkflowSelection::all_direct();
     require_exact_text(row, "event_name", crate::GITHUB_PROVIDER_EVENT)?;
     let git_ref = crate::GithubProviderGitRef::new(
         row.try_get::<String, _>("git_ref")

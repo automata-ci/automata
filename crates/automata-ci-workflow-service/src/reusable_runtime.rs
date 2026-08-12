@@ -298,7 +298,7 @@ impl ReusableWorkflowRuntimeService {
         )
         .map_err(|_| ReusableWorkflowRuntimeError::InvalidEvidence)?;
         let context_key = BlobKey::new(format!(
-            "workflow-plan-v2/reusable-contexts/{}/{}.pb",
+            "logical-workflow/reusable-contexts/{}/{}.pb",
             preparation.target().run_id().as_uuid(),
             candidate.child_invocation_id().as_uuid(),
         ))

@@ -15,8 +15,7 @@ use common::{
     TestDatabase, TestResult, run_with_database, run_with_unmigrated_database, seed_control_plane,
 };
 
-const UI_PROJECTION_MIGRATION: &str =
-    include_str!("../migrations/0011_workflow_run_ui_projection.sql");
+const UI_PROJECTION_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 struct ProjectionRow {

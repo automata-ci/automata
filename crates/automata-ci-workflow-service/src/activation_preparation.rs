@@ -308,7 +308,7 @@ fn context_payload(
     let bytes = automata_ci_protocol_protobuf::encode_job_runtime_context(context, limits)
         .map_err(|_| LogicalActivationPreparationError::Corrupt)?;
     let key = BlobKey::new(format!(
-        "workflow-plan-v2/activation-preparations/{}/{}/{}/{}/{filename}",
+        "logical-workflow/activation-preparations/{}/{}/{}/{}/{filename}",
         descriptor.target().run_id().as_uuid(),
         descriptor.target().invocation_id().as_uuid(),
         descriptor.target().logical_job_id().as_uuid(),

@@ -772,12 +772,12 @@ async fn lock_source_run(
                check_projection.terminal_count AS terminal_check_subject_count
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
-        LEFT JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        LEFT JOIN workflow_plan_v2_invocations AS invocation
+        LEFT JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        LEFT JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
-        LEFT JOIN workflow_plan_v2_run_result_claims AS claim ON claim.run_id = run.id
-        LEFT JOIN workflow_plan_v2_run_results AS result ON result.run_id = run.id
+        LEFT JOIN logical_workflow_run_result_claims AS claim ON claim.run_id = run.id
+        LEFT JOIN logical_workflow_run_results AS result ON result.run_id = run.id
         LEFT JOIN workflow_rerun_attempts AS attempt ON attempt.run_id = run.id
         LEFT JOIN workflow_runs AS root_run
           ON root_run.id = COALESCE(attempt.root_run_id, run.id)
@@ -1220,13 +1220,13 @@ async fn load_source_jobs(
                job.secret_reference_names, job.variable_reference_names,
                job.credential_requirements_schema,
                result.effective_conclusion, result.instance_count
-        FROM workflow_plan_v2_jobs AS job
-        JOIN workflow_plan_v2_effective_job_results AS result
+        FROM logical_workflow_jobs AS job
+        JOIN logical_workflow_effective_job_results AS result
           ON result.logical_job_id = job.id
          AND result.run_id = job.run_id
          AND result.invocation_id = job.invocation_id
          AND result.claim_state = 'finalized'
-        JOIN workflow_plan_v2_run_result_jobs AS aggregate
+        JOIN logical_workflow_run_result_jobs AS aggregate
           ON aggregate.run_id = job.run_id
          AND aggregate.root_invocation_id = job.invocation_id
          AND aggregate.logical_job_id = job.id
@@ -1245,7 +1245,7 @@ async fn load_source_jobs(
         return Err(WorkflowRerunStoreError::UnsupportedSelection);
     }
     let invocation_count: i64 = sqlx::query_scalar(
-        "SELECT count(*)::BIGINT FROM workflow_plan_v2_invocations WHERE run_id = $1",
+        "SELECT count(*)::BIGINT FROM logical_workflow_invocations WHERE run_id = $1",
     )
     .bind(source.run_id)
     .fetch_one(&mut **transaction)
@@ -1315,7 +1315,7 @@ async fn load_source_dependencies(
     sqlx::query_as(
         r"
         SELECT logical_job_id, prerequisite_job_id
-        FROM workflow_plan_v2_dependencies
+        FROM logical_workflow_dependencies
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY logical_job_id, prerequisite_job_id
         ",
@@ -1446,7 +1446,7 @@ async fn insert_marker_and_invocation(
 ) -> Result<(), WorkflowRerunStoreError> {
     let marker_rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_runs (
+        INSERT INTO logical_workflow_runs (
             run_id, root_invocation_id, orchestration_schema, admission_digest,
             state, revision, admitted_at_ms, updated_at_ms,
             base_context_digest, base_context_object_key,
@@ -1457,7 +1457,7 @@ async fn insert_marker_and_invocation(
                base_context_digest, base_context_object_key,
                base_context_size_bytes, base_context_media_type, base_context_schema,
                runner_requirements_schema
-        FROM workflow_plan_v2_runs WHERE run_id = $1
+        FROM logical_workflow_runs WHERE run_id = $1
         ",
     )
     .bind(source.run_id)
@@ -1473,14 +1473,14 @@ async fn insert_marker_and_invocation(
 
     let invocation_rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_invocations (
+        INSERT INTO logical_workflow_invocations (
             id, run_id, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, state, revision,
             created_at_ms, updated_at_ms, invocation_kind
         )
         SELECT $3, $2, plan_digest, plan_object_key, plan_size_bytes,
                plan_media_type, plan_schema, 'pending', 1, $4, $4, 'root'
-        FROM workflow_plan_v2_invocations
+        FROM logical_workflow_invocations
         WHERE run_id = $1 AND id = $5 AND invocation_kind = 'root'
         ",
     )
@@ -1779,7 +1779,7 @@ async fn insert_rerun_run_subject_evidence(
          AND request.rerun_run_id = attempt.run_id
          AND request.source_run_id = attempt.source_run_id
         JOIN workflow_runs AS run ON run.id = attempt.run_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = attempt.run_id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = attempt.run_id
         JOIN workflow_rerun_check_evidence AS check_evidence
           ON check_evidence.tenant_id = request.tenant_id
          AND check_evidence.operation_id = request.operation_id
@@ -1861,13 +1861,13 @@ async fn copy_runtime_policy_pin(
 ) -> Result<(), WorkflowRerunStoreError> {
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_runtime_policy_pins (
+        INSERT INTO logical_workflow_runtime_policy_pins (
             run_id, tenant_id, repository_id, policy_revision,
             policy_digest, pinned_at_ms
         )
         SELECT $2, tenant_id, repository_id, policy_revision,
                policy_digest, $3
-        FROM workflow_plan_v2_runtime_policy_pins
+        FROM logical_workflow_runtime_policy_pins
         WHERE run_id = $1
         ",
     )
@@ -1898,7 +1898,7 @@ async fn insert_jobs(
         let is_selected = write.selected_jobs.contains(&job.id);
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_jobs (
+            INSERT INTO logical_workflow_jobs (
                 id, run_id, invocation_id, logical_key, source_order,
                 execution_kind, state, activation_fence,
                 activation_owner_id, activation_claimed_at_ms,
@@ -1989,7 +1989,7 @@ async fn insert_dependencies(
     for (source_job, source_prerequisite) in write.dependencies {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_dependencies (
+            INSERT INTO logical_workflow_dependencies (
                 run_id, invocation_id, logical_job_id, prerequisite_job_id
             ) VALUES ($1,$2,$3,$4)
             ",
@@ -2039,7 +2039,7 @@ async fn copy_carried_result(
                result.claim_owner_id,result.claim_generation,
                result.claim_started_at_ms,result.claim_expires_at_ms,
                result.finalized_at_ms
-        FROM workflow_plan_v2_effective_job_results AS result
+        FROM logical_workflow_effective_job_results AS result
         WHERE result.run_id = $1 AND result.logical_job_id = $2
           AND result.claim_state = 'finalized'
         ",
@@ -2061,7 +2061,7 @@ async fn copy_carried_result(
             logical_job_id, output_name, sensitivity, public_value
         )
         SELECT $2, output_name, sensitivity, public_value
-        FROM workflow_plan_v2_effective_job_result_outputs
+        FROM logical_workflow_effective_job_result_outputs
         WHERE logical_job_id = $1
         ORDER BY output_name COLLATE "C"
         "#,
@@ -2080,7 +2080,7 @@ async fn seal_graph(
 ) -> Result<(), WorkflowRerunStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET admission_graph_sealed_at_ms = database_clock.now_ms,
             updated_at_ms = database_clock.now_ms
         FROM (

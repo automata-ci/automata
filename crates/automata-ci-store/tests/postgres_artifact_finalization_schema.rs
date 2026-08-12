@@ -1,5 +1,4 @@
-const ARTIFACT_FINALIZATION_MIGRATION: &str =
-    include_str!("../migrations/0016_artifact_finalization_singleflight.sql");
+const ARTIFACT_FINALIZATION_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn artifact_finalization_migration_is_greenfield_fenced_and_recoverable() {

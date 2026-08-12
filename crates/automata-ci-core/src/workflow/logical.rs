@@ -1,4 +1,4 @@
-//! Schema-v2 logical workflow and job templates.
+//! Logical-workflow logical workflow and job templates.
 
 use std::{collections::BTreeSet, fmt};
 
@@ -15,7 +15,7 @@ use super::{
     validation::LogicalPlanBudget,
 };
 
-/// Maximum logical jobs in one schema-v2 workflow plan.
+/// Maximum logical jobs in one logical-workflow workflow plan.
 pub const MAX_LOGICAL_JOBS: usize = 1_024;
 /// Maximum direct prerequisite jobs for one logical job.
 pub const MAX_LOGICAL_JOB_NEEDS: usize = 128;
@@ -2299,7 +2299,7 @@ impl LogicalJobTemplateBuilder {
     }
 }
 
-/// Schema-v2 logical workflow body. The outer plan owns source/event evidence.
+/// Logical-workflow logical workflow body. The outer plan owns source/event evidence.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalWorkflowPlan {

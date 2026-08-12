@@ -107,7 +107,7 @@ fn runtime_context_is_deterministic_flat_and_round_trips() {
     );
 
     let wire = fixture_wire::JobRuntimeContext::decode(first.as_slice()).expect("wire context");
-    assert_eq!(wire.schema_version, 2);
+    assert_eq!(wire.schema_version, 1);
     for (parent, node) in wire.nodes.iter().enumerate() {
         use fixture_wire::context_value_node::Value;
         match node.value.as_ref().expect("node value") {

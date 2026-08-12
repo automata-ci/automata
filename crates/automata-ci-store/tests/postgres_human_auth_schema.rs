@@ -6,8 +6,7 @@ use uuid::Uuid;
 
 use common::{TestResult, run_with_database, seed_control_plane};
 
-const HUMAN_AUTH_MIGRATION: &str =
-    include_str!("../migrations/0010_human_auth_rbac_publication.sql");
+const HUMAN_AUTH_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn human_auth_migration_keeps_publication_private_and_never_names_value_read() {

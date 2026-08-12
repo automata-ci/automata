@@ -184,7 +184,7 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
             .await?;
         let corrupted = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_jobs
+            UPDATE logical_workflow_jobs
             SET activation_fence = $2,
                 created_at_ms = 1,
                 activation_claimed_at_ms = 1,
@@ -202,7 +202,7 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
         corruption.commit().await?;
 
         let mut authority_lock = database.pool().begin().await?;
-        sqlx::query("SELECT id FROM workflow_plan_v2_jobs WHERE id = $1 FOR UPDATE")
+        sqlx::query("SELECT id FROM logical_workflow_jobs WHERE id = $1 FOR UPDATE")
             .bind(poisoned.jobs[0].as_uuid())
             .fetch_one(&mut *authority_lock)
             .await?;
@@ -220,14 +220,14 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
             LogicalJobOrchestrationSelectionOutcome::Contended
         ));
         let contended_outcome: String = sqlx::query_scalar(
-            "SELECT outcome FROM workflow_plan_v2_activation_work_selections WHERE selection_id = $1",
+            "SELECT outcome FROM logical_workflow_activation_work_selections WHERE selection_id = $1",
         )
         .bind(contended_request.selection_id().as_uuid())
         .fetch_one(database.pool())
         .await?;
         assert_eq!(contended_outcome, "contended");
         let quarantine_count: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM workflow_plan_v2_activation_work_quarantines",
+            "SELECT count(*)::BIGINT FROM logical_workflow_activation_work_quarantines",
         )
         .fetch_one(database.pool())
         .await?;
@@ -258,7 +258,7 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
         let poison_receipt: (String, Option<i64>, Option<Uuid>) = sqlx::query_as(
             r"
             SELECT outcome, generation, logical_job_id
-            FROM workflow_plan_v2_activation_work_selections
+            FROM logical_workflow_activation_work_selections
             WHERE selection_id = $1
             ",
         )
@@ -271,7 +271,7 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
         let poison: (String, i64, Uuid) = sqlx::query_as(
             r"
             SELECT failure_kind, authority_generation, selection_id
-            FROM workflow_plan_v2_activation_work_quarantines
+            FROM logical_workflow_activation_work_quarantines
             WHERE logical_job_id = $1
             ",
         )
@@ -289,7 +289,7 @@ async fn activation_generation_poison_is_locked_exact_and_does_not_starve_new_wo
         )
         .await?;
         let selecting_count: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM workflow_plan_v2_activation_work_selections WHERE outcome = 'selecting'",
+            "SELECT count(*)::BIGINT FROM logical_workflow_activation_work_selections WHERE outcome = 'selecting'",
         )
         .fetch_one(database.pool())
         .await?;
@@ -353,7 +353,7 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
             .await?;
         let corrupted = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_materialization_claims
+            UPDATE logical_workflow_materialization_claims
             SET generation = $2, created_at_ms = 1, claimed_at_ms = 1,
                 expires_at_ms = 2001, updated_at_ms = 1
             WHERE instance_id = $1 AND state = 'materializing'
@@ -369,7 +369,7 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
 
         let mut authority_lock = database.pool().begin().await?;
         sqlx::query(
-            "SELECT instance_id FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1 FOR UPDATE",
+            "SELECT instance_id FROM logical_workflow_materialization_claims WHERE instance_id = $1 FOR UPDATE",
         )
         .bind(prepared.activated.id().as_uuid())
         .fetch_one(&mut *authority_lock)
@@ -388,14 +388,14 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
             LogicalInstanceMaterializationSelectionOutcome::Contended
         ));
         let contended_outcome: String = sqlx::query_scalar(
-            "SELECT outcome FROM workflow_plan_v2_materialization_work_selections WHERE selection_id = $1",
+            "SELECT outcome FROM logical_workflow_materialization_work_selections WHERE selection_id = $1",
         )
         .bind(contended_request.selection_id().as_uuid())
         .fetch_one(database.pool())
         .await?;
         assert_eq!(contended_outcome, "contended");
         let quarantine_count: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM workflow_plan_v2_materialization_work_quarantines",
+            "SELECT count(*)::BIGINT FROM logical_workflow_materialization_work_quarantines",
         )
         .fetch_one(database.pool())
         .await?;
@@ -425,7 +425,7 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
         let poison_receipt: (String, Option<i64>, Option<Uuid>) = sqlx::query_as(
             r"
             SELECT outcome, generation, instance_id
-            FROM workflow_plan_v2_materialization_work_selections
+            FROM logical_workflow_materialization_work_selections
             WHERE selection_id = $1
             ",
         )
@@ -438,7 +438,7 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
         let poison: (String, i64, Uuid) = sqlx::query_as(
             r"
             SELECT failure_kind, authority_generation, selection_id
-            FROM workflow_plan_v2_materialization_work_quarantines
+            FROM logical_workflow_materialization_work_quarantines
             WHERE instance_id = $1
             ",
         )
@@ -590,8 +590,8 @@ async fn legacy_null_activation_origin_rejects_live_consume_and_allows_takeover(
                    job.activation_expires_at_ms,
                    floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT,
                    preparation.logical_job_id IS NOT NULL
-            FROM workflow_plan_v2_jobs AS job
-            LEFT JOIN workflow_plan_v2_activation_preparations AS preparation
+            FROM logical_workflow_jobs AS job
+            LEFT JOIN logical_workflow_activation_preparations AS preparation
               ON preparation.logical_job_id = job.id
             WHERE job.id = $1
             ",
@@ -746,7 +746,7 @@ async fn clear_preparation_origin(
 ) -> TestResult {
     set_replica_update(
         database,
-        "UPDATE workflow_plan_v2_activation_preparation_claims SET origin_selection_id = NULL WHERE logical_job_id = $1",
+        "UPDATE logical_workflow_activation_preparation_claims SET origin_selection_id = NULL WHERE logical_job_id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -758,7 +758,7 @@ async fn expire_preparation_claim(
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM workflow_plan_v2_activation_preparation_claims WHERE logical_job_id = $1",
+        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_activation_preparation_claims WHERE logical_job_id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -770,7 +770,7 @@ async fn clear_activation_origin(
 ) -> TestResult {
     set_replica_update(
         database,
-        "UPDATE workflow_plan_v2_jobs SET activation_origin_selection_id = NULL WHERE id = $1",
+        "UPDATE logical_workflow_jobs SET activation_origin_selection_id = NULL WHERE id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -782,7 +782,7 @@ async fn expire_activation_claim(
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (activation_expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM workflow_plan_v2_jobs WHERE id = $1",
+        "SELECT pg_sleep(GREATEST(0.0, (activation_expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_jobs WHERE id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -794,7 +794,7 @@ async fn clear_materialization_origin(
 ) -> TestResult {
     set_replica_update(
         database,
-        "UPDATE workflow_plan_v2_materialization_claims SET origin_selection_id = NULL WHERE instance_id = $1",
+        "UPDATE logical_workflow_materialization_claims SET origin_selection_id = NULL WHERE instance_id = $1",
         instance_id.as_uuid(),
     )
     .await
@@ -806,7 +806,7 @@ async fn expire_materialization_claim(
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1",
+        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_materialization_claims WHERE instance_id = $1",
         instance_id.as_uuid(),
     )
     .await
@@ -858,7 +858,7 @@ async fn assert_activation_poison_reciprocity(
         r"
         CREATE TEMPORARY TABLE activation_poison_copy ON COMMIT DROP AS
         SELECT *
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1
         ",
     )
@@ -866,14 +866,14 @@ async fn assert_activation_poison_reciprocity(
     .execute(&mut *contradictory)
     .await?;
     sqlx::query(
-        "DELETE FROM workflow_plan_v2_activation_work_quarantines WHERE logical_job_id = $1",
+        "DELETE FROM logical_workflow_activation_work_quarantines WHERE logical_job_id = $1",
     )
     .bind(poisoned_job.as_uuid())
     .execute(&mut *contradictory)
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_selections
+        UPDATE logical_workflow_activation_work_selections
         SET outcome = 'selecting', claimed_at_ms = NULL, expires_at_ms = NULL,
             tenant_id = NULL, run_id = NULL, invocation_id = NULL,
             logical_job_id = NULL, generation = NULL, authority_kind = NULL,
@@ -889,7 +889,7 @@ async fn assert_activation_poison_reciprocity(
         .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_quarantines
+        INSERT INTO logical_workflow_activation_work_quarantines
         SELECT * FROM activation_poison_copy
         ",
     )
@@ -897,7 +897,7 @@ async fn assert_activation_poison_reciprocity(
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_selections AS selection
+        UPDATE logical_workflow_activation_work_selections AS selection
         SET outcome = 'contended',
             claimed_at_ms = poison.selection_claimed_at_ms,
             expires_at_ms = poison.selection_expires_at_ms
@@ -924,7 +924,7 @@ async fn assert_activation_poison_reciprocity(
         .await?;
     let error = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_quarantines (
+        INSERT INTO logical_workflow_activation_work_quarantines (
             logical_job_id, tenant_id, run_id, invocation_id,
             selection_id, selection_owner_id, selection_requested_at_ms,
             selection_duration_ms, selection_generation,
@@ -940,7 +940,7 @@ async fn assert_activation_poison_reciprocity(
                authority_digest, authority_owner_id, authority_generation,
                authority_claimed_at_ms, authority_expires_at_ms, failure_kind,
                quarantined_at_ms
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1
         ",
     )
@@ -952,7 +952,7 @@ async fn assert_activation_poison_reciprocity(
     assert_database_constraint(
         &error,
         "23505",
-        "workflow_plan_v2_activation_quarantine_selection_unique",
+        "logical_workflow_activation_quarantine_selection_unique",
     );
     duplicate.rollback().await?;
     Ok(())
@@ -973,7 +973,7 @@ async fn assert_materialization_poison_reciprocity(
         r"
         CREATE TEMPORARY TABLE materialization_poison_copy ON COMMIT DROP AS
         SELECT *
-        FROM workflow_plan_v2_materialization_work_quarantines
+        FROM logical_workflow_materialization_work_quarantines
         WHERE instance_id = $1
         ",
     )
@@ -981,14 +981,14 @@ async fn assert_materialization_poison_reciprocity(
     .execute(&mut *contradictory)
     .await?;
     sqlx::query(
-        "DELETE FROM workflow_plan_v2_materialization_work_quarantines WHERE instance_id = $1",
+        "DELETE FROM logical_workflow_materialization_work_quarantines WHERE instance_id = $1",
     )
     .bind(poisoned_instance.as_uuid())
     .execute(&mut *contradictory)
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_selections
+        UPDATE logical_workflow_materialization_work_selections
         SET outcome = 'selecting', claimed_at_ms = NULL, expires_at_ms = NULL,
             tenant_id = NULL, run_id = NULL, invocation_id = NULL,
             logical_job_id = NULL, instance_id = NULL, generation = NULL,
@@ -1004,7 +1004,7 @@ async fn assert_materialization_poison_reciprocity(
         .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_quarantines
+        INSERT INTO logical_workflow_materialization_work_quarantines
         SELECT * FROM materialization_poison_copy
         ",
     )
@@ -1012,7 +1012,7 @@ async fn assert_materialization_poison_reciprocity(
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_selections AS selection
+        UPDATE logical_workflow_materialization_work_selections AS selection
         SET outcome = 'contended',
             claimed_at_ms = poison.selection_claimed_at_ms,
             expires_at_ms = poison.selection_expires_at_ms
@@ -1039,7 +1039,7 @@ async fn assert_materialization_poison_reciprocity(
         .await?;
     let error = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_quarantines (
+        INSERT INTO logical_workflow_materialization_work_quarantines (
             instance_id, tenant_id, run_id, invocation_id, logical_job_id,
             selection_id, selection_owner_id, selection_requested_at_ms,
             selection_duration_ms, selection_generation,
@@ -1053,7 +1053,7 @@ async fn assert_materialization_poison_reciprocity(
                selection_claimed_at_ms, selection_expires_at_ms, authority_digest,
                authority_owner_id, authority_generation, authority_claimed_at_ms,
                authority_expires_at_ms, failure_kind, quarantined_at_ms
-        FROM workflow_plan_v2_materialization_work_quarantines
+        FROM logical_workflow_materialization_work_quarantines
         WHERE instance_id = $1
         ",
     )
@@ -1065,7 +1065,7 @@ async fn assert_materialization_poison_reciprocity(
     assert_database_constraint(
         &error,
         "23505",
-        "workflow_plan_v2_materialization_quarantine_selection_unique",
+        "logical_workflow_materialization_quarantine_selection_unique",
     );
     duplicate.rollback().await?;
     Ok(())
@@ -1410,8 +1410,8 @@ async fn assert_ordinary_activation_quarantine(
                 selection.run_id, selection.invocation_id,
                 selection.logical_job_id, selection.generation,
                 selection.authority_kind, selection.authority_digest)
-        FROM workflow_plan_v2_activation_work_quarantines AS quarantine
-        JOIN workflow_plan_v2_activation_work_selections AS selection
+        FROM logical_workflow_activation_work_quarantines AS quarantine
+        JOIN logical_workflow_activation_work_selections AS selection
           ON selection.selection_id = quarantine.selection_id
         WHERE quarantine.selection_id = $1
         ",
@@ -1449,8 +1449,8 @@ async fn assert_ordinary_materialization_quarantine(
                 selection.run_id, selection.invocation_id,
                 selection.logical_job_id, selection.instance_id,
                 selection.generation, selection.authority_digest)
-        FROM workflow_plan_v2_materialization_work_quarantines AS quarantine
-        JOIN workflow_plan_v2_materialization_work_selections AS selection
+        FROM logical_workflow_materialization_work_quarantines AS quarantine
+        JOIN logical_workflow_materialization_work_selections AS selection
           ON selection.selection_id = quarantine.selection_id
         WHERE quarantine.selection_id = $1
         ",
@@ -1474,7 +1474,7 @@ async fn delete_activation_quarantine_and_assert_replay_corrupt(
         .execute(&mut *corruption)
         .await?;
     let rows = sqlx::query(
-        "DELETE FROM workflow_plan_v2_activation_work_quarantines WHERE logical_job_id = $1",
+        "DELETE FROM logical_workflow_activation_work_quarantines WHERE logical_job_id = $1",
     )
     .bind(logical_job_id.as_uuid())
     .execute(&mut *corruption)
@@ -1502,7 +1502,7 @@ async fn corrupt_materialization_quarantine_failure_and_assert_replay_corrupt(
         .await?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_quarantines
+        UPDATE logical_workflow_materialization_work_quarantines
         SET failure_kind = 'relational_evidence'
         WHERE instance_id = $1
         ",
@@ -1533,7 +1533,7 @@ async fn corrupt_activation_quarantine_selection_and_assert_replay_corrupt(
         .await?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_quarantines
+        UPDATE logical_workflow_activation_work_quarantines
         SET selection_owner_id = $2
         WHERE logical_job_id = $1
         ",
@@ -1565,7 +1565,7 @@ async fn corrupt_materialization_quarantine_authority_and_assert_replay_corrupt(
         .await?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_quarantines
+        UPDATE logical_workflow_materialization_work_quarantines
         SET authority_owner_id = $2
         WHERE instance_id = $1
         ",
@@ -2214,6 +2214,10 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([9; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),

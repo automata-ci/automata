@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
-    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEventKind,
-    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
+    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
     GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -222,7 +222,7 @@ impl GithubRepositoryDispatchEvidenceRepository for PostgresStore {
         .await?
         {
             if existing.repository_dispatch_resolution() != Some(request.resolution())
-                || existing.authenticated_event_v1() != Some(request.pending().event())
+                || existing.authenticated_event() != request.pending().event()
                 || existing.manifest() != request.pending().manifest()
             {
                 return Err(GithubSubjectEvidenceStoreError::ReplayConflict);
@@ -242,7 +242,7 @@ impl GithubRepositoryDispatchEvidenceRepository for PostgresStore {
 }
 
 /// Links the delivery's database-derived Check and inserts its run receipt
-/// inside the caller's epoch-4 logical-admission transaction.
+/// inside the caller's logical-admission transaction.
 #[allow(clippy::too_many_lines)] // One exact SQL statement binds the full admission aggregate.
 pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
@@ -317,8 +317,8 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
         JOIN workflow_snapshots AS snapshot
           ON snapshot.id = run.snapshot_id
          AND snapshot.workflow_id = run.workflow_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = run.id
          AND invocation.id = marker.root_invocation_id
         JOIN workflow_admission_receipts AS admission_receipt
@@ -368,10 +368,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
           AND workflow.path = $10
           AND subject.subject_key = workflow.path
           AND (
-              manifest.workflow_selection_kind = 'exact'
-              AND workflow.path = manifest.workflow_path
-              AND subject.id = evidence.github_check_subject_id
-              OR manifest.workflow_selection_kind = 'all_direct'
+              manifest.workflow_selection_kind = 'all_direct'
               AND EXISTS (
                   SELECT 1
                   FROM provider_delivery_workflow_inventories AS inventory
@@ -399,8 +396,8 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
               evidence.authenticated_event_git_ref,
               manifest.git_ref
           )
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.plan_schema = invocation.plan_schema
           AND run.plan_digest = $16
           AND run.plan_digest = invocation.plan_digest
@@ -762,10 +759,7 @@ async fn load_queued_workflow_check_subject(
           AND inbox.claimed_at_ms = $10
           AND inbox.claim_expires_at_ms = $11
           AND (
-              manifest.workflow_selection_kind = 'exact'
-              AND subject.id = evidence.github_check_subject_id
-              AND subject.subject_key = manifest.workflow_path
-              OR manifest.workflow_selection_kind = 'all_direct'
+              manifest.workflow_selection_kind = 'all_direct'
               AND EXISTS (
                   SELECT 1
                   FROM provider_delivery_workflow_inventories AS inventory
@@ -823,8 +817,8 @@ async fn link_exact_check_to_run(
              workflow_runs AS run,
              workflow_definitions AS workflow,
              workflow_snapshots AS snapshot,
-             workflow_plan_v2_runs AS marker,
-             workflow_plan_v2_invocations AS invocation,
+             logical_workflow_runs AS marker,
+             logical_workflow_invocations AS invocation,
              workflow_admission_receipts AS admission_receipt
         WHERE evidence.tenant_id = $1
           AND evidence.repository_id = $2
@@ -874,18 +868,15 @@ async fn link_exact_check_to_run(
               manifest.git_ref
           )
           AND run.git_ref = $11
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.plan_digest = $12
           AND run.created_at_ms = $4
           AND workflow.repository_id = run.repository_id
           AND workflow.id = run.workflow_id
           AND workflow.path = $13
           AND (
-              manifest.workflow_selection_kind = 'exact'
-              AND workflow.path = manifest.workflow_path
-              AND subject.id = evidence.github_check_subject_id
-              OR manifest.workflow_selection_kind = 'all_direct'
+              manifest.workflow_selection_kind = 'all_direct'
               AND EXISTS (
                   SELECT 1
                   FROM provider_delivery_workflow_inventories AS inventory
@@ -1389,7 +1380,7 @@ fn resolved_repository_dispatch_evidence(
     let pending = request.pending();
     let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-    ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
+    ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch(
         pending.delivery_id(),
         pending.repository_owner_id(),
         pending.manifest().clone(),
@@ -1430,10 +1421,10 @@ async fn insert_delivery_evidence(
         .private_source_authority
         .as_ref()
         .map(|selector| selector.policy_revision().as_i64());
-    let authenticated_event = request.authenticated_event_v1();
-    let authenticated_event_version = authenticated_event.map(|_| 1_i16);
-    let authenticated_event_name = authenticated_event.map(|event| event.kind().as_str());
-    let authenticated_event_git_ref = authenticated_event.map(GithubAuthenticatedEventV1::git_ref);
+    let authenticated_event = request.authenticated_event();
+    let authenticated_event_version = 1_i16;
+    let authenticated_event_name = authenticated_event.kind().as_str();
+    let authenticated_event_git_ref = authenticated_event.git_ref();
     let result = sqlx::query(
         r"
         INSERT INTO github_provider_delivery_evidence (
@@ -1555,35 +1546,19 @@ fn evidence_from_request(
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let subject_id = GithubCheckSubjectId::from_uuid(subject_id)
         .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-    let result = match request.authenticated_event_v1() {
-        Some(event) => {
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
-                delivery_id,
-                request.repository_owner_id(),
-                pin.manifest.clone(),
-                request.authenticated_webhook_verifier_fingerprint(),
-                request.authenticated_webhook_verifier_revision(),
-                pin.checks_authority.clone(),
-                pin.private_source_authority.clone(),
-                subject_id,
-                request.head_sha(),
-                event.clone(),
-                request.delivery().accepted_at(),
-            )
-        }
-        None => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            delivery_id,
-            request.repository_owner_id(),
-            pin.manifest.clone(),
-            request.authenticated_webhook_verifier_fingerprint(),
-            request.authenticated_webhook_verifier_revision(),
-            pin.checks_authority.clone(),
-            pin.private_source_authority.clone(),
-            subject_id,
-            request.head_sha(),
-            request.delivery().accepted_at(),
-        ),
-    };
+    let result = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+        delivery_id,
+        request.repository_owner_id(),
+        pin.manifest.clone(),
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+        pin.checks_authority.clone(),
+        pin.private_source_authority.clone(),
+        subject_id,
+        request.head_sha(),
+        request.authenticated_event().clone(),
+        request.delivery().accepted_at(),
+    );
     result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
@@ -1782,7 +1757,7 @@ fn decode_pending_repository_dispatch(
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
     let event =
-        GithubAuthenticatedEventV1::new(GithubAuthenticatedEventKind::RepositoryDispatch, git_ref)
+        GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::RepositoryDispatch, git_ref)
             .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let accepted_at: i64 = row.try_get("accepted_at_ms").map_err(operation_error)?;
     PendingGithubRepositoryDispatchEvidence::from_durable_parts(
@@ -1877,7 +1852,7 @@ fn acceptance_matches(
         && durable.receipt.accepted_at() == request.delivery().accepted_at()
         && durable.receipt.repository_owner_id() == request.repository_owner_id()
         && durable.receipt.evidence().check_head_sha() == request.head_sha()
-        && durable.receipt.evidence().authenticated_event_v1() == request.authenticated_event_v1()
+        && durable.receipt.evidence().authenticated_event() == request.authenticated_event()
         && durable
             .receipt
             .evidence()
@@ -2027,27 +2002,15 @@ fn decode_delivery_event_evidence(
         source_revision,
         source_authority,
     ) {
-        (None, None, None, None, None) => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            delivery_id,
-            owner_id,
-            manifest,
-            authenticated_verifier_fingerprint,
-            authenticated_verifier_revision,
-            checks_authority,
-            private_source_authority,
-            subject_id,
-            head_sha,
-            accepted_at,
-        ),
         (Some(1), Some(event_name), Some(git_ref), None, None) => {
             let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
             if kind == GithubAuthenticatedEventKind::RepositoryDispatch {
                 return Err(GithubSubjectEvidenceStoreError::CorruptData);
             }
-            let event = GithubAuthenticatedEventV1::new(kind, git_ref)
+            let event = GithubAuthenticatedEvent::new(kind, git_ref)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
                 delivery_id,
                 owner_id,
                 manifest,
@@ -2071,14 +2034,14 @@ fn decode_delivery_event_evidence(
             let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
                 .filter(|kind| *kind == GithubAuthenticatedEventKind::RepositoryDispatch)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
-            let event = GithubAuthenticatedEventV1::new(kind, git_ref)
+            let event = GithubAuthenticatedEvent::new(kind, git_ref)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
             let revision = GithubCheckHeadSha::try_from_slice(&source_revision)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
             let authority =
                 GithubRepositoryDispatchResolutionAuthority::from_durable(&source_authority)
                     .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch(
                 delivery_id,
                 owner_id,
                 manifest,
@@ -2413,20 +2376,11 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
     if workflow_path != check_subject_key {
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
-    let workflow_selection = match row
-        .try_get::<String, _>("workflow_selection_kind")
-        .map_err(operation_error)?
-        .as_str()
-    {
-        "exact" => GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(workflow_path)
-                .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
-        ),
-        "all_direct" if workflow_path == crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY => {
-            GithubProviderWorkflowSelection::all_direct()
-        }
-        _ => return Err(GithubSubjectEvidenceStoreError::CorruptData),
-    };
+    require_exact_text(row, "workflow_selection_kind", "all_direct")?;
+    if workflow_path != crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY {
+        return Err(GithubSubjectEvidenceStoreError::CorruptData);
+    }
+    let workflow_selection = GithubProviderWorkflowSelection::all_direct();
     require_exact_text(row, "event_name", crate::GITHUB_PROVIDER_EVENT)?;
     let git_ref = crate::GithubProviderGitRef::new(
         row.try_get::<String, _>("git_ref")

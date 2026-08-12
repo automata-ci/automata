@@ -209,16 +209,16 @@ async fn preparation_is_dependency_ready_fenced_replayable_and_workspace_bound()
                 SELECT job.authority_profile, claim.authority_profile,
                        preparation.authority_profile, publication.authority_profile,
                        materialization.authority_profile, concrete.authority_profile
-                FROM workflow_plan_v2_jobs AS job
-                JOIN workflow_plan_v2_activation_preparation_claims AS claim
+                FROM logical_workflow_jobs AS job
+                JOIN logical_workflow_activation_preparation_claims AS claim
                   ON claim.logical_job_id = job.id
-                JOIN workflow_plan_v2_activation_preparations AS preparation
+                JOIN logical_workflow_activation_preparations AS preparation
                   ON preparation.logical_job_id = job.id
-                JOIN workflow_plan_v2_activation_publications AS publication
+                JOIN logical_workflow_activation_publications AS publication
                   ON publication.logical_job_id = job.id
-                JOIN workflow_plan_v2_materialization_claims AS materialization
+                JOIN logical_workflow_materialization_claims AS materialization
                   ON materialization.logical_job_id = job.id
-                JOIN workflow_plan_v2_concrete_jobs AS concrete
+                JOIN logical_workflow_concrete_jobs AS concrete
                   ON concrete.logical_job_id = job.id
                 WHERE job.id = $1
                 ",
@@ -515,7 +515,7 @@ async fn credential_free_profile_is_exactly_pinned_and_opposite_substitution_is_
         );
 
         let substitution = sqlx::query(
-            "UPDATE workflow_plan_v2_activation_preparation_claims \
+            "UPDATE logical_workflow_activation_preparation_claims \
              SET authority_profile = 'standard' WHERE logical_job_id = $1",
         )
         .bind(fixture.first.as_uuid())
@@ -574,16 +574,16 @@ async fn credential_free_profile_is_exactly_pinned_and_opposite_substitution_is_
             SELECT job.authority_profile, claim.authority_profile,
                    preparation.authority_profile, publication.authority_profile,
                    materialization.authority_profile, concrete.authority_profile
-            FROM workflow_plan_v2_jobs AS job
-            JOIN workflow_plan_v2_activation_preparation_claims AS claim
+            FROM logical_workflow_jobs AS job
+            JOIN logical_workflow_activation_preparation_claims AS claim
               ON claim.logical_job_id = job.id
-            JOIN workflow_plan_v2_activation_preparations AS preparation
+            JOIN logical_workflow_activation_preparations AS preparation
               ON preparation.logical_job_id = job.id
-            JOIN workflow_plan_v2_activation_publications AS publication
+            JOIN logical_workflow_activation_publications AS publication
               ON publication.logical_job_id = job.id
-            JOIN workflow_plan_v2_materialization_claims AS materialization
+            JOIN logical_workflow_materialization_claims AS materialization
               ON materialization.logical_job_id = job.id
-            JOIN workflow_plan_v2_concrete_jobs AS concrete
+            JOIN logical_workflow_concrete_jobs AS concrete
               ON concrete.logical_job_id = job.id
             WHERE job.id = $1
             ",
@@ -717,13 +717,13 @@ async fn selector_quarantines_expired_max_generation_and_advances_to_newer_work(
         let expired_at = database_now_ms(&database).await? - 1;
         let mut corruption = database.pool().begin().await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_activation_preparation_claims DISABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_activation_preparation_claims DISABLE TRIGGER USER",
         )
         .execute(&mut *corruption)
         .await?;
         let updated = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims
+            UPDATE logical_workflow_activation_preparation_claims
             SET generation = 9223372036854775807,
                 expires_at_ms = $2, updated_at_ms = $2
             WHERE logical_job_id = $1 AND state = 'preparing'
@@ -735,7 +735,7 @@ async fn selector_quarantines_expired_max_generation_and_advances_to_newer_work(
         .await?;
         assert_eq!(updated.rows_affected(), 1);
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_activation_preparation_claims ENABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_activation_preparation_claims ENABLE TRIGGER USER",
         )
         .execute(&mut *corruption)
         .await?;
@@ -765,7 +765,7 @@ async fn selector_quarantines_expired_max_generation_and_advances_to_newer_work(
         let quarantine: (i64, String) = sqlx::query_as(
             r"
             SELECT authority_generation, failure_kind
-            FROM workflow_plan_v2_activation_work_quarantines
+            FROM logical_workflow_activation_work_quarantines
             WHERE logical_job_id = $1
             ",
         )
@@ -1333,6 +1333,10 @@ async fn fixture_with_visibility(
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([3; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),

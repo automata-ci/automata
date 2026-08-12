@@ -1,5 +1,5 @@
 {
-  "schema": 3,
+  "schema": 1,
   "transport": { "mode": "github_dot_com" },
   "app": {
     "id": 123456,
@@ -121,7 +121,6 @@
           }
         }
       },
-      "workflow_selection": { "mode": "all_direct" },
       "check_name": "Automata CI",
       "authorities": {
         "checks_write": {
@@ -230,7 +229,6 @@
           }
         }
       },
-      "workflow_selection": { "mode": "all_direct" },
       "check_name": "Automata CI",
       "authorities": {
         "checks_write": {

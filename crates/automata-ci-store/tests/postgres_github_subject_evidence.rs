@@ -7,8 +7,8 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
     AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery,
-    CompleteProviderDelivery, EnsureGithubServerServiceAuthority, GithubAuthenticatedEventKind,
-    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
+    CompleteProviderDelivery, EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
     GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRepository as _,
     GithubProviderManifestRevision, GithubProviderOrigins,
@@ -310,7 +310,7 @@ async fn repository_dispatch_resolution_is_claim_fenced_atomic_and_exactly_repla
             .await?;
         assert_eq!(
             accepted.evidence().event(),
-            &GithubAuthenticatedEventV1::new(
+            &GithubAuthenticatedEvent::new(
                 GithubAuthenticatedEventKind::RepositoryDispatch,
                 "refs/heads/main",
             )?
@@ -1390,7 +1390,7 @@ async fn changed_or_foreign_delivery_cannot_relink_or_leave_partial_admission() 
                 (SELECT count(*) FROM workflow_definitions WHERE id = $2),
                 (SELECT count(*) FROM workflow_snapshots WHERE id = $3),
                 (SELECT count(*) FROM workflow_runs WHERE id = $4),
-                (SELECT count(*) FROM workflow_plan_v2_runs WHERE run_id = $4),
+                (SELECT count(*) FROM logical_workflow_runs WHERE run_id = $4),
                 (SELECT count(*) FROM github_workflow_run_subject_evidence WHERE run_id = $4)
             ",
         )
@@ -1665,9 +1665,7 @@ async fn bootstrap_manifest_only(
         connection_id,
         visibility,
         at,
-        GithubProviderWorkflowSelection::exact(automata_ci_store::GithubCheckSubjectKey::new(
-            ".ci/workflows/ci.yml",
-        )?),
+        GithubProviderWorkflowSelection::all_direct(),
     )
     .await
 }
@@ -1764,10 +1762,7 @@ fn manifest(
         revisions,
         spki,
         verifier,
-        GithubProviderWorkflowSelection::exact(
-            automata_ci_store::GithubCheckSubjectKey::new(".ci/workflows/ci.yml")
-                .expect("workflow path"),
-        ),
+        GithubProviderWorkflowSelection::all_direct(),
     )
 }
 
@@ -1884,7 +1879,7 @@ fn repository_dispatch_acceptance(
                 Sha256Digest::from_bytes([digest_byte.wrapping_add(1); 32]),
                 ObjectKey::new(format!("github/events/{delivery_key}")).expect("event object key"),
                 512,
-                "application/vnd.automata.github-authenticated-event.v1+json",
+                "application/vnd.automata.github-authenticated-event+json",
             )
             .expect("event object"),
             UnixMillis::new(accepted_at),
@@ -1892,7 +1887,7 @@ fn repository_dispatch_acceptance(
         .expect("delivery"),
         ProviderRepositoryOwnerId::new(OWNER_ID).expect("signed owner"),
         ProviderRepositoryOwnerId::new(OWNER_ID).expect("configured owner"),
-        GithubAuthenticatedEventV1::new(
+        GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
         )
@@ -1944,6 +1939,11 @@ fn acceptance_for_manifest(
         .expect("delivery"),
         ProviderRepositoryOwnerId::new(signed_owner_id).expect("signed owner"),
         ProviderRepositoryOwnerId::new(configured_owner_id).expect("configured owner"),
+        automata_ci_store::GithubAuthenticatedEvent::new(
+            automata_ci_store::GithubAuthenticatedEventKind::Push,
+            "refs/heads/main",
+        )
+        .expect("authenticated event"),
         GithubCheckHeadSha::new(head_sha).expect("head SHA"),
         manifest.webhook_verifier_fingerprint(),
         manifest.webhook_verifier_revision(),
@@ -2192,13 +2192,13 @@ async fn assert_run_evidence(
         Sha256Digest::from_bytes([31; 32])
     );
     assert_eq!(evidence.request().git_ref(), "refs/heads/main");
-    assert_eq!(evidence.request().plan_schema(), 2);
+    assert_eq!(evidence.request().plan_schema(), 1);
 
     let counts: (i64, i64, i64) = sqlx::query_as(
         r"
         SELECT
             (SELECT count(*) FROM workflow_runs WHERE id = $1),
-            (SELECT count(*) FROM workflow_plan_v2_runs WHERE run_id = $1),
+            (SELECT count(*) FROM logical_workflow_runs WHERE run_id = $1),
             (SELECT count(*) FROM github_workflow_run_subject_evidence WHERE run_id = $1)
         ",
     )

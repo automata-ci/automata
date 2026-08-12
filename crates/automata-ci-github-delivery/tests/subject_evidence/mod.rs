@@ -1,11 +1,12 @@
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderGitRef, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
-    GithubProviderWorkflowSelection, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
+    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision,
     ManifestPinnedGithubDeliveryEvidence, ObjectKey, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderRepositoryOwnerId, WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision,
@@ -95,9 +96,7 @@ pub fn fixture_subject_evidence_with_head(
         repository_owner_id,
         accepted_at,
         seed,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("workflow path"),
-        ),
+        GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
         check_head_sha,
     )
@@ -200,6 +199,8 @@ fn fixture_subject_evidence_with_selection_and_head(
         private_source_authority,
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(seed + 2)).expect("Check subject ID"),
         check_head_sha,
+        GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, "refs/heads/main")
+            .expect("authenticated event"),
         accepted_at,
     )
     .expect("fixture subject evidence")

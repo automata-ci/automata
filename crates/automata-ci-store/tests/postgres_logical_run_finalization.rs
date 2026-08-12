@@ -69,7 +69,7 @@ async fn zero_job_current_run_is_rejected_at_transaction_commit() -> TestResult 
         seed_tenant(&database, &fixture.tenant).await?;
         admit_authenticated_fixture(&database, &fixture).await?;
         let mut transaction = database.pool().begin().await?;
-        let deletion = sqlx::query("DELETE FROM workflow_plan_v2_jobs WHERE id = $1")
+        let deletion = sqlx::query("DELETE FROM logical_workflow_jobs WHERE id = $1")
             .bind(fixture.job_ids[0].as_uuid())
             .execute(&mut *transaction)
             .await;
@@ -79,7 +79,7 @@ async fn zero_job_current_run_is_rejected_at_transaction_commit() -> TestResult 
         );
         transaction.rollback().await?;
         let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_jobs WHERE run_id = $1")
+            sqlx::query_scalar("SELECT count(*) FROM logical_workflow_jobs WHERE run_id = $1")
                 .bind(fixture.command.run_id().as_uuid())
                 .fetch_one(database.pool())
                 .await?;
@@ -862,13 +862,13 @@ async fn private_rerun_authority_is_live_and_grouped_sources_fail_closed() -> Te
             .commit_logical_run_finalization(commit_at_claim_start(&legacy_claim)?)
             .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_runs DISABLE TRIGGER workflow_plan_v2_runs_base_context_immutable",
+            "ALTER TABLE logical_workflow_runs DISABLE TRIGGER logical_workflow_runs_base_context_immutable",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_runs
+            UPDATE logical_workflow_runs
             SET base_context_digest = NULL,
                 base_context_object_key = NULL,
                 base_context_size_bytes = NULL,
@@ -881,7 +881,7 @@ async fn private_rerun_authority_is_live_and_grouped_sources_fail_closed() -> Te
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_runs ENABLE TRIGGER workflow_plan_v2_runs_base_context_immutable",
+            "ALTER TABLE logical_workflow_runs ENABLE TRIGGER logical_workflow_runs_base_context_immutable",
         )
         .execute(database.pool())
         .await?;
@@ -981,7 +981,7 @@ async fn partial_rerun_carries_prerequisites_through_a_nested_rerun() -> TestRes
 
         let nested_source_job = LogicalWorkflowJobId::from_uuid(
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM workflow_plan_v2_jobs WHERE run_id = $1 AND source_order = 2",
+                "SELECT id FROM logical_workflow_jobs WHERE run_id = $1 AND source_order = 2",
             )
             .bind(first.run_id().as_uuid())
             .fetch_one(database.pool())
@@ -1012,7 +1012,7 @@ async fn partial_rerun_carries_prerequisites_through_a_nested_rerun() -> TestRes
                        AND effective.claim_state = 'finalized'
                    )
             FROM workflow_rerun_attempt_jobs AS mapping
-            LEFT JOIN workflow_plan_v2_effective_job_results AS effective
+            LEFT JOIN logical_workflow_effective_job_results AS effective
               ON effective.run_id = mapping.run_id
              AND effective.logical_job_id = mapping.logical_job_id
             WHERE mapping.run_id = $1
@@ -1094,7 +1094,7 @@ async fn mismatched_linked_check_rolls_back_the_entire_finalization() -> TestRes
         let unchanged: (i64, String, String, i64) = sqlx::query_as(
             r"
             SELECT
-                (SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1),
+                (SELECT count(*) FROM logical_workflow_run_results WHERE run_id = $1),
                 run.status, subject.desired_state, subject.desired_revision
             FROM workflow_runs AS run
             JOIN github_check_subjects AS subject
@@ -1168,7 +1168,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         // rejection trigger is disabled for the narrow update and restored
         // before 0031 observes or claims any evidence.
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results DISABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -1182,7 +1182,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         {
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_job_results
+                UPDATE logical_workflow_job_results
                 SET effective_conclusion = $2, closure_has_failure = $3,
                     closure_has_cancelled = $4, closure_has_skipped = $5,
                     commit_digest = $6
@@ -1198,7 +1198,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
             .execute(database.pool())
             .await?;
             sqlx::query(
-                "UPDATE workflow_plan_v2_jobs SET state = $2 WHERE id = $1",
+                "UPDATE logical_workflow_jobs SET state = $2 WHERE id = $1",
             )
             .bind(fixture.job_ids[index].as_uuid())
             .bind(state)
@@ -1206,7 +1206,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
             .await?;
         }
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results ENABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results ENABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -1226,8 +1226,8 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         let states: (String, String, String) = sqlx::query_as(
             r"
             SELECT invocation.state, marker.state, run.status
-            FROM workflow_plan_v2_runs AS marker
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_runs AS marker
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = marker.run_id
              AND invocation.id = marker.root_invocation_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
@@ -1281,9 +1281,9 @@ async fn preterminal_concurrency_cancellation_closes_with_immutable_run_evidence
             SELECT invocation.state, marker.state, run.status,
                    result.effective_conclusion, invocation.updated_at_ms,
                    marker.updated_at_ms, run.updated_at_ms
-            FROM workflow_plan_v2_run_results AS result
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = result.run_id
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_run_results AS result
+            JOIN logical_workflow_runs AS marker ON marker.run_id = result.run_id
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = result.run_id
              AND invocation.id = result.root_invocation_id
             JOIN workflow_runs AS run ON run.id = result.run_id
@@ -1407,7 +1407,7 @@ async fn assert_clock_skew_is_side_effect_free(
         ));
     }
     let claim_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_run_result_claims WHERE run_id = $1",
+        "SELECT count(*) FROM logical_workflow_run_result_claims WHERE run_id = $1",
     )
     .bind(fixture.command.run_id().as_uuid())
     .fetch_one(database.pool())
@@ -1436,7 +1436,7 @@ async fn assert_database_time_commit_fence(database: &TestDatabase) -> TestResul
         Err(LogicalRunFinalizationStoreError::ClaimRejected)
     ));
     let result_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM logical_workflow_run_results WHERE run_id = $1")
             .bind(fixture.command.run_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -1477,7 +1477,7 @@ async fn assert_database_time_expired_fresh_commit(database: &TestDatabase) -> T
         Err(LogicalRunFinalizationStoreError::ClaimRejected)
     ));
     let result_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM logical_workflow_run_results WHERE run_id = $1")
             .bind(fixture.command.run_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -1709,6 +1709,10 @@ fn fixture_delivery_request(
         )?,
         ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace)? + 1)?,
         ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace)? + 1)?,
+        automata_ci_store::GithubAuthenticatedEvent::new(
+            automata_ci_store::GithubAuthenticatedEventKind::Push,
+            "refs/heads/main",
+        )?,
         GithubCheckHeadSha::new([0x14; 20])?,
         manifest.webhook_verifier_fingerprint(),
         manifest.webhook_verifier_revision(),
@@ -1774,7 +1778,7 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_concurrency_cancellations (
+        INSERT INTO logical_workflow_concurrency_cancellations (
             run_id, root_invocation_id, preempting_run_id,
             prior_workflow_status, prior_workflow_updated_at_ms,
             prior_marker_state, prior_marker_revision, prior_marker_updated_at_ms,
@@ -1786,8 +1790,8 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
                marker.state, marker.revision, marker.updated_at_ms,
                invocation.state, invocation.revision, invocation.updated_at_ms, $3
         FROM workflow_runs AS run
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         WHERE run.id = $1
@@ -1948,7 +1952,7 @@ async fn assert_claimed_graph_and_evidence_are_immutable(
     // late source-level jobs before any terminal transition.
     let late_job = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_jobs (
+        INSERT INTO logical_workflow_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence,
             created_at_ms, updated_at_ms
@@ -2060,9 +2064,9 @@ async fn assert_takeover_replay_and_atomic_terminal_state(
         r"
         SELECT invocation.state, marker.state, run.status,
                result.effective_conclusion
-        FROM workflow_plan_v2_run_results AS result
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = result.run_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_run_results AS result
+        JOIN logical_workflow_runs AS marker ON marker.run_id = result.run_id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = result.run_id
          AND invocation.id = result.root_invocation_id
         JOIN workflow_runs AS run ON run.id = result.run_id
@@ -2083,7 +2087,7 @@ async fn assert_takeover_replay_and_atomic_terminal_state(
     );
     assert!(
         sqlx::query(
-            "UPDATE workflow_plan_v2_run_results SET effective_conclusion = 'failure' WHERE run_id = $1",
+            "UPDATE logical_workflow_run_results SET effective_conclusion = 'failure' WHERE run_id = $1",
         )
         .bind(receipt.target().run_id().as_uuid())
         .execute(database.pool())
@@ -2160,8 +2164,8 @@ async fn finalize_rerun_skipped_job(
     let (invocation_id, logical_job_id): (Uuid, Uuid) = sqlx::query_as(
         r"
         SELECT marker.root_invocation_id, job.id
-        FROM workflow_plan_v2_runs AS marker
-        JOIN workflow_plan_v2_jobs AS job
+        FROM logical_workflow_runs AS marker
+        JOIN logical_workflow_jobs AS job
           ON job.run_id = marker.run_id
          AND job.invocation_id = marker.root_invocation_id
         WHERE marker.run_id = $1
@@ -2270,7 +2274,7 @@ async fn assert_late_rerun_carry_mutations_are_rejected(
     .await?;
     let timestamp_error = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET updated_at_ms = updated_at_ms + 1
         WHERE id = $1
         ",
@@ -2356,10 +2360,10 @@ async fn assert_late_rerun_carry_mutations_are_rejected(
                source.claim_started_at_ms, source.claim_expires_at_ms,
                source.finalized_at_ms
         FROM workflow_rerun_attempt_jobs AS mapping
-        JOIN workflow_plan_v2_jobs AS job
+        JOIN logical_workflow_jobs AS job
           ON job.run_id = mapping.run_id
          AND job.id = mapping.logical_job_id
-        JOIN workflow_plan_v2_effective_job_results AS source
+        JOIN logical_workflow_effective_job_results AS source
           ON source.run_id = mapping.source_run_id
          AND source.logical_job_id = mapping.source_logical_job_id
          AND source.claim_state = 'finalized'
@@ -2453,7 +2457,7 @@ async fn claim_activation(
         logical_job_id,
     )?;
     let has_preparation: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM workflow_plan_v2_activation_preparations WHERE logical_job_id = $1)",
+        "SELECT EXISTS (SELECT 1 FROM logical_workflow_activation_preparations WHERE logical_job_id = $1)",
     )
     .bind(logical_job_id.as_uuid())
     .fetch_one(database.pool())

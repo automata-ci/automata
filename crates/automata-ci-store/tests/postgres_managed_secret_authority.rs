@@ -421,6 +421,10 @@ async fn admit_authenticated_fixture(
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([0x14; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -636,7 +640,7 @@ fn activation_reference(object: &LogicalActivationObject) -> JobContentReference
     )
 }
 
-#[allow(clippy::too_many_lines)] // Current WorkflowPlan-v2 fixture retains every exact descriptor.
+#[allow(clippy::too_many_lines)] // Current logical workflow fixture retains every exact descriptor.
 fn prepare_instance(
     fixture: &LogicalFixture,
     claimed: &ClaimedLogicalJobActivation,
@@ -854,7 +858,7 @@ async fn lease_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             UnixMillis::new(database_now_ms(database).await? - 10_000),

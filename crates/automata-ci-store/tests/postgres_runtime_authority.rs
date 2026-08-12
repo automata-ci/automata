@@ -399,6 +399,10 @@ async fn admit_signed_workflow(
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new(head_sha)?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -760,7 +764,7 @@ async fn seed_execution(database: &TestDatabase) -> TestResult<GithubJobRuntimeA
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,
@@ -1591,7 +1595,7 @@ async fn migration_installs_and_retains_the_exact_v5_gate() -> TestResult {
             r"
             SELECT pg_catalog.pg_get_constraintdef(catalog_constraint.oid)
             FROM pg_catalog.pg_constraint AS catalog_constraint
-            WHERE catalog_constraint.conname = 'github_runtime_authority_current_job_ir_v5'
+            WHERE catalog_constraint.conname = 'github_runtime_authority_current_job_ir_current'
               AND catalog_constraint.conrelid =
                     'github_runtime_authority_issuances'::REGCLASS
             ",
@@ -1702,7 +1706,7 @@ async fn mint_begin_persists_and_db_authorizes_the_exact_provider_window() -> Te
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> TestResult {
     run_with_database(|database| async move {
         let contention_fixture = seed_authority(&database).await?;
@@ -1730,7 +1734,7 @@ async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;
@@ -1743,7 +1747,7 @@ async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> Test
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn a_pre_mint_terminal_row_never_replays_as_an_already_started_mint() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;
@@ -1799,7 +1803,7 @@ async fn a_pre_mint_terminal_row_never_replays_as_an_already_started_mint() -> T
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn stale_commit_is_never_ready_and_cannot_be_erased_before_provider_expiry() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;

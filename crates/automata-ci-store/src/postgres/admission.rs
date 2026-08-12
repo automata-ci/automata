@@ -1212,8 +1212,8 @@ async fn lock_logical_cancellation_state(
                invocation.state AS invocation_state,
                invocation.revision AS invocation_revision,
                invocation.updated_at_ms AS invocation_updated_at_ms
-        FROM workflow_plan_v2_runs AS marker
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_runs AS marker
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         WHERE marker.run_id = $1
@@ -1265,7 +1265,7 @@ async fn lock_logical_cancellation_dependents(
     let job_rows = sqlx::query(
         r"
         SELECT updated_at_ms
-        FROM workflow_plan_v2_jobs
+        FROM logical_workflow_jobs
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY source_order, id
         FOR UPDATE
@@ -1328,7 +1328,7 @@ async fn insert_logical_cancellation_evidence(
 ) -> Result<(), WorkflowAdmissionStoreError> {
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_concurrency_cancellations (
+        INSERT INTO logical_workflow_concurrency_cancellations (
             run_id, root_invocation_id, preempting_run_id,
             prior_workflow_status, prior_workflow_updated_at_ms,
             prior_marker_state, prior_marker_revision, prior_marker_updated_at_ms,
@@ -1370,7 +1370,7 @@ async fn finalize_logical_concurrency_cancellation(
 ) -> Result<(), WorkflowAdmissionStoreError> {
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET state = 'cancelled',
             activation_owner_id = NULL,
             activation_claimed_at_ms = NULL,
@@ -1388,7 +1388,7 @@ async fn finalize_logical_concurrency_cancellation(
     .map_err(operation_error)?;
     let invocation_rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_invocations
+        UPDATE logical_workflow_invocations
         SET state = 'cancelled', revision = revision + 1, updated_at_ms = $2
         WHERE run_id = $1 AND state IN ('pending','active')
           AND revision < 9223372036854775807
@@ -1402,7 +1402,7 @@ async fn finalize_logical_concurrency_cancellation(
     .rows_affected();
     let marker_rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET state = 'cancelled', revision = revision + 1, updated_at_ms = $2
         WHERE run_id = $1 AND state IN ('pending','active')
           AND revision < 9223372036854775807
@@ -1904,7 +1904,7 @@ pub(super) async fn reconcile_run_in_transaction(
         SELECT run.repository_id, run.concurrency_group_key,
                marker.state AS logical_orchestration_state
         FROM workflow_runs AS run
-        LEFT JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+        LEFT JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
         WHERE run.id = $1
         ",
     )

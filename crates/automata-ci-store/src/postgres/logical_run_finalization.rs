@@ -32,21 +32,21 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
                claim.generation AS claim_generation,
                claim.claimed_at_ms AS claim_claimed_at_ms,
                claim.expires_at_ms AS claim_expires_at_ms
-        FROM workflow_plan_v2_runs AS marker
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_runs AS marker
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        LEFT JOIN workflow_plan_v2_run_result_claims AS claim
+        LEFT JOIN logical_workflow_run_result_claims AS claim
           ON claim.run_id = marker.run_id
         WHERE marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
           AND marker.revision < 9223372036854775807
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND invocation.revision < 9223372036854775807
-          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND run.admission_epoch = 1 AND run.plan_schema = 1
           AND run.status IN ('queued', 'in_progress', 'cancelled')
           AND (
               claim.run_id IS NULL
@@ -55,14 +55,14 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
                   AND claim.generation < 9223372036854775807)
           )
           AND (SELECT count(*)
-               FROM workflow_plan_v2_jobs AS job
+               FROM logical_workflow_jobs AS job
                WHERE job.run_id = marker.run_id
                  AND job.invocation_id = marker.root_invocation_id)
               BETWEEN 1 AND 1024
           AND NOT EXISTS (
               SELECT 1
-              FROM workflow_plan_v2_jobs AS job
-              LEFT JOIN workflow_plan_v2_effective_job_results AS result
+              FROM logical_workflow_jobs AS job
+              LEFT JOIN logical_workflow_effective_job_results AS result
                 ON result.run_id = job.run_id
                AND result.invocation_id = job.invocation_id
                AND result.logical_job_id = job.id
@@ -82,7 +82,7 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
                     END
                     OR result.prerequisite_count IS DISTINCT FROM (
                         SELECT count(*)::INTEGER
-                        FROM workflow_plan_v2_dependencies AS dependency
+                        FROM logical_workflow_dependencies AS dependency
                         WHERE dependency.run_id = job.run_id
                           AND dependency.invocation_id = job.invocation_id
                           AND dependency.logical_job_id = job.id
@@ -94,7 +94,7 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
               FROM (
                   SELECT job.source_order,
                          row_number() OVER (ORDER BY job.source_order) - 1 AS expected_order
-                  FROM workflow_plan_v2_jobs AS job
+                  FROM logical_workflow_jobs AS job
                   WHERE job.run_id = marker.run_id
                     AND job.invocation_id = marker.root_invocation_id
               ) AS ordered
@@ -106,7 +106,7 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
               run.updated_at_ms,
               COALESCE((
                   SELECT max(result.finalized_at_ms)
-                  FROM workflow_plan_v2_effective_job_results AS result
+                  FROM logical_workflow_effective_job_results AS result
                   WHERE result.run_id = marker.run_id
                     AND result.invocation_id = marker.root_invocation_id
               ), 0)
@@ -130,9 +130,9 @@ const EXACT_FINALIZED_COMMIT_QUERY: &str = r"
                invocation.updated_at_ms AS invocation_updated_at_ms,
                run.status AS workflow_status,
                run.updated_at_ms AS workflow_updated_at_ms
-        FROM workflow_plan_v2_run_results AS result
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = result.run_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_run_results AS result
+        JOIN logical_workflow_runs AS marker ON marker.run_id = result.run_id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = result.run_id
          AND invocation.id = result.root_invocation_id
         JOIN workflow_runs AS run ON run.id = result.run_id
@@ -178,22 +178,22 @@ impl LogicalRunFinalizationRepository for PostgresStore {
 
         let claim_row = sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_run_result_claims (
+            INSERT INTO logical_workflow_run_result_claims (
                 run_id, root_invocation_id, descriptor_digest, state,
                 owner_id, generation, claimed_at_ms, expires_at_ms,
                 created_at_ms, updated_at_ms
             ) VALUES ($1,$2,$3,'aggregating',$4,1,$5,$6,$5,$5)
             ON CONFLICT (run_id) DO UPDATE
             SET owner_id = EXCLUDED.owner_id,
-                generation = workflow_plan_v2_run_result_claims.generation + 1,
+                generation = logical_workflow_run_result_claims.generation + 1,
                 claimed_at_ms = EXCLUDED.claimed_at_ms,
                 expires_at_ms = EXCLUDED.expires_at_ms,
                 updated_at_ms = EXCLUDED.claimed_at_ms
-            WHERE workflow_plan_v2_run_result_claims.state = 'aggregating'
-              AND workflow_plan_v2_run_result_claims.expires_at_ms <= $5
-              AND workflow_plan_v2_run_result_claims.generation < 9223372036854775807
-              AND workflow_plan_v2_run_result_claims.descriptor_digest = EXCLUDED.descriptor_digest
-              AND workflow_plan_v2_run_result_claims.root_invocation_id = EXCLUDED.root_invocation_id
+            WHERE logical_workflow_run_result_claims.state = 'aggregating'
+              AND logical_workflow_run_result_claims.expires_at_ms <= $5
+              AND logical_workflow_run_result_claims.generation < 9223372036854775807
+              AND logical_workflow_run_result_claims.descriptor_digest = EXCLUDED.descriptor_digest
+              AND logical_workflow_run_result_claims.root_invocation_id = EXCLUDED.root_invocation_id
             RETURNING owner_id, generation, claimed_at_ms, expires_at_ms
             ",
         )
@@ -277,7 +277,7 @@ impl LogicalRunFinalizationRepository for PostgresStore {
         .await?;
         let finalized = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_run_result_claims
+            UPDATE logical_workflow_run_result_claims
             SET state = 'finalized', updated_at_ms = $8
             WHERE run_id = $1 AND root_invocation_id = $2
               AND state = 'aggregating' AND owner_id = $3
@@ -369,9 +369,9 @@ async fn has_exhausted_ready_candidate(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_run_result_claims AS claim
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = claim.run_id
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_run_result_claims AS claim
+            JOIN logical_workflow_runs AS marker ON marker.run_id = claim.run_id
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = marker.run_id
              AND invocation.id = marker.root_invocation_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
@@ -383,8 +383,8 @@ async fn has_exhausted_ready_candidate(
               AND run.status IN ('queued', 'in_progress', 'cancelled')
               AND NOT EXISTS (
                   SELECT 1
-                  FROM workflow_plan_v2_jobs AS job
-                  LEFT JOIN workflow_plan_v2_effective_job_results AS result
+                  FROM logical_workflow_jobs AS job
+                  LEFT JOIN logical_workflow_effective_job_results AS result
                     ON result.run_id = job.run_id
                    AND result.invocation_id = job.invocation_id
                    AND result.logical_job_id = job.id
@@ -421,9 +421,9 @@ async fn lock_commit_target(
                claim.generation AS claim_generation,
                claim.claimed_at_ms AS claim_claimed_at_ms,
                claim.expires_at_ms AS claim_expires_at_ms
-        FROM workflow_plan_v2_run_result_claims AS claim
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = claim.run_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_run_result_claims AS claim
+        JOIN logical_workflow_runs AS marker ON marker.run_id = claim.run_id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
@@ -432,8 +432,8 @@ async fn lock_commit_target(
           AND marker.run_id = $2
           AND marker.root_invocation_id = $3
           AND marker.orchestration_schema = 1
-          AND invocation.plan_schema = 2
-          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND invocation.plan_schema = 1
+          AND run.admission_epoch = 1 AND run.plan_schema = 1
         FOR UPDATE OF marker, invocation, run, claim
         ",
     )
@@ -511,8 +511,8 @@ async fn load_job_evidence(
                result.prerequisites_digest, result.output_count,
                result.outputs_digest, result.commit_digest,
                result.finalized_at_ms, result.claim_state AS result_claim_state
-        FROM workflow_plan_v2_jobs AS job
-        LEFT JOIN workflow_plan_v2_effective_job_results AS result
+        FROM logical_workflow_jobs AS job
+        LEFT JOIN logical_workflow_effective_job_results AS result
           ON result.run_id = job.run_id
          AND result.invocation_id = job.invocation_id
          AND result.logical_job_id = job.id
@@ -646,7 +646,7 @@ async fn insert_result(
     let descriptor = request.descriptor();
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_run_results (
+        INSERT INTO logical_workflow_run_results (
             run_id, root_invocation_id, descriptor_digest, admission_digest,
             marker_state, marker_revision, marker_updated_at_ms,
             invocation_state, invocation_revision, invocation_updated_at_ms,
@@ -697,7 +697,7 @@ async fn insert_job_evidence(
     for job in descriptor.jobs() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_run_result_jobs (
+            INSERT INTO logical_workflow_run_result_jobs (
                 run_id, root_invocation_id, logical_job_id, logical_key,
                 source_order, descriptor_digest, effective_conclusion,
                 closure_has_failure, closure_has_cancelled, closure_has_skipped,
@@ -750,7 +750,7 @@ async fn transition_invocation(
     let descriptor = request.descriptor();
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_invocations
+        UPDATE logical_workflow_invocations
         SET state = $6, revision = revision + 1, updated_at_ms = $7
         WHERE run_id = $1 AND id = $2
           AND state = $3 AND revision = $4 AND updated_at_ms = $5
@@ -777,7 +777,7 @@ async fn transition_marker(
     let descriptor = request.descriptor();
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET state = $5, revision = revision + 1, updated_at_ms = $6
         WHERE run_id = $1 AND state = $2 AND revision = $3 AND updated_at_ms = $4
         ",
@@ -1014,7 +1014,7 @@ async fn stored_job_evidence_matches(
                instances_digest, prerequisite_count, prerequisites_digest,
                output_count, outputs_digest, job_commit_digest,
                job_finalized_at_ms
-        FROM workflow_plan_v2_run_result_jobs
+        FROM logical_workflow_run_result_jobs
         WHERE run_id = $1 AND root_invocation_id = $2
         ORDER BY source_order, logical_key COLLATE "C", logical_job_id
         "#,

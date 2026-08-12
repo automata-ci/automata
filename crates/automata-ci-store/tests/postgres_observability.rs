@@ -198,8 +198,8 @@ fn assert_logical_snapshot(
     assert_eq!(snapshot.workflow_runs().get(WorkflowRunStatus::Queued), 2);
     assert_eq!(
         snapshot
-            .workflow_plan_v2_runs()
-            .get(automata_ci_store::WorkflowPlanV2RunState::Active),
+            .logical_workflow_runs()
+            .get(automata_ci_store::LogicalWorkflowRunState::Active),
         1
     );
     assert_eq!(
@@ -697,7 +697,7 @@ async fn insert_logical_metrics_state(
     wait_until_database_after(database, expired.expires_at().get()).await?;
 
     let pending_since: i64 =
-        sqlx::query_scalar("SELECT created_at_ms FROM workflow_plan_v2_jobs WHERE id = $1")
+        sqlx::query_scalar("SELECT created_at_ms FROM logical_workflow_jobs WHERE id = $1")
             .bind(fixture.pending_job.as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -868,6 +868,10 @@ async fn admit_logical_metrics_fixture(
             )?,
             ProviderRepositoryOwnerId::new(9_100_004)?,
             ProviderRepositoryOwnerId::new(9_100_004)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([20; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -971,7 +975,7 @@ async fn assert_logical_admission_evidence(
           ON delivery.provider_delivery_id = subject.provider_delivery_id
          AND delivery.tenant_id = subject.tenant_id
          AND delivery.repository_id = subject.repository_id
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin
+        JOIN logical_workflow_runtime_policy_pins AS pin
           ON pin.run_id = subject.run_id
          AND pin.tenant_id = subject.tenant_id
          AND pin.repository_id = subject.repository_id
@@ -1008,7 +1012,7 @@ async fn activate_logical_metrics_run(
         WITH stamp AS (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         )
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET state = 'active', revision = revision + 1,
             updated_at_ms = stamp.now_ms
         FROM stamp
@@ -1024,7 +1028,7 @@ async fn activate_logical_metrics_run(
         WITH stamp AS (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         )
-        UPDATE workflow_plan_v2_invocations
+        UPDATE logical_workflow_invocations
         SET state = 'active', revision = revision + 1,
             updated_at_ms = stamp.now_ms
         FROM stamp

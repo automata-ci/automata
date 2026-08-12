@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 
 const LOCK_FILE_NAME: &str = ".automata-windows-provider-v2.lock";
 const JOURNAL_FILE_NAME: &str = ".automata-windows-provider-v2.events";
-const DURABLE_SCHEMA: u32 = 3;
+const DURABLE_SCHEMA: u32 = 1;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;

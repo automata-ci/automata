@@ -55,7 +55,7 @@ jobs:
     for report in [inherent, through_trait] {
         assert!(report.is_accepted(), "{:#?}", report.diagnostics());
         let plan = report.plan().expect("current plan");
-        assert_eq!(plan.version(), WorkflowPlanVersion::v2());
+        assert_eq!(plan.version(), WorkflowPlanVersion::v1());
         assert_eq!(plan.jobs().len(), 1);
         plan.validate().expect("valid current plan");
         let encoded = serde_json::to_string(plan).expect("serialize plan");

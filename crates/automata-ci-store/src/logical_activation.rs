@@ -675,7 +675,7 @@ impl ClaimedLogicalJobActivation {
         &self.execution
     }
 
-    /// Returns the immutable WorkflowPlan-v2 descriptor.
+    /// Returns the immutable logical workflow descriptor.
     #[must_use]
     pub const fn plan(&self) -> &AdmissionObject {
         &self.plan

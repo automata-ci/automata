@@ -2,16 +2,16 @@ mod github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BootstrapGithubProviderManifest, GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES,
-    GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES, GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES,
-    GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES, GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES,
-    GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS, GITHUB_PROVIDER_ARCHIVE_ORIGIN, GITHUB_PROVIDER_EVENT,
-    GITHUB_PROVIDER_GIT_REF, GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES,
-    GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS, GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION,
-    GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
-    GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
-    GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WORKFLOW_MAX_BYTES,
-    GITHUB_PROVIDER_WORKFLOW_PATH, GithubCheckName, GithubCheckSubjectKey, GithubProviderGitRef,
+    BootstrapGithubProviderManifest, GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY,
+    GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES, GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES,
+    GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES, GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES,
+    GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES, GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS,
+    GITHUB_PROVIDER_ARCHIVE_ORIGIN, GITHUB_PROVIDER_EVENT, GITHUB_PROVIDER_GIT_REF,
+    GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES, GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS,
+    GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
+    GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS, GITHUB_PROVIDER_REST_API_VERSION,
+    GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS, GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES,
+    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubCheckName, GithubProviderGitRef,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository,
     GithubProviderManifestRevision, GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -34,7 +34,10 @@ fn manifest_closes_public_repository_selector_and_origins() {
         manifest.repository_visibility(),
         ProviderRepositoryVisibility::Public
     );
-    assert_eq!(manifest.workflow_path(), GITHUB_PROVIDER_WORKFLOW_PATH);
+    assert_eq!(
+        manifest.workflow_path(),
+        GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY
+    );
     assert_eq!(
         manifest.check_subject_key().as_str(),
         manifest.workflow_path()
@@ -176,28 +179,6 @@ fn resource_policy_accepts_only_the_exact_supported_values() {
 }
 
 #[test]
-fn manifest_can_pin_a_nondefault_direct_workflow_path() {
-    let manifest = manifest_with_profile_at_path(
-        1,
-        1,
-        1,
-        1,
-        [7; 32],
-        [9; 32],
-        "Automata CI",
-        ProviderRepositoryVisibility::Public,
-        automata_ci_core::JobAuthorityProfile::Standard,
-        ".ci/workflows/main.yaml",
-    );
-
-    assert_eq!(manifest.workflow_path(), ".ci/workflows/main.yaml");
-    assert_eq!(
-        manifest.check_subject_key().as_str(),
-        ".ci/workflows/main.yaml"
-    );
-}
-
-#[test]
 fn all_direct_selection_is_canonical_and_digest_bound() {
     let exact = manifest(1, 1, 1, [7; 32], "Automata CI");
     let all_direct = manifest_with_profile_selection(
@@ -213,7 +194,6 @@ fn all_direct_selection_is_canonical_and_digest_bound() {
         GithubProviderWorkflowSelection::all_direct(),
     );
 
-    assert_eq!(all_direct.exact_workflow_path(), None);
     assert_eq!(all_direct.workflow_path(), ".ci/workflows");
     assert!(all_direct.selects_workflow_path(".ci/workflows/build.yml"));
     assert!(all_direct.selects_workflow_path(".ci/workflows/release.yaml"));
@@ -445,33 +425,6 @@ fn manifest_with_profile(
     visibility: ProviderRepositoryVisibility,
     authority_profile: automata_ci_core::JobAuthorityProfile,
 ) -> GithubProviderManifest {
-    manifest_with_profile_at_path(
-        manifest_revision,
-        app_revision,
-        webhook_verifier_revision,
-        policy_revision,
-        spki,
-        webhook_verifier_fingerprint,
-        check_name,
-        visibility,
-        authority_profile,
-        GITHUB_PROVIDER_WORKFLOW_PATH,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn manifest_with_profile_at_path(
-    manifest_revision: u64,
-    app_revision: u64,
-    webhook_verifier_revision: u64,
-    policy_revision: u64,
-    spki: [u8; 32],
-    webhook_verifier_fingerprint: [u8; 32],
-    check_name: &str,
-    visibility: ProviderRepositoryVisibility,
-    authority_profile: automata_ci_core::JobAuthorityProfile,
-    workflow_path: &str,
-) -> GithubProviderManifest {
     manifest_with_profile_selection(
         manifest_revision,
         app_revision,
@@ -482,9 +435,7 @@ fn manifest_with_profile_at_path(
         check_name,
         visibility,
         authority_profile,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(workflow_path).expect("workflow path"),
-        ),
+        GithubProviderWorkflowSelection::all_direct(),
     )
 }
 

@@ -135,7 +135,7 @@ fn runtime_context_round_trips_with_opaque_secret_bindings() {
     .expect("runtime context");
 
     assert_eq!(context.schema_version(), JOB_RUNTIME_CONTEXT_SCHEMA_VERSION);
-    assert_eq!(context.schema_version(), 2);
+    assert_eq!(context.schema_version(), 1);
     assert_eq!(context.strategy().job_index(), 1);
     assert_eq!(context.needs()["compile"].result(), JobConclusion::Success);
     assert_eq!(

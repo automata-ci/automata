@@ -636,7 +636,7 @@ impl AdmitLogicalWorkflowRun {
         &self.source
     }
 
-    /// Returns immutable WorkflowPlan-v2 object metadata.
+    /// Returns immutable logical workflow object metadata.
     #[must_use]
     pub const fn plan(&self) -> &AdmissionObject {
         &self.plan

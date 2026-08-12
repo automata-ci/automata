@@ -402,7 +402,7 @@ message JobExecutionContext {
   optional uint64 run_number = 5;
   optional uint32 run_attempt = 6;
   JobContentReference event = 7;
-  // Required immutable execution-time context for JobIR v5.
+  // Required immutable execution-time context for JobIR.
   JobContentReference runtime_context = 8;
   // Stable positive numeric alias for the internal UUID run identity.
   optional uint64 run_id_alias = 9;
@@ -774,7 +774,7 @@ message JobIr {
   repeated ContainerEntry services = 11;
   repeated StepIr steps = 12;
   repeated JobOutputDefinition outputs = 13;
-  // Required resolved provider permission request for JobIR v5.
+  // Required resolved provider permission request for JobIR.
   JobPermissionRequest permission_request = 14;
   // Required immutable job-visible authority policy; omission is never defaulted.
   optional JobAuthorityProfile authority_profile = 15;

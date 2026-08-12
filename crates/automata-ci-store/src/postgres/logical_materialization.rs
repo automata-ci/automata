@@ -123,7 +123,7 @@ impl LogicalMaterializationRepository for PostgresStore {
 
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_materialization_claims
+            UPDATE logical_workflow_materialization_claims
             SET generation = $6,
                 claimed_at_ms = $7,
                 expires_at_ms = $8,
@@ -245,7 +245,7 @@ impl LogicalMaterializationRepository for PostgresStore {
         insert_materialization_receipt(&mut transaction, &request, &descriptor).await?;
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_materialization_claims
+            UPDATE logical_workflow_materialization_claims
             SET state = 'materialized', updated_at_ms = $9
             WHERE instance_id = $1
               AND run_id = $2
@@ -322,7 +322,7 @@ async fn lock_materialization_selection_evidence(
                AND logical_job_id = $6
                AND instance_id = $7
                AND authority_digest = $8, FALSE) AS exact
-        FROM workflow_plan_v2_materialization_work_selections
+        FROM logical_workflow_materialization_work_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -347,7 +347,7 @@ async fn lock_materialization_selection_evidence(
     let horizon: Option<String> = sqlx::query_scalar(
         r"
         SELECT queue_name
-        FROM workflow_plan_v2_work_selection_replay_horizons
+        FROM logical_workflow_work_selection_replay_horizons
         WHERE queue_name = 'materialization'
         FOR UPDATE
         ",
@@ -370,7 +370,7 @@ async fn lock_materialization_quarantine_custody(
     let quarantine: Option<Uuid> = sqlx::query_scalar(
         r"
         SELECT instance_id
-        FROM workflow_plan_v2_materialization_work_quarantines
+        FROM logical_workflow_materialization_work_quarantines
         WHERE instance_id = $1
         FOR UPDATE
         ",
@@ -402,7 +402,7 @@ async fn load_exact_materialization_renewal_receipt(
         r"
         SELECT successor_generation, successor_claimed_at_ms,
                successor_expires_at_ms, validated_at_ms
-        FROM workflow_plan_v2_materialization_renewal_receipts
+        FROM logical_workflow_materialization_renewal_receipts
         WHERE instance_id = $1
           AND predecessor_generation = $2
           AND selection_id = $3
@@ -485,7 +485,7 @@ async fn verify_selected_materialization_renewal_lineage(
             r"
             SELECT successor_generation, successor_claimed_at_ms,
                    successor_expires_at_ms
-            FROM workflow_plan_v2_materialization_renewal_receipts
+            FROM logical_workflow_materialization_renewal_receipts
             WHERE instance_id = $1
               AND predecessor_generation = $2
               AND selection_id = $3
@@ -566,7 +566,7 @@ async fn insert_materialization_renewal_receipt(
 ) -> Result<i64, LogicalMaterializationStoreError> {
     sqlx::query_scalar(
         r"
-        INSERT INTO workflow_plan_v2_materialization_renewal_receipts (
+        INSERT INTO logical_workflow_materialization_renewal_receipts (
             instance_id, selection_id, tenant_id, run_id, invocation_id,
             logical_job_id, owner_id, runtime_policy_revision,
             runtime_policy_digest, authority_digest, expected_job_id,
@@ -646,7 +646,7 @@ pub(super) async fn claim_logical_instance_materialization_in_transaction(
 
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_claims (
+        INSERT INTO logical_workflow_materialization_claims (
             instance_id, run_id, invocation_id, logical_job_id,
             descriptor_digest, expected_job_id, expected_attempt_id,
             authority_profile, state, owner_id, generation, claimed_at_ms, expires_at_ms,
@@ -816,10 +816,10 @@ async fn lock_run(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_workflow_plan_v2_invocation_published(
+               AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
                )
-        FROM workflow_plan_v2_runs AS marker
+        FROM logical_workflow_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
         ",
@@ -835,8 +835,8 @@ async fn lock_run(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 2
-        FROM workflow_plan_v2_invocations AS invocation
+               AND invocation.plan_schema = 1
+        FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
         ",
@@ -892,7 +892,7 @@ async fn resolve_durable_claim(
         .ok_or(LogicalMaterializationStoreError::GenerationExhausted)?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_claims
+        UPDATE logical_workflow_materialization_claims
         SET owner_id = $6,
             generation = $7,
             claimed_at_ms = $8,
@@ -949,7 +949,7 @@ async fn reject_quarantined_materialization(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_materialization_work_quarantines
+            FROM logical_workflow_materialization_work_quarantines
             WHERE instance_id = $1
         )
         ",
@@ -1024,15 +1024,15 @@ async fn terminal_materialized_base_exists(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_instances AS instance
-            JOIN workflow_plan_v2_jobs AS logical_job
+            FROM logical_workflow_instances AS instance
+            JOIN logical_workflow_jobs AS logical_job
               ON logical_job.run_id = instance.run_id
              AND logical_job.invocation_id = instance.invocation_id
              AND logical_job.id = instance.logical_job_id
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = instance.run_id
+            JOIN logical_workflow_runs AS marker ON marker.run_id = instance.run_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
             JOIN repositories AS repository ON repository.id = run.repository_id
-            JOIN workflow_plan_v2_materialization_claims AS claim
+            JOIN logical_workflow_materialization_claims AS claim
               ON claim.instance_id = instance.id
             WHERE repository.tenant_id = $1
               AND instance.run_id = $2
@@ -1067,7 +1067,7 @@ async fn lock_fresh_target(
         .is_some()
     {
         sqlx::query(
-            "SELECT instance_id FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1 FOR UPDATE",
+            "SELECT instance_id FROM logical_workflow_materialization_claims WHERE instance_id = $1 FOR UPDATE",
         )
         .bind(target.instance_id().as_uuid())
         .fetch_optional(&mut **transaction)
@@ -1122,22 +1122,22 @@ fn instance_query() -> &'static str {
            claim.created_at_ms AS materialization_created_at_ms,
            claim.updated_at_ms AS materialization_updated_at_ms,
            claim.origin_selection_id AS materialization_origin_selection_id
-    FROM workflow_plan_v2_instances AS instance
-    JOIN workflow_plan_v2_activation_publications AS publication
+    FROM logical_workflow_instances AS instance
+    JOIN logical_workflow_activation_publications AS publication
       ON publication.run_id = instance.run_id
      AND publication.invocation_id = instance.invocation_id
      AND publication.logical_job_id = instance.logical_job_id
-    JOIN workflow_plan_v2_jobs AS logical_job
+    JOIN logical_workflow_jobs AS logical_job
       ON logical_job.run_id = instance.run_id
      AND logical_job.invocation_id = instance.invocation_id
      AND logical_job.id = instance.logical_job_id
-    JOIN workflow_plan_v2_invocations AS invocation
+    JOIN logical_workflow_invocations AS invocation
       ON invocation.run_id = logical_job.run_id
      AND invocation.id = logical_job.invocation_id
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = instance.run_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = instance.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
-    LEFT JOIN workflow_plan_v2_materialization_claims AS claim
+    LEFT JOIN logical_workflow_materialization_claims AS claim
       ON claim.instance_id = instance.id
      AND claim.run_id = instance.run_id
      AND claim.invocation_id = instance.invocation_id
@@ -1147,16 +1147,16 @@ fn instance_query() -> &'static str {
       AND instance.invocation_id = $3
       AND instance.logical_job_id = $4
       AND instance.id = $5
-      AND instance.job_ir_version = 5
+      AND instance.job_ir_version = 1
       AND instance.job_ir_media_type =
           'application/vnd.automata.job-ir.protobuf'
-      AND instance.runtime_context_schema = 2
+      AND instance.runtime_context_schema = 1
       AND instance.runtime_context_media_type =
           'application/vnd.automata.job-runtime-context.protobuf'
       AND publication.condition_matched
       AND publication.instance_count > 0
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 2
+      AND invocation.plan_schema = 1
       AND marker.orchestration_schema = 1
       AND (
           (
@@ -1170,7 +1170,7 @@ fn instance_query() -> &'static str {
               AND run.status = 'cancelled'
               AND EXISTS (
                   SELECT 1
-                  FROM workflow_plan_v2_concurrency_cancellations AS cancellation
+                  FROM logical_workflow_concurrency_cancellations AS cancellation
                   WHERE cancellation.run_id = run.id
                     AND cancellation.root_invocation_id = invocation.id
                     AND cancellation.cancelled_at_ms = logical_job.updated_at_ms
@@ -1180,8 +1180,8 @@ fn instance_query() -> &'static str {
               )
           )
       )
-      AND run.admission_epoch = 4
-      AND run.plan_schema = 2
+      AND run.admission_epoch = 1
+      AND run.plan_schema = 1
     FOR UPDATE OF instance
     "
 }
@@ -1225,27 +1225,27 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
            claim.created_at_ms AS materialization_created_at_ms,
            claim.updated_at_ms AS materialization_updated_at_ms,
            claim.origin_selection_id AS materialization_origin_selection_id
-    FROM workflow_plan_v2_instances AS instance
-    JOIN workflow_plan_v2_activation_publications AS publication
+    FROM logical_workflow_instances AS instance
+    JOIN logical_workflow_activation_publications AS publication
       ON publication.run_id = instance.run_id
      AND publication.invocation_id = instance.invocation_id
      AND publication.logical_job_id = instance.logical_job_id
-    JOIN workflow_plan_v2_jobs AS logical_job
+    JOIN logical_workflow_jobs AS logical_job
       ON logical_job.run_id = instance.run_id
      AND logical_job.invocation_id = instance.invocation_id
      AND logical_job.id = instance.logical_job_id
-    JOIN workflow_plan_v2_invocations AS invocation
+    JOIN logical_workflow_invocations AS invocation
       ON invocation.run_id = logical_job.run_id
      AND invocation.id = logical_job.invocation_id
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = instance.run_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = instance.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
-    JOIN workflow_plan_v2_materialization_claims AS claim
+    JOIN logical_workflow_materialization_claims AS claim
       ON claim.instance_id = instance.id
      AND claim.run_id = instance.run_id
      AND claim.invocation_id = instance.invocation_id
      AND claim.logical_job_id = instance.logical_job_id
-    JOIN workflow_plan_v2_concrete_jobs AS concrete
+    JOIN logical_workflow_concrete_jobs AS concrete
       ON concrete.instance_id = claim.instance_id
      AND concrete.run_id = claim.run_id
      AND concrete.invocation_id = claim.invocation_id
@@ -1254,38 +1254,38 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
     JOIN job_attempts AS attempt ON attempt.id = concrete.initial_attempt_id
     JOIN attempt_terminal_results AS terminal
       ON terminal.attempt_id = attempt.id
-    JOIN workflow_plan_v2_instance_result_claims AS instance_claim
+    JOIN logical_workflow_instance_result_claims AS instance_claim
       ON instance_claim.attempt_id = terminal.attempt_id
      AND instance_claim.run_id = concrete.run_id
      AND instance_claim.invocation_id = concrete.invocation_id
      AND instance_claim.logical_job_id = concrete.logical_job_id
      AND instance_claim.instance_id = concrete.instance_id
      AND instance_claim.job_id = concrete.job_id
-    JOIN workflow_plan_v2_instance_results AS instance_result
+    JOIN logical_workflow_instance_results AS instance_result
       ON instance_result.instance_id = instance_claim.instance_id
      AND instance_result.run_id = instance_claim.run_id
      AND instance_result.invocation_id = instance_claim.invocation_id
      AND instance_result.logical_job_id = instance_claim.logical_job_id
      AND instance_result.job_id = instance_claim.job_id
      AND instance_result.attempt_id = instance_claim.attempt_id
-    JOIN workflow_plan_v2_job_result_claims AS job_claim
+    JOIN logical_workflow_job_result_claims AS job_claim
       ON job_claim.run_id = logical_job.run_id
      AND job_claim.invocation_id = logical_job.invocation_id
      AND job_claim.logical_job_id = logical_job.id
-    JOIN workflow_plan_v2_job_results AS job_result
+    JOIN logical_workflow_job_results AS job_result
       ON job_result.run_id = job_claim.run_id
      AND job_result.invocation_id = job_claim.invocation_id
      AND job_result.logical_job_id = job_claim.logical_job_id
-    JOIN workflow_plan_v2_job_result_instances AS job_instance
+    JOIN logical_workflow_job_result_instances AS job_instance
       ON job_instance.logical_job_id = job_result.logical_job_id
      AND job_instance.instance_id = instance_result.instance_id
-    LEFT JOIN workflow_plan_v2_run_result_claims AS run_claim
+    LEFT JOIN logical_workflow_run_result_claims AS run_claim
       ON run_claim.run_id = marker.run_id
      AND run_claim.root_invocation_id = marker.root_invocation_id
-    LEFT JOIN workflow_plan_v2_run_results AS run_result
+    LEFT JOIN logical_workflow_run_results AS run_result
       ON run_result.run_id = run_claim.run_id
      AND run_result.root_invocation_id = run_claim.root_invocation_id
-    LEFT JOIN workflow_plan_v2_run_result_jobs AS run_job
+    LEFT JOIN logical_workflow_run_result_jobs AS run_job
       ON run_job.run_id = run_result.run_id
      AND run_job.root_invocation_id = run_result.root_invocation_id
      AND run_job.logical_job_id = logical_job.id
@@ -1294,20 +1294,20 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND instance.invocation_id = $3
       AND instance.logical_job_id = $4
       AND instance.id = $5
-      AND instance.job_ir_version = 5
+      AND instance.job_ir_version = 1
       AND instance.job_ir_media_type =
           'application/vnd.automata.job-ir.protobuf'
-      AND instance.runtime_context_schema = 2
+      AND instance.runtime_context_schema = 1
       AND instance.runtime_context_media_type =
           'application/vnd.automata.job-runtime-context.protobuf'
       AND publication.condition_matched
       AND publication.instance_count > 0
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 2
+      AND invocation.plan_schema = 1
       AND marker.root_invocation_id = invocation.id
       AND marker.orchestration_schema = 1
-      AND run.admission_epoch = 4
-      AND run.plan_schema = 2
+      AND run.admission_epoch = 1
+      AND run.plan_schema = 1
       AND claim.state = 'materialized'
       AND concrete.descriptor_digest = claim.descriptor_digest
       AND concrete.job_id = claim.expected_job_id
@@ -1318,7 +1318,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND concrete.claim_expires_at_ms = claim.expires_at_ms
       AND concrete.committed_at_ms = claim.updated_at_ms
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = 4
+      AND job.admission_epoch = 1
       AND job.job_ir_schema = 5
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
@@ -1326,8 +1326,8 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND attempt.job_id = job.id
       AND attempt.attempt_number = 1
       AND terminal.result_schema = 1
-      AND terminal.workflow_plan_v2_logical_job_id = logical_job.id
-      AND terminal.workflow_plan_v2_terminal_ordinal > 0
+      AND terminal.logical_workflow_logical_job_id = logical_job.id
+      AND terminal.logical_workflow_terminal_ordinal > 0
       AND terminal.completed_at_ms >= 0
       AND terminal.committed_at_ms >= terminal.completed_at_ms
       AND (
@@ -1349,7 +1349,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND instance_result.result_size_bytes = terminal.result_size_bytes
       AND instance_result.result_schema = terminal.result_schema
       AND instance_result.raw_conclusion = terminal.conclusion
-      AND instance_result.terminal_ordinal = terminal.workflow_plan_v2_terminal_ordinal
+      AND instance_result.terminal_ordinal = terminal.logical_workflow_terminal_ordinal
       AND instance_result.result_completed_at_ms = terminal.completed_at_ms
       AND instance_result.result_committed_at_ms = terminal.committed_at_ms
       AND instance_result.job_ir_digest = instance.job_ir_digest
@@ -1371,18 +1371,18 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND job_result.instance_count = publication.instance_count
       AND job_result.instance_count = (
           SELECT count(*)::INTEGER
-          FROM workflow_plan_v2_instances AS expected_instance
+          FROM logical_workflow_instances AS expected_instance
           WHERE expected_instance.run_id = logical_job.run_id
             AND expected_instance.invocation_id = logical_job.invocation_id
             AND expected_instance.logical_job_id = logical_job.id
       )
       AND job_result.instance_count = (
           SELECT count(*)::INTEGER
-          FROM workflow_plan_v2_job_result_instances AS result_instance
+          FROM logical_workflow_job_result_instances AS result_instance
           WHERE result_instance.logical_job_id = logical_job.id
       )
       AND job_instance.matrix_index = instance.matrix_index
-      AND job_instance.terminal_ordinal = terminal.workflow_plan_v2_terminal_ordinal
+      AND job_instance.terminal_ordinal = terminal.logical_workflow_terminal_ordinal
       AND job_instance.instance_descriptor_digest = instance_result.descriptor_digest
       AND job_instance.instance_outputs_digest = instance_result.outputs_digest
       AND job_instance.instance_commit_digest = instance_result.commit_digest
@@ -1412,13 +1412,13 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
               AND run_result.admission_digest = marker.admission_digest
               AND run_result.job_count = (
                   SELECT count(*)::INTEGER
-                  FROM workflow_plan_v2_jobs AS expected_job
+                  FROM logical_workflow_jobs AS expected_job
                   WHERE expected_job.run_id = marker.run_id
                     AND expected_job.invocation_id = marker.root_invocation_id
               )
               AND run_result.job_count = (
                   SELECT count(*)::INTEGER
-                  FROM workflow_plan_v2_run_result_jobs AS result_job
+                  FROM logical_workflow_run_result_jobs AS result_job
                   WHERE result_job.run_id = marker.run_id
                     AND result_job.root_invocation_id = marker.root_invocation_id
               )
@@ -1535,14 +1535,14 @@ async fn load_terminal_run_root(
                invocation.updated_at_ms AS current_invocation_updated_at_ms,
                run.status AS current_workflow_status,
                run.updated_at_ms AS current_workflow_updated_at_ms
-        FROM workflow_plan_v2_run_result_claims AS claim
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = claim.run_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_run_result_claims AS claim
+        JOIN logical_workflow_runs AS marker ON marker.run_id = claim.run_id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        LEFT JOIN workflow_plan_v2_run_results AS result
+        LEFT JOIN logical_workflow_run_results AS result
           ON result.run_id = claim.run_id
         WHERE repository.tenant_id = $1
           AND claim.run_id = $2
@@ -1568,7 +1568,7 @@ async fn reauthenticate_terminal_jobs(
     let expected_job_count = sqlx::query_scalar::<_, i64>(
         r"
         SELECT count(*)
-        FROM workflow_plan_v2_jobs
+        FROM logical_workflow_jobs
         WHERE run_id = $1 AND invocation_id = $2
         ",
     )
@@ -1587,7 +1587,7 @@ async fn reauthenticate_terminal_jobs(
     let dependency_rows = sqlx::query(
         r"
         SELECT logical_job_id, prerequisite_job_id
-        FROM workflow_plan_v2_dependencies
+        FROM logical_workflow_dependencies
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY logical_job_id, prerequisite_job_id
         ",
@@ -1716,13 +1716,13 @@ async fn load_terminal_job_base_rows(
                publication.activation_output_digest,
                publication.condition_matched, publication.instance_count,
                publication.published_at_ms
-        FROM workflow_plan_v2_jobs AS job
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_jobs AS job
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = job.run_id
          AND publication.invocation_id = job.invocation_id
          AND publication.logical_job_id = job.id
@@ -1730,10 +1730,10 @@ async fn load_terminal_job_base_rows(
           AND job.run_id = $2 AND job.invocation_id = $3
           AND marker.root_invocation_id = job.invocation_id
           AND marker.orchestration_schema = 1
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.plan_media_type =
               'application/vnd.automata.workflow-plan+json'
-          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND run.admission_epoch = 1 AND run.plan_schema = 1
         ORDER BY job.source_order, job.id
         ",
     )
@@ -1963,14 +1963,14 @@ async fn load_terminal_job_result_root(
                claim.claimed_at_ms AS receipt_claim_claimed_at_ms,
                claim.expires_at_ms AS receipt_claim_expires_at_ms,
                claim.updated_at_ms AS receipt_claim_updated_at_ms,
-               (SELECT count(*) FROM workflow_plan_v2_job_result_instances AS child
+               (SELECT count(*) FROM logical_workflow_job_result_instances AS child
                 WHERE child.logical_job_id = result.logical_job_id) AS actual_instance_count,
-               (SELECT count(*) FROM workflow_plan_v2_job_result_prerequisites AS child
+               (SELECT count(*) FROM logical_workflow_job_result_prerequisites AS child
                 WHERE child.logical_job_id = result.logical_job_id) AS actual_prerequisite_count,
-               (SELECT count(*) FROM workflow_plan_v2_job_result_outputs AS child
+               (SELECT count(*) FROM logical_workflow_job_result_outputs AS child
                 WHERE child.logical_job_id = result.logical_job_id) AS actual_output_count
-        FROM workflow_plan_v2_job_results AS result
-        JOIN workflow_plan_v2_job_result_claims AS claim
+        FROM logical_workflow_job_results AS result
+        JOIN logical_workflow_job_result_claims AS claim
           ON claim.logical_job_id = result.logical_job_id
         WHERE result.logical_job_id = $1
         ",
@@ -1989,7 +1989,7 @@ async fn load_terminal_job_outputs(
     let rows = sqlx::query(
         r#"
         SELECT output_name, sensitivity, public_value
-        FROM workflow_plan_v2_job_result_outputs
+        FROM logical_workflow_job_result_outputs
         WHERE logical_job_id = $1
         ORDER BY output_name COLLATE "C"
         "#,
@@ -2091,18 +2091,18 @@ async fn load_terminal_instance_evidence(
                terminal.conclusion AS terminal_conclusion,
                terminal.completed_at_ms AS terminal_completed_at_ms,
                terminal.committed_at_ms AS terminal_committed_at_ms,
-               terminal.workflow_plan_v2_logical_job_id AS terminal_logical_job_id,
-               terminal.workflow_plan_v2_terminal_ordinal AS terminal_ordinal
-        FROM workflow_plan_v2_instances AS instance
-        LEFT JOIN workflow_plan_v2_instance_results AS result
+               terminal.logical_workflow_logical_job_id AS terminal_logical_job_id,
+               terminal.logical_workflow_terminal_ordinal AS terminal_ordinal
+        FROM logical_workflow_instances AS instance
+        LEFT JOIN logical_workflow_instance_results AS result
           ON result.instance_id = instance.id
-        LEFT JOIN workflow_plan_v2_instance_result_claims AS claim
+        LEFT JOIN logical_workflow_instance_result_claims AS claim
           ON claim.instance_id = instance.id
-        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+        LEFT JOIN logical_workflow_job_environment_evidence AS evidence
           ON evidence.instance_id = instance.id
-        LEFT JOIN workflow_plan_v2_concrete_jobs AS concrete
+        LEFT JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.instance_id = instance.id
-        LEFT JOIN workflow_plan_v2_materialization_claims AS materialization
+        LEFT JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = instance.id
         LEFT JOIN job_attempts AS attempt ON attempt.id = result.attempt_id
         LEFT JOIN attempt_terminal_results AS terminal
@@ -2174,8 +2174,8 @@ async fn load_terminal_instance_outputs(
         r#"
         SELECT output.instance_id, output.output_name,
                output.sensitivity, output.public_value
-        FROM workflow_plan_v2_instance_result_outputs AS output
-        JOIN workflow_plan_v2_instance_results AS result
+        FROM logical_workflow_instance_result_outputs AS output
+        JOIN logical_workflow_instance_results AS result
           ON result.instance_id = output.instance_id
         WHERE result.run_id = $1 AND result.invocation_id = $2
           AND result.logical_job_id = $3
@@ -2680,7 +2680,7 @@ async fn terminal_job_instance_children_match(
         SELECT instance_id, matrix_index, terminal_ordinal,
                instance_descriptor_digest, instance_outputs_digest,
                instance_commit_digest, raw_conclusion, effective_conclusion
-        FROM workflow_plan_v2_job_result_instances
+        FROM logical_workflow_job_result_instances
         WHERE logical_job_id = $1
         ORDER BY matrix_index
         ",
@@ -2733,7 +2733,7 @@ async fn terminal_job_prerequisite_children_match(
                prerequisite_commit_digest, prerequisite_outputs_digest,
                effective_conclusion, closure_has_failure,
                closure_has_cancelled, closure_has_skipped
-        FROM workflow_plan_v2_job_result_prerequisites
+        FROM logical_workflow_job_result_prerequisites
         WHERE logical_job_id = $1
         ORDER BY prerequisite_source_order, prerequisite_job_id
         ",
@@ -2947,7 +2947,7 @@ async fn terminal_run_job_children_match(
                instances_digest, prerequisite_count, prerequisites_digest,
                output_count, outputs_digest, job_commit_digest,
                job_finalized_at_ms
-        FROM workflow_plan_v2_run_result_jobs
+        FROM logical_workflow_run_result_jobs
         WHERE run_id = $1 AND root_invocation_id = $2
         ORDER BY source_order, logical_key COLLATE "C", logical_job_id
         "#,
@@ -3655,7 +3655,7 @@ async fn insert_materialization_receipt(
 ) -> Result<(), LogicalMaterializationStoreError> {
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_concrete_jobs (
+        INSERT INTO logical_workflow_concrete_jobs (
             instance_id, run_id, invocation_id, logical_job_id,
             descriptor_digest, job_id, initial_attempt_id, job_key,
             display_name, requirements, authority_profile,
@@ -3833,7 +3833,7 @@ fn receipt_query() -> &'static str {
            attempt.requested_log_visibility, attempt.effective_log_visibility,
            attempt.output_safety_reason, attempt.output_safety_schema,
            attempt.classified_at_ms
-    FROM workflow_plan_v2_concrete_jobs AS concrete
+    FROM logical_workflow_concrete_jobs AS concrete
     JOIN jobs AS job ON job.id = concrete.job_id
     JOIN workflow_runs AS run ON run.id = job.run_id
     JOIN job_attempts AS attempt ON attempt.id = concrete.initial_attempt_id

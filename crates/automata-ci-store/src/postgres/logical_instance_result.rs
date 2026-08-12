@@ -147,7 +147,7 @@ impl LogicalInstanceResultRepository for PostgresStore {
         insert_outputs(&mut transaction, &request, &descriptor).await?;
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_instance_result_claims
+            UPDATE logical_workflow_instance_result_claims
             SET state = 'finalized', updated_at_ms = $8
             WHERE attempt_id = $1
               AND state = 'projecting'
@@ -313,7 +313,7 @@ async fn insert_initial_claim(
 ) -> Result<LogicalInstanceResultClaimOutcome, LogicalInstanceResultStoreError> {
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_instance_result_claims (
+        INSERT INTO logical_workflow_instance_result_claims (
             attempt_id, run_id, invocation_id, logical_job_id, instance_id,
             job_id, descriptor_digest, state, owner_id, generation,
             claimed_at_ms, expires_at_ms, created_at_ms, updated_at_ms
@@ -406,7 +406,7 @@ async fn reserve_or_replay_selection(
             r"
             SELECT EXISTS (
                 SELECT 1
-                FROM workflow_plan_v2_instance_result_quarantines
+                FROM logical_workflow_instance_result_quarantines
                 WHERE attempt_id = $1 AND tenant_id = $2
             )
             ",
@@ -486,7 +486,7 @@ async fn lock_selection_request(
         r"
         SELECT owner_id, claimed_at_ms, expires_at_ms, outcome,
                tenant_id, attempt_id, generation
-        FROM workflow_plan_v2_instance_result_selections
+        FROM logical_workflow_instance_result_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -506,7 +506,7 @@ async fn lock_selection_request_optional(
         r"
         SELECT owner_id, claimed_at_ms, expires_at_ms, outcome,
                tenant_id, attempt_id, generation
-        FROM workflow_plan_v2_instance_result_selections
+        FROM logical_workflow_instance_result_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -565,7 +565,7 @@ async fn reserve_selection_request(
     let floor: i64 = sqlx::query_scalar(
         r"
         SELECT replay_floor_ms
-        FROM workflow_plan_v2_result_selection_replay_horizons
+        FROM logical_workflow_result_selection_replay_horizons
         WHERE queue_name = 'instance'
         FOR UPDATE
         ",
@@ -590,7 +590,7 @@ async fn reserve_selection_request(
     }
     let horizon_rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_result_selection_replay_horizons
+        UPDATE logical_workflow_result_selection_replay_horizons
         SET replay_floor_ms = $1, updated_at_ms = $1
         WHERE queue_name = 'instance'
         ",
@@ -610,13 +610,13 @@ async fn reserve_selection_request(
         r"
         WITH expired AS (
             SELECT selection_id
-            FROM workflow_plan_v2_instance_result_selections
+            FROM logical_workflow_instance_result_selections
             WHERE expires_at_ms <= $1
             ORDER BY expires_at_ms, selection_id
             FOR UPDATE SKIP LOCKED
             LIMIT 1024
         )
-        DELETE FROM workflow_plan_v2_instance_result_selections AS selection
+        DELETE FROM logical_workflow_instance_result_selections AS selection
         USING expired
         WHERE selection.selection_id = expired.selection_id
         ",
@@ -628,7 +628,7 @@ async fn reserve_selection_request(
     .rows_affected();
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_instance_result_selections (
+        INSERT INTO logical_workflow_instance_result_selections (
             selection_id, owner_id, claimed_at_ms, expires_at_ms, outcome,
             created_at_ms, updated_at_ms
         ) VALUES ($1,$2,$3,$4,'selecting',$3,$3)
@@ -659,7 +659,7 @@ async fn finalize_idle_selection(
 ) -> Result<(), LogicalInstanceResultStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_instance_result_selections
+        UPDATE logical_workflow_instance_result_selections
         SET outcome = 'idle'
         WHERE selection_id = $1 AND outcome = 'selecting'
           AND owner_id = $2 AND claimed_at_ms = $3 AND expires_at_ms = $4
@@ -687,7 +687,7 @@ async fn finalize_claimed_selection(
 ) -> Result<(), LogicalInstanceResultStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_instance_result_selections
+        UPDATE logical_workflow_instance_result_selections
         SET outcome = 'claimed', tenant_id = $2, attempt_id = $3,
             generation = $5
         WHERE selection_id = $1 AND outcome = 'selecting'
@@ -719,7 +719,7 @@ async fn finalize_quarantined_selection(
 ) -> Result<(), LogicalInstanceResultStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_instance_result_selections
+        UPDATE logical_workflow_instance_result_selections
         SET outcome = 'quarantined', tenant_id = $2, attempt_id = $3,
             generation = NULL
         WHERE selection_id = $1 AND outcome = 'selecting'
@@ -824,7 +824,7 @@ async fn quarantine_matches_due_snapshot(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_instance_result_quarantines
+            FROM logical_workflow_instance_result_quarantines
             WHERE attempt_id = $1 AND tenant_id = $2 AND run_id = $3
               AND invocation_id = $4 AND logical_job_id = $5
               AND source_order = $6 AND ready_at_ms = $7
@@ -910,7 +910,7 @@ async fn quarantine_exists(
     let tenant_id = sqlx::query_scalar::<_, String>(
         r"
         SELECT tenant_id
-        FROM workflow_plan_v2_instance_result_quarantines
+        FROM logical_workflow_instance_result_quarantines
         WHERE attempt_id = $1
         ",
     )
@@ -943,7 +943,7 @@ async fn insert_quarantine(
     let claim_descriptor_digest = claim.map(|claim| claim.descriptor_digest.as_bytes().to_vec());
     let inserted = sqlx::query_scalar::<_, i64>(
         r"
-        INSERT INTO workflow_plan_v2_instance_result_quarantines (
+        INSERT INTO logical_workflow_instance_result_quarantines (
             attempt_id, tenant_id, run_id, invocation_id, logical_job_id,
             source_order, ready_at_ms, available_at_ms, failure_kind,
             claim_owner_id, claim_generation, claim_claimed_at_ms,
@@ -1032,7 +1032,7 @@ async fn resolve_durable_claim(
         .ok_or(LogicalInstanceResultStoreError::GenerationExhausted)?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_instance_result_claims
+        UPDATE logical_workflow_instance_result_claims
         SET owner_id = $3, generation = $4, claimed_at_ms = $5,
             expires_at_ms = $6, updated_at_ms = $5
         WHERE attempt_id = $1
@@ -1098,7 +1098,7 @@ async fn load_durable_claim(
                generation AS result_claim_generation,
                claimed_at_ms AS result_claim_claimed_at_ms,
                expires_at_ms AS result_claim_expires_at_ms
-        FROM workflow_plan_v2_instance_result_claims
+        FROM logical_workflow_instance_result_claims
         WHERE attempt_id = $1
         FOR UPDATE
         ",
@@ -1147,13 +1147,13 @@ async fn lock_next_target(
                source_order AS due_source_order,
                ready_at_ms AS due_ready_at_ms,
                available_at_ms AS due_available_at_ms
-        FROM workflow_plan_v2_instance_result_due
+        FROM logical_workflow_instance_result_due
         WHERE available_at_ms <= $1
           AND NOT EXISTS (
               SELECT 1
-              FROM workflow_plan_v2_instance_result_quarantines AS quarantine
+              FROM logical_workflow_instance_result_quarantines AS quarantine
               WHERE quarantine.attempt_id =
-                    workflow_plan_v2_instance_result_due.attempt_id
+                    logical_workflow_instance_result_due.attempt_id
           )
         ORDER BY available_at_ms, ready_at_ms, run_id, invocation_id,
                  source_order, logical_job_id, attempt_id
@@ -1174,7 +1174,7 @@ async fn lock_due_target(
     sqlx::query(
         r"
         SELECT attempt_id
-        FROM workflow_plan_v2_instance_result_due
+        FROM logical_workflow_instance_result_due
         WHERE attempt_id = $1
         FOR UPDATE
         ",
@@ -1194,7 +1194,7 @@ async fn lock_due_snapshot(
         r"
         SELECT attempt_id, tenant_id, run_id, invocation_id, logical_job_id,
                source_order, ready_at_ms, available_at_ms
-        FROM workflow_plan_v2_instance_result_due
+        FROM logical_workflow_instance_result_due
         WHERE attempt_id = $1
         FOR UPDATE
         ",
@@ -1231,7 +1231,7 @@ fn target_query() -> &'static str {
            terminal.server_cancellation_digest,
            terminal.conclusion, terminal.completed_at_ms,
            terminal.committed_at_ms,
-           terminal.workflow_plan_v2_terminal_ordinal,
+           terminal.logical_workflow_terminal_ordinal,
            attempt.secret_exposure_class AS maximum_secret_exposure_class,
            instance.job_ir_digest, instance.job_ir_object_key,
            instance.job_ir_size_bytes, instance.job_ir_media_type,
@@ -1239,36 +1239,36 @@ fn target_query() -> &'static str {
     FROM attempt_terminal_results AS terminal
     JOIN job_attempts AS attempt ON attempt.id = terminal.attempt_id
     JOIN jobs AS job ON job.id = attempt.job_id
-    JOIN workflow_plan_v2_concrete_jobs AS concrete
+    JOIN logical_workflow_concrete_jobs AS concrete
       ON concrete.job_id = job.id
      AND concrete.initial_attempt_id = attempt.id
-    JOIN workflow_plan_v2_materialization_claims AS materialization
+    JOIN logical_workflow_materialization_claims AS materialization
       ON materialization.instance_id = concrete.instance_id
-    JOIN workflow_plan_v2_instances AS instance
+    JOIN logical_workflow_instances AS instance
       ON instance.id = concrete.instance_id
      AND instance.run_id = concrete.run_id
      AND instance.invocation_id = concrete.invocation_id
      AND instance.logical_job_id = concrete.logical_job_id
-    JOIN workflow_plan_v2_jobs AS logical_job
+    JOIN logical_workflow_jobs AS logical_job
       ON logical_job.run_id = concrete.run_id
      AND logical_job.invocation_id = concrete.invocation_id
      AND logical_job.id = concrete.logical_job_id
-    JOIN workflow_plan_v2_invocations AS invocation
+    JOIN logical_workflow_invocations AS invocation
       ON invocation.run_id = logical_job.run_id
      AND invocation.id = logical_job.invocation_id
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = concrete.run_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = concrete.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
     WHERE repository.tenant_id = $1
       AND terminal.attempt_id = $2
       AND materialization.state = 'materialized'
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = 4
+      AND job.admission_epoch = 1
       AND job.job_ir_schema = 5
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
       AND job.job_ir_size_bytes = instance.job_ir_size_bytes
-      AND instance.job_ir_version = 5
+      AND instance.job_ir_version = 1
       AND instance.job_ir_media_type =
           'application/vnd.automata.job-ir.protobuf'
       AND (
@@ -1276,8 +1276,8 @@ fn target_query() -> &'static str {
            AND terminal.result_schema = 1)
           OR terminal.terminal_authority = 'server_cancellation'
       )
-      AND terminal.workflow_plan_v2_logical_job_id = concrete.logical_job_id
-      AND terminal.workflow_plan_v2_terminal_ordinal > 0
+      AND terminal.logical_workflow_logical_job_id = concrete.logical_job_id
+      AND terminal.logical_workflow_terminal_ordinal > 0
       AND terminal.completed_at_ms >= 0
       AND terminal.committed_at_ms >= terminal.completed_at_ms
       AND (
@@ -1288,10 +1288,10 @@ fn target_query() -> &'static str {
           OR (terminal.conclusion = 'skipped' AND attempt.lifecycle = 'skipped')
       )
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 2
+      AND invocation.plan_schema = 1
       AND marker.orchestration_schema = 1
-      AND run.admission_epoch = 4
-      AND run.plan_schema = 2
+      AND run.admission_epoch = 1
+      AND run.plan_schema = 1
       AND logical_job.state IN ('activated', 'completed', 'skipped', 'cancelled', 'failed')
       AND invocation.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')
       AND marker.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')
@@ -1426,7 +1426,7 @@ fn decode_descriptor(
     let matrix_digest = decode_digest(row, "matrix_digest")?;
     let terminal_ordinal = LogicalInstanceTerminalOrdinal::new(
         u64::try_from(
-            row.try_get::<i64, _>("workflow_plan_v2_terminal_ordinal")
+            row.try_get::<i64, _>("logical_workflow_terminal_ordinal")
                 .map_err(operation_error)?,
         )
         .map_err(|_| StoreError::corrupt_data("invalid logical terminal ordinal"))?,
@@ -1663,7 +1663,7 @@ async fn insert_instance_result(
     };
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_instance_results (
+        INSERT INTO logical_workflow_instance_results (
             instance_id, run_id, invocation_id, logical_job_id, job_id,
             attempt_id, descriptor_digest, terminal_authority,
             result_digest, result_object_key, result_size_bytes,
@@ -1735,7 +1735,7 @@ async fn insert_outputs(
     for output in request.outputs() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_instance_result_outputs (
+            INSERT INTO logical_workflow_instance_result_outputs (
                 instance_id, output_name, sensitivity, public_value
             ) VALUES ($1,$2,$3,$4)
             ",
@@ -1799,10 +1799,10 @@ fn receipt_query() -> &'static str {
            claim.claimed_at_ms AS receipt_claim_claimed_at_ms,
            claim.expires_at_ms AS receipt_claim_expires_at_ms,
            claim.updated_at_ms AS receipt_claim_updated_at_ms,
-           (SELECT count(*) FROM workflow_plan_v2_instance_result_outputs AS output
+           (SELECT count(*) FROM logical_workflow_instance_result_outputs AS output
             WHERE output.instance_id = result.instance_id) AS actual_output_count
-    FROM workflow_plan_v2_instance_results AS result
-    JOIN workflow_plan_v2_instance_result_claims AS claim
+    FROM logical_workflow_instance_results AS result
+    JOIN logical_workflow_instance_result_claims AS claim
       ON claim.attempt_id = result.attempt_id
     WHERE result.attempt_id = $1
     "
@@ -2048,7 +2048,7 @@ async fn verify_exact_finalized_commit(
     let continue_on_error = sqlx::query_scalar::<_, bool>(
         r"
         SELECT continue_on_error
-        FROM workflow_plan_v2_instance_results
+        FROM logical_workflow_instance_results
         WHERE attempt_id = $1
         ",
     )
@@ -2143,7 +2143,7 @@ async fn load_result_outputs(
     let rows = sqlx::query(
         r#"
         SELECT output_name, sensitivity, public_value
-        FROM workflow_plan_v2_instance_result_outputs
+        FROM logical_workflow_instance_result_outputs
         WHERE instance_id = $1
         ORDER BY output_name COLLATE "C"
         "#,
@@ -2176,7 +2176,7 @@ async fn outputs_match(
     let rows = sqlx::query(
         r#"
         SELECT output_name, sensitivity, public_value
-        FROM workflow_plan_v2_instance_result_outputs
+        FROM logical_workflow_instance_result_outputs
         WHERE instance_id = $1
         ORDER BY output_name COLLATE "C"
         "#,

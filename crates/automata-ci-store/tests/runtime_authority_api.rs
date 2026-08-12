@@ -26,11 +26,9 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-const BASE_MIGRATION: &str =
-    include_str!("../migrations/0018_github_runtime_authority_issuances.sql");
-const MIGRATION: &str = include_str!("../migrations/0023_github_runtime_authority_lifecycle.sql");
-const DATABASE_TIME_MIGRATION: &str =
-    include_str!("../migrations/0044_github_runtime_authority_database_time.sql");
+const BASE_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const DATABASE_TIME_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[derive(Clone, Copy)]
 struct IdentityInputs {

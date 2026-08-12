@@ -1,4 +1,4 @@
-//! Immutable runner-policy evidence pinned to every WorkflowPlan-v2 run.
+//! Immutable runner-policy evidence pinned to every logical workflow run.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -8,7 +8,7 @@ use common::{
     seed_control_plane,
 };
 
-const SECRETS_MIGRATION: &str = include_str!("../migrations/0012_secrets_output_safety.sql");
+const SECRETS_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone, Copy)]

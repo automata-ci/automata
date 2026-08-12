@@ -676,9 +676,9 @@ async fn lock_current_execution(
         JOIN workflow_snapshots AS snapshot
           ON snapshot.id = run.snapshot_id
          AND snapshot.workflow_id = run.workflow_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete ON concrete.job_id = job.id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_concrete_jobs AS concrete ON concrete.job_id = job.id
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.run_id = concrete.run_id
          AND materialization.invocation_id = concrete.invocation_id
@@ -691,30 +691,30 @@ async fn lock_current_execution(
          AND materialization.claimed_at_ms = concrete.claim_started_at_ms
          AND materialization.expires_at_ms = concrete.claim_expires_at_ms
          AND materialization.updated_at_ms = concrete.committed_at_ms
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_instances AS instance
           ON instance.id = concrete.instance_id
          AND instance.run_id = concrete.run_id
          AND instance.invocation_id = concrete.invocation_id
          AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+        JOIN logical_workflow_activation_preparation_claims AS preparation_claim
           ON preparation_claim.run_id = logical_job.run_id
          AND preparation_claim.invocation_id = logical_job.invocation_id
          AND preparation_claim.logical_job_id = logical_job.id
-        JOIN workflow_plan_v2_activation_preparations AS preparation
+        JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.run_id = preparation_claim.run_id
          AND preparation.invocation_id = preparation_claim.invocation_id
          AND preparation.logical_job_id = preparation_claim.logical_job_id
          AND preparation.descriptor_digest = preparation_claim.descriptor_digest
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = logical_job.run_id
          AND publication.invocation_id = logical_job.invocation_id
          AND publication.logical_job_id = logical_job.id
          AND publication.activation_input_digest = preparation.activation_input_digest
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = concrete.run_id
          AND invocation.id = concrete.invocation_id
         JOIN runners AS runner ON runner.id = attempt.runner_id
@@ -780,7 +780,7 @@ async fn lock_current_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 4
+          AND job.admission_epoch = 1
           AND job.job_ir_schema = 5
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
@@ -789,8 +789,8 @@ async fn lock_current_execution(
           AND job.requirements @> '{"features":["automata.core/oidc-tokens@v1"]}'::jsonb
           AND run.id = $12
           AND run.workflow_id = $17
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.status IN ('queued', 'in_progress')
           AND (
               concrete.invocation_id <> marker.root_invocation_id
@@ -836,13 +836,13 @@ async fn lock_current_execution(
           )
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               run.id, concrete.invocation_id
           )
           AND automata_reusable_workflow_oidc_permission_authorized(
               run.id, concrete.invocation_id
           )
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
@@ -850,18 +850,18 @@ async fn lock_current_execution(
               preparation.activation_input_digest
           AND preparation_claim.state = 'prepared'
           AND publication.condition_matched
-          AND publication.job_ir_version = 5
-          AND publication.runtime_context_schema = 2
+          AND publication.job_ir_version = 1
+          AND publication.runtime_context_schema = 1
           AND manifest.authority_profile = 'standard'
           AND logical_job.authority_profile = 'standard'
           AND preparation_claim.authority_profile = 'standard'
           AND preparation.authority_profile = 'standard'
           AND publication.authority_profile = 'standard'
-          AND instance.job_ir_version = 5
+          AND instance.job_ir_version = 1
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND concrete.runtime_context_schema = 2
+          AND concrete.runtime_context_schema = 1
           AND concrete.requirements = job.requirements
           AND materialization.state = 'materialized'
           AND materialization.authority_profile = 'standard'

@@ -1,4 +1,4 @@
-//! Autonomous finalization of complete WorkflowPlan-v2 runs.
+//! Autonomous finalization of complete logical workflow runs.
 
 use std::{sync::Arc, time::Duration};
 

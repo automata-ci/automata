@@ -84,7 +84,6 @@ fn repository(
         "runtime_policy_revision": 1,
         "authority_profile": "standard",
         "runner_policy": runner_policy(),
-        "workflow_path": ".ci/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority, 7),
@@ -95,7 +94,7 @@ fn repository(
 }
 
 fn mixed_document() -> Value {
-    let mut public = repository(
+    let public = repository(
         "tenant-public",
         0x201,
         202,
@@ -107,13 +106,8 @@ fn mixed_document() -> Value {
         0x501,
         None,
     );
-    public
-        .as_object_mut()
-        .expect("repository fixture is an object")
-        .remove("workflow_path");
-    public["workflow_selection"] = json!({"mode": "all_direct"});
     json!({
-        "schema": 3,
+        "schema": 1,
         "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
@@ -303,11 +297,6 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_eq!(plan.manifests().len(), 2);
     assert_eq!(plan.authorities().len(), 3);
     assert_eq!(plan.connections().len(), 2);
-    assert_eq!(
-        plan.manifests()[0].exact_workflow_path(),
-        Some(".ci/workflows/main.yml")
-    );
-    assert_eq!(plan.manifests()[1].exact_workflow_path(), None);
     assert_eq!(plan.manifests()[1].workflow_path(), ".ci/workflows");
     assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");

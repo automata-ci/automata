@@ -99,7 +99,6 @@ fn repository(
         "runtime_policy_revision": 9,
         "authority_profile": authority_profile,
         "runner_policy": runner_policy(),
-        "workflow_path": ".ci/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority_id, 7),
@@ -142,7 +141,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 3,
+        "schema": 1,
         "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
@@ -244,10 +243,9 @@ fn checked_in_example_matches_the_current_provider_manifest_contract() {
     let config = GithubProviderConfig::load(&SecretSource::File(path))
         .expect("checked-in provider example must remain loadable");
     assert_eq!(config.repositories().len(), 2);
-    assert!(config.repositories().iter().all(|repository| matches!(
-        repository.workflow_selection(),
-        GithubProviderWorkflowSelection::AllDirect
-    )));
+    assert!(config.repositories().iter().all(|repository| {
+        repository.workflow_selection() == &GithubProviderWorkflowSelection::all_direct()
+    }));
     assert_eq!(
         config.repositories()[0].visibility(),
         ProviderRepositoryVisibility::Public
@@ -369,31 +367,18 @@ fn schedule_policy_is_optional_but_bounded_when_configured() {
 }
 
 #[test]
-fn all_direct_selection_is_explicit_and_legacy_exact_mode_stays_precise() {
-    let exact = load_value("legacy-exact.json", &manifest(vec![public_repository()]))
-        .expect("legacy exact configuration");
-    assert_eq!(
-        exact.repositories()[0].exact_workflow_path(),
-        Some(".ci/workflows/main.yml")
-    );
-
+fn all_direct_selection_uses_the_configured_default_branch() {
     let mut all_direct_repository = public_repository();
     let repository = all_direct_repository
         .as_object_mut()
         .expect("repository object");
-    repository.remove("workflow_path");
     repository.insert("default_branch".to_owned(), json!("refs/release"));
-    repository.insert(
-        "workflow_selection".to_owned(),
-        json!({"mode": "all_direct"}),
-    );
     let all_direct = load_value("all-direct.json", &manifest(vec![all_direct_repository]))
         .expect("all-direct configuration");
-    assert!(matches!(
+    assert_eq!(
         all_direct.repositories()[0].workflow_selection(),
-        GithubProviderWorkflowSelection::AllDirect
-    ));
-    assert_eq!(all_direct.repositories()[0].exact_workflow_path(), None);
+        &GithubProviderWorkflowSelection::all_direct()
+    );
     assert_eq!(
         all_direct.repositories()[0].workflow_git_ref().as_str(),
         "refs/heads/refs/release"

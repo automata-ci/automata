@@ -12,11 +12,10 @@ use automata_ci_store::{
     GITHUB_PROVIDER_ARCHIVE_FORMAT, GITHUB_PROVIDER_ARCHIVE_ORIGIN,
     GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION, GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
     GITHUB_PROVIDER_REST_ACCEPT, GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_SOURCE_REVISION,
-    GITHUB_PROVIDER_WEB_ORIGIN, GithubServerServiceAuthoritySelector,
-    LogicalWorkflowAdmissionStoreError, MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
+    GITHUB_PROVIDER_WEB_ORIGIN, LogicalWorkflowAdmissionStoreError,
     ManifestPinnedGithubDeliveryEvidence, ProviderDeliveryFailureKind, ProviderDeliveryIdentity,
-    ProviderDeliveryWorkflowConclusion, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    StoreError, WorkflowAdmissionIdempotency,
+    ProviderDeliveryWorkflowConclusion, ProviderRepositoryVisibility, StoreError,
+    WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubChangedFilesV1, GithubEventMetadataV1,
@@ -30,21 +29,28 @@ use automata_ci_workflow_service::{
 };
 use bytes::Bytes;
 use thiserror::Error;
-use tokio::sync::OwnedMutexGuard;
 
 use crate::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE,
-    GithubDeliveryEventWorkflowRequest, GithubDeliveryPrivateRepositoryAction,
-    GithubDeliverySourceCredential, GithubDeliverySourceCredentialProvider,
-    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryPrivateRepositoryAction,
     GithubDeliveryWorkerError, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
     GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
-    GithubDeliveryWorkflowRequest,
-    service::{credential_matches_request, poll_provider_once, provider_required_through},
-    worker::GithubDeliveryClaimSnapshot,
+    GithubDeliveryWorkflowRequest, worker::GithubDeliveryClaimSnapshot,
 };
 
 const GITHUB_PROVIDER: &str = "github";
+
+fn processor_claim_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWorkflowProcessorError {
+    match error {
+        GithubDeliveryWorkerError::ClaimRejected => GithubDeliveryWorkflowProcessorError::ClaimLost,
+        GithubDeliveryWorkerError::InvalidTrustedTime
+        | GithubDeliveryWorkerError::InboxUnavailable
+        | GithubDeliveryWorkerError::InboxRejected
+        | GithubDeliveryWorkerError::InvariantViolation
+        | GithubDeliveryWorkerError::Prerequisite(_) => {
+            GithubDeliveryWorkflowProcessorError::InvariantViolation
+        }
+    }
+}
 
 /// Exact repository authority supplied to one changed-files provider call.
 ///
@@ -227,55 +233,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         self
     }
 
-    async fn process(
+    async fn process_authenticated_event(
         &self,
         request: &GithubDeliveryWorkflowRequest<'_>,
-    ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
-        if !valid_request(request) {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-        }
-        let Ok(source) = std::str::from_utf8(request.workflow_source()) else {
-            return Ok(failed("github.workflow.invalid_source_encoding"));
-        };
-        let parsed = GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(
-            source_provenance(request),
-            source,
-        ));
-        if !parsed.is_accepted() {
-            return Ok(failed("github.workflow.frontend_rejected"));
-        }
-        let Some(source_plan) = parsed.plan() else {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-        };
-        let event = event_provenance(request);
-        let initial = compile(
-            source_plan,
-            event.clone(),
-            GithubEventMetadataV1::push(request.push().deleted()),
-        );
-        match initial.disposition() {
-            CompilationDisposition::RequiresChangedFiles => {
-                let changed_files = self.resolve_changed_files(request).await?;
-                let Some(changed_files) = changed_files else {
-                    return Ok(failed("github.workflow.changed_files_invalid"));
-                };
-                let selected = compile(
-                    source_plan,
-                    event,
-                    GithubEventMetadataV1::push_with_changed_files(
-                        request.push().deleted(),
-                        changed_files,
-                    ),
-                );
-                Box::pin(self.finish_compilation(request, selected)).await
-            }
-            _ => Box::pin(self.finish_compilation(request, initial)).await,
-        }
-    }
-
-    async fn process_authenticated_event_v1(
-        &self,
-        request: &GithubDeliveryEventWorkflowRequest<'_>,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         if !valid_authenticated_event_request(request) {
             return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
@@ -338,319 +298,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         Box::pin(self.finish_authenticated_event_compilation(request, report)).await
     }
 
-    async fn resolve_changed_files(
-        &self,
-        request: &GithubDeliveryWorkflowRequest<'_>,
-    ) -> Result<Option<GithubChangedFilesV1>, GithubDeliveryWorkflowProcessorError> {
-        let path_filter_commit_limit = request
-            .manifest_pinned_evidence()
-            .manifest()
-            .limits()
-            .path_filter_max_commits();
-        if u64::try_from(request.push().commit_count()).unwrap_or(u64::MAX)
-            > path_filter_commit_limit
-        {
-            return Ok(Some(GithubChangedFilesV1::bypass_path_filters()));
-        }
-        let provider = self.changed_files.as_ref().ok_or(
-            GithubDeliveryWorkflowProcessorError::Prerequisite(
-                GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
-            ),
-        )?;
-        match request.identity().repository_visibility() {
-            ProviderRepositoryVisibility::Public => {
-                self.resolve_public_changed_files(request, provider.as_ref())
-                    .await
-            }
-            ProviderRepositoryVisibility::Private => {
-                self.resolve_private_changed_files(request, provider.as_ref())
-                    .await
-            }
-        }
-    }
-
-    async fn resolve_public_changed_files(
-        &self,
-        request: &GithubDeliveryWorkflowRequest<'_>,
-        provider: &dyn GithubPushChangedFilesProvider,
-    ) -> Result<Option<GithubChangedFilesV1>, GithubDeliveryWorkflowProcessorError> {
-        if request
-            .manifest_pinned_evidence()
-            .private_source_authority()
-            .is_some()
-        {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-        }
-        let operation = request.lease().lock_operation().await;
-        let observed_at = request.clock().now();
-        let (snapshot, observed_at) = request
-            .lease()
-            .require_live_observation(observed_at)
-            .map_err(processor_claim_error)?;
-        if snapshot != request.claim_snapshot() {
-            return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-        }
-        let required_through = provider_required_through(snapshot, observed_at)
-            .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-        let provider_call = tokio::time::timeout(
-            provider_tail(),
-            provider.changed_files(GithubPushChangedFilesRequest {
-                identity: request.identity(),
-                request_digest: request.request_digest(),
-                push: request.push(),
-                snapshot,
-                observed_at,
-                required_through,
-                authority: GithubPushChangedFilesAuthority::PublicAnonymous,
-            }),
-        );
-        tokio::pin!(provider_call);
-        let ready = poll_provider_once(request.lease(), provider_call.as_mut())
-            .await
-            .map_err(processor_claim_error)?;
-        drop(operation);
-        let result = match ready {
-            Some(result) => result,
-            None => provider_call.await,
-        };
-        let _operation = request.lease().lock_operation().await;
-        let latest = request
-            .lease()
-            .require_live_at(request.clock().now())
-            .map_err(processor_claim_error)?;
-        if latest != snapshot {
-            return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-        }
-        let result = result.map_err(|_| GithubDeliveryWorkflowProcessorError::Unavailable)?;
-        changed_files_result(
-            result,
-            request
-                .manifest_pinned_evidence()
-                .manifest()
-                .limits()
-                .path_filter_max_changed_files(),
-        )
-    }
-
-    async fn resolve_private_changed_files(
-        &self,
-        request: &GithubDeliveryWorkflowRequest<'_>,
-        provider: &dyn GithubPushChangedFilesProvider,
-    ) -> Result<Option<GithubChangedFilesV1>, GithubDeliveryWorkflowProcessorError> {
-        let (authority_selector, credentials) = private_changed_files_context(request)?;
-        let observed_at = request.clock().now();
-        let (requested_snapshot, observed_at) = request
-            .lease()
-            .require_live_observation(observed_at)
-            .map_err(processor_claim_error)?;
-        if requested_snapshot != request.claim_snapshot() {
-            return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-        }
-        let credential_request = private_changed_files_credential_request(
-            request.identity(),
-            request.push().repository().owner_id().get(),
-            authority_selector,
-            requested_snapshot,
-            observed_at,
-        )?;
-        let (credential, operation, provider_observed_at) =
-            acquire_private_changed_files_credential(
-                request,
-                credentials,
-                credential_request,
-                requested_snapshot,
-            )
-            .await?;
-        let result = {
-            let provider_call = tokio::time::timeout(
-                provider_tail(),
-                provider.changed_files(GithubPushChangedFilesRequest {
-                    identity: request.identity(),
-                    request_digest: request.request_digest(),
-                    push: request.push(),
-                    snapshot: requested_snapshot,
-                    observed_at: provider_observed_at,
-                    required_through: credential_request.required_through(),
-                    authority: GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(
-                        credential.token(),
-                    ),
-                }),
-            );
-            tokio::pin!(provider_call);
-            let ready = poll_provider_once(request.lease(), provider_call.as_mut()).await;
-            drop(operation);
-            match ready {
-                Ok(Some(result)) => Ok(result),
-                Ok(None) => Ok(provider_call.await),
-                Err(error) => Err(error),
-            }
-        };
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                credential.release().await;
-                return Err(processor_claim_error(error));
-            }
-        };
-        let operation = request.lease().lock_operation().await;
-        let latest = request
-            .lease()
-            .require_live_at(request.clock().now())
-            .map_err(processor_claim_error);
-        let latest = match latest {
-            Ok(latest) => latest,
-            Err(error) => {
-                drop(operation);
-                credential.release().await;
-                return Err(error);
-            }
-        };
-        if latest != requested_snapshot {
-            drop(operation);
-            credential.release().await;
-            return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-        }
-        let outcome = match result {
-            Ok(result) => changed_files_result(
-                result,
-                request
-                    .manifest_pinned_evidence()
-                    .manifest()
-                    .limits()
-                    .path_filter_max_changed_files(),
-            ),
-            Err(_) => Err(GithubDeliveryWorkflowProcessorError::Unavailable),
-        };
-        drop(operation);
-        credential.release().await;
-        outcome
-    }
-
-    async fn finish_compilation(
-        &self,
-        request: &GithubDeliveryWorkflowRequest<'_>,
-        report: automata_ci_workflow_github::CompilationReport,
-    ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
-        match report.disposition() {
-            CompilationDisposition::Accepted => {
-                let inputs = report
-                    .workflow_dispatch_inputs()
-                    .cloned()
-                    .unwrap_or_else(ContextValue::empty_object);
-                let Some(plan) = report.into_parts().0 else {
-                    return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-                };
-                let base_context = JobRuntimeContext::new_base(
-                    inputs,
-                    ContextValue::empty_object(),
-                    BTreeMap::new(),
-                )
-                .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-                Box::pin(self.admit(request, plan, base_context)).await
-            }
-            CompilationDisposition::NotSelected(reason) => Ok(skipped(reason)),
-            CompilationDisposition::Rejected => Ok(failed("github.workflow.compilation_rejected")),
-            CompilationDisposition::RequiresChangedFiles => {
-                Err(GithubDeliveryWorkflowProcessorError::InvariantViolation)
-            }
-            _ => Ok(failed(
-                "github.workflow.unsupported_compilation_disposition",
-            )),
-        }
-    }
-
-    async fn admit(
-        &self,
-        request: &GithubDeliveryWorkflowRequest<'_>,
-        plan: automata_ci_core::WorkflowPlan,
-        base_context: JobRuntimeContext,
-    ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
-        let coordinates = AdmissionRepositoryCoordinates::new(
-            GITHUB_PROVIDER,
-            request.identity().repository_id().get().to_string(),
-            request.push().repository().owner(),
-            request.push().repository().name(),
-        )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-        let idempotency = WorkflowAdmissionIdempotency::provider_delivery(
-            request.identity().delivery_id().to_owned(),
-        )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-        let workflow_name = plan.name().map_or_else(
-            || request.workflow_path().to_owned(),
-            |name| name.value().clone(),
-        );
-        let admission = WorkflowAdmissionRequest::builder(
-            request.identity().tenant().clone(),
-            coordinates,
-            request.workflow_path(),
-            Bytes::copy_from_slice(request.workflow_source()),
-            request.push().raw_body().clone(),
-            plan,
-            base_context,
-            idempotency,
-        )
-        .commit_sha(request.repository_source().revision().as_str())
-        .git_ref(request.push().git_ref().full())
-        .workflow_name(workflow_name)
-        .run_attempt(1)
-        .repository_workflow_sources(repository_workflow_sources(
-            request.repository_source(),
-            request.manifest_pinned_evidence(),
-        )?)
-        .build();
-        let admission = match admission {
-            Ok(admission) => admission,
-            Err(
-                WorkflowAdmissionRequestError::InvalidPlan
-                | WorkflowAdmissionRequestError::ProvenanceMismatch
-                | WorkflowAdmissionRequestError::DeliveryMismatch,
-            ) => return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation),
-            Err(_) => return Ok(failed("github.workflow.admission_request_rejected")),
-        };
-        let operation = request.lease().lock_operation().await;
-        let observed_at = request.clock().now();
-        let current_snapshot = request
-            .lease()
-            .require_live_at(observed_at)
-            .map_err(processor_claim_error)?;
-        if !request
-            .claim_snapshot()
-            .has_same_live_lineage(current_snapshot)
-            || current_snapshot.claim().delivery_id() != request.delivery_id()
-        {
-            return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-        }
-        let current_claim = AuthenticatedGithubDeliveryClaim::new(
-            current_snapshot.claim(),
-            current_snapshot.attempt(),
-            current_snapshot.claimed_at(),
-            current_snapshot.expires_at(),
-        )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-        let admission_result = self
-            .admission
-            .admit_authenticated_github_delivery(admission, current_claim)
-            .await;
-        drop(operation);
-        match admission_result {
-            Ok(result) => {
-                let run_id = result.receipt().run_id();
-                if run_id.as_uuid().is_nil() {
-                    return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-                }
-                Ok(ProviderDeliveryWorkflowConclusion::Admitted { run_id })
-            }
-            Err(WorkflowAdmissionError::Store(
-                LogicalWorkflowAdmissionStoreError::RunNumberExhausted,
-            )) => Ok(failed("github.workflow.run_number_exhausted")),
-            Err(error) => Err(admission_error(&error)),
-        }
-    }
-
     async fn finish_authenticated_event_compilation(
         &self,
-        request: &GithubDeliveryEventWorkflowRequest<'_>,
+        request: &GithubDeliveryWorkflowRequest<'_>,
         report: automata_ci_workflow_github::CompilationReport,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         match report.disposition() {
@@ -693,15 +343,12 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
 
     async fn admit_authenticated_event(
         &self,
-        request: &GithubDeliveryEventWorkflowRequest<'_>,
+        request: &GithubDeliveryWorkflowRequest<'_>,
         plan: automata_ci_core::WorkflowPlan,
         base_context: JobRuntimeContext,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         let repository = request.event().repository();
-        let event_coordinates = request
-            .manifest_pinned_evidence()
-            .authenticated_event_v1()
-            .ok_or(GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+        let event_coordinates = request.manifest_pinned_evidence().authenticated_event();
         let coordinates = AdmissionRepositoryCoordinates::new(
             GITHUB_PROVIDER,
             request.identity().repository_id().get().to_string(),
@@ -805,212 +452,17 @@ impl GithubDeliveryWorkflowProcessor for GithubDeliveryWorkflowAdmissionProcesso
         &self,
         request: GithubDeliveryWorkflowRequest<'_>,
     ) -> GithubDeliveryWorkflowProcessorCompletion {
-        let result = Box::pin(self.process(&request)).await;
+        let result = Box::pin(self.process_authenticated_event(&request)).await;
         if matches!(result, Err(GithubDeliveryWorkflowProcessorError::ClaimLost)) {
             request.finish(result).await
         } else {
             request.finish_same_lineage(result).await
         }
     }
-
-    async fn process_authenticated_event_v1_workflow(
-        &self,
-        request: GithubDeliveryEventWorkflowRequest<'_>,
-    ) -> GithubDeliveryWorkflowProcessorCompletion {
-        let result = Box::pin(self.process_authenticated_event_v1(&request)).await;
-        if matches!(result, Err(GithubDeliveryWorkflowProcessorError::ClaimLost)) {
-            request.finish(result).await
-        } else {
-            request.finish_same_lineage(result).await
-        }
-    }
-}
-
-fn changed_files_result(
-    result: Result<GithubChangedFilesV1, GithubPushChangedFilesError>,
-    maximum_changed_files: u64,
-) -> Result<Option<GithubChangedFilesV1>, GithubDeliveryWorkflowProcessorError> {
-    match result {
-        Ok(changed_files) if valid_changed_files_limit(&changed_files, maximum_changed_files) => {
-            Ok(Some(changed_files))
-        }
-        Ok(_) | Err(GithubPushChangedFilesError::InvalidEvidence) => Ok(None),
-        Err(GithubPushChangedFilesError::Unavailable) => {
-            Err(GithubDeliveryWorkflowProcessorError::Unavailable)
-        }
-    }
-}
-
-fn private_changed_files_credential_request<'a>(
-    identity: &'a ProviderDeliveryIdentity,
-    repository_owner_id: u64,
-    authority_selector: &'a GithubServerServiceAuthoritySelector,
-    snapshot: GithubDeliveryClaimSnapshot,
-    observed_at: UnixMillis,
-) -> Result<GithubDeliverySourceCredentialRequest<'a>, GithubDeliveryWorkflowProcessorError> {
-    let repository_owner_id = ProviderRepositoryOwnerId::new(repository_owner_id)
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    GithubDeliverySourceCredentialRequest::from_live_snapshot(
-        identity,
-        repository_owner_id,
-        authority_selector,
-        snapshot,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
-        observed_at,
-    )
-    .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
-}
-
-fn private_changed_files_context<'a>(
-    request: &'a GithubDeliveryWorkflowRequest<'_>,
-) -> Result<
-    (
-        &'a GithubServerServiceAuthoritySelector,
-        &'a dyn GithubDeliverySourceCredentialProvider,
-    ),
-    GithubDeliveryWorkflowProcessorError,
-> {
-    let authority_selector = request
-        .manifest_pinned_evidence()
-        .private_source_authority()
-        .ok_or(GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    let credentials =
-        request
-            .private_credentials()
-            .ok_or(GithubDeliveryWorkflowProcessorError::Prerequisite(
-                GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
-            ))?;
-    Ok((authority_selector, credentials))
-}
-
-async fn acquire_private_changed_files_credential(
-    request: &GithubDeliveryWorkflowRequest<'_>,
-    credentials: &dyn GithubDeliverySourceCredentialProvider,
-    credential_request: GithubDeliverySourceCredentialRequest<'_>,
-    requested_snapshot: GithubDeliveryClaimSnapshot,
-) -> Result<
-    (
-        GithubDeliverySourceCredential,
-        OwnedMutexGuard<()>,
-        UnixMillis,
-    ),
-    GithubDeliveryWorkflowProcessorError,
-> {
-    let operation = request.lease().lock_operation().await;
-    let current = request
-        .lease()
-        .require_live_at(request.clock().now())
-        .map_err(processor_claim_error)?;
-    if current != requested_snapshot {
-        return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-    }
-    let credential = credentials.acquire(credential_request);
-    tokio::pin!(credential);
-    let ready = poll_provider_once(request.lease(), credential.as_mut())
-        .await
-        .map_err(processor_claim_error)?;
-    drop(operation);
-    let credential = match ready {
-        Some(credential) => credential,
-        None => credential.await,
-    };
-    let operation = request.lease().lock_operation().await;
-    let provider_observed_at = request.clock().now();
-    let (latest, provider_observed_at) = match request
-        .lease()
-        .require_live_observation(provider_observed_at)
-    {
-        Ok(observation) => observation,
-        Err(error) => {
-            drop(operation);
-            if let Ok(credential) = credential {
-                credential.release().await;
-            }
-            return Err(processor_claim_error(error));
-        }
-    };
-    if latest != requested_snapshot {
-        drop(operation);
-        if let Ok(credential) = credential {
-            credential.release().await;
-        }
-        return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
-    }
-    let credential = credential.map_err(private_credential_error)?;
-    if !credential_matches_request(&credential, credential_request)
-        || credential.acquired_at() > provider_observed_at
-    {
-        drop(operation);
-        credential.release().await;
-        return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-    }
-    Ok((credential, operation, provider_observed_at))
-}
-
-fn valid_changed_files_limit(changed_files: &GithubChangedFilesV1, maximum: u64) -> bool {
-    match changed_files {
-        GithubChangedFilesV1::Complete(files) => {
-            u64::try_from(files.len()).is_ok_and(|count| count <= maximum)
-        }
-        GithubChangedFilesV1::BypassPathFilters => true,
-        _ => false,
-    }
-}
-
-fn private_credential_error(
-    error: GithubDeliverySourceCredentialProviderError,
-) -> GithubDeliveryWorkflowProcessorError {
-    match error {
-        GithubDeliverySourceCredentialProviderError::Unavailable => {
-            GithubDeliveryWorkflowProcessorError::Unavailable
-        }
-        GithubDeliverySourceCredentialProviderError::Rejected
-        | GithubDeliverySourceCredentialProviderError::InvariantViolation => {
-            GithubDeliveryWorkflowProcessorError::InvariantViolation
-        }
-    }
-}
-
-fn processor_claim_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWorkflowProcessorError {
-    match error {
-        GithubDeliveryWorkerError::ClaimRejected => GithubDeliveryWorkflowProcessorError::ClaimLost,
-        GithubDeliveryWorkerError::InvalidTrustedTime
-        | GithubDeliveryWorkerError::InboxUnavailable
-        | GithubDeliveryWorkerError::InboxRejected
-        | GithubDeliveryWorkerError::InvariantViolation
-        | GithubDeliveryWorkerError::Prerequisite(_) => {
-            GithubDeliveryWorkflowProcessorError::InvariantViolation
-        }
-    }
-}
-
-fn provider_tail() -> std::time::Duration {
-    std::time::Duration::from_millis(
-        u64::try_from(MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS)
-            .expect("fixed GitHub provider tail is positive"),
-    )
-}
-
-fn source_provenance(request: &GithubDeliveryWorkflowRequest<'_>) -> SourceProvenance {
-    SourceProvenance::new(
-        SourceId::new(request.workflow_path()),
-        SourceOrigin::Repository {
-            repository: Arc::from(request.repository_source().repository().as_str()),
-            revision: Arc::from(request.repository_source().revision().as_str()),
-            path: Arc::from(request.workflow_path()),
-        },
-    )
-}
-
-fn event_provenance(request: &GithubDeliveryWorkflowRequest<'_>) -> WorkflowEventProvenance {
-    WorkflowEventProvenance::new(GITHUB_PROVIDER, request.push().event_name())
-        .with_delivery_id(request.push().delivery_id())
-        .with_commit_sha(request.repository_source().revision().as_str())
-        .with_git_ref(request.push().git_ref().full())
 }
 
 fn authenticated_event_source_provenance(
-    request: &GithubDeliveryEventWorkflowRequest<'_>,
+    request: &GithubDeliveryWorkflowRequest<'_>,
 ) -> SourceProvenance {
     SourceProvenance::new(
         SourceId::new(request.workflow_path()),
@@ -1023,19 +475,16 @@ fn authenticated_event_source_provenance(
 }
 
 fn authenticated_event_provenance(
-    request: &GithubDeliveryEventWorkflowRequest<'_>,
+    request: &GithubDeliveryWorkflowRequest<'_>,
 ) -> WorkflowEventProvenance {
     let git_ref = request
         .manifest_pinned_evidence()
-        .authenticated_event_v1()
-        .map(automata_ci_store::GithubAuthenticatedEventV1::git_ref);
+        .authenticated_event()
+        .git_ref();
     let provenance = WorkflowEventProvenance::new(GITHUB_PROVIDER, request.event().event_name())
         .with_delivery_id(request.event().delivery_id())
         .with_commit_sha(request.repository_source().revision().as_str());
-    match git_ref {
-        Some(git_ref) => provenance.with_git_ref(git_ref),
-        None => provenance,
-    }
+    provenance.with_git_ref(git_ref)
 }
 
 fn compile(
@@ -1080,90 +529,7 @@ fn repository_workflow_sources(
         })
 }
 
-fn valid_request(request: &GithubDeliveryWorkflowRequest<'_>) -> bool {
-    let identity = request.identity();
-    let push = request.push();
-    let source = request.repository_source();
-    let evidence = request.manifest_pinned_evidence();
-    let manifest = evidence.manifest();
-    let origins = manifest.origins();
-    let raw_size = u64::try_from(push.raw_body().len()).unwrap_or(u64::MAX);
-    let check_head_matches =
-        crate::check_head_sha(push).is_ok_and(|check_head| check_head == evidence.check_head_sha());
-    let visibility_authority_matches = matches!(
-        (
-            identity.repository_visibility(),
-            evidence.private_source_authority()
-        ),
-        (ProviderRepositoryVisibility::Public, None)
-            | (ProviderRepositoryVisibility::Private, Some(_))
-    );
-    let source_authentication = match identity.repository_visibility() {
-        ProviderRepositoryVisibility::Public => GITHUB_PROVIDER_PUBLIC_SOURCE_AUTHENTICATION,
-        ProviderRepositoryVisibility::Private => GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION,
-    };
-    let commit_count = u64::try_from(push.commit_count()).unwrap_or(u64::MAX);
-    let path_filter_commit_evidence_matches = match push.complete_pushed_commit_revisions() {
-        Some(revisions) => {
-            commit_count <= manifest.limits().path_filter_max_commits()
-                && revisions.len() == push.commit_count()
-        }
-        None => commit_count > manifest.limits().path_filter_max_commits(),
-    };
-    identity.provider() == GITHUB_PROVIDER
-        && evidence.delivery_id() == request.delivery_id()
-        && evidence.accepted_at() == request.accepted_at()
-        && evidence.tenant() == identity.tenant()
-        && manifest.matches_delivery_identity(identity)
-        && visibility_authority_matches
-        && identity.delivery_id() == push.delivery_id()
-        && identity.installation_id().get() == push.installation_id().get()
-        && identity.repository_id().get() == push.repository().id().get()
-        && evidence.repository_owner_id().get() == push.repository().owner_id().get()
-        && matches!(
-            (
-                identity.repository_visibility(),
-                push.repository().visibility()
-            ),
-            (
-                ProviderRepositoryVisibility::Public,
-                automata_ci_github::GithubRepositoryVisibility::Public
-            ) | (
-                ProviderRepositoryVisibility::Private,
-                automata_ci_github::GithubRepositoryVisibility::Private
-            )
-        )
-        && identity.repository_identity() == push.repository().full_name()
-        && request.raw_event().digest().as_bytes() == push.body_sha256().as_bytes()
-        && request.raw_event().encoded_size() == raw_size
-        && request.raw_event().media_type() == GITHUB_PUSH_EVENT_MEDIA_TYPE
-        && raw_size <= manifest.limits().webhook_max_body_bytes()
-        && check_head_matches
-        && push.event_name() == manifest.event_name()
-        && push.git_ref().full() == manifest.git_ref()
-        && !push.deleted()
-        && commit_count <= manifest.limits().push_webhook_max_commits()
-        && path_filter_commit_evidence_matches
-        && source.provider().as_str() == GITHUB_PROVIDER
-        && source.repository().as_str() == push.repository().full_name()
-        && source.revision().as_str() == push.after_commit_sha()
-        && source.format() == ArchiveFormat::TarGzip
-        && source.size() <= manifest.limits().archive_max_compressed_bytes()
-        && manifest.selects_workflow_path(request.workflow_path())
-        && u64::try_from(request.workflow_source().len()).unwrap_or(u64::MAX)
-            <= manifest.limits().workflow_max_bytes()
-        && origins.web_origin() == GITHUB_PROVIDER_WEB_ORIGIN
-        && origins.api_origin() == GITHUB_PROVIDER_API_ORIGIN
-        && origins.archive_origin() == GITHUB_PROVIDER_ARCHIVE_ORIGIN
-        && manifest.rest_api_version() == GITHUB_PROVIDER_REST_API_VERSION
-        && manifest.rest_accept() == GITHUB_PROVIDER_REST_ACCEPT
-        && manifest.archive_accept() == GITHUB_PROVIDER_ARCHIVE_ACCEPT
-        && manifest.source_authentication() == source_authentication
-        && manifest.source_revision() == GITHUB_PROVIDER_SOURCE_REVISION
-        && manifest.archive_format() == GITHUB_PROVIDER_ARCHIVE_FORMAT
-}
-
-fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowRequest<'_>) -> bool {
+fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>) -> bool {
     let identity = request.identity();
     let event = request.event();
     let repository = event.repository();
@@ -1172,9 +538,7 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
     let manifest = evidence.manifest();
     let origins = manifest.origins();
     let raw_size = u64::try_from(event.raw_body().len()).unwrap_or(u64::MAX);
-    let Some(authenticated_event) = evidence.authenticated_event_v1() else {
-        return false;
-    };
+    let authenticated_event = evidence.authenticated_event();
     let event_coordinates_match =
         authenticated_event_coordinates_match(event, evidence, authenticated_event);
     let source_revision_matches = authenticated_event_source_matches(event, evidence, source);
@@ -1232,7 +596,7 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
         && identity.repository_identity() == repository.full_name()
         && request.raw_event().digest().as_bytes() == event.body_sha256().as_bytes()
         && request.raw_event().encoded_size() == raw_size
-        && request.raw_event().media_type() == GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        && request.raw_event().media_type() == GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
         && raw_size <= manifest.limits().webhook_max_body_bytes()
         && event_coordinates_match
         && push_policy_matches
@@ -1258,7 +622,7 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
 fn authenticated_event_coordinates_match(
     event: &automata_ci_github::VerifiedGithubWebhook,
     evidence: &ManifestPinnedGithubDeliveryEvidence,
-    authenticated_event: &automata_ci_store::GithubAuthenticatedEventV1,
+    authenticated_event: &automata_ci_store::GithubAuthenticatedEvent,
 ) -> bool {
     match event {
         automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
@@ -2020,6 +1384,11 @@ mod renewal_tests {
             Some(private_source_authority),
             GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x7602)).expect("Check subject ID"),
             crate::check_head_sha(push).expect("Check head"),
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                push.git_ref().full(),
+            )
+            .expect("authenticated event"),
             claimed.receipt().accepted_at(),
         )
         .expect("manifest-pinned evidence")
@@ -2168,8 +1537,10 @@ mod renewal_tests {
             .checked_add(Duration::from_secs(10))
             .expect("successor deadline");
         let lease = GithubDeliveryClaimLease::new(fixture.claimed.clone(), predecessor_deadline);
-        let prepared =
-            PreparedGithubDelivery::from_parts(fixture.push.clone(), fixture.evidence.clone());
+        let prepared = PreparedGithubDelivery::from_authenticated_event(
+            automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            fixture.evidence.clone(),
+        );
 
         let processing = worker.process_fetched_source_leased(
             &lease,
@@ -2248,8 +1619,10 @@ mod renewal_tests {
             .expect("successor deadline");
         let lease = GithubDeliveryClaimLease::new(fixture.claimed.clone(), predecessor_deadline);
 
-        let prepared =
-            PreparedGithubDelivery::from_parts(fixture.push.clone(), fixture.evidence.clone());
+        let prepared = PreparedGithubDelivery::from_authenticated_event(
+            automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            fixture.evidence.clone(),
+        );
 
         let processing = worker.process_fetched_source_leased(
             &lease,

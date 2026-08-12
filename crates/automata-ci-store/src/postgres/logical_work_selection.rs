@@ -643,7 +643,7 @@ async fn require_active_consume_graph_ids(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 4 AND run.plan_schema = 2
+               AND run.admission_epoch = 1 AND run.plan_schema = 1
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -663,10 +663,10 @@ async fn require_active_consume_graph_ids(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_workflow_plan_v2_invocation_published(
+               AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
                )
-        FROM workflow_plan_v2_runs AS marker
+        FROM logical_workflow_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
         ",
@@ -682,8 +682,8 @@ async fn require_active_consume_graph_ids(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 2
-        FROM workflow_plan_v2_invocations AS invocation
+               AND invocation.plan_schema = 1
+        FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
         ",
@@ -725,7 +725,7 @@ async fn reserve_activation_selection(
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_selections (
+        INSERT INTO logical_workflow_activation_work_selections (
             selection_id, owner_id, requested_at_ms, duration_ms, outcome
         ) VALUES ($1,$2,$3,$4,'selecting')
         ON CONFLICT (selection_id) DO NOTHING
@@ -755,7 +755,7 @@ async fn reserve_materialization_selection(
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_selections (
+        INSERT INTO logical_workflow_materialization_work_selections (
             selection_id, owner_id, requested_at_ms, duration_ms, outcome
         ) VALUES ($1,$2,$3,$4,'selecting')
         ON CONFLICT (selection_id) DO NOTHING
@@ -788,7 +788,7 @@ async fn lock_selection_horizon(
         SELECT replay_floor_ms, updated_at_ms, cursor_ready_at_ms,
                cursor_run_id, cursor_invocation_id, cursor_source_order,
                cursor_matrix_index, cursor_target_id
-        FROM workflow_plan_v2_work_selection_replay_horizons
+        FROM logical_workflow_work_selection_replay_horizons
         WHERE queue_name = $1
         FOR UPDATE
         ",
@@ -830,7 +830,7 @@ async fn lock_selection_admission(
         r"
         SELECT replay_floor_ms, updated_at_ms,
                floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS database_now
-        FROM workflow_plan_v2_work_selection_replay_horizons
+        FROM logical_workflow_work_selection_replay_horizons
         WHERE queue_name = $1
         FOR UPDATE
         ",
@@ -903,7 +903,7 @@ async fn advance_selection_horizon(
     };
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_work_selection_replay_horizons
+        UPDATE logical_workflow_work_selection_replay_horizons
         SET replay_floor_ms = $2, updated_at_ms = $3,
             cursor_ready_at_ms = $6, cursor_run_id = $7,
             cursor_invocation_id = $8, cursor_source_order = $9,
@@ -939,11 +939,11 @@ async fn cleanup_receipts(
             r"
             WITH expired AS (
                 SELECT selection_id
-                FROM workflow_plan_v2_activation_work_selections AS receipt
+                FROM logical_workflow_activation_work_selections AS receipt
                 WHERE expires_at_ms <= $1 AND requested_at_ms < $1
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_activation_preparation_claims AS preparation
+                      FROM logical_workflow_activation_preparation_claims AS preparation
                       WHERE receipt.authority_kind = 'preparation'
                         AND preparation.logical_job_id = receipt.logical_job_id
                         AND preparation.origin_selection_id = receipt.selection_id
@@ -953,7 +953,7 @@ async fn cleanup_receipts(
                   )
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_jobs AS job
+                      FROM logical_workflow_jobs AS job
                       WHERE receipt.authority_kind = 'activation'
                         AND job.id = receipt.logical_job_id
                         AND job.activation_origin_selection_id = receipt.selection_id
@@ -963,14 +963,14 @@ async fn cleanup_receipts(
                   )
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_activation_work_quarantines AS quarantine
+                      FROM logical_workflow_activation_work_quarantines AS quarantine
                       WHERE quarantine.selection_id = receipt.selection_id
                   )
                 ORDER BY expires_at_ms, selection_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
-            DELETE FROM workflow_plan_v2_activation_work_selections AS receipt
+            DELETE FROM logical_workflow_activation_work_selections AS receipt
             USING expired
             WHERE receipt.selection_id = expired.selection_id
             ",
@@ -979,11 +979,11 @@ async fn cleanup_receipts(
             r"
             WITH expired AS (
                 SELECT selection_id
-                FROM workflow_plan_v2_materialization_work_selections AS receipt
+                FROM logical_workflow_materialization_work_selections AS receipt
                 WHERE expires_at_ms <= $1 AND requested_at_ms < $1
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_materialization_claims AS claim
+                      FROM logical_workflow_materialization_claims AS claim
                       WHERE claim.instance_id = receipt.instance_id
                         AND claim.origin_selection_id = receipt.selection_id
                         AND claim.generation >= receipt.generation
@@ -992,14 +992,14 @@ async fn cleanup_receipts(
                   )
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_materialization_work_quarantines AS quarantine
+                      FROM logical_workflow_materialization_work_quarantines AS quarantine
                       WHERE quarantine.selection_id = receipt.selection_id
                   )
                 ORDER BY expires_at_ms, selection_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
-            DELETE FROM workflow_plan_v2_materialization_work_selections AS receipt
+            DELETE FROM logical_workflow_materialization_work_selections AS receipt
             USING expired
             WHERE receipt.selection_id = expired.selection_id
             ",
@@ -1067,33 +1067,33 @@ async fn discover_activation_candidates(
                preparation_claim.claimed_at_ms AS preparation_claimed_at_ms,
                preparation_claim.expires_at_ms AS preparation_expires_at_ms,
                preparation.activation_input_digest AS prepared_input_digest
-        FROM workflow_plan_v2_jobs AS job
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_jobs AS job
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin ON pin.run_id = job.run_id
-        LEFT JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+        JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = job.run_id
+        LEFT JOIN logical_workflow_activation_preparation_claims AS preparation_claim
           ON preparation_claim.logical_job_id = job.id
-        LEFT JOIN workflow_plan_v2_activation_preparations AS preparation
+        LEFT JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.logical_job_id = job.id
-        LEFT JOIN workflow_plan_v2_activation_work_quarantines AS quarantine
+        LEFT JOIN logical_workflow_activation_work_quarantines AS quarantine
           ON quarantine.logical_job_id = job.id
         CROSS JOIN LATERAL (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT AS now_ms
         ) AS database_clock
         WHERE job.execution_kind = 'steps'
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               marker.run_id, invocation.id
           )
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND marker.orchestration_schema = 1
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND run.admission_epoch = 1 AND run.plan_schema = 1
           AND (
               (job.state = 'pending' AND (
                   preparation_claim.logical_job_id IS NULL
@@ -1107,8 +1107,8 @@ async fn discover_activation_candidates(
           AND quarantine.logical_job_id IS NULL
           AND NOT EXISTS (
               SELECT 1
-              FROM workflow_plan_v2_dependencies AS dependency
-              LEFT JOIN workflow_plan_v2_effective_job_results AS result
+              FROM logical_workflow_dependencies AS dependency
+              LEFT JOIN logical_workflow_effective_job_results AS result
                 ON result.logical_job_id = dependency.prerequisite_job_id
                AND result.run_id = dependency.run_id
                AND result.invocation_id = dependency.invocation_id
@@ -1155,31 +1155,31 @@ async fn discover_materialization_candidates(
                claim.descriptor_digest AS claim_descriptor_digest,
                claim.claimed_at_ms AS claim_claimed_at_ms,
                claim.expires_at_ms AS claim_expires_at_ms
-        FROM workflow_plan_v2_instances AS instance
-        JOIN workflow_plan_v2_activation_publications AS publication
+        FROM logical_workflow_instances AS instance
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = instance.run_id
          AND publication.invocation_id = instance.invocation_id
          AND publication.logical_job_id = instance.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = instance.run_id
          AND logical_job.invocation_id = instance.invocation_id
          AND logical_job.id = instance.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = instance.run_id
          AND invocation.id = instance.invocation_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = instance.run_id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = instance.run_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin ON pin.run_id = instance.run_id
-        LEFT JOIN workflow_plan_v2_materialization_claims AS claim
+        JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = instance.run_id
+        LEFT JOIN logical_workflow_materialization_claims AS claim
           ON claim.instance_id = instance.id
-        LEFT JOIN workflow_plan_v2_materialization_work_quarantines AS quarantine
+        LEFT JOIN logical_workflow_materialization_work_quarantines AS quarantine
           ON quarantine.instance_id = instance.id
         CROSS JOIN LATERAL (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT AS now_ms
         ) AS database_clock
-        WHERE instance.job_ir_version = 5
-          AND instance.runtime_context_schema = 2
+        WHERE instance.job_ir_version = 1
+          AND instance.runtime_context_schema = 1
           AND instance.runtime_policy_revision = pin.policy_revision
           AND instance.runtime_policy_digest = pin.policy_digest
           AND publication.runtime_policy_revision = pin.policy_revision
@@ -1188,16 +1188,16 @@ async fn discover_materialization_candidates(
           AND publication.instance_count > 0
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               marker.run_id, invocation.id
           )
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND marker.orchestration_schema = 1
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND run.admission_epoch = 1 AND run.plan_schema = 1
           AND (claim.instance_id IS NULL
                OR (claim.state = 'materializing'
                    AND claim.expires_at_ms <= database_clock.now_ms))
@@ -1242,7 +1242,7 @@ async fn lock_activation_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT run_id FROM workflow_plan_v2_runs WHERE run_id = $1 FOR UPDATE SKIP LOCKED",
+        "SELECT run_id FROM logical_workflow_runs WHERE run_id = $1 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .fetch_optional(&mut **transaction)
@@ -1253,7 +1253,7 @@ async fn lock_activation_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT id FROM workflow_plan_v2_invocations WHERE run_id = $1 AND id = $2 FOR UPDATE SKIP LOCKED",
+        "SELECT id FROM logical_workflow_invocations WHERE run_id = $1 AND id = $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .bind(invocation_id)
@@ -1265,7 +1265,7 @@ async fn lock_activation_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT id FROM workflow_plan_v2_jobs WHERE run_id = $1 AND invocation_id = $2 AND id = $3 FOR UPDATE SKIP LOCKED",
+        "SELECT id FROM logical_workflow_jobs WHERE run_id = $1 AND invocation_id = $2 AND id = $3 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .bind(invocation_id)
@@ -1278,7 +1278,7 @@ async fn lock_activation_eligibility_graph(
         return Ok(false);
     }
     let preparation_locked = sqlx::query(
-        "SELECT logical_job_id FROM workflow_plan_v2_activation_preparation_claims WHERE logical_job_id = $1 FOR UPDATE SKIP LOCKED",
+        "SELECT logical_job_id FROM logical_workflow_activation_preparation_claims WHERE logical_job_id = $1 FOR UPDATE SKIP LOCKED",
     )
     .bind(logical_job_id)
     .fetch_optional(&mut **transaction)
@@ -1286,7 +1286,7 @@ async fn lock_activation_eligibility_graph(
     .map_err(operation_error)?;
     if preparation_locked.is_none()
         && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM workflow_plan_v2_activation_preparation_claims WHERE logical_job_id = $1)",
+            "SELECT EXISTS (SELECT 1 FROM logical_workflow_activation_preparation_claims WHERE logical_job_id = $1)",
         )
         .bind(logical_job_id)
         .fetch_one(&mut **transaction)
@@ -1296,7 +1296,7 @@ async fn lock_activation_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT run_id FROM workflow_plan_v2_runtime_policy_pins WHERE run_id = $1 FOR SHARE SKIP LOCKED",
+        "SELECT run_id FROM logical_workflow_runtime_policy_pins WHERE run_id = $1 FOR SHARE SKIP LOCKED",
     )
     .bind(run_id)
     .fetch_optional(&mut **transaction)
@@ -1309,7 +1309,7 @@ async fn lock_activation_eligibility_graph(
     let dependency_count: i64 = sqlx::query_scalar(
         r"
         SELECT count(*)::BIGINT
-        FROM workflow_plan_v2_dependencies
+        FROM logical_workflow_dependencies
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
     )
@@ -1322,7 +1322,7 @@ async fn lock_activation_eligibility_graph(
     let dependencies = sqlx::query(
         r"
         SELECT dependency.prerequisite_job_id
-        FROM workflow_plan_v2_dependencies AS dependency
+        FROM logical_workflow_dependencies AS dependency
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
         ORDER BY dependency.prerequisite_job_id
@@ -1341,8 +1341,8 @@ async fn lock_activation_eligibility_graph(
     let prerequisite_jobs = sqlx::query(
         r"
         SELECT prerequisite.id
-        FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_jobs AS prerequisite
+        FROM logical_workflow_dependencies AS dependency
+        JOIN logical_workflow_jobs AS prerequisite
           ON prerequisite.id = dependency.prerequisite_job_id
          AND prerequisite.run_id = dependency.run_id
          AND prerequisite.invocation_id = dependency.invocation_id
@@ -1364,8 +1364,8 @@ async fn lock_activation_eligibility_graph(
     let finalized_result_count: i64 = sqlx::query_scalar(
         r"
         SELECT count(*)::BIGINT
-        FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_effective_job_results AS result
+        FROM logical_workflow_dependencies AS dependency
+        JOIN logical_workflow_effective_job_results AS result
           ON result.logical_job_id = dependency.prerequisite_job_id
          AND result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
@@ -1405,7 +1405,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT run_id FROM workflow_plan_v2_runs WHERE run_id = $1 FOR UPDATE SKIP LOCKED",
+        "SELECT run_id FROM logical_workflow_runs WHERE run_id = $1 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .fetch_optional(&mut **transaction)
@@ -1416,7 +1416,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT id FROM workflow_plan_v2_invocations WHERE run_id = $1 AND id = $2 FOR UPDATE SKIP LOCKED",
+        "SELECT id FROM logical_workflow_invocations WHERE run_id = $1 AND id = $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .bind(invocation_id)
@@ -1428,7 +1428,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT id FROM workflow_plan_v2_instances WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3 AND id = $4 FOR UPDATE SKIP LOCKED",
+        "SELECT id FROM logical_workflow_instances WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3 AND id = $4 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .bind(invocation_id)
@@ -1442,7 +1442,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     let claim_locked = sqlx::query(
-        "SELECT instance_id FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1 FOR UPDATE SKIP LOCKED",
+        "SELECT instance_id FROM logical_workflow_materialization_claims WHERE instance_id = $1 FOR UPDATE SKIP LOCKED",
     )
     .bind(instance_id)
     .fetch_optional(&mut **transaction)
@@ -1450,7 +1450,7 @@ async fn lock_materialization_eligibility_graph(
     .map_err(operation_error)?;
     if claim_locked.is_none()
         && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1)",
+            "SELECT EXISTS (SELECT 1 FROM logical_workflow_materialization_claims WHERE instance_id = $1)",
         )
         .bind(instance_id)
         .fetch_one(&mut **transaction)
@@ -1460,7 +1460,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT id FROM workflow_plan_v2_jobs WHERE run_id = $1 AND invocation_id = $2 AND id = $3 FOR UPDATE SKIP LOCKED",
+        "SELECT id FROM logical_workflow_jobs WHERE run_id = $1 AND invocation_id = $2 AND id = $3 FOR UPDATE SKIP LOCKED",
     )
     .bind(run_id)
     .bind(invocation_id)
@@ -1475,7 +1475,7 @@ async fn lock_materialization_eligibility_graph(
     if sqlx::query(
         r"
         SELECT logical_job_id
-        FROM workflow_plan_v2_activation_publications
+        FROM logical_workflow_activation_publications
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         FOR SHARE SKIP LOCKED
         ",
@@ -1491,7 +1491,7 @@ async fn lock_materialization_eligibility_graph(
         return Ok(false);
     }
     if sqlx::query(
-        "SELECT run_id FROM workflow_plan_v2_runtime_policy_pins WHERE run_id = $1 FOR SHARE SKIP LOCKED",
+        "SELECT run_id FROM logical_workflow_runtime_policy_pins WHERE run_id = $1 FOR SHARE SKIP LOCKED",
     )
     .bind(run_id)
     .fetch_optional(&mut **transaction)
@@ -1513,27 +1513,27 @@ async fn activation_candidate_is_eligible(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_jobs AS job
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_jobs AS job
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+            JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
-            LEFT JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+            LEFT JOIN logical_workflow_activation_preparation_claims AS preparation
               ON preparation.logical_job_id = job.id
-            LEFT JOIN workflow_plan_v2_activation_work_quarantines AS quarantine
+            LEFT JOIN logical_workflow_activation_work_quarantines AS quarantine
               ON quarantine.logical_job_id = job.id
             WHERE job.id = $1 AND job.run_id = $2 AND job.invocation_id = $3
               AND job.execution_kind = 'steps'
-              AND automata_workflow_plan_v2_invocation_published(
+              AND automata_logical_workflow_invocation_published(
                   marker.run_id, invocation.id
               )
-              AND invocation.plan_schema = 2
+              AND invocation.plan_schema = 1
               AND invocation.state IN ('pending', 'active')
               AND marker.orchestration_schema = 1
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = 4 AND run.plan_schema = 2
+              AND run.admission_epoch = 1 AND run.plan_schema = 1
               AND quarantine.logical_job_id IS NULL
               AND (
                   (job.state = 'pending' AND (
@@ -1545,8 +1545,8 @@ async fn activation_candidate_is_eligible(
               )
               AND NOT EXISTS (
                   SELECT 1
-                  FROM workflow_plan_v2_dependencies AS dependency
-                  LEFT JOIN workflow_plan_v2_effective_job_results AS result
+                  FROM logical_workflow_dependencies AS dependency
+                  LEFT JOIN logical_workflow_effective_job_results AS result
                     ON result.logical_job_id = dependency.prerequisite_job_id
                    AND result.run_id = dependency.run_id
                    AND result.invocation_id = dependency.invocation_id
@@ -1583,43 +1583,43 @@ async fn materialization_candidate_is_eligible(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_instances AS instance
-            JOIN workflow_plan_v2_activation_publications AS publication
+            FROM logical_workflow_instances AS instance
+            JOIN logical_workflow_activation_publications AS publication
               ON publication.run_id = instance.run_id
              AND publication.invocation_id = instance.invocation_id
              AND publication.logical_job_id = instance.logical_job_id
-            JOIN workflow_plan_v2_jobs AS job
+            JOIN logical_workflow_jobs AS job
               ON job.run_id = instance.run_id
              AND job.invocation_id = instance.invocation_id
              AND job.id = instance.logical_job_id
-            JOIN workflow_plan_v2_invocations AS invocation
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = instance.run_id AND invocation.id = instance.invocation_id
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = instance.run_id
+            JOIN logical_workflow_runs AS marker ON marker.run_id = instance.run_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
-            JOIN workflow_plan_v2_runtime_policy_pins AS pin ON pin.run_id = instance.run_id
-            LEFT JOIN workflow_plan_v2_materialization_claims AS claim
+            JOIN logical_workflow_runtime_policy_pins AS pin ON pin.run_id = instance.run_id
+            LEFT JOIN logical_workflow_materialization_claims AS claim
               ON claim.instance_id = instance.id
-            LEFT JOIN workflow_plan_v2_materialization_work_quarantines AS quarantine
+            LEFT JOIN logical_workflow_materialization_work_quarantines AS quarantine
               ON quarantine.instance_id = instance.id
             WHERE instance.id = $1 AND instance.run_id = $2
               AND instance.invocation_id = $3 AND instance.logical_job_id = $4
-              AND instance.job_ir_version = 5 AND instance.runtime_context_schema = 2
+              AND instance.job_ir_version = 1 AND instance.runtime_context_schema = 1
               AND instance.runtime_policy_revision = pin.policy_revision
               AND instance.runtime_policy_digest = pin.policy_digest
               AND publication.runtime_policy_revision = pin.policy_revision
               AND publication.runtime_policy_digest = pin.policy_digest
               AND publication.condition_matched AND publication.instance_count > 0
               AND job.execution_kind = 'steps' AND job.state = 'activated'
-              AND automata_workflow_plan_v2_invocation_published(
+              AND automata_logical_workflow_invocation_published(
                   marker.run_id, invocation.id
               )
-              AND invocation.plan_schema = 2
+              AND invocation.plan_schema = 1
               AND invocation.state IN ('pending', 'active')
               AND marker.orchestration_schema = 1
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = 4 AND run.plan_schema = 2
+              AND run.admission_epoch = 1 AND run.plan_schema = 1
               AND (claim.instance_id IS NULL
                    OR (claim.state = 'materializing' AND claim.expires_at_ms <= $5))
               AND quarantine.instance_id IS NULL
@@ -1802,7 +1802,7 @@ async fn quarantine_activation_generation_poison(
     require_max_generation_poison(&evidence, selection_claimed_at)?;
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_quarantines (
+        INSERT INTO logical_workflow_activation_work_quarantines (
             logical_job_id, tenant_id, run_id, invocation_id,
             selection_id, selection_owner_id,
             selection_requested_at_ms, selection_duration_ms,
@@ -1842,7 +1842,7 @@ async fn quarantine_activation_generation_poison(
 
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_selections
+        UPDATE logical_workflow_activation_work_selections
         SET claimed_at_ms = $2, expires_at_ms = $3, outcome = 'quarantined',
             tenant_id = $4, run_id = $5, invocation_id = $6,
             logical_job_id = $7, generation = $8,
@@ -1887,7 +1887,7 @@ async fn quarantine_materialization_generation_poison(
     require_max_generation_poison(&evidence, selection_claimed_at)?;
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_quarantines (
+        INSERT INTO logical_workflow_materialization_work_quarantines (
             instance_id, tenant_id, run_id, invocation_id, logical_job_id,
             selection_id, selection_owner_id,
             selection_requested_at_ms, selection_duration_ms,
@@ -1930,7 +1930,7 @@ async fn quarantine_materialization_generation_poison(
 
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_selections
+        UPDATE logical_workflow_materialization_work_selections
         SET claimed_at_ms = $2, expires_at_ms = $3, outcome = 'quarantined',
             tenant_id = $4, run_id = $5, invocation_id = $6,
             logical_job_id = $7, instance_id = $8, generation = $9,
@@ -1978,7 +1978,7 @@ async fn load_locked_activation_generation_poison(
         SELECT state, activation_owner_id, activation_fence,
                activation_input_digest, activation_claimed_at_ms,
                activation_expires_at_ms
-        FROM workflow_plan_v2_jobs
+        FROM logical_workflow_jobs
         WHERE run_id = $1 AND invocation_id = $2 AND id = $3
         ",
     )
@@ -2010,7 +2010,7 @@ async fn load_locked_activation_generation_poison(
                 r"
                 SELECT state, owner_id, generation, descriptor_digest,
                        claimed_at_ms, expires_at_ms
-                FROM workflow_plan_v2_activation_preparation_claims
+                FROM logical_workflow_activation_preparation_claims
                 WHERE logical_job_id = $1
                 ",
             )
@@ -2058,7 +2058,7 @@ async fn load_locked_materialization_generation_poison(
         r"
         SELECT state, owner_id, generation, descriptor_digest,
                claimed_at_ms, expires_at_ms
-        FROM workflow_plan_v2_materialization_claims
+        FROM logical_workflow_materialization_claims
         WHERE instance_id = $1
         ",
     )
@@ -2203,7 +2203,7 @@ async fn insert_activation_receipt(
 ) -> Result<(), LogicalWorkSelectionStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_selections
+        UPDATE logical_workflow_activation_work_selections
         SET claimed_at_ms = $5, expires_at_ms = $6, outcome = $7,
             tenant_id = $8, run_id = $9, invocation_id = $10,
             logical_job_id = $11, generation = $12,
@@ -2303,7 +2303,7 @@ async fn insert_materialization_receipt(
 ) -> Result<(), LogicalWorkSelectionStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_selections
+        UPDATE logical_workflow_materialization_work_selections
         SET claimed_at_ms = $5, expires_at_ms = $6, outcome = $7,
             tenant_id = $8, run_id = $9, invocation_id = $10,
             logical_job_id = $11, instance_id = $12, generation = $13,
@@ -2343,7 +2343,7 @@ async fn lock_activation_receipt(
         SELECT owner_id, requested_at_ms, duration_ms, claimed_at_ms,
                expires_at_ms, outcome, tenant_id, run_id, invocation_id,
                logical_job_id, generation, authority_kind, authority_digest
-        FROM workflow_plan_v2_activation_work_selections
+        FROM logical_workflow_activation_work_selections
         WHERE selection_id = $1 FOR UPDATE
         ",
     )
@@ -2362,7 +2362,7 @@ async fn lock_materialization_receipt(
         SELECT owner_id, requested_at_ms, duration_ms, claimed_at_ms,
                expires_at_ms, outcome, tenant_id, run_id, invocation_id,
                logical_job_id, instance_id, generation, authority_digest
-        FROM workflow_plan_v2_materialization_work_selections
+        FROM logical_workflow_materialization_work_selections
         WHERE selection_id = $1 FOR UPDATE
         ",
     )
@@ -2722,10 +2722,10 @@ async fn quarantine_activation_authority(
                    claim.expires_at_ms AS authority_expires_at_ms,
                    claim.state AS authority_state,
                    claim.origin_selection_id
-            FROM workflow_plan_v2_jobs AS job
+            FROM logical_workflow_jobs AS job
             JOIN workflow_runs AS run ON run.id = job.run_id
             JOIN repositories AS repository ON repository.id = run.repository_id
-            JOIN workflow_plan_v2_activation_preparation_claims AS claim
+            JOIN logical_workflow_activation_preparation_claims AS claim
               ON claim.logical_job_id = job.id
             WHERE job.id = $1
             FOR UPDATE OF job, claim
@@ -2745,7 +2745,7 @@ async fn quarantine_activation_authority(
                    job.activation_expires_at_ms AS authority_expires_at_ms,
                    job.state AS authority_state,
                    job.activation_origin_selection_id AS origin_selection_id
-            FROM workflow_plan_v2_jobs AS job
+            FROM logical_workflow_jobs AS job
             JOIN workflow_runs AS run ON run.id = job.run_id
             JOIN repositories AS repository ON repository.id = run.repository_id
             WHERE job.id = $1
@@ -2775,7 +2775,7 @@ async fn quarantine_activation_authority(
     ) = activation_captured_authority(request)?;
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_quarantines (
+        INSERT INTO logical_workflow_activation_work_quarantines (
             logical_job_id, tenant_id, run_id, invocation_id,
             selection_id, selection_owner_id,
             selection_requested_at_ms, selection_duration_ms,
@@ -2859,10 +2859,10 @@ async fn quarantine_materialization_authority(
                claim.claimed_at_ms AS authority_claimed_at_ms,
                claim.expires_at_ms AS authority_expires_at_ms,
                claim.state AS authority_state, claim.origin_selection_id
-        FROM workflow_plan_v2_instances AS instance
+        FROM logical_workflow_instances AS instance
         JOIN workflow_runs AS run ON run.id = instance.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_materialization_claims AS claim
+        JOIN logical_workflow_materialization_claims AS claim
           ON claim.instance_id = instance.id
         WHERE instance.id = $1
         FOR UPDATE OF instance, claim
@@ -2884,7 +2884,7 @@ async fn quarantine_materialization_authority(
     let authority = request.consumed().authority().claim();
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_quarantines (
+        INSERT INTO logical_workflow_materialization_work_quarantines (
             instance_id, tenant_id, run_id, invocation_id, logical_job_id,
             selection_id, selection_owner_id,
             selection_requested_at_ms, selection_duration_ms,
@@ -3115,7 +3115,7 @@ async fn lock_quarantine_horizon(
     queue: &'static str,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
     let row = sqlx::query(
-        "SELECT queue_name FROM workflow_plan_v2_work_selection_replay_horizons WHERE queue_name = $1 FOR UPDATE",
+        "SELECT queue_name FROM logical_workflow_work_selection_replay_horizons WHERE queue_name = $1 FOR UPDATE",
     )
     .bind(queue)
     .fetch_optional(&mut **transaction)
@@ -3137,7 +3137,7 @@ async fn lock_activation_receipt_for_selected(
                claimed_at_ms, expires_at_ms, outcome, tenant_id, run_id,
                invocation_id, logical_job_id, generation, authority_kind,
                authority_digest
-        FROM workflow_plan_v2_activation_work_selections
+        FROM logical_workflow_activation_work_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -3158,7 +3158,7 @@ async fn lock_materialization_receipt_for_selected(
                claimed_at_ms, expires_at_ms, outcome, tenant_id, run_id,
                invocation_id, logical_job_id, instance_id, generation,
                authority_digest
-        FROM workflow_plan_v2_materialization_work_selections
+        FROM logical_workflow_materialization_work_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -3278,7 +3278,7 @@ async fn lock_activation_quarantine(
                authority_kind, authority_digest, authority_owner_id,
                authority_generation, authority_claimed_at_ms,
                authority_expires_at_ms, failure_kind
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1 FOR UPDATE
         ",
     )
@@ -3300,7 +3300,7 @@ async fn lock_materialization_quarantine(
                selection_claimed_at_ms, selection_expires_at_ms,
                authority_digest, authority_owner_id, authority_generation,
                authority_claimed_at_ms, authority_expires_at_ms, failure_kind
-        FROM workflow_plan_v2_materialization_work_quarantines
+        FROM logical_workflow_materialization_work_quarantines
         WHERE instance_id = $1 FOR UPDATE
         ",
     )
@@ -3323,7 +3323,7 @@ async fn lock_activation_replay_quarantines(
                authority_kind, authority_digest, authority_owner_id,
                authority_generation, authority_claimed_at_ms,
                authority_expires_at_ms, failure_kind, quarantined_at_ms
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1 OR selection_id = $2
         ORDER BY logical_job_id, selection_id
         FOR UPDATE
@@ -3349,7 +3349,7 @@ async fn lock_materialization_replay_quarantines(
                authority_digest, authority_owner_id, authority_generation,
                authority_claimed_at_ms, authority_expires_at_ms,
                failure_kind, quarantined_at_ms
-        FROM workflow_plan_v2_materialization_work_quarantines
+        FROM logical_workflow_materialization_work_quarantines
         WHERE instance_id = $1 OR selection_id = $2
         ORDER BY instance_id, selection_id
         FOR UPDATE
@@ -3370,16 +3370,16 @@ async fn require_quarantine_replay_graph(
 ) -> Result<(), LogicalWorkSelectionStoreError> {
     let exact: Option<bool> = sqlx::query_scalar(
         r"
-        SELECT run.admission_epoch = 4 AND run.plan_schema = 2
+        SELECT run.admission_epoch = 1 AND run.plan_schema = 1
                AND marker.orchestration_schema = 1
-               AND automata_workflow_plan_v2_invocation_published(
+               AND automata_logical_workflow_invocation_published(
                    marker.run_id, $3
                )
-               AND invocation.plan_schema = 2
+               AND invocation.plan_schema = 1
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = run.id AND invocation.id = $3
         WHERE repository.tenant_id = $1 AND run.id = $2
         FOR SHARE OF repository, run, marker, invocation
@@ -3416,8 +3416,8 @@ async fn lock_activation_replay_authority(
                    claim.claimed_at_ms AS authority_claimed_at_ms,
                    claim.expires_at_ms AS authority_expires_at_ms,
                    claim.state AS authority_state
-            FROM workflow_plan_v2_activation_preparation_claims AS claim
-            JOIN workflow_plan_v2_jobs AS job ON job.id = claim.logical_job_id
+            FROM logical_workflow_activation_preparation_claims AS claim
+            JOIN logical_workflow_jobs AS job ON job.id = claim.logical_job_id
             JOIN workflow_runs AS run ON run.id = job.run_id
             JOIN repositories AS repository ON repository.id = run.repository_id
             WHERE job.id = $1
@@ -3439,7 +3439,7 @@ async fn lock_activation_replay_authority(
                    job.activation_claimed_at_ms AS authority_claimed_at_ms,
                    job.activation_expires_at_ms AS authority_expires_at_ms,
                    job.state AS authority_state
-            FROM workflow_plan_v2_jobs AS job
+            FROM logical_workflow_jobs AS job
             JOIN workflow_runs AS run ON run.id = job.run_id
             JOIN repositories AS repository ON repository.id = run.repository_id
             WHERE job.id = $1
@@ -3468,8 +3468,8 @@ async fn lock_materialization_replay_authority(
                claim.claimed_at_ms AS authority_claimed_at_ms,
                claim.expires_at_ms AS authority_expires_at_ms,
                claim.state AS authority_state
-        FROM workflow_plan_v2_materialization_claims AS claim
-        JOIN workflow_plan_v2_instances AS instance ON instance.id = claim.instance_id
+        FROM logical_workflow_materialization_claims AS claim
+        JOIN logical_workflow_instances AS instance ON instance.id = claim.instance_id
         JOIN workflow_runs AS run ON run.id = instance.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE instance.id = $1

@@ -228,6 +228,10 @@ async fn stage_authenticated_admission(
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 104)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 104)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([9; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -406,7 +410,7 @@ async fn assert_logical_admission_shape(
         r"
         SELECT root_invocation_id, orchestration_schema, admission_digest,
                state, revision
-        FROM workflow_plan_v2_runs WHERE run_id = $1
+        FROM logical_workflow_runs WHERE run_id = $1
         ",
     )
     .bind(run_id.as_uuid())
@@ -420,7 +424,7 @@ async fn assert_logical_admission_shape(
         r"
         SELECT base_context_digest, base_context_object_key, base_context_size_bytes,
                base_context_media_type, base_context_schema
-        FROM workflow_plan_v2_runs WHERE run_id = $1
+        FROM logical_workflow_runs WHERE run_id = $1
         ",
     )
     .bind(run_id.as_uuid())
@@ -440,7 +444,7 @@ async fn assert_logical_admission_shape(
     let invocation: (i16, String, Vec<u8>) = sqlx::query_as(
         r"
         SELECT plan_schema, state, plan_digest
-        FROM workflow_plan_v2_invocations WHERE id = $1 AND run_id = $2
+        FROM logical_workflow_invocations WHERE id = $1 AND run_id = $2
         ",
     )
     .bind(root_id.as_uuid())
@@ -452,7 +456,7 @@ async fn assert_logical_admission_shape(
     let logical_jobs: Vec<(String, i32, String, String)> = sqlx::query_as(
         r"
         SELECT logical_key, source_order, execution_kind, state
-        FROM workflow_plan_v2_jobs WHERE run_id = $1 ORDER BY source_order
+        FROM logical_workflow_jobs WHERE run_id = $1 ORDER BY source_order
         ",
     )
     .bind(run_id.as_uuid())
@@ -476,7 +480,7 @@ async fn assert_logical_admission_shape(
         ]
     );
     let dependency_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_dependencies WHERE run_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM logical_workflow_dependencies WHERE run_id = $1")
             .bind(run_id.as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -550,7 +554,7 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
         )
         .await?;
         let tamper = sqlx::query(
-            "UPDATE workflow_plan_v2_runs SET base_context_digest = $2 WHERE run_id = $1",
+            "UPDATE logical_workflow_runs SET base_context_digest = $2 WHERE run_id = $1",
         )
         .bind(run_id.as_uuid())
         .bind(vec![0x55_u8; 32])
@@ -561,7 +565,7 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
             tamper
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("workflow_plan_v2_runs_base_context_immutable"),
+            Some("logical_workflow_runs_base_context_immutable"),
         );
         assert_no_concrete_jobs(&database, run_id).await?;
         let subject_evidence_count: i64 = sqlx::query_scalar(
@@ -625,7 +629,7 @@ async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> Test
                 .await,
             Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
         ));
-        let marker_count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_runs")
+        let marker_count: i64 = sqlx::query_scalar("SELECT count(*) FROM logical_workflow_runs")
             .fetch_one(database.pool())
             .await?;
         assert_eq!(marker_count, 1);
@@ -662,7 +666,7 @@ async fn descriptors_are_immutable_and_activation_claim_shape_is_strict() -> Tes
                 .is_err()
         );
         assert!(
-            sqlx::query("UPDATE workflow_plan_v2_jobs SET logical_key = 'changed' WHERE id = $1",)
+            sqlx::query("UPDATE logical_workflow_jobs SET logical_key = 'changed' WHERE id = $1",)
                 .bind(first_job_id)
                 .execute(database.pool())
                 .await
@@ -671,7 +675,7 @@ async fn descriptors_are_immutable_and_activation_claim_shape_is_strict() -> Tes
         assert!(
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_jobs
+                UPDATE logical_workflow_jobs
                 SET state = 'activating', activation_fence = 1
                 WHERE id = $1
                 ",
@@ -724,7 +728,7 @@ async fn descriptors_are_immutable_and_activation_claim_shape_is_strict() -> Tes
         assert!(
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_jobs
+                UPDATE logical_workflow_jobs
                 SET activation_expires_at_ms = activation_claimed_at_ms
                 WHERE id = $1
                 ",
@@ -1047,7 +1051,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
             r"
             SELECT pin.policy_revision, pin.policy_digest, pin.pinned_at_ms,
                    manifest.runtime_policy_revision, manifest.runtime_policy_digest
-            FROM workflow_plan_v2_runtime_policy_pins AS pin
+            FROM logical_workflow_runtime_policy_pins AS pin
             JOIN github_provider_manifest_current AS current_manifest
               ON current_manifest.tenant_id = pin.tenant_id
              AND current_manifest.repository_id = pin.repository_id

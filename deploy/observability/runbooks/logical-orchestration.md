@@ -1,11 +1,11 @@
-# WorkflowPlan-v2 logical orchestration
+# logical workflow logical orchestration
 
 Check the durable-state sampler first. It refreshes every 15 seconds and retains
 the last good snapshot after an error, cancellation, timeout, or capacity-bound
 failure. Confirm `automata_ci_control_plane_state_sampler_healthy` is 1 and the
 last-success timestamp is advancing before interpreting logical state.
 
-Use `cluster_state:automata_ci_control_plane_workflow_plan_v2_runs:max` for the
+Use `cluster_state:automata_ci_control_plane_logical_workflow_runs:max` for the
 current run markers and `cluster_state:automata_ci_control_plane_logical_jobs:max`
 for logical jobs. Run marker states are `pending`, `active`, `completed`,
 `cancelled`, and `failed`; logical-job states are `pending`, `activating`,

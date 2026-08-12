@@ -114,7 +114,7 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 3,
+        "schema": 1,
         "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,

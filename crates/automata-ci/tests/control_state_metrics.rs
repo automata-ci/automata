@@ -28,7 +28,7 @@ const STATE_FAMILIES: [&str; 28] = [
     "automata_ci_control_plane_state_sampler_last_success_timestamp_seconds",
     "automata_ci_control_plane_state_sampler_runs",
     "automata_ci_control_plane_workflow_runs",
-    "automata_ci_control_plane_workflow_plan_v2_runs",
+    "automata_ci_control_plane_logical_workflow_runs",
     "automata_ci_postgres_pool_connections",
     "automata_ci_postgres_pool_max_connections",
 ];

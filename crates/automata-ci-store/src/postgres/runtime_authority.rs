@@ -3300,7 +3300,7 @@ async fn lock_exact_authority_graph(
          AND checks.app_configuration_revision =
              origin.checks_authority_app_configuration_revision
          AND checks.policy_revision = origin.checks_authority_policy_revision
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin
+        JOIN logical_workflow_runtime_policy_pins AS pin
           ON pin.run_id = origin.run_id
          AND pin.tenant_id = origin.tenant_id
          AND pin.repository_id = origin.repository_id
@@ -3309,10 +3309,10 @@ async fn lock_exact_authority_graph(
          AND policy.repository_id = pin.repository_id
          AND policy.policy_revision = pin.policy_revision
          AND policy.policy_digest = pin.policy_digest
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.job_id = $13
          AND concrete.run_id = origin.run_id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.run_id = concrete.run_id
          AND materialization.invocation_id = concrete.invocation_id
@@ -3325,33 +3325,33 @@ async fn lock_exact_authority_graph(
          AND materialization.claimed_at_ms = concrete.claim_started_at_ms
          AND materialization.expires_at_ms = concrete.claim_expires_at_ms
          AND materialization.updated_at_ms = concrete.committed_at_ms
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_instances AS instance
           ON instance.id = concrete.instance_id
          AND instance.run_id = concrete.run_id
          AND instance.invocation_id = concrete.invocation_id
          AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = instance.run_id
          AND publication.invocation_id = instance.invocation_id
          AND publication.logical_job_id = instance.logical_job_id
-        JOIN workflow_plan_v2_activation_preparations AS preparation
+        JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.run_id = publication.run_id
          AND preparation.invocation_id = publication.invocation_id
          AND preparation.logical_job_id = publication.logical_job_id
          AND preparation.activation_input_digest = publication.activation_input_digest
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+        JOIN logical_workflow_activation_preparation_claims AS preparation_claim
           ON preparation_claim.run_id = preparation.run_id
          AND preparation_claim.invocation_id = preparation.invocation_id
          AND preparation_claim.logical_job_id = preparation.logical_job_id
          AND preparation_claim.descriptor_digest = preparation.descriptor_digest
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = concrete.run_id
          AND invocation.id = concrete.invocation_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = concrete.run_id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = concrete.run_id
         WHERE origin.tenant_id = $1
           AND origin.repository_id = $2
           AND origin.run_id = $3
@@ -3483,8 +3483,8 @@ async fn lock_exact_selection_tails(
                    AND materialization_selection.claimed_at_ms = $20
                    AND materialization_selection.expires_at_ms = $21
                    AS materialization_is_base
-        FROM workflow_plan_v2_concrete_jobs AS concrete
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        FROM logical_workflow_concrete_jobs AS concrete
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.run_id = concrete.run_id
          AND materialization.invocation_id = concrete.invocation_id
@@ -3492,28 +3492,28 @@ async fn lock_exact_selection_tails(
          AND materialization.descriptor_digest = concrete.descriptor_digest
          AND materialization.expected_job_id = concrete.job_id
          AND materialization.expected_attempt_id = concrete.initial_attempt_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = logical_job.run_id
          AND publication.invocation_id = logical_job.invocation_id
          AND publication.logical_job_id = logical_job.id
          AND publication.activation_input_digest =
              logical_job.activation_input_digest
-        JOIN workflow_plan_v2_activation_preparations AS preparation
+        JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.run_id = publication.run_id
          AND preparation.invocation_id = publication.invocation_id
          AND preparation.logical_job_id = publication.logical_job_id
          AND preparation.activation_input_digest =
              publication.activation_input_digest
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+        JOIN logical_workflow_activation_preparation_claims AS preparation_claim
           ON preparation_claim.run_id = preparation.run_id
          AND preparation_claim.invocation_id = preparation.invocation_id
          AND preparation_claim.logical_job_id = preparation.logical_job_id
          AND preparation_claim.descriptor_digest = preparation.descriptor_digest
-        JOIN workflow_plan_v2_activation_work_selections AS preparation_selection
+        JOIN logical_workflow_activation_work_selections AS preparation_selection
           ON preparation_selection.selection_id = $4
          AND preparation_selection.outcome = 'claimed'
          AND preparation_selection.tenant_id = $1
@@ -3523,7 +3523,7 @@ async fn lock_exact_selection_tails(
          AND preparation_selection.authority_kind = 'preparation'
          AND preparation_selection.owner_id = $5
          AND preparation_selection.authority_digest = $7
-        JOIN workflow_plan_v2_activation_work_selections AS activation_selection
+        JOIN logical_workflow_activation_work_selections AS activation_selection
           ON activation_selection.selection_id = $10
          AND activation_selection.outcome = 'claimed'
          AND activation_selection.tenant_id = $1
@@ -3533,7 +3533,7 @@ async fn lock_exact_selection_tails(
          AND activation_selection.authority_kind = 'activation'
          AND activation_selection.owner_id = $11
          AND activation_selection.authority_digest = $13
-        JOIN workflow_plan_v2_materialization_work_selections AS materialization_selection
+        JOIN logical_workflow_materialization_work_selections AS materialization_selection
           ON materialization_selection.selection_id = $16
          AND materialization_selection.outcome = 'claimed'
          AND materialization_selection.tenant_id = $1
@@ -3685,8 +3685,8 @@ async fn lock_exact_activation_selection_renewal(
     sqlx::query_scalar(
         r"
         SELECT TRUE
-        FROM workflow_plan_v2_activation_renewal_receipts AS renewal
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin
+        FROM logical_workflow_activation_renewal_receipts AS renewal
+        JOIN logical_workflow_runtime_policy_pins AS pin
           ON pin.run_id = renewal.run_id
          AND pin.tenant_id = renewal.tenant_id
          AND pin.repository_id = $12
@@ -3736,8 +3736,8 @@ async fn lock_exact_materialization_selection_renewal(
     sqlx::query_scalar(
         r"
         SELECT TRUE
-        FROM workflow_plan_v2_materialization_renewal_receipts AS renewal
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin
+        FROM logical_workflow_materialization_renewal_receipts AS renewal
+        JOIN logical_workflow_runtime_policy_pins AS pin
           ON pin.run_id = renewal.run_id
          AND pin.tenant_id = renewal.tenant_id
          AND pin.repository_id = $14

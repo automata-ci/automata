@@ -1,6 +1,6 @@
 //! Fenced aggregation of immutable instance results into one logical-job result.
 //!
-//! Repository claims authenticate the exact current WorkflowPlan-v2 object,
+//! Repository claims authenticate the exact current logical workflow object,
 //! ordered instance-result/output evidence, and direct prerequisite closure.
 //! The plan blob is loaded, canonically decoded, and revalidated outside SQL
 //! before a sensitivity-safe aggregate is committed.
@@ -24,7 +24,7 @@ use crate::{
     WORKFLOW_PLAN_SCHEMA,
 };
 
-/// Exact media type of the current canonical WorkflowPlan-v2 object.
+/// Exact media type of the current canonical logical workflow object.
 pub const LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE: &str = "application/vnd.automata.workflow-plan+json";
 /// Maximum duration of one logical-job result claim.
 pub const MAX_LOGICAL_JOB_RESULT_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
@@ -1082,7 +1082,7 @@ pub struct CommitLogicalJobResult {
 }
 
 impl CommitLogicalJobResult {
-    /// Canonically decodes and revalidates exact WorkflowPlan-v2 bytes, then
+    /// Canonically decodes and revalidates exact logical workflow bytes, then
     /// aggregates conclusions and every declared output.
     ///
     /// `LastSuccessfulCompletion` uses raw success and the greatest
@@ -1438,7 +1438,7 @@ pub enum LogicalJobResultValueError {
     /// Durable source order was out of range.
     #[error("logical job-result source order is invalid")]
     InvalidSourceOrder,
-    /// The plan object descriptor was not current WorkflowPlan-v2 JSON.
+    /// The plan object descriptor was not current logical workflow JSON.
     #[error("logical job-result plan object is invalid")]
     InvalidPlanObject,
     /// Instance evidence was missing or inconsistent with activation.

@@ -11,7 +11,7 @@ use automata_ci_core::{
     MatrixPatch, MatrixPatchSet, MatrixTemplate, MatrixValue, MatrixValueTemplate,
     OutputSensitivity, PlanEvaluationPhase, PlanExpression, PlanSourceLocation, PlanSourceOrigin,
     PlanSourceSpan, ReusableInputBinding, ReusableSecretBinding, ReusableSecretForwarding,
-    ReusableWorkflowInvocation, StepJobTemplate, WORKFLOW_PLAN_V2_SCHEMA_VERSION,
+    ReusableWorkflowInvocation, StepJobTemplate, WORKFLOW_PLAN_SCHEMA_VERSION,
     WorkflowEventProvenance, WorkflowInputKey, WorkflowInvocationContract, WorkflowJobKey,
     WorkflowOutputDefinition, WorkflowOutputKey, WorkflowPlan, WorkflowPlanVersion,
     WorkflowSecretKey, WorkflowSourceProvenance, WorkflowStepKey, WorkflowStrategyTemplate,
@@ -309,8 +309,8 @@ fn plan_value_with_matrix(matrix: &MatrixTemplate, expansion_limit: u16) -> serd
 #[test]
 fn logical_plan_round_trips_with_strategy_contracts_and_result_references() {
     let plan = valid_plan();
-    assert_eq!(plan.version(), WorkflowPlanVersion::v2());
-    assert_eq!(plan.version().get(), WORKFLOW_PLAN_V2_SCHEMA_VERSION);
+    assert_eq!(plan.version(), WorkflowPlanVersion::v1());
+    assert_eq!(plan.version().get(), WORKFLOW_PLAN_SCHEMA_VERSION);
     assert_eq!(plan.jobs().len(), 2);
     assert_eq!(plan.logical().jobs(), plan.jobs());
     assert_eq!(plan.jobs()[1].needs()[0].value().as_str(), "build");
@@ -381,7 +381,7 @@ fn only_the_current_version_and_required_logical_body_decode() {
     }
     assert!(WorkflowPlanVersion::new(1).is_err());
     assert_eq!(
-        WorkflowPlanVersion::new(WORKFLOW_PLAN_V2_SCHEMA_VERSION).expect("current"),
+        WorkflowPlanVersion::new(WORKFLOW_PLAN_SCHEMA_VERSION).expect("current"),
         WorkflowPlanVersion::current()
     );
 

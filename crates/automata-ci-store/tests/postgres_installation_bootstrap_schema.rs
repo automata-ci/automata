@@ -1,5 +1,4 @@
-const INSTALLATION_MIGRATION: &str =
-    include_str!("../migrations/0015_human_auth_installation_bootstrap.sql");
+const INSTALLATION_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn installation_bootstrap_schema_is_exact_single_use_and_fail_closed() {

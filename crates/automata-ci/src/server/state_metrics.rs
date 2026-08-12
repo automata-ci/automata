@@ -18,8 +18,8 @@ use automata_ci_store::{
     ArtifactReservationKind, ArtifactState, BuiltinSecretCleanupStatus,
     ControlPlaneStateRepository, ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest,
     DatabasePoolSnapshot, JobAttemptCounts, LEASE_NEAR_EXPIRY_WINDOW, LeaseState,
-    LogicalActivationState, LogicalJobState, RunnerDesiredState, RunnerObservedState,
-    RunnerSessionState, WorkflowPlanV2RunState, WorkflowRunCounts, WorkflowRunStatus,
+    LogicalActivationState, LogicalJobState, LogicalWorkflowRunState, RunnerDesiredState,
+    RunnerObservedState, RunnerSessionState, WorkflowRunCounts, WorkflowRunStatus,
 };
 use prometheus_client::{
     collector::Collector,
@@ -499,16 +499,16 @@ fn encode_logical_orchestration(
     snapshot: &ControlPlaneStateSnapshot,
 ) -> Result<(), fmt::Error> {
     let runs = Family::<StateLabels, UnsignedGauge>::default();
-    let run_counts = snapshot.workflow_plan_v2_runs();
-    for state in WorkflowPlanV2RunState::ALL {
+    let run_counts = snapshot.logical_workflow_runs();
+    for state in LogicalWorkflowRunState::ALL {
         runs.get_or_create(&StateLabels {
-            state: workflow_plan_v2_run_state(state),
+            state: logical_workflow_run_state(state),
         })
         .set(run_counts.get(state));
     }
     let metric = encoder.encode_descriptor(
-        "control_plane_workflow_plan_v2_runs",
-        "Durable current WorkflowPlan-v2 orchestration markers by closed state.",
+        "control_plane_logical_workflow_runs",
+        "Durable current logical workflow orchestration markers by closed state.",
         None,
         MetricType::Gauge,
     )?;
@@ -524,7 +524,7 @@ fn encode_logical_orchestration(
     }
     let metric = encoder.encode_descriptor(
         "control_plane_logical_jobs",
-        "Durable current WorkflowPlan-v2 logical jobs by closed state.",
+        "Durable current logical workflow logical jobs by closed state.",
         None,
         MetricType::Gauge,
     )?;
@@ -916,13 +916,13 @@ const fn workflow_status(status: WorkflowRunStatus) -> &'static str {
     }
 }
 
-const fn workflow_plan_v2_run_state(state: WorkflowPlanV2RunState) -> &'static str {
+const fn logical_workflow_run_state(state: LogicalWorkflowRunState) -> &'static str {
     match state {
-        WorkflowPlanV2RunState::Pending => "pending",
-        WorkflowPlanV2RunState::Active => "active",
-        WorkflowPlanV2RunState::Completed => "completed",
-        WorkflowPlanV2RunState::Cancelled => "cancelled",
-        WorkflowPlanV2RunState::Failed => "failed",
+        LogicalWorkflowRunState::Pending => "pending",
+        LogicalWorkflowRunState::Active => "active",
+        LogicalWorkflowRunState::Completed => "completed",
+        LogicalWorkflowRunState::Cancelled => "cancelled",
+        LogicalWorkflowRunState::Failed => "failed",
     }
 }
 
@@ -1049,9 +1049,9 @@ mod tests {
     use automata_ci_store::{
         ArtifactCounts, ArtifactReservations, BuiltinSecretCleanupCounts,
         ControlPlaneCapacityCandidate, ControlPlaneCapacityRunner, ControlPlaneStateValueError,
-        JobAttemptCounts, LeaseCounts, LogicalActivationCounts, LogicalJobCounts, RoutingLabel,
-        RunnerCounts, RunnerGeneration, RunnerSessionCounts, RunnerSessionFence, RunnerSlotCount,
-        SessionEpoch, StableRunnerSlot, WorkflowPlanV2RunCounts,
+        JobAttemptCounts, LeaseCounts, LogicalActivationCounts, LogicalJobCounts,
+        LogicalWorkflowRunCounts, RoutingLabel, RunnerCounts, RunnerGeneration,
+        RunnerSessionCounts, RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
     };
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
@@ -1265,7 +1265,7 @@ mod tests {
         let durable = snapshot(3)
             .expect("base snapshot")
             .with_logical_orchestration(
-                WorkflowPlanV2RunCounts::default(),
+                LogicalWorkflowRunCounts::default(),
                 LogicalJobCounts::default(),
                 LogicalActivationCounts::default(),
                 0,
@@ -1304,7 +1304,7 @@ mod tests {
             .filter(|name| {
                 name.starts_with("automata_ci_control_plane_state_sampler_")
                     || name.starts_with("automata_ci_control_plane_workflow_runs")
-                    || name.starts_with("automata_ci_control_plane_workflow_plan_v2_runs")
+                    || name.starts_with("automata_ci_control_plane_logical_workflow_runs")
                     || name.starts_with("automata_ci_control_plane_logical_")
                     || name.starts_with("automata_ci_control_plane_eligible_queue_")
                     || name.starts_with("automata_ci_control_plane_job_attempts")
@@ -1349,7 +1349,7 @@ mod tests {
                 "automata_ci_control_plane_state_sampler_last_success_timestamp_seconds",
                 "automata_ci_control_plane_state_sampler_runs",
                 "automata_ci_control_plane_workflow_runs",
-                "automata_ci_control_plane_workflow_plan_v2_runs",
+                "automata_ci_control_plane_logical_workflow_runs",
                 "automata_ci_postgres_pool_connections",
                 "automata_ci_postgres_pool_max_connections",
             ]
@@ -1363,7 +1363,7 @@ mod tests {
             .filter(|sample| {
                 sample.starts_with("automata_ci_control_plane_state_sampler_")
                     || sample.starts_with("automata_ci_control_plane_workflow_runs")
-                    || sample.starts_with("automata_ci_control_plane_workflow_plan_v2_runs")
+                    || sample.starts_with("automata_ci_control_plane_logical_workflow_runs")
                     || sample.starts_with("automata_ci_control_plane_logical_")
                     || sample.starts_with("automata_ci_control_plane_eligible_queue_")
                     || sample.starts_with("automata_ci_control_plane_job_attempts")

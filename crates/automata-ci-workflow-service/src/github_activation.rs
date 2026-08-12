@@ -102,7 +102,7 @@ fn is_activation_safe_github_property(property: &str) -> bool {
     )
 }
 
-/// GitHub Actions evaluator for schema-v2 logical-job activation.
+/// GitHub Actions evaluator for logical-workflow logical-job activation.
 ///
 /// The caller supplies the immutable `github` object, including any bounded
 /// event data appropriate for this run. The adapter constructs all remaining

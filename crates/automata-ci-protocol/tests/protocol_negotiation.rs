@@ -30,9 +30,9 @@ fn disjoint_ranges_return_typed_error() {
 
 #[test]
 fn current_resource_aware_protocol_is_exactly_v5_with_no_v4_downgrade() {
-    assert_eq!(PROTOCOL_MIN_VERSION, version(5));
-    assert_eq!(PROTOCOL_MAX_VERSION, version(5));
-    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(5, 5));
+    assert_eq!(PROTOCOL_MIN_VERSION, version(1));
+    assert_eq!(PROTOCOL_MAX_VERSION, version(1));
+    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(1, 1));
 
     let legacy = range(3, 3);
     assert_eq!(
@@ -80,14 +80,14 @@ fn job_ir_negotiation_accepts_the_exact_current_contract() {
 
 #[test]
 fn non_current_job_ir_ranges_cannot_enter_negotiation() {
-    let retired = JobIrVersion::new(JobIrVersion::current().get() - 1)
-        .expect("positive retired JobIR version");
+    let unsupported = JobIrVersion::new(JobIrVersion::current().get() + 1)
+        .expect("positive unsupported JobIR version");
 
     assert_eq!(
-        JobIrVersionRange::new(retired, retired),
+        JobIrVersionRange::new(unsupported, unsupported),
         Err(JobIrVersionError::UnsupportedRange {
-            minimum: retired,
-            maximum: retired,
+            minimum: unsupported,
+            maximum: unsupported,
         })
     );
 }

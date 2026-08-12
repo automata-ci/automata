@@ -1,11 +1,9 @@
-const WORKFLOW_ADMISSION: &str = include_str!("../migrations/0005_workflow_admission.sql");
-const JOB_IR_CONTEXT: &str = include_str!("../migrations/0007_job_ir_v4_execution_context.sql");
-const PROVIDER_INBOX: &str = include_str!("../migrations/0017_provider_delivery_inbox.sql");
-const LOGICAL_ORCHESTRATION: &str =
-    include_str!("../migrations/0019_workflow_plan_v2_orchestration.sql");
-const CONCRETE_JOBS: &str = include_str!("../migrations/0021_workflow_plan_v2_concrete_jobs.sql");
-const DEPENDENT_PREPARATION: &str =
-    include_str!("../migrations/0028_workflow_plan_v2_dependent_activation_preparation.sql");
+const WORKFLOW_ADMISSION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const JOB_IR_CONTEXT: &str = include_str!("../migrations/0001_initial_schema.sql");
+const PROVIDER_INBOX: &str = include_str!("../migrations/0001_initial_schema.sql");
+const LOGICAL_ORCHESTRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const CONCRETE_JOBS: &str = include_str!("../migrations/0001_initial_schema.sql");
+const DEPENDENT_PREPARATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn every_durable_provider_event_uses_the_twenty_five_mib_ceiling() {

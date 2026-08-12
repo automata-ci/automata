@@ -261,7 +261,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             routing,
             observed_at,

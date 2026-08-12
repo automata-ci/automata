@@ -848,7 +848,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
                AND evidence.event_name = 'schedule'
                AND evidence.event_digest = $11
                AND evidence.git_ref = $12
-               AND evidence.workflow_plan_schema = 2
+               AND evidence.workflow_plan_schema = 1
                AND evidence.plan_digest = $13
                AND evidence.logical_admission_digest = $14
                AND evidence.admitted_at_ms = $15

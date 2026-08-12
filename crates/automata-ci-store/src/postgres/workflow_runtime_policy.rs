@@ -43,8 +43,8 @@ pub(super) async fn load_pinned_runtime_policy_for_run(
         r"
         SELECT pin.tenant_id, pin.repository_id, pin.policy_revision,
                pin.policy_digest
-        FROM workflow_plan_v2_runtime_policy_pins AS pin
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = pin.run_id
+        FROM logical_workflow_runtime_policy_pins AS pin
+        JOIN logical_workflow_runs AS marker ON marker.run_id = pin.run_id
         JOIN workflow_runs AS run ON run.id = marker.run_id
         JOIN repositories AS repository
           ON repository.id = pin.repository_id

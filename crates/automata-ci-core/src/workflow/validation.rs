@@ -2,9 +2,9 @@
 
 use thiserror::Error;
 
-/// Maximum cumulative number of semantic nodes in one schema-v2 plan.
+/// Maximum cumulative number of semantic nodes in one logical-workflow plan.
 pub const MAX_LOGICAL_PLAN_NODES: usize = 65_536;
-/// Maximum cumulative UTF-8 text retained by one schema-v2 plan.
+/// Maximum cumulative UTF-8 text retained by one logical-workflow plan.
 pub const MAX_LOGICAL_PLAN_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) struct LogicalPlanBudget {

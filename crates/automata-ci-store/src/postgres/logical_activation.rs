@@ -147,7 +147,7 @@ impl LogicalActivationRepository for PostgresStore {
 
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_jobs
+            UPDATE logical_workflow_jobs
             SET activation_fence = $9,
                 activation_claimed_at_ms = $10,
                 activation_expires_at_ms = $11,
@@ -271,7 +271,7 @@ impl LogicalActivationRepository for PostgresStore {
         };
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_jobs
+            UPDATE logical_workflow_jobs
             SET state = $5,
                 activation_owner_id = NULL,
                 activation_claimed_at_ms = NULL,
@@ -345,7 +345,7 @@ async fn lock_activation_selection_evidence(
                AND logical_job_id = $6
                AND authority_kind = 'activation'
                AND authority_digest = $7, FALSE) AS exact
-        FROM workflow_plan_v2_activation_work_selections
+        FROM logical_workflow_activation_work_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -369,7 +369,7 @@ async fn lock_activation_selection_evidence(
     let horizon: Option<String> = sqlx::query_scalar(
         r"
         SELECT queue_name
-        FROM workflow_plan_v2_work_selection_replay_horizons
+        FROM logical_workflow_work_selection_replay_horizons
         WHERE queue_name = 'activation'
         FOR UPDATE
         ",
@@ -392,7 +392,7 @@ async fn lock_activation_quarantine_custody(
     let quarantine: Option<Uuid> = sqlx::query_scalar(
         r"
         SELECT logical_job_id
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1
         FOR UPDATE
         ",
@@ -424,7 +424,7 @@ async fn load_exact_activation_renewal_receipt(
         r"
         SELECT successor_generation, successor_claimed_at_ms,
                successor_expires_at_ms, validated_at_ms
-        FROM workflow_plan_v2_activation_renewal_receipts
+        FROM logical_workflow_activation_renewal_receipts
         WHERE logical_job_id = $1
           AND authority_kind = 'activation'
           AND predecessor_generation = $2
@@ -513,7 +513,7 @@ async fn verify_selected_activation_renewal_lineage(
             r"
             SELECT successor_generation, successor_claimed_at_ms,
                    successor_expires_at_ms
-            FROM workflow_plan_v2_activation_renewal_receipts
+            FROM logical_workflow_activation_renewal_receipts
             WHERE logical_job_id = $1
               AND authority_kind = 'activation'
               AND predecessor_generation = $2
@@ -589,7 +589,7 @@ async fn insert_activation_renewal_receipt(
 ) -> Result<i64, LogicalActivationStoreError> {
     sqlx::query_scalar(
         r"
-        INSERT INTO workflow_plan_v2_activation_renewal_receipts (
+        INSERT INTO logical_workflow_activation_renewal_receipts (
             logical_job_id, authority_kind, selection_id, tenant_id, run_id,
             invocation_id, owner_id, runtime_policy_revision,
             runtime_policy_digest, authority_digest, predecessor_generation,
@@ -722,7 +722,7 @@ pub(super) async fn claim_logical_job_activation_in_transaction(
         .ok_or(LogicalActivationStoreError::GenerationExhausted)?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET state = 'activating',
             activation_fence = $5,
             activation_owner_id = $6,
@@ -877,7 +877,7 @@ async fn reject_quarantined_activation(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_activation_work_quarantines
+            FROM logical_workflow_activation_work_quarantines
             WHERE logical_job_id = $1
         )
         ",
@@ -902,7 +902,7 @@ async fn lock_active_activation_graph(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 4 AND run.plan_schema = 2
+               AND run.admission_epoch = 1 AND run.plan_schema = 1
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -922,10 +922,10 @@ async fn lock_active_activation_graph(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_workflow_plan_v2_invocation_published(
+               AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
                )
-        FROM workflow_plan_v2_runs AS marker
+        FROM logical_workflow_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
         ",
@@ -941,8 +941,8 @@ async fn lock_active_activation_graph(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 2
-        FROM workflow_plan_v2_invocations AS invocation
+               AND invocation.plan_schema = 1
+        FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
         ",
@@ -1007,30 +1007,30 @@ fn claim_target_query() -> &'static str {
            preparation.runtime_policy_digest AS prepared_runtime_policy_digest,
            (preparation.logical_job_id IS NOT NULL
             AND preparation_claim.state = 'prepared') AS prerequisites_ready
-    FROM workflow_plan_v2_jobs AS job
-    JOIN workflow_plan_v2_invocations AS invocation
+    FROM logical_workflow_jobs AS job
+    JOIN logical_workflow_invocations AS invocation
       ON invocation.run_id = job.run_id
      AND invocation.id = job.invocation_id
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
-    LEFT JOIN workflow_plan_v2_activation_preparations AS preparation
+    LEFT JOIN logical_workflow_activation_preparations AS preparation
       ON preparation.run_id = job.run_id
      AND preparation.invocation_id = job.invocation_id
      AND preparation.logical_job_id = job.id
-    LEFT JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+    LEFT JOIN logical_workflow_activation_preparation_claims AS preparation_claim
       ON preparation_claim.logical_job_id = preparation.logical_job_id
     WHERE repository.tenant_id = $1
       AND job.run_id = $2
       AND job.invocation_id = $3
       AND job.id = $4
       AND job.execution_kind = 'steps'
-      AND invocation.plan_schema = 2
+      AND invocation.plan_schema = 1
       AND invocation.state IN ('pending', 'active')
       AND marker.orchestration_schema = 1
       AND marker.state IN ('pending', 'active')
-      AND run.admission_epoch = 4
-      AND run.plan_schema = 2
+      AND run.admission_epoch = 1
+      AND run.plan_schema = 1
     FOR UPDATE OF job
     "
 }
@@ -1361,7 +1361,7 @@ async fn insert_publication(
 ) -> Result<(), LogicalActivationStoreError> {
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_publications (
+        INSERT INTO logical_workflow_activation_publications (
             run_id, invocation_id, logical_job_id,
             activation_input_digest, activation_output_digest, authority_profile,
             activation_owner_id, activation_generation,
@@ -1413,7 +1413,7 @@ async fn insert_instance(
     let evidence = instance.environment_gate().ok_or_else(corrupt_instance)?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_instances (
+        INSERT INTO logical_workflow_instances (
             id, run_id, invocation_id, logical_job_id,
             matrix_index, matrix_total, matrix_digest, workspace,
             job_ir_digest, job_ir_object_key, job_ir_size_bytes,
@@ -1463,7 +1463,7 @@ async fn insert_instance(
     .map_err(operation_error)?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_job_environment_evidence (
+        INSERT INTO logical_workflow_job_environment_evidence (
             instance_id, environment_normalized_name, event_trust,
             source_kind, reusable_secret_permission, created_at_ms
         ) VALUES ($1,$2,$3,$4,$5,$6)
@@ -1498,7 +1498,7 @@ async fn verify_exact_publication(
                condition_matched, instance_count, job_ir_version,
                runtime_context_schema, published_at_ms,
                runtime_policy_revision, runtime_policy_digest
-        FROM workflow_plan_v2_activation_publications
+        FROM logical_workflow_activation_publications
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
     )
@@ -1591,8 +1591,8 @@ async fn verify_exact_instances(
                evidence.source_kind AS gate_source_kind,
                evidence.reusable_secret_permission AS gate_reusable_permission,
                evidence.created_at_ms AS gate_created_at_ms
-        FROM workflow_plan_v2_instances AS instance
-        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+        FROM logical_workflow_instances AS instance
+        LEFT JOIN logical_workflow_job_environment_evidence AS evidence
           ON evidence.instance_id = instance.id
         WHERE instance.run_id = $1 AND instance.invocation_id = $2
           AND instance.logical_job_id = $3

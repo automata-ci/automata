@@ -6,9 +6,9 @@ use uuid::Uuid;
 use crate::{MAX_JOB_IR_BYTES, ObjectKey, RoutingDocument, Sha256Digest, StoreError, TenantScope};
 
 /// Exact admission epoch required for current workflow runs.
-pub const WORKFLOW_ADMISSION_EPOCH: u16 = 4;
+pub const WORKFLOW_ADMISSION_EPOCH: u16 = 1;
 /// Durable workflow-plan JSON schema emitted by the current frontend layer.
-pub const WORKFLOW_PLAN_SCHEMA: u16 = 2;
+pub const WORKFLOW_PLAN_SCHEMA: u16 = 1;
 /// Largest immutable source or plan object accepted at admission.
 pub const MAX_ADMISSION_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 /// Largest immutable provider event accepted at admission.

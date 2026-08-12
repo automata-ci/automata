@@ -651,7 +651,7 @@ async fn pin_workflow_dispatch_runtime_policy(
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_runtime_policy_pins (
+        INSERT INTO logical_workflow_runtime_policy_pins (
             run_id, tenant_id, repository_id, policy_revision,
             policy_digest, pinned_at_ms
         )
@@ -856,8 +856,8 @@ async fn replay_receipt(
                invocation.id AS invocation_id
         FROM workflow_admission_receipts AS receipt
         LEFT JOIN workflow_runs AS run ON run.id = receipt.run_id
-        LEFT JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        LEFT JOIN workflow_plan_v2_invocations AS invocation
+        LEFT JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        LEFT JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         WHERE receipt.tenant_id = $1
@@ -1333,7 +1333,7 @@ async fn insert_logical_run_and_invocation(
     let base_context = command.base_context();
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_runs (
+        INSERT INTO logical_workflow_runs (
             run_id, root_invocation_id, orchestration_schema,
             admission_digest, state, revision, admitted_at_ms, updated_at_ms,
             base_context_digest, base_context_object_key,
@@ -1366,7 +1366,7 @@ async fn insert_logical_run_and_invocation(
     let plan = command.plan();
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_invocations (
+        INSERT INTO logical_workflow_invocations (
             id, run_id, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, state, revision,
             created_at_ms, updated_at_ms
@@ -1398,7 +1398,7 @@ async fn insert_logical_jobs(
     let pin = sqlx::query(
         r"
         SELECT policy_revision, policy_digest
-        FROM workflow_plan_v2_runtime_policy_pins
+        FROM logical_workflow_runtime_policy_pins
         WHERE run_id = $1
         FOR KEY SHARE
         ",
@@ -1414,7 +1414,7 @@ async fn insert_logical_jobs(
     for job in command.jobs() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_jobs (
+            INSERT INTO logical_workflow_jobs (
                 id, run_id, invocation_id, logical_key, source_order,
                 execution_kind, state, activation_fence,
                 created_at_ms, updated_at_ms,
@@ -1455,7 +1455,7 @@ async fn insert_logical_jobs(
         for prerequisite in job.prerequisites() {
             sqlx::query(
                 r"
-                INSERT INTO workflow_plan_v2_dependencies (
+                INSERT INTO logical_workflow_dependencies (
                     run_id, invocation_id, logical_job_id, prerequisite_job_id
                 ) VALUES ($1,$2,$3,$4)
                 ",
@@ -1478,7 +1478,7 @@ async fn seal_logical_graph(
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET admission_graph_sealed_at_ms = database_clock.now_ms,
             updated_at_ms = database_clock.now_ms
         FROM (

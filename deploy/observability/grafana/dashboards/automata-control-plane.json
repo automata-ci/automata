@@ -182,8 +182,8 @@
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 2}, "unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 53}, "id": 20,
       "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"expr": "cluster_state:automata_ci_control_plane_workflow_plan_v2_runs:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{state}}", "refId": "A"}],
-      "title": "WorkflowPlan-v2 run state", "type": "timeseries"
+      "targets": [{"expr": "cluster_state:automata_ci_control_plane_logical_workflow_runs:max{cluster=~\"$cluster\",environment=~\"$environment\"}", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "logical workflow run state", "type": "timeseries"
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},

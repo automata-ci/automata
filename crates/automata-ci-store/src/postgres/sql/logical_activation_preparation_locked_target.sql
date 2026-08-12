@@ -80,11 +80,11 @@ SELECT job.logical_key, job.source_order, job.created_at_ms,
        claim.claimed_at_ms AS durable_claimed_at_ms,
        claim.expires_at_ms AS durable_expires_at_ms,
        claim.origin_selection_id AS durable_origin_selection_id
-FROM workflow_plan_v2_jobs AS job
-JOIN workflow_plan_v2_invocations AS invocation
+FROM logical_workflow_jobs AS job
+JOIN logical_workflow_invocations AS invocation
   ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
-JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
-LEFT JOIN workflow_plan_v2_reusable_call_publications AS reusable_call
+JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
+LEFT JOIN logical_workflow_reusable_call_publications AS reusable_call
   ON reusable_call.run_id = invocation.run_id
  AND reusable_call.child_invocation_id = invocation.id
  AND reusable_call.child_graph_sealed_at_ms IS NOT NULL
@@ -102,22 +102,22 @@ JOIN github_provider_manifest_revisions AS manifest
  AND manifest.provider_connection_id = origin.provider_connection_id
  AND manifest.manifest_revision = origin.provider_manifest_revision
  AND manifest.manifest_digest = origin.provider_manifest_digest
-LEFT JOIN workflow_plan_v2_activation_preparation_claims AS claim
+LEFT JOIN logical_workflow_activation_preparation_claims AS claim
   ON claim.logical_job_id = job.id
 WHERE repository.tenant_id = $1
   AND job.run_id = $2 AND job.invocation_id = $3 AND job.id = $4
   AND job.execution_kind = $5
-  AND automata_workflow_plan_v2_invocation_published(
+  AND automata_logical_workflow_invocation_published(
       marker.run_id, invocation.id
   )
-  AND invocation.plan_schema = 2
+  AND invocation.plan_schema = 1
   AND invocation.plan_media_type =
       'application/vnd.automata.workflow-plan+json'
   AND invocation.state IN ('pending', 'active')
   AND marker.orchestration_schema = 1
   AND marker.base_context_schema = 2
   AND marker.state IN ('pending', 'active')
-  AND run.admission_epoch = 4 AND run.plan_schema = 2
+  AND run.admission_epoch = 1 AND run.plan_schema = 1
   AND run.event_media_type = 'application/json'
   AND (job.state = 'pending' OR claim.state = 'prepared')
 FOR UPDATE OF job

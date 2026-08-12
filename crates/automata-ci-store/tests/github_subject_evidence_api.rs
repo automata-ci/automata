@@ -3,7 +3,7 @@ mod github_manifest_fixture;
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
+    AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
     GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
     GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
@@ -53,6 +53,11 @@ fn delivery(provider: &str) -> AcceptProviderDelivery {
     .expect("delivery")
 }
 
+fn push_event() -> GithubAuthenticatedEvent {
+    GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, "refs/heads/main")
+        .expect("push event")
+}
+
 #[test]
 fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identity() {
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner");
@@ -66,6 +71,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
         delivery("github"),
         owner,
         owner,
+        push_event(),
         head,
         verifier,
         verifier_revision,
@@ -92,6 +98,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
             delivery("github"),
             owner,
             other_owner,
+            push_event(),
             head,
             verifier,
             verifier_revision
@@ -103,6 +110,7 @@ fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identi
             delivery("synthetic"),
             owner,
             owner,
+            push_event(),
             head,
             verifier,
             verifier_revision
@@ -149,7 +157,7 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
     assert_eq!(request.run_id(), run_id);
     assert_eq!(request.root_invocation_id(), invocation_id);
     assert_eq!(request.delivery_id(), delivery_id);
-    assert_eq!(request.plan_schema(), 2);
+    assert_eq!(request.plan_schema(), 1);
     assert_eq!(request.admitted_at(), UnixMillis::new(500));
     assert_eq!(
         format!("{request:?}"),
@@ -221,7 +229,7 @@ fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
         manifest.webhook_verifier_revision(),
         checks,
         Some(private),
-        GithubAuthenticatedEventV1::new(
+        GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
         )
@@ -280,6 +288,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
         Some(private.clone()),
         subject_id,
         GithubCheckHeadSha::new([9; 20]).expect("head"),
+        push_event(),
         UnixMillis::new(100),
     )
     .expect("delivery evidence");
@@ -319,6 +328,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             Some(private),
             subject_id,
             GithubCheckHeadSha::new([9; 20]).expect("head"),
+            push_event(),
             UnixMillis::new(100),
         ),
         Err(GithubSubjectEvidenceValueError::WebhookVerifierPinMismatch)
@@ -335,6 +345,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             None,
             subject_id,
             GithubCheckHeadSha::new([9; 20]).expect("head"),
+            push_event(),
             UnixMillis::new(100),
         ),
         Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)

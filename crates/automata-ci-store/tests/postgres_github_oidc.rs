@@ -459,6 +459,10 @@ async fn admit_signed_oidc_workflow(
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new(head_sha)?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -867,7 +871,7 @@ async fn seed_current_profiled_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,
@@ -1013,22 +1017,22 @@ const INSERT_RUNTIME_AUTHORITY_CANDIDATE_SQL: &str = r"
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.job_id = job.id
          AND concrete.initial_attempt_id = attempt.id
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation
+        JOIN logical_workflow_activation_preparation_claims AS preparation
           ON preparation.run_id = concrete.run_id
          AND preparation.invocation_id = concrete.invocation_id
          AND preparation.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = concrete.run_id
          AND publication.invocation_id = concrete.invocation_id
          AND publication.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.expected_job_id = concrete.job_id
          AND materialization.expected_attempt_id = concrete.initial_attempt_id
@@ -1728,7 +1732,7 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
             SELECT state, activation_fence, activation_owner_id,
                    activation_claimed_at_ms, activation_expires_at_ms,
                    activation_input_digest, activation_origin_selection_id
-            FROM workflow_plan_v2_jobs
+            FROM logical_workflow_jobs
             WHERE id = $1
             ",
         )
@@ -1741,13 +1745,13 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
         // altered value remains structurally valid, so discovery reaches the
         // post-claim exact descriptor check inside the selector transaction.
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_activation_preparation_claims DISABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_activation_preparation_claims DISABLE TRIGGER USER",
         )
         .execute(database.pool())
         .await?;
         let corrupted = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims
+            UPDATE logical_workflow_activation_preparation_claims
             SET logical_key = logical_key || '-corrupt'
             WHERE logical_job_id = $1
             ",
@@ -1757,7 +1761,7 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
         .await?;
         assert_eq!(corrupted.rows_affected(), 1);
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_activation_preparation_claims ENABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_activation_preparation_claims ENABLE TRIGGER USER",
         )
         .execute(database.pool())
         .await?;
@@ -1778,13 +1782,13 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
             LogicalWorkSelectionStoreError::Store(StoreError::CorruptData(message)) => message,
             error => return Err(format!("unexpected selector error: {error:?}").into()),
         };
-        assert!(!message.contains("workflow_plan_v2"));
+        assert!(!message.contains("logical_workflow"));
         assert!(!message.contains(&fixture.tenant));
 
         let selection_count: i64 = sqlx::query_scalar(
             r"
             SELECT count(*)
-            FROM workflow_plan_v2_activation_work_selections
+            FROM logical_workflow_activation_work_selections
             WHERE selection_id = $1
             ",
         )
@@ -1798,7 +1802,7 @@ async fn corrupt_activation_evidence_rolls_back_selection_claim_and_oidc_authori
             SELECT state, activation_fence, activation_owner_id,
                    activation_claimed_at_ms, activation_expires_at_ms,
                    activation_input_digest, activation_origin_selection_id
-            FROM workflow_plan_v2_jobs
+            FROM logical_workflow_jobs
             WHERE id = $1
             ",
         )
@@ -1860,7 +1864,7 @@ async fn generic_admission_can_never_reserve_oidc_authority() -> TestResult {
         .await?;
         assert_eq!(admission_count, 0);
         let phase_claims: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_activation_preparation_claims",
+            "SELECT count(*) FROM logical_workflow_activation_preparation_claims",
         )
         .fetch_one(database.pool())
         .await?;

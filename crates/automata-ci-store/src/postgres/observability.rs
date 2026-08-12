@@ -13,12 +13,11 @@ use crate::{
     ControlPlaneCapacityRunner, ControlPlaneStateRepository, ControlPlaneStateSnapshot,
     ControlPlaneStateSnapshotRequest, DatabasePoolSnapshot, JobAttemptCounts, LeaseCounts,
     LeaseState, LogicalActivationCounts, LogicalActivationState, LogicalJobCounts, LogicalJobState,
-    MAX_CONTROL_PLANE_CAPACITY_CANDIDATES, MAX_CONTROL_PLANE_CAPACITY_RUNNERS,
-    MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RoutingLabel, RunnerCounts, RunnerDesiredState,
-    RunnerGeneration, RunnerObservedState, RunnerSessionCounts, RunnerSessionFence,
-    RunnerSessionState, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
-    WORKFLOW_ADMISSION_EPOCH, WorkflowPlanV2RunCounts, WorkflowPlanV2RunState, WorkflowRunCounts,
-    WorkflowRunStatus,
+    LogicalWorkflowRunCounts, LogicalWorkflowRunState, MAX_CONTROL_PLANE_CAPACITY_CANDIDATES,
+    MAX_CONTROL_PLANE_CAPACITY_RUNNERS, MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RoutingLabel,
+    RunnerCounts, RunnerDesiredState, RunnerGeneration, RunnerObservedState, RunnerSessionCounts,
+    RunnerSessionFence, RunnerSessionState, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
+    StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowRunCounts, WorkflowRunStatus,
 };
 
 const STATE_TRANSACTION_MODE: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
@@ -42,7 +41,7 @@ logical_run AS (
         count(*) FILTER (WHERE state = 'completed')::BIGINT AS completed,
         count(*) FILTER (WHERE state = 'cancelled')::BIGINT AS cancelled,
         count(*) FILTER (WHERE state = 'failed')::BIGINT AS failed
-    FROM workflow_plan_v2_runs
+    FROM logical_workflow_runs
 ),
 logical_job AS (
     SELECT
@@ -63,15 +62,15 @@ logical_job AS (
         min(activation_expires_at_ms) FILTER (
             WHERE state = 'activating' AND activation_expires_at_ms <= $1
         )::BIGINT AS expired_oldest_at_ms
-    FROM workflow_plan_v2_jobs
+    FROM logical_workflow_jobs
 ),
 logical_publication AS (
     SELECT count(*)::BIGINT AS publications
-    FROM workflow_plan_v2_activation_publications
+    FROM logical_workflow_activation_publications
 ),
 logical_instance AS (
     SELECT count(*)::BIGINT AS instances
-    FROM workflow_plan_v2_instances
+    FROM logical_workflow_instances
 ),
 attempt AS (
     SELECT
@@ -483,7 +482,7 @@ fn decode_snapshot(
     .with_builtin_secret_cleanup(decode_builtin_secret_cleanup(row)?);
     snapshot
         .with_logical_orchestration(
-            decode_workflow_plan_v2_runs(row)?,
+            decode_logical_workflow_runs(row)?,
             decode_logical_jobs(row)?,
             decode_logical_activations(row)?,
             decode_count(row, "logical_activation_publications")?,
@@ -509,14 +508,14 @@ fn decode_workflow_runs(row: &PgRow) -> Result<WorkflowRunCounts, StoreError> {
     Ok(workflow_runs)
 }
 
-fn decode_workflow_plan_v2_runs(row: &PgRow) -> Result<WorkflowPlanV2RunCounts, StoreError> {
-    let mut counts = WorkflowPlanV2RunCounts::default();
+fn decode_logical_workflow_runs(row: &PgRow) -> Result<LogicalWorkflowRunCounts, StoreError> {
+    let mut counts = LogicalWorkflowRunCounts::default();
     for (state, column) in [
-        (WorkflowPlanV2RunState::Pending, "logical_run_pending"),
-        (WorkflowPlanV2RunState::Active, "logical_run_active"),
-        (WorkflowPlanV2RunState::Completed, "logical_run_completed"),
-        (WorkflowPlanV2RunState::Cancelled, "logical_run_cancelled"),
-        (WorkflowPlanV2RunState::Failed, "logical_run_failed"),
+        (LogicalWorkflowRunState::Pending, "logical_run_pending"),
+        (LogicalWorkflowRunState::Active, "logical_run_active"),
+        (LogicalWorkflowRunState::Completed, "logical_run_completed"),
+        (LogicalWorkflowRunState::Cancelled, "logical_run_cancelled"),
+        (LogicalWorkflowRunState::Failed, "logical_run_failed"),
     ] {
         counts.set(state, decode_count(row, column)?);
     }
@@ -862,10 +861,10 @@ mod tests {
     fn snapshot_queries_are_bounded_and_preserve_the_production_runnable_predicate() {
         for table in [
             "workflow_runs",
-            "workflow_plan_v2_runs",
-            "workflow_plan_v2_jobs",
-            "workflow_plan_v2_activation_publications",
-            "workflow_plan_v2_instances",
+            "logical_workflow_runs",
+            "logical_workflow_jobs",
+            "logical_workflow_activation_publications",
+            "logical_workflow_instances",
             "job_attempts",
             "runners",
             "runner_sessions",

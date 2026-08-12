@@ -4,10 +4,9 @@ mod github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BootstrapGithubProviderRepository, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision,
-    GithubProviderManifestStoreError, GithubProviderOrigins,
+    BootstrapGithubProviderRepository, GithubCheckName, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
@@ -903,9 +902,7 @@ fn manifest_with_visibility_and_verifier(
         check_name,
         repository_name,
         visibility,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("workflow path"),
-        ),
+        GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
     )
 }

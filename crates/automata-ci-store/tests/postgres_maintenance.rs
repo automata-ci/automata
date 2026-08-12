@@ -286,7 +286,7 @@ async fn stale_session_timeout_preserves_short_resume_window_then_fences_offline
                 RunnerSessionId::new(),
                 fence.runner_id(),
                 RunnerGeneration::new(1)?,
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 JobIrVersion::current(),
                 capabilities,
                 open_observed_at,

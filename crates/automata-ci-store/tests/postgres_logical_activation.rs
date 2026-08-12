@@ -246,6 +246,10 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([9; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -558,7 +562,7 @@ async fn claim_first_logical_job(
         LogicalJobOrchestrationSelectionOutcome::Idle
     ));
     let dependent_state: String =
-        sqlx::query_scalar("SELECT state FROM workflow_plan_v2_jobs WHERE id = $1")
+        sqlx::query_scalar("SELECT state FROM logical_workflow_jobs WHERE id = $1")
             .bind(fixture.second_job.as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -628,7 +632,7 @@ async fn assert_published_instances(
         r"
         SELECT activation_output_digest, instance_count,
                job_ir_version, runtime_context_schema
-        FROM workflow_plan_v2_activation_publications
+        FROM logical_workflow_activation_publications
         WHERE logical_job_id = $1
         ",
     )
@@ -646,7 +650,7 @@ async fn assert_published_instances(
     );
 
     let instance_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_instances WHERE logical_job_id = $1",
+        "SELECT count(*) FROM logical_workflow_instances WHERE logical_job_id = $1",
     )
     .bind(fixture.first_job.as_uuid())
     .fetch_one(database.pool())
@@ -654,7 +658,7 @@ async fn assert_published_instances(
     assert_eq!(instance_count, 2);
     assert!(
         sqlx::query(
-            "UPDATE workflow_plan_v2_instances SET matrix_digest = $2 WHERE logical_job_id = $1",
+            "UPDATE logical_workflow_instances SET matrix_digest = $2 WHERE logical_job_id = $1",
         )
         .bind(fixture.first_job.as_uuid())
         .bind([9_u8; 32].as_slice())
@@ -721,7 +725,7 @@ async fn assert_environment_evidence_contract(
         r"
         SELECT instance_id, environment_normalized_name, event_trust, source_kind,
                reusable_secret_permission
-        FROM workflow_plan_v2_job_environment_evidence
+        FROM logical_workflow_job_environment_evidence
         ORDER BY instance_id
         ",
     )
@@ -747,7 +751,7 @@ async fn assert_environment_evidence_contract(
         SELECT column_name
         FROM information_schema.columns
         WHERE table_schema = current_schema()
-          AND table_name = 'workflow_plan_v2_job_environment_evidence'
+          AND table_name = 'logical_workflow_job_environment_evidence'
         ORDER BY ordinal_position
         ",
     )
@@ -780,7 +784,7 @@ async fn assert_environment_evidence_contract(
     ] {
         let error = sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_job_environment_evidence (
+            INSERT INTO logical_workflow_job_environment_evidence (
                 instance_id, environment_normalized_name, event_trust,
                 source_kind, reusable_secret_permission, created_at_ms
             ) VALUES ($1, NULL, $2, $3, $4, $5)
@@ -797,9 +801,9 @@ async fn assert_environment_evidence_contract(
         assert_constraint(&error, expected_constraint);
     }
     for mutation in [
-        "UPDATE workflow_plan_v2_job_environment_evidence SET event_trust = event_trust",
-        "DELETE FROM workflow_plan_v2_job_environment_evidence",
-        "TRUNCATE workflow_plan_v2_job_environment_evidence",
+        "UPDATE logical_workflow_job_environment_evidence SET event_trust = event_trust",
+        "DELETE FROM logical_workflow_job_environment_evidence",
+        "TRUNCATE logical_workflow_job_environment_evidence",
     ] {
         let error = sqlx::query(mutation)
             .execute(database.pool())
@@ -958,7 +962,7 @@ async fn v5_cut_fails_closed_instead_of_converting_obsolete_concrete_jobs() -> T
                 job_ir_schema, job_ir_size_bytes, created_at_ms
             ) VALUES (
                 $1, $2, 'obsolete', 'Obsolete', $3, 'activation/obsolete-v4.pb',
-                '{"schema_version":2,"labels":[],"eligible_groups":[],"platform":null,"minimum_cpu_cores":null,"minimum_memory_bytes":null,"required_features":[]}',
+                '{"schema_version":1,"labels":[],"eligible_groups":[],"platform":null,"minimum_cpu_cores":null,"minimum_memory_bytes":null,"required_features":[]}',
                 3, 4, 128, 1001
             )
             "#,
@@ -1200,7 +1204,7 @@ async fn zero_instance_publications_preserve_condition_distinction() -> TestResu
             assert_eq!(receipt.instance_count(), 0);
             assert_eq!(receipt.condition_matched(), condition_matched);
             let state: String =
-                sqlx::query_scalar("SELECT state FROM workflow_plan_v2_jobs WHERE id = $1")
+                sqlx::query_scalar("SELECT state FROM logical_workflow_jobs WHERE id = $1")
                     .bind(fixture.first_job.as_uuid())
                     .fetch_one(database.pool())
                     .await?;

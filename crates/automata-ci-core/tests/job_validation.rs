@@ -116,7 +116,7 @@ fn valid_job_ir_round_trips_through_json() {
     let decoded: JobIrEnvelope = serde_json::from_str(&encoded).expect("deserialize envelope");
     assert_eq!(decoded, envelope);
     let shape: serde_json::Value = serde_json::from_str(&encoded).expect("JSON shape");
-    assert_eq!(shape["schema_version"], serde_json::json!(5));
+    assert_eq!(shape["schema_version"], serde_json::json!(1));
     assert_eq!(
         shape["job"]["requirements"]["schema_version"],
         serde_json::json!(RUNNER_REQUIREMENTS_SCHEMA_VERSION)

@@ -1,4 +1,4 @@
-//! Explicit schema-v2 lowering into durable logical job templates.
+//! Explicit logical-workflow lowering into durable logical job templates.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -264,14 +264,14 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         &mut workflow_references,
         &mut context,
     );
-    let run_defaults = compile_defaults_v2(
+    let run_defaults = compile_defaults(
         workflow.defaults(),
         None,
         &mut workflow_references,
         &mut context,
     );
     let concurrency = workflow.concurrency().and_then(|value| {
-        compile_concurrency_v2(
+        compile_concurrency(
             value,
             WORKFLOW_CONCURRENCY_POLICY,
             &mut workflow_references,
@@ -290,7 +290,7 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         .jobs()
         .iter()
         .enumerate()
-        .filter_map(|(index, job)| compile_job_v2(index, job, &mut context))
+        .filter_map(|(index, job)| compile_job(index, job, &mut context))
         .collect::<Vec<_>>();
     validate_and_infer_result_edges(&mut pending, &mut context);
     let jobs = pending
@@ -959,7 +959,7 @@ fn normalized_yaml_number(node: &YamlNode, context: &mut CompileContext<'_>) -> 
     }
 }
 
-fn compile_job_v2(
+fn compile_job(
     index: usize,
     job: &WorkflowJob,
     context: &mut CompileContext<'_>,
@@ -1008,7 +1008,7 @@ fn compile_job_v2(
         .permissions()
         .and_then(|permissions| compile_permission_snapshot(permissions, context));
     let concurrency = source_job.concurrency().and_then(|concurrency| {
-        compile_concurrency_v2(concurrency, JOB_ACTIVATION_POLICY, &mut references, context)
+        compile_concurrency(concurrency, JOB_ACTIVATION_POLICY, &mut references, context)
     });
 
     let reusable = source_job.reusable_workflow_call().is_some();
@@ -1100,12 +1100,12 @@ fn compile_step_job_body(
         );
         return None;
     };
-    let runner = compile_runner_v2(runner, references, context)?;
+    let runner = compile_runner(runner, references, context)?;
     let steps = source_job
         .steps()
         .iter()
         .enumerate()
-        .filter_map(|(index, step)| compile_step_v2(index, step, references, context))
+        .filter_map(|(index, step)| compile_step(index, step, references, context))
         .collect::<Vec<_>>();
     let services = source_job.services().map_or_else(Vec::new, |services| {
         services
@@ -1123,7 +1123,7 @@ fn compile_step_job_body(
         references,
         context,
     );
-    let run_defaults = compile_defaults_v2(
+    let run_defaults = compile_defaults(
         source_job.defaults(),
         Some(JOB_DEFAULT_POLICY),
         references,
@@ -1888,7 +1888,7 @@ fn compile_template_map(
     TemplateValueMap::new(entries)
 }
 
-fn compile_defaults_v2(
+fn compile_defaults(
     defaults: Option<&Defaults>,
     policy: Option<ValueExpressionPolicy>,
     references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
@@ -1926,7 +1926,7 @@ fn compile_defaults_v2(
     )
 }
 
-fn compile_concurrency_v2(
+fn compile_concurrency(
     concurrency: &Concurrency,
     policy: ValueExpressionPolicy,
     references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
@@ -1998,7 +1998,7 @@ fn output_merge_policy(has_strategy: bool) -> LogicalOutputMergePolicy {
     }
 }
 
-fn compile_runner_v2(
+fn compile_runner(
     runner: &RunnerSelection,
     references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
     context: &mut CompileContext<'_>,
@@ -2054,7 +2054,7 @@ fn compile_runner_v2(
     ))
 }
 
-fn compile_step_v2(
+fn compile_step(
     index: usize,
     step: &Step,
     references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
