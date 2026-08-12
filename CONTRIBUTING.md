@@ -144,7 +144,7 @@ npm audit --audit-level=low
 
 Run the relevant repository script tests for shell, workflow, installer,
 distribution, or renderer changes. The
-[CI workflow](.github/workflows/ci.yml) is the source of truth for required
+[CI workflow](.ci/workflows/ci.yml) is the source of truth for required
 checks; the [development guide](docs/development.md) documents checks that need
 PostgreSQL, object storage, Podman, or additional build tools.
 

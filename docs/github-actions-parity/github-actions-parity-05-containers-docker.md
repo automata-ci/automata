@@ -298,7 +298,7 @@ Tasks:
 - [ ] Recover and remove all owned resources after cancellation, runner crash,
   provider restart, and ambiguous daemon responses.
 - [ ] Add compatibility tests for the exact metrics and static-binary Docker
-  commands in Automata's `.github/workflows/ci.yml`.
+  commands in Automata's `.ci/workflows/ci.yml`.
 
 Acceptance:
 
