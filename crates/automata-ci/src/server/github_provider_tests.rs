@@ -149,12 +149,21 @@ fn fixed_evidence_plan(
     config: &GithubProviderConfig,
     broker_policy_byte: u8,
 ) -> GithubProviderBootstrapPlan {
+    fixed_evidence_plan_with_compatible(config, broker_policy_byte, &[])
+}
+
+fn fixed_evidence_plan_with_compatible(
+    config: &GithubProviderConfig,
+    broker_policy_byte: u8,
+    compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
+) -> GithubProviderBootstrapPlan {
     GithubProviderBootstrapPlan::from_derived_evidence(
         config,
         Sha256Digest::from_bytes([0x51; 32]),
         GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes([0x61; 32]))
             .expect("fixture verifier fingerprint"),
         Sha256Digest::from_bytes([broker_policy_byte; 32]),
+        compatible_historical_broker_policy_fingerprints,
     )
     .expect("fixed-evidence plan")
 }
@@ -402,7 +411,12 @@ fn historical_authority(
 #[tokio::test]
 async fn historical_revision_resolves_only_through_the_exact_current_live_route() {
     let config = load_config("historical-route.json", &mixed_document()).expect("mixed config");
-    let plan = fixed_evidence_plan(&config, 0x71);
+    let historical_broker_fingerprint = Sha256Digest::from_bytes([0x70; 32]);
+    let plan = fixed_evidence_plan_with_compatible(
+        &config,
+        0x71,
+        std::slice::from_ref(&historical_broker_fingerprint),
+    );
     let target = MemoryBootstrapTarget::default();
     let ready = plan
         .bootstrap_with_target(&target, UnixMillis::new(2_000))
@@ -416,7 +430,7 @@ async fn historical_revision_resolves_only_through_the_exact_current_live_route(
         current.app_configuration_revision().get() - 1,
         current.policy_revision().get() - 1,
         current.app_key_spki_sha256(),
-        current.configuration_fingerprint(),
+        authority_configuration_fingerprint(historical_broker_fingerprint, current.scope()),
     );
 
     let historical_request = resolver

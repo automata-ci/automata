@@ -420,6 +420,7 @@ impl GithubProviderRuntimeBuilder {
 
         let ready = plan.bootstrap(store.as_ref(), applied_at).await?;
         let credential_request_resolver = ready.credential_request_resolver();
+        let credential_adapter_routes = credential_request_resolver.clone();
         let resolver: Arc<dyn GithubServerServiceCredentialRequestResolver> =
             Arc::new(credential_request_resolver.clone());
         let routed_brokers = brokers
@@ -593,6 +594,7 @@ impl GithubProviderRuntimeBuilder {
             credential_authority_repository,
             releases.clone(),
             plan.authorities(),
+            credential_adapter_routes,
         )?);
 
         let endpoint = GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)

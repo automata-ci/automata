@@ -103,6 +103,7 @@ impl GithubProviderBootstrapPlan {
             broker.app_key_spki_sha256(),
             webhook_fingerprint,
             broker.broker_policy_fingerprint(),
+            &broker.compatible_historical_broker_policy_fingerprints(),
         )
     }
 
@@ -115,6 +116,7 @@ impl GithubProviderBootstrapPlan {
         app_key_spki_sha256: Sha256Digest,
         webhook_fingerprint: GithubProviderWebhookVerifierFingerprint,
         broker_policy_fingerprint: Sha256Digest,
+        compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
     ) -> Result<Self, GithubProviderBootstrapError> {
         let mut manifests = Vec::with_capacity(config.repositories().len());
         let mut runner_policies = Vec::with_capacity(config.repositories().len());
@@ -244,7 +246,10 @@ impl GithubProviderBootstrapPlan {
             manifests.push(manifest);
         }
 
-        let resolver = GithubProviderCredentialRequestResolver::new(&authorities)?;
+        let resolver = GithubProviderCredentialRequestResolver::new(
+            &authorities,
+            compatible_historical_broker_policy_fingerprints,
+        )?;
         Ok(Self {
             manifests: manifests.into(),
             runner_policies: runner_policies.into(),
@@ -465,13 +470,16 @@ impl fmt::Debug for GithubProviderBootstrapReady {
 pub struct GithubProviderCredentialRequestResolver {
     authorities:
         Arc<BTreeMap<GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity>>,
+    compatible_historical_configuration_fingerprints: Arc<BTreeSet<Sha256Digest>>,
 }
 
 impl GithubProviderCredentialRequestResolver {
     pub(super) fn new(
         authorities: &[GithubServerServiceAuthorityIdentity],
+        compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
     ) -> Result<Self, GithubProviderBootstrapError> {
         let mut by_id = BTreeMap::new();
+        let mut scopes = BTreeSet::new();
         for authority in authorities {
             if by_id
                 .insert(authority.authority_id(), authority.clone())
@@ -479,9 +487,22 @@ impl GithubProviderCredentialRequestResolver {
             {
                 return Err(GithubProviderBootstrapError::DuplicateSelector);
             }
+            scopes.insert(authority.scope());
         }
+        let compatible_historical_configuration_fingerprints =
+            compatible_historical_broker_policy_fingerprints
+                .iter()
+                .flat_map(|broker_fingerprint| {
+                    scopes.iter().map(move |scope| {
+                        authority_configuration_fingerprint(*broker_fingerprint, *scope)
+                    })
+                })
+                .collect();
         Ok(Self {
             authorities: Arc::new(by_id),
+            compatible_historical_configuration_fingerprints: Arc::new(
+                compatible_historical_configuration_fingerprints,
+            ),
         })
     }
 
@@ -503,6 +524,10 @@ impl fmt::Debug for GithubProviderCredentialRequestResolver {
         formatter
             .debug_struct("GithubProviderCredentialRequestResolver")
             .field("authority_count", &self.authorities.len())
+            .field(
+                "compatible_historical_configuration_fingerprint_count",
+                &self.compatible_historical_configuration_fingerprints.len(),
+            )
             .finish()
     }
 }
@@ -516,10 +541,13 @@ impl GithubServerServiceCredentialRequestResolver for GithubProviderCredentialRe
         Option<ResolvedGithubServerServiceCredentialRequest>,
         GithubServerServiceResolutionError,
     > {
-        let mut routes = self
-            .authorities
-            .values()
-            .filter(|configured| authority_uses_configured_live_route(identity, configured));
+        let mut routes = self.authorities.values().filter(|configured| {
+            authority_uses_configured_live_route(
+                identity,
+                configured,
+                &self.compatible_historical_configuration_fingerprints,
+            )
+        });
         let Some(_configured) = routes.next() else {
             return Ok(None);
         };
@@ -537,6 +565,7 @@ impl GithubServerServiceCredentialRequestResolver for GithubProviderCredentialRe
 fn authority_uses_configured_live_route(
     identity: &GithubServerServiceAuthorityIdentity,
     configured: &GithubServerServiceAuthorityIdentity,
+    compatible_historical_configuration_fingerprints: &BTreeSet<Sha256Digest>,
 ) -> bool {
     identity.tenant() == configured.tenant()
         && identity.repository_id() == configured.repository_id()
@@ -549,7 +578,9 @@ fn authority_uses_configured_live_route(
         && identity.app_client_id() == configured.app_client_id()
         && identity.jwt_issuer() == configured.jwt_issuer()
         && identity.app_key_spki_sha256() == configured.app_key_spki_sha256()
-        && identity.configuration_fingerprint() == configured.configuration_fingerprint()
+        && (identity.configuration_fingerprint() == configured.configuration_fingerprint()
+            || compatible_historical_configuration_fingerprints
+                .contains(&identity.configuration_fingerprint()))
 }
 
 /// Sanitized provider bootstrap failure.
@@ -643,7 +674,7 @@ fn authority_identity(
     .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)
 }
 
-fn authority_configuration_fingerprint(
+pub(super) fn authority_configuration_fingerprint(
     broker_policy_fingerprint: Sha256Digest,
     scope: GithubServerServiceScope,
 ) -> Sha256Digest {

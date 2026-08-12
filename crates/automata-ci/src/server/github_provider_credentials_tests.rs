@@ -465,6 +465,20 @@ fn historical_authority(
     id: u128,
     app_key_spki_sha256: Sha256Digest,
 ) -> GithubServerServiceAuthorityIdentity {
+    historical_authority_with_fingerprint(
+        current,
+        id,
+        app_key_spki_sha256,
+        current.configuration_fingerprint(),
+    )
+}
+
+fn historical_authority_with_fingerprint(
+    current: &GithubServerServiceAuthorityIdentity,
+    id: u128,
+    app_key_spki_sha256: Sha256Digest,
+    configuration_fingerprint: Sha256Digest,
+) -> GithubServerServiceAuthorityIdentity {
     GithubServerServiceAuthorityIdentity::new(
         current.tenant().clone(),
         authority_id(id),
@@ -480,7 +494,7 @@ fn historical_authority(
         app_key_spki_sha256,
         GithubServerServiceRevision::new(2).expect("historical App revision"),
         GithubServerServiceRevision::new(4).expect("historical policy revision"),
-        current.configuration_fingerprint(),
+        configuration_fingerprint,
     )
     .expect("historical authority")
 }
@@ -765,7 +779,25 @@ fn durable_adapters(
     lookup: Arc<FakeAuthorityLookup>,
 ) -> GithubProviderCredentialAdapters {
     let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
-    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup)
+    let routes = GithubProviderCredentialRequestResolver::new(authorities, &[])
+        .expect("strict durable routes");
+    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup, routes)
+        .expect("durable adapters")
+}
+
+fn durable_adapters_with_compatible(
+    handoffs: Arc<FakeHandoffs>,
+    authorities: &[GithubServerServiceAuthorityIdentity],
+    lookup: Arc<FakeAuthorityLookup>,
+    compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
+) -> GithubProviderCredentialAdapters {
+    let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
+    let routes = GithubProviderCredentialRequestResolver::new(
+        authorities,
+        compatible_historical_broker_policy_fingerprints,
+    )
+    .expect("compatible durable routes");
+    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup, routes)
         .expect("durable adapters")
 }
 
@@ -834,16 +866,26 @@ async fn full_checks_coordinates_are_rejected_before_handoff_io() {
 #[tokio::test]
 async fn active_historical_checks_authority_uses_the_exact_current_live_route() {
     let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
-    let historical = historical_authority(&current, 0x62, current.app_key_spki_sha256());
+    let historical_broker_fingerprint = Sha256Digest::from_bytes([0x70; 32]);
+    let historical = historical_authority_with_fingerprint(
+        &current,
+        0x62,
+        current.app_key_spki_sha256(),
+        super::super::github_provider::authority_configuration_fingerprint(
+            historical_broker_fingerprint,
+            current.scope(),
+        ),
+    );
     let lookup = Arc::new(FakeAuthorityLookup::new([authority_descriptor(
         historical.clone(),
         GithubServerServiceAuthorityState::Active,
     )]));
     let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let adapters = durable_adapters(
+    let adapters = durable_adapters_with_compatible(
         Arc::clone(&handoffs),
         std::slice::from_ref(&current),
         Arc::clone(&lookup),
+        std::slice::from_ref(&historical_broker_fingerprint),
     );
 
     let credential = adapters
@@ -864,9 +906,19 @@ async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() 
     let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
     let retired = historical_authority(&current, 0x62, current.app_key_spki_sha256());
     let drifted = historical_authority(&current, 0x63, Sha256Digest::from_bytes([0x77; 32]));
+    let fingerprint_drifted = historical_authority_with_fingerprint(
+        &current,
+        0x65,
+        current.app_key_spki_sha256(),
+        Sha256Digest::from_bytes([0x78; 32]),
+    );
     let lookup = Arc::new(FakeAuthorityLookup::new([
         authority_descriptor(retired.clone(), GithubServerServiceAuthorityState::Retired),
         authority_descriptor(drifted.clone(), GithubServerServiceAuthorityState::Active),
+        authority_descriptor(
+            fingerprint_drifted.clone(),
+            GithubServerServiceAuthorityState::Active,
+        ),
     ]));
     let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
     let adapters = durable_adapters(
@@ -876,7 +928,7 @@ async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() 
     );
     let unknown = historical_authority(&current, 0x64, current.app_key_spki_sha256());
 
-    for rejected in [&retired, &drifted, &unknown] {
+    for rejected in [&retired, &drifted, &fingerprint_drifted, &unknown] {
         assert_eq!(
             adapters
                 .acquire_checks(checks_context(rejected))
@@ -885,7 +937,7 @@ async fn retired_unknown_and_route_drifted_authorities_never_enter_handoff_io() 
             GithubChecksCredentialProviderError::Rejected
         );
     }
-    assert_eq!(lookup.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 4);
     assert_eq!(handoffs.calls.load(Ordering::SeqCst), 0);
 }
 

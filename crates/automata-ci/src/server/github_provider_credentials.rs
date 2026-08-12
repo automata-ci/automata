@@ -747,15 +747,13 @@ impl GithubProviderCredentialAdapters {
         authority_repository: Arc<dyn GithubServerServiceAuthorityRepository>,
         releases: Arc<GithubProviderCredentialReleaseSupervisor>,
         authorities: &[GithubServerServiceAuthorityIdentity],
+        routes: GithubProviderCredentialRequestResolver,
     ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
         let handoffs = Arc::new(ExactCredentialHandoffIssuer {
             issuer,
             repository,
             releases,
         });
-        let routes = GithubProviderCredentialRequestResolver::new(authorities).map_err(|_| {
-            GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry
-        })?;
         let mut adapters = Self::with_handoffs(handoffs, authorities)?;
         adapters.durable_authorities = Some(DurableGithubProviderAuthorityResolver {
             repository: Arc::new(StoreGithubProviderAuthorityLookup {
@@ -807,14 +805,11 @@ impl GithubProviderCredentialAdapters {
         handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
         authorities: &[GithubServerServiceAuthorityIdentity],
         repository: Arc<dyn GithubProviderAuthorityLookup>,
+        routes: GithubProviderCredentialRequestResolver,
     ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
         let mut adapters = Self::with_handoffs(handoffs, authorities)?;
-        adapters.durable_authorities = Some(DurableGithubProviderAuthorityResolver {
-            repository,
-            routes: GithubProviderCredentialRequestResolver::new(authorities).map_err(|_| {
-                GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry
-            })?,
-        });
+        adapters.durable_authorities =
+            Some(DurableGithubProviderAuthorityResolver { repository, routes });
         Ok(adapters)
     }
 
