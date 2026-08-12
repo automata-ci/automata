@@ -115,15 +115,6 @@ pub struct CheckedOutLocalActionPreparer {
     conditions: GithubConditionCompiler,
 }
 
-impl Clone for CheckedOutLocalActionPreparer {
-    fn clone(&self) -> Self {
-        Self {
-            decoder: Arc::clone(&self.decoder),
-            conditions: self.conditions,
-        }
-    }
-}
-
 impl CheckedOutLocalActionPreparer {
     /// Creates a checked-out action metadata compiler.
     #[must_use]

@@ -682,7 +682,38 @@ fn runner_requirements(
         core::RUNNER_REQUIREMENTS_SCHEMA_VERSION,
         "runner_requirements.schema_version",
     )?;
-    validate_runner_requirement_collections(&value, limits)?;
+    for (length, field) in [
+        (value.labels.len(), "runner_requirements.labels"),
+        (
+            value.eligible_groups.len(),
+            "runner_requirements.eligible_groups",
+        ),
+        (
+            value.sandbox_features.len(),
+            "runner_requirements.sandbox_features",
+        ),
+        (
+            value.container_features.len(),
+            "runner_requirements.container_features",
+        ),
+        (value.features.len(), "runner_requirements.features"),
+    ] {
+        check_collection(length, limits.max_collection_items(), field)?;
+    }
+    ensure_canonical_strings(&value.labels, "runner_requirements.labels")?;
+    ensure_canonical_strings(
+        &value.eligible_groups,
+        "runner_requirements.eligible_groups",
+    )?;
+    ensure_canonical_strings(
+        &value.sandbox_features,
+        "runner_requirements.sandbox_features",
+    )?;
+    ensure_canonical_strings(
+        &value.container_features,
+        "runner_requirements.container_features",
+    )?;
+    ensure_canonical_strings(&value.features, "runner_requirements.features")?;
 
     let labels = decode_labels(value.labels, "runner_requirements.labels")?;
     let groups = decode_groups(value.eligible_groups, "runner_requirements.eligible_groups")?;
@@ -741,71 +772,7 @@ fn runner_requirements(
     if let Some(profile) = value.environment_profile {
         requirements = requirements.with_environment_profile(environment_profile(profile)?);
     }
-    if let Some(allocation) = value.resource_allocation {
-        let allocation = decode_resource_allocation(allocation)?;
-        if allocation.requests() != requirements.minimum_resources() {
-            return Err(DecodeError::InvalidValue {
-                field: "runner_requirements.minimum_resources",
-            });
-        }
-        requirements = requirements.with_resource_allocation(allocation);
-    }
     Ok(requirements)
-}
-
-fn validate_runner_requirement_collections(
-    value: &wire::RunnerRequirements,
-    limits: &protocol::ProtocolLimits,
-) -> Result<(), DecodeError> {
-    for (length, field) in [
-        (value.labels.len(), "runner_requirements.labels"),
-        (
-            value.eligible_groups.len(),
-            "runner_requirements.eligible_groups",
-        ),
-        (
-            value.sandbox_features.len(),
-            "runner_requirements.sandbox_features",
-        ),
-        (
-            value.container_features.len(),
-            "runner_requirements.container_features",
-        ),
-        (value.features.len(), "runner_requirements.features"),
-    ] {
-        check_collection(length, limits.max_collection_items(), field)?;
-    }
-    ensure_canonical_strings(&value.labels, "runner_requirements.labels")?;
-    ensure_canonical_strings(
-        &value.eligible_groups,
-        "runner_requirements.eligible_groups",
-    )?;
-    ensure_canonical_strings(
-        &value.sandbox_features,
-        "runner_requirements.sandbox_features",
-    )?;
-    ensure_canonical_strings(
-        &value.container_features,
-        "runner_requirements.container_features",
-    )?;
-    ensure_canonical_strings(&value.features, "runner_requirements.features")?;
-    Ok(())
-}
-
-fn decode_resource_allocation(
-    allocation: wire::JobResourceAllocation,
-) -> Result<core::JobResourceAllocation, DecodeError> {
-    let requests = resource_capacity(
-        required(allocation.requests, "job_resource_allocation.requests")?,
-        "job_resource_allocation.requests.gpu_count",
-    )?;
-    let limits = resource_capacity(
-        required(allocation.limits, "job_resource_allocation.limits")?,
-        "job_resource_allocation.limits.gpu_count",
-    )?;
-    core::JobResourceAllocation::new(requests, limits).map_err(|_| DecodeError::InvalidValue {
-        field: "job_resource_allocation",
-    })
 }
 
 fn decode_labels(
@@ -874,88 +841,13 @@ fn lease_offer(
         &lease,
         limits,
     )?;
-    let managed_secret_bindings = value
-        .managed_secret_bindings
-        .map(|overlay| managed_secret_binding_overlay(overlay, &lease, limits))
-        .transpose()?;
-    let offer = protocol::LeaseOffer::new(header, slot, lease, job, authorities);
-    match managed_secret_bindings {
-        Some(overlay) => {
-            offer
-                .with_managed_secret_bindings(overlay)
-                .map_err(|_| DecodeError::InvalidValue {
-                    field: "lease_offer.managed_secret_bindings",
-                })
-        }
-        None => Ok(offer),
-    }
-}
-
-fn managed_secret_binding_overlay(
-    value: wire::ManagedSecretBindingOverlay,
-    lease: &core::Lease,
-    limits: &protocol::ProtocolLimits,
-) -> Result<protocol::ManagedSecretBindingOverlay, DecodeError> {
-    check_schema(
-        value.schema_version,
-        protocol::MANAGED_SECRET_BINDING_OVERLAY_SCHEMA_VERSION,
-        "managed_secret_binding_overlay.schema_version",
-    )?;
-    check_collection(
-        value.bindings.len(),
-        protocol::MAX_MANAGED_SECRET_BINDINGS.min(limits.max_collection_items()),
-        "managed_secret_binding_overlay.bindings",
-    )?;
-    ensure_order(
-        value
-            .bindings
-            .windows(2)
-            .map(|pair| pair[0].canonical_name.cmp(&pair[1].canonical_name)),
-        "managed_secret_binding_overlay.bindings",
-    )?;
-    let attempt_id = core::AttemptId::from_uuid(uuid(
-        value.attempt_id,
-        "managed_secret_binding_overlay.attempt_id",
-    )?);
-    let lease_id = core::LeaseId::from_uuid(uuid(
-        value.lease_id,
-        "managed_secret_binding_overlay.lease_id",
-    )?);
-    let fencing_token = fencing_token(
-        value.fencing_token,
-        "managed_secret_binding_overlay.fencing_token",
-    )?;
-    if attempt_id != lease.attempt_id()
-        || lease_id != lease.lease_id()
-        || fencing_token != lease.fencing_token()
-    {
-        return Err(DecodeError::InvalidValue {
-            field: "managed_secret_binding_overlay.lease_binding",
-        });
-    }
-    let bindings = value
-        .bindings
-        .into_iter()
-        .map(|entry| {
-            let binding = core::SecretBinding::new(entry.grant_id)
-                .and_then(|binding| binding.with_version_id(entry.version_id))
-                .map_err(|_| DecodeError::InvalidValue {
-                    field: "managed_secret_binding_overlay.binding",
-                })?;
-            Ok((entry.canonical_name, binding))
-        })
-        .collect::<Result<Vec<_>, DecodeError>>()?;
-    let overlay = protocol::ManagedSecretBindingOverlay::new(lease, bindings).map_err(|_| {
-        DecodeError::InvalidValue {
-            field: "managed_secret_binding_overlay",
-        }
-    })?;
-    if value.sha256_digest.as_slice() != overlay.digest().as_bytes() {
-        return Err(DecodeError::InvalidValue {
-            field: "managed_secret_binding_overlay.sha256_digest",
-        });
-    }
-    Ok(overlay)
+    Ok(protocol::LeaseOffer::new(
+        header,
+        slot,
+        lease,
+        job,
+        authorities,
+    ))
 }
 
 fn runtime_authorities(
@@ -1200,9 +1092,6 @@ fn job_execution_context(
     );
     if let Some(actor) = value.actor {
         context = context.with_actor(actor);
-    }
-    if let Some(actor) = value.triggering_actor {
-        context = context.with_triggering_actor(actor);
     }
     if let Some(run_id_alias) = value.run_id_alias {
         context = context.with_run_id_alias(core::RunIdAlias::new(run_id_alias).map_err(|_| {

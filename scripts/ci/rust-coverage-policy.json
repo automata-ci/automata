@@ -53,8 +53,7 @@
     "podman": {
       "description": "Ignored rootless Podman integration tests",
       "service_requirements": [
-        "Configured rootless Podman, helper binaries, state roots, and test images",
-        "Explicit Buildx live gate via AUTOMATA_LIVE_ROOTLESS_BUILDX=1 and a digest-pinned BuildKit image via AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"
+        "Configured rootless Podman, helper binaries, state roots, and test images"
       ],
       "source_prefixes": []
     },
@@ -107,13 +106,6 @@
         "crates/automata-ci-results-github/tests/cache_http.rs",
         "crates/automata-ci-results-github/tests/http_compatibility.rs"
       ]
-    },
-    "exact_test_bundles": {
-      "podman": {
-        "crates/automata-ci-runner/src/podman_probe/mod.rs": [
-          "podman_probe::tests::configured_rootless_lifecycle_matches_both_production_network_policies"
-        ]
-      }
     },
     "intentionally_unexecuted_sources": [
       "crates/automata-ci-runner/src/product/metrics.rs",

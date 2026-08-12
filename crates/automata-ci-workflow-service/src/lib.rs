@@ -10,12 +10,10 @@
 mod activation;
 mod activation_preparation;
 mod autonomous_workflow;
-mod credential_requirements;
 mod github;
 mod github_activation;
 mod github_autonomous;
 mod github_dispatch;
-mod github_schedule;
 mod id;
 mod logical_projection;
 mod materialization;
@@ -24,16 +22,13 @@ mod observer;
 mod orchestration;
 mod port;
 mod result_projection;
-mod reusable_runtime;
 mod reusable_workflow;
 mod run_finalization;
 mod runner_policy;
 mod service;
-mod workflow_rerun;
 
 pub use activation::{
-    ActivateLogicalJobRequest, ActivatedDeploymentEnvironment, ActivatedJobInstance,
-    ActivatedJobResources, ActivatedResourceVector, ActivatedRunnerSelection,
+    ActivateLogicalJobRequest, ActivatedJobInstance, ActivatedRunnerSelection,
     ActivationEvaluationContext, ActivationEvaluationSite, ActivationStatus, ActivationValue,
     LogicalActivationError, LogicalActivationEvaluator, LogicalActivationRequestError,
     LogicalActivationSession, LogicalJobActivation, LogicalJobActivator,
@@ -51,7 +46,6 @@ pub use autonomous_workflow::{
     AutonomousWorkflowPhaseExecutor, AutonomousWorkflowQueue, AutonomousWorkflowRenewalOutcome,
     AutonomousWorkflowService,
 };
-pub use credential_requirements::{CredentialDiscoveryError, discover_job_credential_requirements};
 pub use github::GithubWorkflowPlanVerifier;
 pub use github_activation::{
     GithubActivationContext, GithubActivationEvaluationError, GithubActivationSession,
@@ -64,10 +58,6 @@ pub use github_dispatch::{
     GithubWorkflowDispatchEvidenceV1, GithubWorkflowDispatchRequest,
     GithubWorkflowDispatchRequestError, GithubWorkflowDispatchService,
     WorkflowDispatchAuthorization,
-};
-pub use github_schedule::{
-    AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, GithubScheduleEvidenceError,
-    GithubScheduleEvidenceV1,
 };
 pub use id::{Sha256AdmissionIdGenerator, SystemAdmissionClock};
 pub use logical_projection::{
@@ -87,13 +77,10 @@ pub use result_projection::{
     LOGICAL_RESULT_PROJECTION_CLAIM_MILLIS, LogicalResultProjectionError,
     LogicalResultProjectionOutcome, LogicalResultProjectionService,
 };
-pub use reusable_runtime::{
-    ReusableWorkflowRuntimeError, ReusableWorkflowRuntimeOutcome, ReusableWorkflowRuntimeService,
-};
 pub use reusable_workflow::{
     CatalogedReusableWorkflow, ExpandReusableWorkflowRequest, ExpandedReusableInput,
-    ExpandedReusableJob, ExpandedReusableOutput, ExpandedReusableOutputMapping,
-    ExpandedReusableSecret, GithubReusableWorkflowCatalog, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
+    ExpandedReusableJob, ExpandedReusableOutput, ExpandedReusableSecret,
+    GithubReusableWorkflowCatalog, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
     MAX_REUSABLE_WORKFLOW_DEPTH, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS,
     MAX_REUSABLE_WORKFLOW_INVOCATIONS, RepositoryWorkflowSource, ReusableInputBindingSource,
     ReusableWorkflowExpander, ReusableWorkflowExpansion, ReusableWorkflowExpansionError,
@@ -110,7 +97,6 @@ pub use runner_policy::{
     MAX_GITHUB_RUNNER_POLICY_MAPPINGS,
 };
 pub use service::{WorkflowAdmissionError, WorkflowAdmissionService};
-pub use workflow_rerun::WorkflowRerunService;
 
 /// Immutable media type used for exact GitHub workflow source.
 pub const GITHUB_WORKFLOW_MEDIA_TYPE: &str = "application/vnd.github-actions.workflow+yaml";

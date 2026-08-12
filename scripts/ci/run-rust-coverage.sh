@@ -61,15 +61,6 @@ require_environment() {
   done
 }
 
-require_environment_value() {
-  local variable="$1"
-  local expected="$2"
-  if [[ "${!variable-}" != "$expected" ]]; then
-    printf 'error: coverage lane requires %s=%s\n' "$variable" "$expected" >&2
-    exit 2
-  fi
-}
-
 run_command() {
   if [[ "$plan" == true ]]; then
     printf 'RUN'
@@ -81,17 +72,6 @@ run_command() {
 }
 
 run_ignored_command() {
-  local inventory_bundle=""
-  local inventory_source=""
-  if [[ "${1-}" == '--inventory-source' ]]; then
-    if (( $# < 4 )); then
-      printf 'error: ignored coverage inventory requires a bundle, source, and command\n' >&2
-      exit 2
-    fi
-    inventory_bundle="$2"
-    inventory_source="$3"
-    shift 3
-  fi
   if [[ "$plan" == true ]]; then
     run_command "$@"
     return
@@ -101,7 +81,6 @@ run_ignored_command() {
   local listing
   local selected_count
   local -a list_command=()
-  local -a inventory_arguments=()
   for argument in "$@"; do
     if [[ "$argument" == '--test-threads=1' ]]; then
       list_command+=(--list)
@@ -117,16 +96,8 @@ run_ignored_command() {
   listing="$(
     LLVM_PROFILE_FILE=/dev/null "${list_command[@]}"
   )"
-  if [[ -n "$inventory_bundle" ]]; then
-    inventory_arguments+=(
-      --policy "$policy"
-      --bundle "$inventory_bundle"
-      --source "$inventory_source"
-    )
-  fi
   if ! selected_count="$(
-    python3 scripts/ci/check-ignored-test-list.py \
-      "${inventory_arguments[@]}" <<<"$listing"
+    python3 scripts/ci/check-ignored-test-list.py <<<"$listing"
   )"; then
     printf 'command:' >&2
     printf ' %q' "$@" >&2
@@ -191,9 +162,8 @@ run_podman() {
   run_ignored_command cargo test -p automata-ci-sandbox-podman --test live_rootless \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command \
-    --inventory-source podman crates/automata-ci-runner/src/podman_probe/mod.rs \
-    cargo test -p automata-ci-runner --all-features --locked podman_probe::tests:: -- \
+  run_ignored_command cargo test -p automata-ci-runner --all-features --locked \
+    podman_probe::tests:: -- \
     --ignored --test-threads=1
 }
 
@@ -223,21 +193,18 @@ validate_lane_environment() {
         AUTOMATA_TEST_S3_ENDPOINT \
         AUTOMATA_TEST_S3_BUCKET \
         AUTOMATA_TEST_S3_ACCESS_KEY \
-        AUTOMATA_TEST_S3_SECRET_KEY \
-        AUTOMATA_TEST_S3_KMS_KEY_ID
+        AUTOMATA_TEST_S3_SECRET_KEY
       ;;
     podman)
       require_environment \
         HOME XDG_RUNTIME_DIR AUTOMATA_LIVE_ROOTLESS_PODMAN \
         AUTOMATA_PODMAN_APPROVED_HELPERS AUTOMATA_PODMAN_TEST_IMAGE \
-        AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE \
         AUTOMATA_PODMAN_TEST_SERVICE_IMAGE AUTOMATA_PODMAN_TEST_SERVICE_PROXY_IMAGE \
         AUTOMATA_TEST_STATIC_RUNNER AUTOMATA_TEST_PODMAN_BINARY \
         AUTOMATA_TEST_PODMAN_STATE_ROOT AUTOMATA_TEST_PODMAN_HOME \
         AUTOMATA_TEST_PODMAN_RUNTIME AUTOMATA_TEST_PODMAN_APPROVED_HELPERS \
         AUTOMATA_TEST_CONMON AUTOMATA_TEST_OCI_RUNTIME AUTOMATA_TEST_CATATONIT \
         AUTOMATA_TEST_SECCOMP_PROFILE
-      require_environment_value AUTOMATA_LIVE_ROOTLESS_BUILDX 1
       ;;
     node-live)
       require_environment \
@@ -360,21 +327,6 @@ checker_status=$?
 set -e
 if (( checker_status > 1 )); then
   exit "$checker_status"
-fi
-if (( checker_status == 1 )); then
-  if ! python3 scripts/ci/validate-rust-coverage-failure.py \
-    --manifest "$coverage_stage/manifest.json" \
-    --summary "$coverage_stage/summary.json" \
-    --lcov "$coverage_stage/coverage.lcov" \
-    --source-head "$source_head" \
-    --source-content-digest "$source_content_digest" \
-    --source-state-token "$source_state_token" \
-    --source-entry-count "$source_entry_count" \
-    "${guard_arguments[@]}"
-  then
-    printf 'error: coverage checker exited 1 without a complete failed-guard manifest\n' >&2
-    exit 2
-  fi
 fi
 
 final_source_snapshot="$(

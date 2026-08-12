@@ -36,7 +36,6 @@ automata-ci-metrics.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-oidc-github-control.workspace = true
 automata-ci-protocol.workspace = true
-automata-ci-protocol-protobuf.workspace = true
 automata-ci-results-github.workspace = true
 automata-ci-runner-auth.workspace = true
 automata-ci-runner-auth-postgres.workspace = true
@@ -54,7 +53,6 @@ clap.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
 futures.workspace = true
-http.workspace = true
 reqwest.workspace = true
 prometheus-client.workspace = true
 rustls.workspace = true
@@ -81,6 +79,7 @@ rustix.workspace = true
 automata-ci-build-support.workspace = true
 
 [dev-dependencies]
+automata-ci-protocol-protobuf.workspace = true
 automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true

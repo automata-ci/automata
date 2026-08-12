@@ -71,16 +71,10 @@ fn server_repository_metadata_derives_one_canonical_default_branch_ref() {
         .expect("repository metadata");
     assert_eq!(metadata.repository(), "owner/repository");
     assert_eq!(metadata.default_branch_ref(), "refs/heads/release/stable");
-    assert_eq!(
-        CacheRepositoryMetadata::new("owner/repository", "refs/release")
-            .expect("nested refs branch")
-            .default_branch_ref(),
-        "refs/heads/refs/release"
-    );
 
     for rejected in [
         "",
-        "refs//heads/main",
+        "refs/heads/main",
         "-main",
         ".hidden",
         "main.lock",

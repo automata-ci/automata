@@ -1,13 +1,12 @@
 use automata_ci_core::{
-    Architecture, ContainerFeature, OperatingSystem, RUNNER_REQUIREMENTS_SCHEMA_VERSION,
-    RequirementMismatch, RunnerCapabilities, RunnerFeature, RunnerId, RunnerPlatform,
-    RunnerRequirements, SandboxFeature,
+    Architecture, ContainerFeature, OperatingSystem, RequirementMismatch, RunnerCapabilities,
+    RunnerFeature, RunnerId, RunnerPlatform, RunnerRequirements, SandboxFeature,
 };
 
 const KNOWN_RUNNER_JSON: &str = include_str!("fixtures/capabilities/runner-v1-known.json");
 const FUTURE_RUNNER_JSON: &str = include_str!("fixtures/capabilities/runner-v1-future.json");
 const FUTURE_REQUIREMENTS_JSON: &str =
-    include_str!("fixtures/capabilities/requirements-v3-future.json");
+    include_str!("fixtures/capabilities/requirements-v2-future.json");
 
 fn runner() -> RunnerCapabilities {
     RunnerCapabilities::new(
@@ -51,7 +50,6 @@ fn newer_required_identifier_decodes_and_produces_a_typed_missing_feature() {
         RunnerFeature::new("com.example/future-runtime@v9").expect("valid future runner ID");
     let decoded: RunnerRequirements = serde_json::from_str(FUTURE_REQUIREMENTS_JSON)
         .expect("decode exact fixture with unknown required feature");
-    assert_eq!(decoded.schema_version(), RUNNER_REQUIREMENTS_SCHEMA_VERSION);
     assert_eq!(decoded.features().iter().next(), Some(&future));
     assert_eq!(
         serde_json::to_value(&decoded).expect("re-serialize future requirements"),

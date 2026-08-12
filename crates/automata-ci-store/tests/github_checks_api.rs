@@ -67,29 +67,6 @@ fn provider_facing_values_are_bounded_and_redacted() {
 }
 
 #[test]
-fn rerun_subject_identity_has_one_closed_physical_origin() {
-    let rerun_run_id = RunId::from_uuid(Uuid::new_v4());
-    let identity = GithubCheckSubjectIdentity::new_rerun(
-        TenantScope::from_authenticated_tenant_id("tenant").expect("tenant"),
-        RepositoryId::from_uuid(Uuid::new_v4()),
-        rerun_run_id,
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
-        ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection"),
-        ProviderInstallationId::new(11).expect("installation"),
-        ProviderRepositoryId::new(13).expect("provider repository"),
-        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
-        GithubCheckAppId::new(17).expect("App"),
-        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
-        GithubCheckName::new("Automata / CI").expect("name"),
-    )
-    .expect("rerun identity");
-
-    assert_eq!(identity.rerun_run_id(), Some(rerun_run_id));
-    assert_eq!(identity.delivery_id(), None);
-    assert_eq!(identity.schedule_fire_id(), None);
-}
-
-#[test]
 fn create_cutoff_is_bounded_and_fenced() {
     let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
     let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");

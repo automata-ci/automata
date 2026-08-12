@@ -9,7 +9,7 @@ use automata_ci_auth::{
     session::SessionKind,
     time::Clock,
 };
-use automata_ci_core::{OperationId, RunId, WorkflowId, WorkflowInputKey, canonical_git_ref};
+use automata_ci_core::{OperationId, RunId, WorkflowId, WorkflowInputKey};
 use automata_ci_store::RepositoryId;
 use axum::{
     Router,
@@ -50,11 +50,14 @@ impl fmt::Debug for WorkflowDispatchApiRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("WorkflowDispatchApiRequest")
+            .field("actor", &self.actor)
             .field("repository_id", &self.repository_id)
             .field("workflow_id", &self.workflow_id)
+            .field("git_ref", &self.git_ref)
+            .field("commit_sha", &self.commit_sha)
             .field("operation_id", &self.operation_id)
             .field("input_count", &self.inputs.len())
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
@@ -348,13 +351,10 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 fn valid_git_ref(value: &str) -> bool {
-    value.len() <= MAX_TARGET_TEXT_BYTES
-        && canonical_git_ref(value)
-        && ["refs/heads/", "refs/tags/"].into_iter().any(|prefix| {
-            value
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| !suffix.is_empty())
-        })
+    valid_text(value)
+        && value
+            .strip_prefix("refs/")
+            .is_some_and(|suffix| !suffix.is_empty())
 }
 
 fn valid_commit_sha(value: &str) -> bool {
@@ -362,6 +362,12 @@ fn valid_commit_sha(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TARGET_TEXT_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 fn success_response(outcome: WorkflowDispatchApiOutcome) -> Response {
@@ -662,13 +668,6 @@ mod tests {
         assert_eq!(captured.actor().tenant_id().as_str(), "tenant-dispatch-api");
         assert_eq!(captured.actor().now(), UnixTimestamp::from_seconds(777));
         assert!(captured.actor().request_id().is_none());
-        let debug = format!("{captured:?}");
-        for redacted in ["refs/heads/release", SHA, "live", "neutral fixture"] {
-            assert!(!debug.contains(redacted), "Debug exposed {redacted}");
-        }
-        for retained in [REPOSITORY_ID, WORKFLOW_ID, OPERATION_ID] {
-            assert!(debug.contains(retained), "Debug omitted {retained}");
-        }
         let inputs = captured.inputs();
         assert_eq!(
             input(inputs, "target"),
@@ -692,7 +691,7 @@ mod tests {
                 PATH,
                 Some(SessionKind::Cli),
                 "application/json",
-                valid_body_with_ref("refs/tags/v1.0.0"),
+                valid_body(),
             ))
             .await
             .expect("replay response");
@@ -768,23 +767,6 @@ mod tests {
             })
             .to_string(),
         );
-        for git_ref in [
-            "refs/heads/has space",
-            "refs/heads/a..b",
-            "refs/heads/a@{b",
-            "refs/heads/a//b",
-            "refs/heads/.hidden",
-            "refs/heads/main.lock",
-            "refs/pull/1/head",
-        ] {
-            invalid_bodies.push(
-                json!({
-                    "git_ref": git_ref, "commit_sha": SHA,
-                    "operation_id": OPERATION_ID, "inputs": {}
-                })
-                .to_string(),
-            );
-        }
         invalid_bodies.push(
             json!({
                 "git_ref": "refs/heads/release", "commit_sha": SHA,
@@ -954,13 +936,9 @@ mod tests {
     }
 
     fn valid_body() -> Body {
-        valid_body_with_ref("refs/heads/release")
-    }
-
-    fn valid_body_with_ref(git_ref: &str) -> Body {
         Body::from(
             serde_json::to_vec(&json!({
-                "git_ref": git_ref,
+                "git_ref": "refs/heads/release",
                 "commit_sha": SHA,
                 "operation_id": OPERATION_ID,
                 "inputs": {

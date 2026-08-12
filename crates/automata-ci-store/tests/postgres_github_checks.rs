@@ -118,29 +118,9 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
     .await?;
     sqlx::query(
         r"
-        CREATE TABLE github_schedule_check_evidence (
-            github_check_subject_id UUID PRIMARY KEY,
-            schedule_fire_id UUID NOT NULL,
-            tenant_id TEXT NOT NULL,
-            repository_id UUID NOT NULL,
-            provider_connection_id UUID NOT NULL,
-            checks_authority_id UUID NOT NULL,
-            checks_authority_identity_digest BYTEA NOT NULL,
-            checks_authority_app_configuration_revision BIGINT NOT NULL,
-            checks_authority_policy_revision BIGINT NOT NULL
-        )
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
         CREATE FUNCTION checks_test_pin_authority() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN
-            IF NEW.origin_kind <> 'provider_delivery' THEN
-                RETURN NEW;
-            END IF;
             INSERT INTO github_provider_delivery_evidence (
                 github_check_subject_id, provider_delivery_id, tenant_id,
                 repository_id, checks_authority_id,
@@ -668,125 +648,6 @@ async fn subject_without_immutable_authority_evidence_is_not_claimable() -> Test
         assert!(
             claim_projection(&database, &fixture).await?.is_none(),
             "a Check without its immutable 0037 selector evidence must remain unclaimable"
-        );
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)] // One lifecycle keeps the rerun authority fence auditable.
-async fn rerun_origin_claim_decodes_and_reconciles_under_its_exact_authority() -> TestResult {
-    run_with_unmigrated_database(|database| async move {
-        apply_checks_migrations(&database).await?;
-        let fixture = seed_fixture(&database).await?;
-        let subject_id = Uuid::new_v4();
-        let rerun_run_id = Uuid::new_v4();
-        let mut transaction = database.pool().begin().await?;
-        sqlx::query(
-            "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_00_canonical_name",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_insert_guard",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO github_check_subjects (
-                id, tenant_id, repository_id, provider_delivery_id,
-                origin_kind, schedule_fire_id, workflow_rerun_run_id,
-                subject_key, provider_connection_id,
-                provider_installation_id, github_repository_id,
-                github_repository_name, github_app_id, head_sha, check_name,
-                external_id, created_at_ms, desired_updated_at_ms
-            ) VALUES (
-                $1, $2, $3, NULL, 'workflow_rerun', NULL, $4,
-                '.github/workflows/ci.yml', $5, $6, $7,
-                'automata-ci/automata', $8, $9, 'Automata / rerun',
-                $10, 100, 100
-            )
-            ",
-        )
-        .bind(subject_id)
-        .bind(fixture.tenant.as_str())
-        .bind(fixture.repository_id.as_uuid())
-        .bind(rerun_run_id)
-        .bind(fixture.connection_id.as_uuid())
-        .bind(i64::try_from(GITHUB_INSTALLATION_ID)?)
-        .bind(i64::try_from(GITHUB_REPOSITORY_ID)?)
-        .bind(i64::try_from(GITHUB_APP_ID)?)
-        .bind(HEAD_SHA.as_slice())
-        .bind(format!("automata-check:{subject_id}"))
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_insert_guard",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_00_canonical_name",
-        )
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        sqlx::query(
-            r"
-            INSERT INTO workflow_rerun_check_evidence (
-                github_check_subject_id, run_id, tenant_id, repository_id,
-                provider_connection_id, checks_authority_id,
-                checks_authority_identity_digest,
-                checks_authority_app_configuration_revision,
-                checks_authority_policy_revision
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,1,1)
-            ",
-        )
-        .bind(subject_id)
-        .bind(rerun_run_id)
-        .bind(fixture.tenant.as_str())
-        .bind(fixture.repository_id.as_uuid())
-        .bind(fixture.connection_id.as_uuid())
-        .bind(Uuid::from_u128(0x00000000_0000_4000_8000_00000000c001))
-        .bind([9_u8; 32].as_slice())
-        .execute(database.pool())
-        .await?;
-
-        let claimed = claim_projection(&database, &fixture)
-            .await?
-            .ok_or("rerun-origin projection was not claimable")?;
-        assert_eq!(claimed.claim().subject_id().as_uuid(), subject_id);
-        assert_eq!(
-            claimed.identity().rerun_run_id(),
-            Some(RunId::from_uuid(rerun_run_id))
-        );
-        assert_eq!(claimed.identity().delivery_id(), None);
-        assert_eq!(claimed.identity().schedule_fire_id(), None);
-        assert_eq!(claimed.action(), GithubCheckProjectionAction::EnsureSuite);
-        assert_eq!(
-            claimed.checks_authority().authority_id().as_uuid(),
-            Uuid::from_u128(0x00000000_0000_4000_8000_00000000c001)
-        );
-        let replay = database
-            .store()
-            .bind_github_check_suite(BindGithubCheckSuite::new(
-                claimed.claim(),
-                GithubCheckSuiteId::new(901)?,
-                live_observation(&claimed),
-            )?)
-            .await?;
-        assert_eq!(replay.subject_id().as_uuid(), subject_id);
-        let next = claim_projection(&database, &fixture)
-            .await?
-            .ok_or("rerun-origin create preparation was not claimable")?;
-        assert_eq!(next.claim().subject_id().as_uuid(), subject_id);
-        assert_eq!(next.action(), GithubCheckProjectionAction::PrepareRunCreate);
-        assert_eq!(
-            next.identity().rerun_run_id(),
-            Some(RunId::from_uuid(rerun_run_id))
         );
         Ok(())
     })

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use automata_ci_control::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig,
     LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
-    LeasePollService, LeaseTimeToLive, RunnableAttemptGate, RunnableAttemptGateDisposition,
+    LeasePollService, LeaseTimeToLive,
 };
 use automata_ci_control_plane::DeterministicScheduler;
 use automata_ci_core::{
@@ -66,31 +66,6 @@ impl LeasePollObserver for RecordingObserver {
             .lock()
             .expect("queue-wait observations")
             .push(duration);
-    }
-}
-
-#[derive(Debug)]
-struct IneligibleAttemptGate {
-    ineligible: AttemptId,
-    evaluations: Mutex<Vec<(AttemptId, UnixMillis)>>,
-}
-
-#[async_trait]
-impl RunnableAttemptGate for IneligibleAttemptGate {
-    async fn evaluate(
-        &self,
-        attempt_id: AttemptId,
-        observed_at: UnixMillis,
-    ) -> Result<RunnableAttemptGateDisposition, StoreError> {
-        self.evaluations
-            .lock()
-            .expect("gate evaluations")
-            .push((attempt_id, observed_at));
-        Ok(if attempt_id == self.ineligible {
-            RunnableAttemptGateDisposition::Ineligible
-        } else {
-            RunnableAttemptGateDisposition::Ready
-        })
     }
 }
 
@@ -430,37 +405,6 @@ async fn receipt_routing_capacity_scan_and_claim_are_ordered_and_least_authority
     assert_eq!(
         fixture.repository.calls(),
         ["lookup", "routing", "availability", "scan", "claim"]
-    );
-}
-
-#[tokio::test]
-async fn ineligible_attempts_never_reach_scheduling_or_claim() {
-    let fixture = fixture(RunnerSlotAvailability::Available, true);
-    let expected_evaluations = fixture
-        .repository
-        .candidates
-        .iter()
-        .map(|candidate| (candidate.attempt_id(), UnixMillis::new(1_000)))
-        .collect::<Vec<_>>();
-    let gate = IneligibleAttemptGate {
-        ineligible: fixture.expected_attempt,
-        evaluations: Mutex::new(Vec::new()),
-    };
-
-    let outcome = service(&fixture)
-        .with_attempt_gate(&gate)
-        .poll(fixture.authenticated, &fixture.request)
-        .await
-        .expect("ineligible candidate is a normal no-work result");
-
-    assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
-    assert_eq!(
-        *gate.evaluations.lock().expect("gate evaluations"),
-        expected_evaluations
-    );
-    assert_eq!(
-        fixture.repository.calls(),
-        ["lookup", "routing", "availability", "scan", "no_work"]
     );
 }
 

@@ -2,10 +2,8 @@ mod support;
 
 use std::sync::Arc;
 
-use automata_ci_core::{
-    JobIrVersion, JobLifecycle, LogSequence, LogStreamId, OperationId, SecretBinding,
-};
-use automata_ci_protocol::{ManagedSecretBindingOverlay, ProtocolVersion};
+use automata_ci_core::{JobIrVersion, JobLifecycle, LogSequence, LogStreamId, OperationId};
+use automata_ci_protocol::ProtocolVersion;
 use automata_ci_runner_journal::{
     CommitFault, CommitFaultInjector, CommitStage, FileJournal, FileJournalOptions,
     JobIrContentRef, JournalContentRetainSet, JournalError, JournalInvariantError, JournalSnapshot,
@@ -52,45 +50,6 @@ fn faulting_journal(scratch: &Scratch, fixture: &Fixture, stage: CommitStage) ->
         FileJournalOptions::new().with_fault_injector(Arc::new(FailJournalAt(stage))),
     )
     .expect("open faulting journal")
-}
-
-#[test]
-fn value_free_managed_secret_overlay_survives_journal_recovery_exactly() {
-    let scratch = Scratch::new("managed-secret-overlay-recovery");
-    let fixture = Fixture::new();
-    let overlay = ManagedSecretBindingOverlay::new(
-        &fixture.lease,
-        [(
-            "DEPLOY_TOKEN".to_owned(),
-            SecretBinding::new("00000000-0000-4000-8000-000000000001")
-                .and_then(|binding| binding.with_version_id("00000000-0000-4000-8000-000000000011"))
-                .expect("value-free binding"),
-        )],
-    )
-    .expect("lease overlay");
-    let journal = fixture.open(&scratch);
-    journal.begin_session(fixture.binding()).expect("session");
-    journal
-        .record_lease_offer(
-            fixture.session_id,
-            fixture
-                .offer(1)
-                .with_managed_secret_bindings(overlay.clone())
-                .expect("overlay matches lease"),
-        )
-        .expect("record offer");
-    drop(journal);
-
-    let reopened = fixture.open(&scratch);
-    let snapshot = reopened.snapshot().expect("recovered snapshot");
-    let recovered = snapshot
-        .slot(fixture.slot)
-        .expect("recovered slot")
-        .offer()
-        .managed_secret_bindings()
-        .expect("recovered overlay");
-    assert_eq!(recovered, &overlay);
-    assert_eq!(recovered.digest(), overlay.digest());
 }
 
 fn offer_with_job_content(

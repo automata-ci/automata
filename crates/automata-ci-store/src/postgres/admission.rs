@@ -638,7 +638,7 @@ async fn insert_run(
             event_name, event_object_key, head_sha, status, workflow_name,
             git_ref, actor, display_title, commit_subject,
             created_at_ms, updated_at_ms, concurrency_group_key,
-            concurrency_queue_policy, concurrency_cancel_in_progress,
+            concurrency_queue_policy,
             admission_epoch, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
             publication_policy_revision, requested_dashboard_visibility,
@@ -647,9 +647,9 @@ async fn insert_run(
             publication_safety_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
-            $11,$12,$13,$14,$15,$15,$16,$17,$18,
-            $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,$32,$33
+            $11,$12,$13,$14,$15,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,
+            $27,$28,$28,$29,$30,$31,$32
         )
         ",
     )
@@ -677,11 +677,6 @@ async fn insert_run(
         command
             .concurrency()
             .map(|concurrency| queue_policy_name(concurrency.queue_policy())),
-    )
-    .bind(
-        command
-            .concurrency()
-            .map(WorkflowConcurrency::cancel_in_progress),
     )
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(event.digest().as_bytes().as_slice())
@@ -1377,7 +1372,6 @@ async fn finalize_logical_concurrency_cancellation(
             updated_at_ms = $2
         WHERE run_id = $1
           AND state IN ('pending', 'activating', 'activated', 'skipped')
-          AND NOT rerun_carried
         ",
     )
     .bind(run_id)

@@ -966,182 +966,14 @@ impl LogicalServiceContainerTemplate {
     }
 }
 
-/// Deferred values for one resource vector in a logical job plan.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LogicalResourceVectorTemplate {
-    cpu: Option<Located<CompiledValueTemplate>>,
-    memory: Option<Located<CompiledValueTemplate>>,
-    ephemeral_storage: Option<Located<CompiledValueTemplate>>,
-    gpu: Option<Located<CompiledValueTemplate>>,
-    span: PlanSourceSpan,
-}
-
-impl LogicalResourceVectorTemplate {
-    /// Creates one unvalidated resource-vector template.
-    #[must_use]
-    pub const fn new(
-        cpu: Option<Located<CompiledValueTemplate>>,
-        memory: Option<Located<CompiledValueTemplate>>,
-        ephemeral_storage: Option<Located<CompiledValueTemplate>>,
-        gpu: Option<Located<CompiledValueTemplate>>,
-        span: PlanSourceSpan,
-    ) -> Self {
-        Self {
-            cpu,
-            memory,
-            ephemeral_storage,
-            gpu,
-            span,
-        }
-    }
-
-    /// Returns the deferred CPU quantity.
-    #[must_use]
-    pub const fn cpu(&self) -> Option<&Located<CompiledValueTemplate>> {
-        self.cpu.as_ref()
-    }
-
-    /// Returns the deferred memory quantity.
-    #[must_use]
-    pub const fn memory(&self) -> Option<&Located<CompiledValueTemplate>> {
-        self.memory.as_ref()
-    }
-
-    /// Returns the deferred ephemeral-storage quantity.
-    #[must_use]
-    pub const fn ephemeral_storage(&self) -> Option<&Located<CompiledValueTemplate>> {
-        self.ephemeral_storage.as_ref()
-    }
-
-    /// Returns the deferred integral GPU quantity.
-    #[must_use]
-    pub const fn gpu(&self) -> Option<&Located<CompiledValueTemplate>> {
-        self.gpu.as_ref()
-    }
-
-    /// Returns the span covering this resource vector.
-    #[must_use]
-    pub const fn span(&self) -> &PlanSourceSpan {
-        &self.span
-    }
-
-    fn is_empty(&self) -> bool {
-        self.cpu.is_none()
-            && self.memory.is_none()
-            && self.ephemeral_storage.is_none()
-            && self.gpu.is_none()
-    }
-
-    fn validate(
-        &self,
-        source_id: &str,
-        field: &'static str,
-        budget: &mut LogicalPlanBudget,
-    ) -> Result<(), WorkflowPlanError> {
-        budget.charge_node(field)?;
-        validate_span_source(&self.span, source_id, field)?;
-        if self.is_empty() {
-            return Err(WorkflowPlanError::EmptyField(field));
-        }
-        for (value, value_field) in [
-            (&self.cpu, "job resource CPU"),
-            (&self.memory, "job resource memory"),
-            (&self.ephemeral_storage, "job resource ephemeral storage"),
-            (&self.gpu, "job resource GPU"),
-        ] {
-            if let Some(value) = value {
-                validate_span_source(value.span(), source_id, value_field)?;
-                value
-                    .value()
-                    .validate(value_field, PlanEvaluationPhase::JobActivation, budget)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Deferred Kubernetes-style requests and limits for one logical step job.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LogicalJobResourcesTemplate {
-    requests: Option<LogicalResourceVectorTemplate>,
-    limits: Option<LogicalResourceVectorTemplate>,
-    span: PlanSourceSpan,
-}
-
-impl LogicalJobResourcesTemplate {
-    /// Creates an unvalidated resource allocation template.
-    #[must_use]
-    pub const fn new(
-        requests: Option<LogicalResourceVectorTemplate>,
-        limits: Option<LogicalResourceVectorTemplate>,
-        span: PlanSourceSpan,
-    ) -> Self {
-        Self {
-            requests,
-            limits,
-            span,
-        }
-    }
-
-    /// Returns deferred placement requests.
-    #[must_use]
-    pub const fn requests(&self) -> Option<&LogicalResourceVectorTemplate> {
-        self.requests.as_ref()
-    }
-
-    /// Returns deferred enforcement limits.
-    #[must_use]
-    pub const fn limits(&self) -> Option<&LogicalResourceVectorTemplate> {
-        self.limits.as_ref()
-    }
-
-    /// Returns the source span covering both vectors.
-    #[must_use]
-    pub const fn span(&self) -> &PlanSourceSpan {
-        &self.span
-    }
-
-    fn validate(
-        &self,
-        source_id: &str,
-        budget: &mut LogicalPlanBudget,
-    ) -> Result<(), WorkflowPlanError> {
-        budget.charge_node("job resources")?;
-        validate_span_source(&self.span, source_id, "job resources")?;
-        if self.requests.is_none() && self.limits.is_none() {
-            return Err(WorkflowPlanError::EmptyField("job resources"));
-        }
-        if let Some(requests) = &self.requests {
-            requests.validate(source_id, "job resource requests", budget)?;
-        }
-        if let Some(limits) = &self.limits {
-            limits.validate(source_id, "job resource limits", budget)?;
-        }
-        Ok(())
-    }
-}
-
 /// Concrete-step side of the closed logical job-kind union.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepJobTemplate {
     runner: LogicalRunnerTemplate,
-    #[serde(deserialize_with = "deserialize_required_resources")]
-    resources: Option<Box<LogicalJobResourcesTemplate>>,
     services: Vec<LogicalServiceContainerTemplate>,
     steps: Vec<LogicalStepTemplate>,
     span: PlanSourceSpan,
-}
-
-fn deserialize_required_resources<'de, D>(
-    deserializer: D,
-) -> Result<Option<Box<LogicalJobResourcesTemplate>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::deserialize(deserializer)
 }
 
 impl StepJobTemplate {
@@ -1154,7 +986,6 @@ impl StepJobTemplate {
     ) -> Self {
         Self {
             runner,
-            resources: None,
             services: Vec::new(),
             steps,
             span,
@@ -1165,12 +996,6 @@ impl StepJobTemplate {
     #[must_use]
     pub const fn runner(&self) -> &LogicalRunnerTemplate {
         &self.runner
-    }
-
-    /// Returns deferred resource requests and limits, when configured.
-    #[must_use]
-    pub fn resources(&self) -> Option<&LogicalJobResourcesTemplate> {
-        self.resources.as_deref()
     }
 
     /// Returns service containers in source order.
@@ -1201,13 +1026,6 @@ impl StepJobTemplate {
         self
     }
 
-    /// Attaches deferred resource requests and limits without validating them.
-    #[must_use]
-    pub fn with_resources(mut self, resources: Option<LogicalJobResourcesTemplate>) -> Self {
-        self.resources = resources.map(Box::new);
-        self
-    }
-
     fn validate(
         &self,
         source_id: &str,
@@ -1217,9 +1035,6 @@ impl StepJobTemplate {
         budget.charge_node("step job template")?;
         validate_span_source(&self.span, source_id, "step job template")?;
         self.runner.validate(source_id, job, budget)?;
-        if let Some(resources) = &self.resources {
-            resources.validate(source_id, budget)?;
-        }
         if self.services.len() > MAX_LOGICAL_SERVICES {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical services",

@@ -74,9 +74,9 @@ impl fmt::Debug for EphemeralJobSecret {
 
 /// In-memory, per-job implementation of the executor's secret boundary.
 ///
-/// The private runner delivery path installs values here only after checking
-/// the lease-bound overlay. Lookup remains exact by binding ID with no fallback
-/// by name, provider, scope, or version.
+/// This is the custody target for a future fenced runner transport. It admits
+/// only a bounded set of exact-version entries and performs exact binding-ID
+/// lookup; it never falls back by name, provider, scope, or version.
 pub struct EphemeralJobSecrets {
     values: BTreeMap<String, EphemeralJobSecret>,
 }

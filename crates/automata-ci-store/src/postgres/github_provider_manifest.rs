@@ -11,15 +11,14 @@ use super::{
     },
 };
 use crate::{
-    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderManifest, GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
+    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName, GithubProviderManifest,
+    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ObjectKey, ProviderConnectionId,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision, ObjectKey,
+    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
     ProviderRepositoryVisibility, RepositoryId, StoreError, TenantScope,
     WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
 };
@@ -33,7 +32,6 @@ const CURRENT_MANIFEST_QUERY: &str = r"
         revision.manifest_digest,
         revision.provider_installation_id,
         revision.github_repository_id,
-        revision.github_repository_owner_id,
         revision.github_repository_name,
         revision.repository_visibility,
         revision.github_app_id,
@@ -51,7 +49,6 @@ const CURRENT_MANIFEST_QUERY: &str = r"
         revision.runner_policy_media_type,
         revision.runtime_policy_revision,
         revision.runtime_policy_digest,
-        revision.workflow_selection_kind,
         revision.workflow_path,
         revision.event_name,
         revision.git_ref,
@@ -87,6 +84,7 @@ const CURRENT_MANIFEST_QUERY: &str = r"
      AND revision.provider_connection_id = current_manifest.provider_connection_id
      AND revision.manifest_revision = current_manifest.manifest_revision
      AND revision.manifest_digest = current_manifest.manifest_digest
+    WHERE current_manifest.provider_connection_id = $1
 ";
 
 #[async_trait]
@@ -140,9 +138,7 @@ impl GithubProviderManifestRepository for PostgresStore {
         tenant: &TenantScope,
         connection_id: ProviderConnectionId,
     ) -> Result<GithubProviderManifestRecord, GithubProviderManifestStoreError> {
-        let query =
-            format!("{CURRENT_MANIFEST_QUERY} WHERE current_manifest.provider_connection_id = $1");
-        let row = sqlx::query(AssertSqlSafe(query))
+        let row = sqlx::query(CURRENT_MANIFEST_QUERY)
             .bind(connection_id.as_uuid())
             .fetch_optional(&self.pool)
             .await
@@ -153,24 +149,6 @@ impl GithubProviderManifestRepository for PostgresStore {
             return Err(GithubProviderManifestStoreError::NotFound);
         }
         Ok(record)
-    }
-
-    async fn list_current_github_provider_manifests(
-        &self,
-        limit: u16,
-    ) -> Result<Vec<GithubProviderManifestRecord>, GithubProviderManifestStoreError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let query = format!(
-            "{CURRENT_MANIFEST_QUERY} ORDER BY revision.tenant_id, revision.provider_connection_id LIMIT $1"
-        );
-        let rows = sqlx::query(AssertSqlSafe(query))
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(operation_error)?;
-        rows.iter().map(decode_manifest_record).collect()
     }
 
     async fn load_github_provider_manifest_revision(
@@ -189,7 +167,6 @@ impl GithubProviderManifestRepository for PostgresStore {
                 revision.manifest_digest,
                 revision.provider_installation_id,
                 revision.github_repository_id,
-                revision.github_repository_owner_id,
                 revision.github_repository_name,
                 revision.repository_visibility,
                 revision.github_app_id,
@@ -207,7 +184,6 @@ impl GithubProviderManifestRepository for PostgresStore {
                 revision.runner_policy_media_type,
                 revision.runtime_policy_revision,
                 revision.runtime_policy_digest,
-                revision.workflow_selection_kind,
                 revision.workflow_path,
                 revision.event_name,
                 revision.git_ref,
@@ -274,18 +250,10 @@ async fn bootstrap_locked_manifest(
             if current.manifest() == desired {
                 (current, true)
             } else {
-                if !desired.valid_successor_of(current.manifest()) {
-                    if current.manifest().github_repository_owner_id().is_none()
-                        && desired.github_repository_owner_id().is_some()
-                        && desired.same_connection_identity(current.manifest())
-                    {
-                        return Err(GithubProviderManifestStoreError::OwnerBindingUpgradeRequired);
-                    }
-                    return Err(GithubProviderManifestStoreError::ConfigurationDrift);
-                }
-                if current
-                    .activated_at()
-                    .is_none_or(|activated_at| authoritative_at < activated_at)
+                if !desired.valid_successor_of(current.manifest())
+                    || current
+                        .activated_at()
+                        .is_none_or(|activated_at| authoritative_at < activated_at)
                 {
                     return Err(GithubProviderManifestStoreError::ConfigurationDrift);
                 }
@@ -537,9 +505,7 @@ async fn lock_current_manifest(
     connection: &mut PgConnection,
     connection_id: ProviderConnectionId,
 ) -> Result<Option<GithubProviderManifestRecord>, GithubProviderManifestStoreError> {
-    let query = format!(
-        "{CURRENT_MANIFEST_QUERY} WHERE current_manifest.provider_connection_id = $1 FOR UPDATE OF current_manifest"
-    );
+    let query = format!("{CURRENT_MANIFEST_QUERY} FOR UPDATE OF current_manifest");
     sqlx::query(AssertSqlSafe(query))
         .bind(connection_id.as_uuid())
         .fetch_optional(connection)
@@ -600,14 +566,12 @@ async fn insert_manifest_revision(
         INSERT INTO github_provider_manifest_revisions (
             tenant_id, repository_id, provider_connection_id,
             manifest_revision, manifest_digest, provider_installation_id,
-            github_repository_id, github_repository_owner_id,
-            github_repository_name, repository_visibility,
+            github_repository_id, github_repository_name, repository_visibility,
             github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
             app_key_spki_sha256, app_configuration_revision,
             webhook_verifier_fingerprint_sha256, webhook_verifier_revision,
             policy_revision, authority_profile,
-            workflow_selection_kind, workflow_path, event_name, git_ref,
-            check_subject_key, check_name,
+            workflow_path, event_name, git_ref, check_subject_key, check_name,
             github_web_origin, github_api_origin, github_archive_origin,
             github_rest_api_version, github_rest_accept, github_archive_accept,
             repository_source_authentication, repository_source_revision,
@@ -624,12 +588,12 @@ async fn insert_manifest_revision(
             runtime_policy_revision, runtime_policy_digest,
             registered_at_ms
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, $16, $17, $18, $19,
-            $20, $21, $22, $23, $24, $25, $26, $27,
-            $28, $29, $30, $31, $32, $33, $34, $35,
-            $36, $37, $38, $39, $40, $41, $42, $43, $44, $45,
-            $46, $47, $48, $49, $50, $51, $52, $53
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, $15, $16, $17, $18,
+            $19, $20, $21, $22, $23, $24, $25, $26,
+            $27, $28, $29, $30, $31, $32, $33, $34,
+            $35, $36, $37, $38, $39, $40, $41, $42, $43, $44,
+            $45, $46, $47, $48, $49, $50, $51
         )
         ",
     )
@@ -640,12 +604,6 @@ async fn insert_manifest_revision(
     .bind(manifest.digest().as_bytes().as_slice())
     .bind(i64_from_u64(manifest.installation_id().get())?)
     .bind(i64_from_u64(manifest.github_repository_id().get())?)
-    .bind(
-        manifest
-            .github_repository_owner_id()
-            .map(|owner| i64_from_u64(owner.get()))
-            .transpose()?,
-    )
     .bind(manifest.github_repository_name().as_str())
     .bind(manifest.repository_visibility().as_durable_str())
     .bind(manifest.github_app_id().as_i64())
@@ -663,7 +621,6 @@ async fn insert_manifest_revision(
     .bind(manifest.webhook_verifier_revision().as_i64())
     .bind(manifest.policy_revision().as_i64())
     .bind(authority_profile_name(manifest.authority_profile()))
-    .bind(manifest.workflow_selection().as_durable_str())
     .bind(manifest.workflow_path())
     .bind(manifest.event_name())
     .bind(manifest.git_ref())
@@ -815,14 +772,6 @@ fn decode_manifest_record(
             .map_err(operation_error)?,
     )?)
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-    let github_repository_owner_id = row
-        .try_get::<Option<i64>, _>("github_repository_owner_id")
-        .map_err(operation_error)?
-        .map(positive_u64)
-        .transpose()?
-        .map(ProviderRepositoryOwnerId::new)
-        .transpose()
-        .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
     let github_repository_name = GithubRepositoryName::new(
         row.try_get::<String, _>("github_repository_name")
             .map_err(operation_error)?,
@@ -963,32 +912,14 @@ fn decode_manifest_record(
     )?)
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
 
-    let workflow_path: String = row.try_get("workflow_path").map_err(operation_error)?;
-    let check_subject_key: String = row.try_get("check_subject_key").map_err(operation_error)?;
-    if workflow_path != check_subject_key {
-        return Err(GithubProviderManifestStoreError::CorruptData);
-    }
-    let workflow_selection = match row
-        .try_get::<String, _>("workflow_selection_kind")
-        .map_err(operation_error)?
-        .as_str()
-    {
-        "exact" => {
-            let path = GithubCheckSubjectKey::new(workflow_path)
-                .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-            GithubProviderWorkflowSelection::exact(path)
-        }
-        "all_direct" if workflow_path == crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY => {
-            GithubProviderWorkflowSelection::all_direct()
-        }
-        _ => return Err(GithubProviderManifestStoreError::CorruptData),
-    };
+    require_exact_text(row, "workflow_path", crate::GITHUB_PROVIDER_WORKFLOW_PATH)?;
     require_exact_text(row, "event_name", crate::GITHUB_PROVIDER_EVENT)?;
-    let git_ref = crate::GithubProviderGitRef::new(
-        row.try_get::<String, _>("git_ref")
-            .map_err(operation_error)?,
-    )
-    .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
+    require_exact_text(row, "git_ref", crate::GITHUB_PROVIDER_GIT_REF)?;
+    require_exact_text(
+        row,
+        "check_subject_key",
+        crate::GITHUB_PROVIDER_WORKFLOW_PATH,
+    )?;
     require_exact_text(row, "github_web_origin", crate::GITHUB_PROVIDER_WEB_ORIGIN)?;
     require_exact_text(row, "github_api_origin", crate::GITHUB_PROVIDER_API_ORIGIN)?;
     require_exact_text(
@@ -1034,7 +965,7 @@ fn decode_manifest_record(
         crate::GITHUB_PROVIDER_ARCHIVE_FORMAT,
     )?;
 
-    let mut manifest = GithubProviderManifest::new_with_workflow_selection_and_git_ref(
+    let manifest = GithubProviderManifest::new(
         tenant,
         connection_id,
         installation_id,
@@ -1053,16 +984,11 @@ fn decode_manifest_record(
         runner_policy,
         runtime_policy_revision,
         runtime_policy_digest,
-        workflow_selection,
-        git_ref,
         check_name,
         GithubProviderOrigins::github_dot_com(),
         limits,
         revision,
     );
-    if let Some(owner_id) = github_repository_owner_id {
-        manifest = manifest.with_repository_owner_id(owner_id);
-    }
     let expected_digest = decode_sha256(row.try_get("manifest_digest").map_err(operation_error)?)?;
     let manifest =
         GithubProviderManifest::from_durable_parts(manifest, repository_id, expected_digest)

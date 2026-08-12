@@ -28,18 +28,9 @@ use super::PostgresStore;
 // any preceding lock wait.
 const MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS: i64 = 60_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProjectionSubjectOrigin {
-    ProviderDelivery,
-    ScheduledFire,
-    WorkflowRerun,
-}
-
-pub(super) const SUBJECT_COLUMNS: &str = r"
+const SUBJECT_COLUMNS: &str = r"
     subject.id, subject.tenant_id, subject.repository_id,
-    subject.origin_kind, subject.provider_delivery_id, subject.schedule_fire_id,
-    subject.workflow_rerun_run_id,
-    subject.subject_key,
+    subject.provider_delivery_id, subject.subject_key,
     subject.provider_connection_id, subject.provider_installation_id,
     subject.github_repository_id, subject.github_repository_name,
     subject.github_app_id, subject.head_sha,
@@ -50,42 +41,16 @@ pub(super) const SUBJECT_COLUMNS: &str = r"
 ";
 
 const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
-    SELECT outbox.subject_id, subject.origin_kind
+    SELECT outbox.subject_id
     FROM github_check_projection_outbox AS outbox
     JOIN github_check_subjects AS subject
       ON subject.id = outbox.subject_id
+    JOIN github_provider_delivery_evidence AS evidence
+      ON evidence.github_check_subject_id = subject.id
+     AND evidence.provider_delivery_id = subject.provider_delivery_id
+     AND evidence.tenant_id = subject.tenant_id
+     AND evidence.repository_id = subject.repository_id
     WHERE subject.provider_connection_id = $1
-      AND CASE subject.origin_kind
-        WHEN 'provider_delivery' THEN EXISTS (
-            SELECT 1
-            FROM github_provider_delivery_evidence AS delivery_evidence
-            WHERE delivery_evidence.github_check_subject_id = subject.id
-              AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-              AND delivery_evidence.tenant_id = subject.tenant_id
-              AND delivery_evidence.repository_id = subject.repository_id
-        )
-        WHEN 'scheduled_fire' THEN EXISTS (
-            SELECT 1
-            FROM github_schedule_check_evidence AS schedule_evidence
-            WHERE schedule_evidence.github_check_subject_id = subject.id
-              AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-              AND schedule_evidence.tenant_id = subject.tenant_id
-              AND schedule_evidence.repository_id = subject.repository_id
-              AND schedule_evidence.provider_connection_id =
-                subject.provider_connection_id
-        )
-        WHEN 'workflow_rerun' THEN EXISTS (
-            SELECT 1
-            FROM workflow_rerun_check_evidence AS rerun_evidence
-            WHERE rerun_evidence.github_check_subject_id = subject.id
-              AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-              AND rerun_evidence.tenant_id = subject.tenant_id
-              AND rerun_evidence.repository_id = subject.repository_id
-              AND rerun_evidence.provider_connection_id =
-                  subject.provider_connection_id
-        )
-        ELSE FALSE
-      END
       AND outbox.claim_fence < 9223372036854775807
       AND (
         outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
@@ -110,7 +75,7 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
     LIMIT 1
 ";
 
-const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
+const CLAIM_LOCKED_PROJECTION_SQL: &str = r"
     UPDATE github_check_projection_outbox AS outbox
     SET state = 'claimed',
         attempted_revision = subject.desired_revision,
@@ -141,8 +106,6 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
          github_provider_delivery_evidence AS evidence
     WHERE outbox.subject_id = $1
       AND subject.id = outbox.subject_id
-      AND subject.origin_kind = 'provider_delivery'
-      AND subject.schedule_fire_id IS NULL
       AND subject.provider_connection_id = $2
       AND evidence.github_check_subject_id = subject.id
       AND evidence.provider_delivery_id = subject.provider_delivery_id
@@ -165,156 +128,7 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
         outbox.claimed_at_ms, outbox.claim_expires_at_ms,
         subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
-        subject.provider_connection_id, subject.provider_installation_id,
-        subject.github_repository_id, subject.github_repository_name,
-        subject.github_app_id, subject.head_sha,
-        subject.check_name, subject.external_id, subject.workflow_run_id,
-        subject.linked_at_ms,
-        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
-        subject.desired_revision, subject.created_at_ms,
-        subject.desired_updated_at_ms,
-        evidence.checks_authority_id,
-        evidence.checks_authority_identity_digest,
-        evidence.checks_authority_app_configuration_revision,
-        evidence.checks_authority_policy_revision
-";
-
-const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
-    UPDATE github_check_projection_outbox AS outbox
-    SET state = 'claimed',
-        attempted_revision = subject.desired_revision,
-        attempt_count = CASE
-            WHEN outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-                THEN 1
-            ELSE outbox.attempt_count + 1
-        END,
-        claim_fence = outbox.claim_fence + 1,
-        claim_owner_id = $3,
-        claim_action = CASE
-            WHEN outbox.external_suite_id IS NULL THEN 'ensure_suite'
-            WHEN outbox.external_run_id IS NULL
-                 AND outbox.create_started_at_ms IS NULL THEN 'prepare_run_create'
-            WHEN outbox.external_run_id IS NULL THEN 'reconcile_run_create'
-            ELSE 'publish'
-        END,
-        claimed_desired_revision = subject.desired_revision,
-        claimed_desired_state = subject.desired_state,
-        claimed_desired_conclusion = subject.desired_conclusion,
-        claimed_at_ms = $4,
-        claim_expires_at_ms = $5,
-        next_attempt_at_ms = NULL,
-        last_failure_kind = NULL,
-        blocked_reason = NULL,
-        state_updated_at_ms = $4
-    FROM github_check_subjects AS subject,
-         github_schedule_check_evidence AS evidence
-    WHERE outbox.subject_id = $1
-      AND subject.id = outbox.subject_id
-      AND subject.origin_kind = 'scheduled_fire'
-      AND subject.provider_delivery_id IS NULL
-      AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = subject.id
-      AND evidence.schedule_fire_id = subject.schedule_fire_id
-      AND evidence.tenant_id = subject.tenant_id
-      AND evidence.repository_id = subject.repository_id
-      AND evidence.provider_connection_id = subject.provider_connection_id
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $4
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
-      )
-    RETURNING
-        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
-        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
-        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
-        subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
-        subject.provider_connection_id, subject.provider_installation_id,
-        subject.github_repository_id, subject.github_repository_name,
-        subject.github_app_id, subject.head_sha,
-        subject.check_name, subject.external_id, subject.workflow_run_id,
-        subject.linked_at_ms,
-        subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
-        subject.desired_revision, subject.created_at_ms,
-        subject.desired_updated_at_ms,
-        evidence.checks_authority_id,
-        evidence.checks_authority_identity_digest,
-        evidence.checks_authority_app_configuration_revision,
-        evidence.checks_authority_policy_revision
-";
-
-const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
-    UPDATE github_check_projection_outbox AS outbox
-    SET state = 'claimed',
-        attempted_revision = subject.desired_revision,
-        attempt_count = CASE
-            WHEN outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-                THEN 1
-            ELSE outbox.attempt_count + 1
-        END,
-        claim_fence = outbox.claim_fence + 1,
-        claim_owner_id = $3,
-        claim_action = CASE
-            WHEN outbox.external_suite_id IS NULL THEN 'ensure_suite'
-            WHEN outbox.external_run_id IS NULL
-                 AND outbox.create_started_at_ms IS NULL THEN 'prepare_run_create'
-            WHEN outbox.external_run_id IS NULL THEN 'reconcile_run_create'
-            ELSE 'publish'
-        END,
-        claimed_desired_revision = subject.desired_revision,
-        claimed_desired_state = subject.desired_state,
-        claimed_desired_conclusion = subject.desired_conclusion,
-        claimed_at_ms = $4,
-        claim_expires_at_ms = $5,
-        next_attempt_at_ms = NULL,
-        last_failure_kind = NULL,
-        blocked_reason = NULL,
-        state_updated_at_ms = $4
-    FROM github_check_subjects AS subject,
-         workflow_rerun_check_evidence AS evidence
-    WHERE outbox.subject_id = $1
-      AND subject.id = outbox.subject_id
-      AND subject.origin_kind = 'workflow_rerun'
-      AND subject.provider_delivery_id IS NULL
-      AND subject.schedule_fire_id IS NULL
-      AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = subject.id
-      AND evidence.run_id = subject.workflow_rerun_run_id
-      AND evidence.tenant_id = subject.tenant_id
-      AND evidence.repository_id = subject.repository_id
-      AND evidence.provider_connection_id = subject.provider_connection_id
-      AND outbox.claim_fence < 9223372036854775807
-      AND (
-        outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
-        OR outbox.attempt_count < 64
-      )
-      AND (
-        outbox.state = 'pending'
-        OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $4
-        OR outbox.state = 'create_indeterminate'
-           AND outbox.next_reconcile_at_ms <= $4
-        OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $4
-      )
-    RETURNING
-        outbox.subject_id, outbox.attempt_count, outbox.claim_fence,
-        outbox.claim_action, outbox.external_suite_id, outbox.external_run_id,
-        outbox.claimed_at_ms, outbox.claim_expires_at_ms,
-        subject.id, subject.tenant_id, subject.repository_id,
-        subject.origin_kind, subject.provider_delivery_id,
-        subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
+        subject.provider_delivery_id, subject.subject_key,
         subject.provider_connection_id, subject.provider_installation_id,
         subject.github_repository_id, subject.github_repository_name,
         subject.github_app_id, subject.head_sha,
@@ -335,10 +149,6 @@ impl GithubCheckSubjectRepository for PostgresStore {
         &self,
         request: RegisterGithubCheckSubject,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-        let delivery_id = request
-            .identity()
-            .delivery_id()
-            .ok_or(GithubCheckStoreError::AuthorityRejected)?;
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         let proposed_id = Uuid::new_v4();
         let external_id = format!("automata-check:{proposed_id}");
@@ -374,7 +184,7 @@ impl GithubCheckSubjectRepository for PostgresStore {
             .bind(proposed_id)
             .bind(request.identity().tenant().as_str())
             .bind(request.identity().repository_id().as_uuid())
-            .bind(delivery_id.as_uuid())
+            .bind(request.identity().delivery_id().as_uuid())
             .bind(request.identity().subject_key().as_str())
             .bind(request.identity().connection_id().as_uuid())
             .bind(request.identity().installation_id().as_i64())
@@ -397,7 +207,7 @@ impl GithubCheckSubjectRepository for PostgresStore {
 
         let existing = load_subject_by_replay_key(
             &mut transaction,
-            delivery_id,
+            request.identity().delivery_id(),
             request.identity().subject_key(),
         )
         .await?;
@@ -565,24 +375,35 @@ impl GithubCheckProjectionOutbox for PostgresStore {
             return Err(GithubCheckStoreError::CorruptData);
         }
         validate_caller_clock(request.observed_at(), lock_observed_at)?;
-        let candidate = sqlx::query(LOCK_PROJECTION_CANDIDATE_SQL)
+        let candidate: Option<Uuid> = sqlx::query_scalar(LOCK_PROJECTION_CANDIDATE_SQL)
             .bind(request.connection_id().as_uuid())
             .bind(lock_observed_at)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(operation_error)?;
         if let Some(candidate) = candidate {
-            let candidate_id: Uuid = candidate.try_get("subject_id").map_err(operation_error)?;
-            let origin = decode_projection_origin(&candidate)?;
-            let claimed = claim_locked_projection(
-                &mut transaction,
-                request,
-                candidate_id,
-                origin,
-                lock_observed_at,
-                claim_duration,
-            )
-            .await?;
+            // Issue the absolute interval only after the exact outbox row is
+            // locked, then recheck both caller admission and due/takeover
+            // eligibility in the fenced UPDATE.
+            let claimed_at = database_now_ms(&mut transaction).await?;
+            if claimed_at < lock_observed_at {
+                return Err(GithubCheckStoreError::CorruptData);
+            }
+            validate_caller_clock(request.observed_at(), claimed_at)?;
+            let expires_at = claimed_at
+                .checked_add(claim_duration)
+                .ok_or(GithubCheckStoreError::CorruptData)?;
+            let row = sqlx::query(CLAIM_LOCKED_PROJECTION_SQL)
+                .bind(candidate)
+                .bind(request.connection_id().as_uuid())
+                .bind(request.owner().as_uuid())
+                .bind(claimed_at)
+                .bind(expires_at)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(operation_error)?
+                .ok_or(GithubCheckStoreError::CorruptData)?;
+            let claimed = decode_claimed(&row, request.owner())?;
             transaction.commit().await.map_err(operation_error)?;
             return Ok(Some(claimed));
         }
@@ -591,8 +412,29 @@ impl GithubCheckProjectionOutbox for PostgresStore {
             return Err(GithubCheckStoreError::CorruptData);
         }
         validate_caller_clock(request.observed_at(), idle_now)?;
-        let fence_exhausted =
-            projection_fence_exhausted(&mut transaction, request.connection_id(), idle_now).await?;
+        let fence_exhausted: bool = sqlx::query_scalar(
+            r"
+            SELECT EXISTS (
+                SELECT 1
+                FROM github_check_projection_outbox AS outbox
+                JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
+                WHERE subject.provider_connection_id = $1
+                  AND outbox.claim_fence = 9223372036854775807
+                  AND (
+                    outbox.state = 'pending'
+                    OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
+                    OR outbox.state = 'create_indeterminate'
+                       AND outbox.next_reconcile_at_ms <= $2
+                    OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
+                  )
+            )
+            ",
+        )
+        .bind(request.connection_id().as_uuid())
+        .bind(idle_now)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(operation_error)?;
         transaction.commit().await.map_err(operation_error)?;
         if fence_exhausted {
             Err(GithubCheckStoreError::FenceExhausted)
@@ -1111,20 +953,59 @@ impl GithubCheckProjectionOutbox for PostgresStore {
     }
 }
 
-pub(super) struct DecodedSubject {
-    pub(super) identity: GithubCheckSubjectIdentity,
-    pub(super) receipt: GithubCheckSubjectReceipt,
-    pub(super) created_at: UnixMillis,
-    pub(super) linked_at: Option<UnixMillis>,
-    pub(super) desired_updated_at: UnixMillis,
+struct DecodedSubject {
+    identity: GithubCheckSubjectIdentity,
+    receipt: GithubCheckSubjectReceipt,
+    created_at: UnixMillis,
+    linked_at: Option<UnixMillis>,
+    desired_updated_at: UnixMillis,
 }
 
-pub(super) fn decode_subject(
-    row: &sqlx::postgres::PgRow,
-) -> Result<DecodedSubject, GithubCheckStoreError> {
+fn decode_subject(row: &sqlx::postgres::PgRow) -> Result<DecodedSubject, GithubCheckStoreError> {
     let subject_id = crate::GithubCheckSubjectId::from_uuid(uuid_column(row, "id")?)
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let identity = decode_subject_identity(row)?;
+    let tenant = TenantScope::from_authenticated_tenant_id(string_column(row, "tenant_id")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let repository_uuid = uuid_column(row, "repository_id")?;
+    if repository_uuid.is_nil() {
+        return Err(GithubCheckStoreError::CorruptData);
+    }
+    let delivery_id = ProviderDeliveryId::from_uuid(uuid_column(row, "provider_delivery_id")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let subject_key = GithubCheckSubjectKey::new(string_column(row, "subject_key")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let connection_id =
+        ProviderConnectionId::from_uuid(uuid_column(row, "provider_connection_id")?)
+            .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let installation_id =
+        ProviderInstallationId::new(positive_u64_column(row, "provider_installation_id")?)
+            .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let github_repository_id =
+        ProviderRepositoryId::new(positive_u64_column(row, "github_repository_id")?)
+            .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let github_repository_name =
+        GithubRepositoryName::new(string_column(row, "github_repository_name")?)
+            .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let app_id = GithubCheckAppId::new(positive_u64_column(row, "github_app_id")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let head_sha = GithubCheckHeadSha::try_from_slice(&bytes_column(row, "head_sha")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let name = GithubCheckName::new(string_column(row, "check_name")?)
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let identity = GithubCheckSubjectIdentity::new(
+        tenant,
+        RepositoryId::from_uuid(repository_uuid),
+        delivery_id,
+        subject_key,
+        connection_id,
+        installation_id,
+        github_repository_id,
+        github_repository_name,
+        app_id,
+        head_sha,
+        name,
+    )
+    .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let workflow_run_id = optional_uuid_column(row, "workflow_run_id")?.map(RunId::from_uuid);
     let desired = decode_desired(row)?;
     let desired_revision = positive_u64_column(row, "desired_revision")?;
@@ -1147,97 +1028,6 @@ pub(super) fn decode_subject(
         linked_at,
         desired_updated_at,
     })
-}
-
-fn decode_subject_identity(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubCheckSubjectIdentity, GithubCheckStoreError> {
-    let tenant = TenantScope::from_authenticated_tenant_id(string_column(row, "tenant_id")?)
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let repository_uuid = uuid_column(row, "repository_id")?;
-    if repository_uuid.is_nil() {
-        return Err(GithubCheckStoreError::CorruptData);
-    }
-    let origin_kind = string_column(row, "origin_kind")?;
-    let delivery_id = optional_uuid_column(row, "provider_delivery_id")?
-        .map(ProviderDeliveryId::from_uuid)
-        .transpose()
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let schedule_fire_id = optional_uuid_column(row, "schedule_fire_id")?
-        .map(GithubScheduleFireId::from_uuid)
-        .transpose()
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let rerun_run_id = optional_uuid_column(row, "workflow_rerun_run_id")?.map(RunId::from_uuid);
-    let subject_key = GithubCheckSubjectKey::new(string_column(row, "subject_key")?)
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let connection_id =
-        ProviderConnectionId::from_uuid(uuid_column(row, "provider_connection_id")?)
-            .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let installation_id =
-        ProviderInstallationId::new(positive_u64_column(row, "provider_installation_id")?)
-            .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let github_repository_id =
-        ProviderRepositoryId::new(positive_u64_column(row, "github_repository_id")?)
-            .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let github_repository_name =
-        GithubRepositoryName::new(string_column(row, "github_repository_name")?)
-            .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let app_id = GithubCheckAppId::new(positive_u64_column(row, "github_app_id")?)
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let head_sha = GithubCheckHeadSha::try_from_slice(&bytes_column(row, "head_sha")?)
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    let name = GithubCheckName::new(string_column(row, "check_name")?)
-        .map_err(|_| GithubCheckStoreError::CorruptData)?;
-    match (
-        origin_kind.as_str(),
-        delivery_id,
-        schedule_fire_id,
-        rerun_run_id,
-    ) {
-        ("provider_delivery", Some(delivery_id), None, None) => GithubCheckSubjectIdentity::new(
-            tenant,
-            RepositoryId::from_uuid(repository_uuid),
-            delivery_id,
-            subject_key,
-            connection_id,
-            installation_id,
-            github_repository_id,
-            github_repository_name,
-            app_id,
-            head_sha,
-            name,
-        ),
-        ("scheduled_fire", None, Some(fire_id), None) => GithubCheckSubjectIdentity::new_scheduled(
-            tenant,
-            RepositoryId::from_uuid(repository_uuid),
-            fire_id,
-            subject_key,
-            connection_id,
-            installation_id,
-            github_repository_id,
-            github_repository_name,
-            app_id,
-            head_sha,
-            name,
-        ),
-        ("workflow_rerun", None, None, Some(rerun_run_id)) => {
-            GithubCheckSubjectIdentity::new_rerun(
-                tenant,
-                RepositoryId::from_uuid(repository_uuid),
-                rerun_run_id,
-                subject_key,
-                connection_id,
-                installation_id,
-                github_repository_id,
-                github_repository_name,
-                app_id,
-                head_sha,
-                name,
-            )
-        }
-        _ => return Err(GithubCheckStoreError::CorruptData),
-    }
-    .map_err(|_| GithubCheckStoreError::CorruptData)
 }
 
 fn decode_claimed(
@@ -1572,118 +1362,6 @@ async fn load_projection_replay(
     }
 }
 
-fn decode_projection_origin(
-    row: &sqlx::postgres::PgRow,
-) -> Result<ProjectionSubjectOrigin, GithubCheckStoreError> {
-    match row
-        .try_get::<String, _>("origin_kind")
-        .map_err(operation_error)?
-        .as_str()
-    {
-        "provider_delivery" => Ok(ProjectionSubjectOrigin::ProviderDelivery),
-        "scheduled_fire" => Ok(ProjectionSubjectOrigin::ScheduledFire),
-        "workflow_rerun" => Ok(ProjectionSubjectOrigin::WorkflowRerun),
-        _ => Err(GithubCheckStoreError::CorruptData),
-    }
-}
-
-async fn claim_locked_projection(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: ClaimGithubCheckProjection,
-    candidate_id: Uuid,
-    origin: ProjectionSubjectOrigin,
-    lock_observed_at: i64,
-    claim_duration: i64,
-) -> Result<ClaimedGithubCheckProjection, GithubCheckStoreError> {
-    // Issue the interval after locking the exact row, then recheck caller
-    // admission and due/takeover eligibility in the fenced update.
-    let claimed_at = database_now_ms(&mut *transaction).await?;
-    if claimed_at < lock_observed_at {
-        return Err(GithubCheckStoreError::CorruptData);
-    }
-    validate_caller_clock(request.observed_at(), claimed_at)?;
-    let expires_at = claimed_at
-        .checked_add(claim_duration)
-        .ok_or(GithubCheckStoreError::CorruptData)?;
-    let claim_sql = match origin {
-        ProjectionSubjectOrigin::ProviderDelivery => CLAIM_LOCKED_DELIVERY_PROJECTION_SQL,
-        ProjectionSubjectOrigin::ScheduledFire => CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL,
-        ProjectionSubjectOrigin::WorkflowRerun => CLAIM_LOCKED_RERUN_PROJECTION_SQL,
-    };
-    let row = sqlx::query(claim_sql)
-        .bind(candidate_id)
-        .bind(request.connection_id().as_uuid())
-        .bind(request.owner().as_uuid())
-        .bind(claimed_at)
-        .bind(expires_at)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-        .ok_or(GithubCheckStoreError::CorruptData)?;
-    decode_claimed(&row, request.owner())
-}
-
-async fn projection_fence_exhausted(
-    transaction: &mut Transaction<'_, Postgres>,
-    connection_id: ProviderConnectionId,
-    database_now: i64,
-) -> Result<bool, GithubCheckStoreError> {
-    sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-            FROM github_check_projection_outbox AS outbox
-            JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
-            WHERE subject.provider_connection_id = $1
-              AND CASE subject.origin_kind
-                WHEN 'provider_delivery' THEN EXISTS (
-                    SELECT 1
-                    FROM github_provider_delivery_evidence AS delivery_evidence
-                    WHERE delivery_evidence.github_check_subject_id = subject.id
-                      AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-                      AND delivery_evidence.tenant_id = subject.tenant_id
-                      AND delivery_evidence.repository_id = subject.repository_id
-                )
-                WHEN 'scheduled_fire' THEN EXISTS (
-                    SELECT 1
-                    FROM github_schedule_check_evidence AS schedule_evidence
-                    WHERE schedule_evidence.github_check_subject_id = subject.id
-                      AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-                      AND schedule_evidence.tenant_id = subject.tenant_id
-                      AND schedule_evidence.repository_id = subject.repository_id
-                      AND schedule_evidence.provider_connection_id =
-                          subject.provider_connection_id
-                )
-                WHEN 'workflow_rerun' THEN EXISTS (
-                    SELECT 1
-                    FROM workflow_rerun_check_evidence AS rerun_evidence
-                    WHERE rerun_evidence.github_check_subject_id = subject.id
-                      AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-                      AND rerun_evidence.tenant_id = subject.tenant_id
-                      AND rerun_evidence.repository_id = subject.repository_id
-                      AND rerun_evidence.provider_connection_id =
-                          subject.provider_connection_id
-                )
-                ELSE FALSE
-              END
-              AND outbox.claim_fence = 9223372036854775807
-              AND (
-                outbox.state = 'pending'
-                OR outbox.state = 'retry' AND outbox.next_attempt_at_ms <= $2
-                OR outbox.state = 'create_indeterminate'
-                   AND outbox.next_reconcile_at_ms <= $2
-                OR outbox.state = 'claimed' AND outbox.claim_expires_at_ms <= $2
-              )
-        )
-        ",
-    )
-    .bind(connection_id.as_uuid())
-    .bind(database_now)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)
-}
-
 async fn block_exhausted_candidates(
     transaction: &mut Transaction<'_, Postgres>,
     connection_id: ProviderConnectionId,
@@ -1704,37 +1382,6 @@ async fn block_exhausted_candidates(
         FROM github_check_subjects AS subject
         WHERE subject.id = outbox.subject_id
           AND subject.provider_connection_id = $1
-          AND CASE subject.origin_kind
-            WHEN 'provider_delivery' THEN EXISTS (
-                SELECT 1
-                FROM github_provider_delivery_evidence AS delivery_evidence
-                WHERE delivery_evidence.github_check_subject_id = subject.id
-                  AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
-                  AND delivery_evidence.tenant_id = subject.tenant_id
-                  AND delivery_evidence.repository_id = subject.repository_id
-            )
-            WHEN 'scheduled_fire' THEN EXISTS (
-                SELECT 1
-                FROM github_schedule_check_evidence AS schedule_evidence
-                WHERE schedule_evidence.github_check_subject_id = subject.id
-                  AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
-                  AND schedule_evidence.tenant_id = subject.tenant_id
-                  AND schedule_evidence.repository_id = subject.repository_id
-                  AND schedule_evidence.provider_connection_id =
-                      subject.provider_connection_id
-            )
-            WHEN 'workflow_rerun' THEN EXISTS (
-                SELECT 1
-                FROM workflow_rerun_check_evidence AS rerun_evidence
-                WHERE rerun_evidence.github_check_subject_id = subject.id
-                  AND rerun_evidence.run_id = subject.workflow_rerun_run_id
-                  AND rerun_evidence.tenant_id = subject.tenant_id
-                  AND rerun_evidence.repository_id = subject.repository_id
-                  AND rerun_evidence.provider_connection_id =
-                      subject.provider_connection_id
-            )
-            ELSE FALSE
-          END
           AND outbox.attempted_revision = subject.desired_revision
           AND outbox.attempt_count >= 64
           AND (

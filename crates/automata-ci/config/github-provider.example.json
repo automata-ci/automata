@@ -11,15 +11,6 @@
     "hmac_secret_source": "file:/run/secrets/automata-github-webhook-hmac",
     "verifier_revision": 1
   },
-  "schedule": {
-    "poll_millis": 1000,
-    "discovery_claim_millis": 300000,
-    "fire_claim_millis": 300000,
-    "retry_millis": 30000,
-    "staleness_millis": 3600000,
-    "maximum_manifests": 256,
-    "maximum_fires_per_pass": 32
-  },
   "repositories": [
     {
       "tenant_id": "automata-main",
@@ -52,37 +43,8 @@
               "automata.core/service-containers@v1"
             ]
           }
-        ],
-        "resources": {
-          "defaults": {
-            "requests": {
-              "cpu_millis": 500,
-              "memory_bytes": 536870912,
-              "ephemeral_disk_bytes": 0,
-              "gpu_count": 0
-            },
-            "limits": {
-              "cpu_millis": 2000,
-              "memory_bytes": 2147483648,
-              "ephemeral_disk_bytes": 0,
-              "gpu_count": 0
-            }
-          },
-          "minimum_requests": {
-            "cpu_millis": 100,
-            "memory_bytes": 134217728,
-            "ephemeral_disk_bytes": 0,
-            "gpu_count": 0
-          },
-          "maximum_limits": {
-            "cpu_millis": 4000,
-            "memory_bytes": 17179869184,
-            "ephemeral_disk_bytes": 0,
-            "gpu_count": 0
-          }
-        }
+        ]
       },
-      "workflow_selection": { "mode": "all_direct" },
       "check_name": "Automata CI",
       "authorities": {
         "checks_write": {
@@ -123,37 +85,8 @@
               "automata.core/service-containers@v1"
             ]
           }
-        ],
-        "resources": {
-          "defaults": {
-            "requests": {
-              "cpu_millis": 500,
-              "memory_bytes": 536870912,
-              "ephemeral_disk_bytes": 0,
-              "gpu_count": 0
-            },
-            "limits": {
-              "cpu_millis": 2000,
-              "memory_bytes": 2147483648,
-              "ephemeral_disk_bytes": 0,
-              "gpu_count": 0
-            }
-          },
-          "minimum_requests": {
-            "cpu_millis": 100,
-            "memory_bytes": 134217728,
-            "ephemeral_disk_bytes": 0,
-            "gpu_count": 0
-          },
-          "maximum_limits": {
-            "cpu_millis": 4000,
-            "memory_bytes": 17179869184,
-            "ephemeral_disk_bytes": 0,
-            "gpu_count": 0
-          }
-        }
+        ]
       },
-      "workflow_selection": { "mode": "all_direct" },
       "check_name": "Automata CI",
       "authorities": {
         "checks_write": {

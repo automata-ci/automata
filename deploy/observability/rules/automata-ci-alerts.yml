@@ -119,7 +119,7 @@ groups:
         expr: >-
           scrape_samples_post_metric_relabeling{job="automata-runner"} > 980
           or
-          scrape_samples_post_metric_relabeling{job="automata-control-plane"} > 4725
+          scrape_samples_post_metric_relabeling{job="automata-control-plane"} > 4500
         for: 15m
         labels:
           severity: warning

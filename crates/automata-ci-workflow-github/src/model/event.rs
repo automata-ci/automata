@@ -10,8 +10,6 @@ pub enum EventName {
     PullRequest,
     /// A merge-queue group activity event.
     MergeGroup,
-    /// A custom repository-dispatch event.
-    RepositoryDispatch,
     /// A manually dispatched workflow invocation.
     WorkflowDispatch,
     /// A scheduled cron invocation.
@@ -28,38 +26,6 @@ pub enum EventName {
 pub struct MergeGroupFilter {
     pub(crate) types: Option<Vec<Spanned<String>>>,
     pub(crate) extensions: Vec<PreservedField>,
-}
-
-/// Source-preserving custom event-type filter for repository dispatches.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct RepositoryDispatchFilter {
-    pub(crate) types: Option<Vec<Spanned<String>>>,
-    pub(crate) extensions: Vec<PreservedField>,
-}
-
-impl RepositoryDispatchFilter {
-    pub(crate) const fn empty() -> Self {
-        Self {
-            types: None,
-            extensions: Vec::new(),
-        }
-    }
-
-    /// Returns configured custom event types in source order.
-    pub fn types(&self) -> &[Spanned<String>] {
-        self.types.as_deref().unwrap_or_default()
-    }
-
-    /// Returns whether the `types` key appeared, including an empty list.
-    pub const fn types_configured(&self) -> bool {
-        self.types.is_some()
-    }
-
-    /// Returns fields retained from source but unsupported by current selection.
-    pub fn extensions(&self) -> &[PreservedField] {
-        &self.extensions
-    }
 }
 
 impl MergeGroupFilter {
@@ -205,8 +171,6 @@ pub enum TriggerConfiguration {
     PullRequest(PushPullRequestFilter),
     /// Merge-group activity filters.
     MergeGroup(MergeGroupFilter),
-    /// Repository-dispatch custom event-type filters.
-    RepositoryDispatch(RepositoryDispatchFilter),
     /// Optional manual-dispatch configuration retained as YAML.
     WorkflowDispatch(Option<YamlNode>),
     /// Schedule configuration retained for bounded cron selection.

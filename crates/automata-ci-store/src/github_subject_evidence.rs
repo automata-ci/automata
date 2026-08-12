@@ -36,8 +36,6 @@ pub enum GithubAuthenticatedEventKind {
     PullRequest,
     /// Merge-queue group activity.
     MergeGroup,
-    /// A custom repository-dispatch event.
-    RepositoryDispatch,
 }
 
 impl GithubAuthenticatedEventKind {
@@ -48,7 +46,6 @@ impl GithubAuthenticatedEventKind {
             Self::Push => "push",
             Self::PullRequest => "pull_request",
             Self::MergeGroup => "merge_group",
-            Self::RepositoryDispatch => "repository_dispatch",
         }
     }
 
@@ -57,7 +54,6 @@ impl GithubAuthenticatedEventKind {
             b"push" => Some(Self::Push),
             b"pull_request" => Some(Self::PullRequest),
             b"merge_group" => Some(Self::MergeGroup),
-            b"repository_dispatch" => Some(Self::RepositoryDispatch),
             _ => None,
         }
     }
@@ -114,67 +110,6 @@ impl fmt::Debug for GithubAuthenticatedEventV1 {
             .field("kind", &self.kind)
             .field("git_ref", &"[REDACTED]")
             .finish()
-    }
-}
-
-/// Least-authority mode that resolved a repository dispatch's default branch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GithubRepositoryDispatchResolutionAuthority {
-    /// The configured public repository was resolved without credentials.
-    PublicAnonymous,
-    /// The pinned exact-repository private-source authority performed resolution.
-    PrivateSourceAuthority,
-}
-
-impl GithubRepositoryDispatchResolutionAuthority {
-    /// Returns the closed durable spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PublicAnonymous => "public_anonymous",
-            Self::PrivateSourceAuthority => "private_source_authority",
-        }
-    }
-
-    pub(crate) const fn from_durable(value: &str) -> Option<Self> {
-        match value.as_bytes() {
-            b"public_anonymous" => Some(Self::PublicAnonymous),
-            b"private_source_authority" => Some(Self::PrivateSourceAuthority),
-            _ => None,
-        }
-    }
-}
-
-/// Immutable source-resolution evidence for one custom repository dispatch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GithubRepositoryDispatchResolution {
-    source_revision: GithubCheckHeadSha,
-    authority: GithubRepositoryDispatchResolutionAuthority,
-}
-
-impl GithubRepositoryDispatchResolution {
-    /// Binds the exact default-branch commit to its least-authority mode.
-    #[must_use]
-    pub const fn new(
-        source_revision: GithubCheckHeadSha,
-        authority: GithubRepositoryDispatchResolutionAuthority,
-    ) -> Self {
-        Self {
-            source_revision,
-            authority,
-        }
-    }
-
-    /// Returns the exact immutable default-branch commit.
-    #[must_use]
-    pub const fn source_revision(self) -> GithubCheckHeadSha {
-        self.source_revision
-    }
-
-    /// Returns the exact resolver authority mode.
-    #[must_use]
-    pub const fn authority(self) -> GithubRepositoryDispatchResolutionAuthority {
-        self.authority
     }
 }
 
@@ -315,7 +250,6 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
     check_subject_id: GithubCheckSubjectId,
     check_head_sha: GithubCheckHeadSha,
     authenticated_event_v1: Option<GithubAuthenticatedEventV1>,
-    repository_dispatch_resolution: Option<GithubRepositoryDispatchResolution>,
     accepted_at: UnixMillis,
 }
 
@@ -372,7 +306,6 @@ impl ManifestPinnedGithubDeliveryEvidence {
             check_subject_id,
             check_head_sha,
             authenticated_event_v1: None,
-            repository_dispatch_resolution: None,
             accepted_at,
         })
     }
@@ -410,61 +343,6 @@ impl ManifestPinnedGithubDeliveryEvidence {
             accepted_at,
         )?;
         evidence.authenticated_event_v1 = Some(authenticated_event_v1);
-        Ok(evidence)
-    }
-
-    /// Rehydrates one fully resolved custom repository-dispatch delivery.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-dispatch envelope, a source/Check mismatch, or a resolver
-    /// authority mode inconsistent with the immutable repository visibility.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_durable_parts_resolved_repository_dispatch_v1(
-        delivery_id: ProviderDeliveryId,
-        repository_owner_id: ProviderRepositoryOwnerId,
-        manifest: GithubProviderManifest,
-        authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
-        authenticated_webhook_verifier_revision: GithubServerServiceRevision,
-        checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-        check_subject_id: GithubCheckSubjectId,
-        check_head_sha: GithubCheckHeadSha,
-        authenticated_event_v1: GithubAuthenticatedEventV1,
-        resolution: GithubRepositoryDispatchResolution,
-        accepted_at: UnixMillis,
-    ) -> Result<Self, GithubSubjectEvidenceValueError> {
-        if authenticated_event_v1.kind() != GithubAuthenticatedEventKind::RepositoryDispatch
-            || resolution.source_revision() != check_head_sha
-        {
-            return Err(GithubSubjectEvidenceValueError::InvalidAuthenticatedEvent);
-        }
-        let expected_authority = match manifest.repository_visibility() {
-            ProviderRepositoryVisibility::Public if private_source_authority.is_none() => {
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous
-            }
-            ProviderRepositoryVisibility::Private if private_source_authority.is_some() => {
-                GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority
-            }
-            _ => return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch),
-        };
-        if resolution.authority() != expected_authority {
-            return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch);
-        }
-        let mut evidence = Self::from_durable_parts_authenticated_event_v1(
-            delivery_id,
-            repository_owner_id,
-            manifest,
-            authenticated_webhook_verifier_fingerprint,
-            authenticated_webhook_verifier_revision,
-            checks_authority,
-            private_source_authority,
-            check_subject_id,
-            check_head_sha,
-            authenticated_event_v1,
-            accepted_at,
-        )?;
-        evidence.repository_dispatch_resolution = Some(resolution);
         Ok(evidence)
     }
 
@@ -583,14 +461,6 @@ impl ManifestPinnedGithubDeliveryEvidence {
     #[must_use]
     pub const fn authenticated_event_v1(&self) -> Option<&GithubAuthenticatedEventV1> {
         self.authenticated_event_v1.as_ref()
-    }
-
-    /// Returns immutable default-branch resolution evidence for repository dispatches.
-    #[must_use]
-    pub const fn repository_dispatch_resolution(
-        &self,
-    ) -> Option<GithubRepositoryDispatchResolution> {
-        self.repository_dispatch_resolution
     }
 
     /// Returns the trusted inbox acceptance time.
@@ -741,7 +611,7 @@ impl AuthenticatedGithubDeliveryClaim {
         self.expires_at
     }
 
-    pub(crate) fn authorizes(self, observed_at: UnixMillis) -> bool {
+    fn authorizes(self, observed_at: UnixMillis) -> bool {
         observed_at >= self.claimed_at && observed_at < self.expires_at
     }
 }

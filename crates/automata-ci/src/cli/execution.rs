@@ -9,9 +9,7 @@ use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::{
-    AdminCommand, Command, OutputFormat, auth::execute_auth_command,
-    environment_review::execute_environment_review_command, rerun::execute_rerun_command,
-    secret::execute_secret_command,
+    AdminCommand, Command, OutputFormat, auth::execute_auth_command, secret::execute_secret_command,
 };
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -195,8 +193,7 @@ impl Error for StatusRequestError {
 /// Executes a command that talks to a running control plane.
 ///
 /// Control-plane status, GitHub device authentication, CLI-session lifecycle,
-/// repository-secret management, protected-environment review, and workflow
-/// reruns are operational.
+/// and repository-secret management are operational.
 ///
 /// # Errors
 ///
@@ -216,10 +213,6 @@ pub async fn execute_control_plane_command(
         Command::Secret(secret) => {
             execute_secret_command(server_url, output, &secret.command).await
         }
-        Command::EnvironmentReview(args) => {
-            execute_environment_review_command(server_url, output, args).await
-        }
-        Command::Rerun(args) => execute_rerun_command(server_url, output, args).await,
         Command::Server(_) | Command::Preview(_) => {
             bail!("service commands cannot be sent to a running control plane")
         }

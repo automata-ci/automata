@@ -13,13 +13,13 @@ pub use container::{
     JobService, JobServices,
 };
 pub use event::{
-    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, RepositoryDispatchFilter,
-    TriggerConfiguration, TriggerSet, WorkflowTriggers,
+    EventName, EventTrigger, MergeGroupFilter, PushPullRequestFilter, TriggerConfiguration,
+    TriggerSet, WorkflowTriggers,
 };
 pub use job::{
-    DetailedJobEnvironment, Job, JobEnvironment, JobId, JobOutputs, JobResourceVector,
-    JobResources, Needs, ReusableWorkflowCall, ReusableWorkflowInputs, ReusableWorkflowSecretMap,
-    ReusableWorkflowSecrets, RunnerSelection, WorkflowJob,
+    DetailedJobEnvironment, Job, JobEnvironment, JobId, JobOutputs, Needs, ReusableWorkflowCall,
+    ReusableWorkflowInputs, ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunnerSelection,
+    WorkflowJob,
 };
 pub use provider_event::{GithubChangedFilesV1, GithubEventMetadataV1};
 pub use step::{ActionStep, RunStep, Step, StepExecution, StepId};

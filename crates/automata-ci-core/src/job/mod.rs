@@ -35,7 +35,7 @@ pub use instance::{
 };
 pub use model::{
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobIr, JobIrEnvelope, JobSource,
-    ValueSource, canonical_git_ref,
+    ValueSource,
 };
 pub use permission::{
     JobPermissionGrant, JobPermissionRequest, MAX_JOB_PERMISSION_GRANTS,

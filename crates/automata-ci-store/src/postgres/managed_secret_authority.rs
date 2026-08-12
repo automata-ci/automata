@@ -1,22 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
-use automata_ci_core::{RunnerId, Sha256Digest, UnixMillis};
+use automata_ci_core::{Sha256Digest, UnixMillis};
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Row as _, Transaction};
-use subtle::ConstantTimeEq as _;
 use uuid::Uuid;
 
-use crate::managed_secret_authority::ManagedSecretAuthorityBindingParts;
 use crate::{
-    AcknowledgeManagedSecretDelivery, MANAGED_SECRET_AUTHORITY_SCHEMA, MAX_MANAGED_SECRET_BINDINGS,
-    ManagedSecretAuthorityBinding, ManagedSecretAuthorityReceipt, ManagedSecretAuthorityRepository,
-    ManagedSecretAuthorityStoreError, ManagedSecretDeliveryAcknowledgement,
-    ManagedSecretDeliveryOperationId, ManagedSecretExecutionScope, ManagedSecretGrantMode,
-    ManagedSecretProviderId, ManagedSecretScope, RepositoryId, RepositorySecretId,
-    RepositorySecretVersionId, ResolveManagedSecretAuthority, ResolveManagedSecretDeliverySession,
-    ResolveManagedSecretExecutionScope, RunnerGeneration, RunnerSessionFence,
-    SecretWorkloadGrantId, SessionEpoch, TenantScope,
+    MANAGED_SECRET_AUTHORITY_SCHEMA, MAX_MANAGED_SECRET_BINDINGS, ManagedSecretAuthorityBinding,
+    ManagedSecretAuthorityReceipt, ManagedSecretAuthorityRepository,
+    ManagedSecretAuthorityStoreError, ManagedSecretGrantMode, ManagedSecretProviderId,
+    RepositorySecretId, RepositorySecretVersionId, ResolveManagedSecretAuthority,
+    SecretWorkloadGrantId,
 };
 
 use super::PostgresStore;
@@ -44,7 +39,6 @@ struct GrantRow {
     grant_id: Uuid,
     fencing_token: i64,
     secret_id: Uuid,
-    canonical_name: String,
     version_id: Uuid,
     version_number: i64,
     provider_id: String,
@@ -92,14 +86,12 @@ struct EnvironmentRow {
     revision: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ApprovalRow {
     id: Uuid,
     environment_id: Uuid,
     required_approvals: i16,
     prevent_self_review: bool,
-    requested_by_principal_id: Option<Uuid>,
-    environment_revision: i64,
     status: String,
     created_at_ms: i64,
     expires_at_ms: i64,
@@ -108,386 +100,26 @@ struct ApprovalRow {
     revision: i64,
 }
 
-#[derive(Clone, Debug)]
-struct ApprovalDecisionRow {
-    request_id: Uuid,
-    principal_id: Uuid,
-    decision: String,
-    reason: Option<String>,
-    decided_at_ms: i64,
-}
-
-struct ReservedDeliveryOperation {
-    operation_id: ManagedSecretDeliveryOperationId,
-    credential_key_id: String,
-    credential_sha256: Sha256Digest,
-}
-
 #[async_trait]
 impl ManagedSecretAuthorityRepository for PostgresStore {
-    async fn resolve_managed_secret_delivery_session(
-        &self,
-        request: ResolveManagedSecretDeliverySession,
-    ) -> Result<Option<RunnerSessionFence>, ManagedSecretAuthorityStoreError> {
-        resolve_managed_secret_delivery_session(&self.pool, request).await
-    }
-
-    async fn resolve_managed_secret_execution_scope(
-        &self,
-        request: ResolveManagedSecretExecutionScope,
-    ) -> Result<ManagedSecretExecutionScope, ManagedSecretAuthorityStoreError> {
-        resolve_managed_secret_execution_scope(&self.pool, &request).await
-    }
-
     async fn resolve_managed_secret_authority(
         &self,
         request: ResolveManagedSecretAuthority,
     ) -> Result<ManagedSecretAuthorityReceipt, ManagedSecretAuthorityStoreError> {
-        check_managed_secret_authority(&self.pool, &request).await
-    }
-
-    async fn acknowledge_managed_secret_delivery(
-        &self,
-        request: AcknowledgeManagedSecretDelivery,
-    ) -> Result<ManagedSecretDeliveryAcknowledgement, ManagedSecretAuthorityStoreError> {
-        acknowledge_managed_secret_delivery(&self.pool, request.authority()).await
-    }
-}
-
-async fn resolve_managed_secret_delivery_session(
-    pool: &PgPool,
-    request: ResolveManagedSecretDeliverySession,
-) -> Result<Option<RunnerSessionFence>, ManagedSecretAuthorityStoreError> {
-    let machine = request.machine();
-    let row = sqlx::query(
-        r"
-        SELECT runner.id AS runner_id, runner.generation, session.session_epoch
-        FROM runners AS runner
-        JOIN runner_machine_certificates AS certificate
-          ON certificate.runner_id = runner.id
-        JOIN runner_sessions AS session
-          ON session.id = $3
-         AND session.runner_id = runner.id
-        WHERE runner.external_identity = $1
-          AND certificate.leaf_sha256 = $2
-          AND certificate.revoked_at_seconds IS NULL
-          AND certificate.expires_at_seconds
-                > floor($4::numeric / 1000)::bigint
-          AND runner.status = 'online'
-          AND runner.desired_state IN ('active', 'draining')
-          AND session.disconnected_at_ms IS NULL
-          AND session.connected_at_ms <= $4
-          AND session.session_epoch = runner.session_epoch
-          AND session.runner_generation = runner.generation
-        ",
-    )
-    .bind(machine.external_identity())
-    .bind(machine.certificate_sha256().as_bytes().as_slice())
-    .bind(request.session_id().as_uuid())
-    .bind(request.observed_at().get())
-    .fetch_optional(pool)
-    .await
-    .map_err(operation_error)?;
-    row.map(|row| {
-        let runner_id: Uuid = field(&row, "runner_id")?;
-        if runner_id.is_nil() {
-            return Err(ManagedSecretAuthorityStoreError::CorruptData);
+        match check_managed_secret_authority(&self.pool, &request).await {
+            Err(ManagedSecretAuthorityStoreError::Unavailable) => {
+                Err(ManagedSecretAuthorityStoreError::Unavailable)
+            }
+            Ok(()) | Err(_) => Err(ManagedSecretAuthorityStoreError::Unauthorized),
         }
-        let generation: i64 = field(&row, "generation")?;
-        let epoch: i64 = field(&row, "session_epoch")?;
-        let generation = u64::try_from(generation)
-            .ok()
-            .and_then(|value| RunnerGeneration::new(value).ok())
-            .ok_or(ManagedSecretAuthorityStoreError::CorruptData)?;
-        let epoch = u64::try_from(epoch)
-            .ok()
-            .and_then(|value| SessionEpoch::new(value).ok())
-            .ok_or(ManagedSecretAuthorityStoreError::CorruptData)?;
-        Ok(RunnerSessionFence::new(
-            request.session_id(),
-            RunnerId::from_uuid(runner_id),
-            generation,
-            epoch,
-        ))
-    })
-    .transpose()
-}
-
-#[allow(clippy::too_many_lines)] // One closed predicate derives scope without trusting caller scope.
-async fn resolve_managed_secret_execution_scope(
-    pool: &PgPool,
-    request: &ResolveManagedSecretExecutionScope,
-) -> Result<ManagedSecretExecutionScope, ManagedSecretAuthorityStoreError> {
-    let lease = request.lease();
-    let session = request.session();
-    let row = sqlx::query(
-        r"
-        SELECT repository.tenant_id, repository.id AS repository_id
-        FROM job_attempts AS attempt
-        JOIN jobs AS job ON job.id = attempt.job_id
-        JOIN workflow_runs AS run ON run.id = job.run_id
-        JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete ON concrete.job_id = job.id
-        JOIN workflow_plan_v2_instances AS instance
-          ON instance.id = concrete.instance_id
-         AND instance.run_id = concrete.run_id
-         AND instance.invocation_id = concrete.invocation_id
-         AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
-          ON logical_job.run_id = concrete.run_id
-         AND logical_job.invocation_id = concrete.invocation_id
-         AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
-          ON invocation.run_id = concrete.run_id
-         AND invocation.id = concrete.invocation_id
-        JOIN runners AS runner ON runner.id = attempt.runner_id
-        JOIN runner_sessions AS runner_session
-          ON runner_session.id = attempt.runner_session_id
-         AND runner_session.runner_id = attempt.runner_id
-        WHERE attempt.id = $1
-          AND attempt.job_id = $2
-          AND attempt.fencing_token = $3
-          AND attempt.lease_id = $4
-          AND attempt.lease_issued_at_ms = $5
-          AND attempt.lease_expires_at_ms = $6
-          AND attempt.runner_id = $7
-          AND attempt.runner_session_id = $8
-          AND attempt.runner_session_epoch = $9
-          AND attempt.runner_generation = $10
-          AND attempt.runner_slot = $11
-          AND attempt.lifecycle IN ('leased', 'preparing', 'running')
-          AND attempt.changed_at_ms <= $14
-          AND attempt.lease_expires_at_ms > $14
-          AND job.id = $2
-          AND job.run_id = $12
-          AND job.admission_epoch = 4
-          AND job.job_ir_schema = 5
-          AND run.id = $12
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
-          AND run.status IN ('queued', 'in_progress')
-          AND run.plan_digest = invocation.plan_digest
-          AND marker.orchestration_schema = 1
-          AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
-              run.id, invocation.id
-          )
-          AND invocation.plan_schema = 2
-          AND invocation.state IN ('pending', 'active')
-          AND logical_job.execution_kind = 'steps'
-          AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 5
-          AND instance.job_ir_digest = job.job_ir_digest
-          AND instance.job_ir_object_key = job.job_ir_object_key
-          AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 2
-          AND instance.runtime_context_digest = $13
-          AND concrete.runtime_context_schema = 2
-          AND concrete.runtime_context_digest = $13
-          AND concrete.runtime_context_digest = instance.runtime_context_digest
-          AND concrete.requirements = job.requirements
-          AND concrete.event_digest = run.event_digest
-          AND runner.id = $7
-          AND runner.tenant_id = repository.tenant_id
-          AND runner.status = 'online'
-          AND runner.desired_state IN ('active', 'draining')
-          AND runner.generation = $10
-          AND runner.session_epoch = $9
-          AND runner_session.id = $8
-          AND runner_session.session_epoch = $9
-          AND runner_session.runner_generation = $10
-          AND runner_session.job_ir_schema = 5
-          AND runner_session.disconnected_at_ms IS NULL
-        ",
-    )
-    .bind(lease.attempt_id().as_uuid())
-    .bind(request.job_id().as_uuid())
-    .bind(positive_i64(lease.fencing_token().get())?)
-    .bind(lease.lease_id().as_uuid())
-    .bind(lease.issued_at().get())
-    .bind(lease.expires_at().get())
-    .bind(lease.runner_id().as_uuid())
-    .bind(session.session_id().as_uuid())
-    .bind(positive_i64(session.session_epoch().get())?)
-    .bind(positive_i64(session.runner_generation().get())?)
-    .bind(i32::from(request.slot().ordinal()))
-    .bind(request.run_id().as_uuid())
-    .bind(request.runtime_context_digest().as_bytes().as_slice())
-    .bind(request.observed_at().get())
-    .fetch_optional(pool)
-    .await
-    .map_err(operation_error)?
-    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    let tenant = TenantScope::from_authenticated_tenant_id(field::<String>(&row, "tenant_id")?)
-        .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
-    let repository_uuid: Uuid = field(&row, "repository_id")?;
-    if repository_uuid.is_nil() {
-        return Err(ManagedSecretAuthorityStoreError::CorruptData);
     }
-    let repository_id = RepositoryId::from_uuid(repository_uuid);
-    Ok(ManagedSecretExecutionScope::from_durable(
-        tenant,
-        repository_id,
-    ))
-}
-
-async fn acknowledge_managed_secret_delivery(
-    pool: &PgPool,
-    request: &ResolveManagedSecretAuthority,
-) -> Result<ManagedSecretDeliveryAcknowledgement, ManagedSecretAuthorityStoreError> {
-    let delivery = request
-        .delivery()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    let mut transaction = pool.begin().await.map_err(operation_error)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-
-    validate_authenticated_machine(&mut transaction, request).await?;
-    let execution = lock_current_execution(&mut transaction, request).await?;
-    lock_current_attempt_set(&mut transaction, request, execution.attempt_number).await?;
-    let row = lock_delivery_operation(&mut transaction, request).await?;
-
-    let stored_credential: Vec<u8> = field(&row, "credential_sha256")?;
-    let credential_matches = stored_credential.len() == 32
-        && bool::from(
-            stored_credential
-                .as_slice()
-                .ct_eq(delivery.credential_sha256().as_bytes()),
-        );
-    if !credential_matches || !field::<bool>(&row, "exact")? {
-        return Err(ManagedSecretAuthorityStoreError::Unauthorized);
-    }
-
-    let state: String = field(&row, "state")?;
-    let usable_until_ms: i64 = field(&row, "usable_until_ms")?;
-    if request.observed_at().get() >= usable_until_ms {
-        if state == "pending" {
-            expire_delivery_operation(&mut transaction, request).await?;
-            transaction.commit().await.map_err(operation_error)?;
-        }
-        return Err(ManagedSecretAuthorityStoreError::Unauthorized);
-    }
-
-    let acknowledged_at = match state.as_str() {
-        "pending" => acknowledge_delivery_operation(&mut transaction, request).await?,
-        "acknowledged" => UnixMillis::new(
-            field::<Option<i64>>(&row, "acknowledged_at_ms")?
-                .ok_or(ManagedSecretAuthorityStoreError::CorruptData)?,
-        ),
-        "expired" => return Err(ManagedSecretAuthorityStoreError::Unauthorized),
-        _ => return Err(ManagedSecretAuthorityStoreError::CorruptData),
-    };
-    transaction.commit().await.map_err(operation_error)?;
-    Ok(ManagedSecretDeliveryAcknowledgement::from_durable(
-        delivery.operation_id(),
-        acknowledged_at,
-    ))
-}
-
-async fn lock_delivery_operation(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-) -> Result<sqlx::postgres::PgRow, ManagedSecretAuthorityStoreError> {
-    let delivery = request
-        .delivery()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    sqlx::query(
-        r"
-        SELECT credential_sha256, state, usable_until_ms, acknowledged_at_ms,
-               (repository_id = $3 AND run_id = $4 AND job_id = $5
-                AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
-                AND runner_id = $9 AND runner_session_id = $10
-                AND runner_session_epoch = $11 AND runner_generation = $12
-                AND runner_slot = $13 AND runtime_context_digest = $14
-                AND binding_set_digest = $15 AND credential_key_id = $16) AS exact
-        FROM managed_secret_delivery_operations
-        WHERE tenant_id = $1 AND operation_id = $2
-        FOR UPDATE
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(delivery.operation_id().as_uuid())
-    .bind(request.repository_id().as_uuid())
-    .bind(request.run_id().as_uuid())
-    .bind(request.job_id().as_uuid())
-    .bind(request.lease().attempt_id().as_uuid())
-    .bind(request.lease().lease_id().as_uuid())
-    .bind(positive_i64(request.lease().fencing_token().get())?)
-    .bind(request.lease().runner_id().as_uuid())
-    .bind(request.session().session_id().as_uuid())
-    .bind(positive_i64(request.session().session_epoch().get())?)
-    .bind(positive_i64(request.session().runner_generation().get())?)
-    .bind(
-        i16::try_from(request.slot().ordinal())
-            .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
-    )
-    .bind(request.runtime_context_digest().as_bytes().as_slice())
-    .bind(binding_set_digest(request).as_bytes().as_slice())
-    .bind(delivery.credential_key_id())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)
-}
-
-async fn expire_delivery_operation(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-) -> Result<(), ManagedSecretAuthorityStoreError> {
-    let operation_id = request
-        .delivery()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?
-        .operation_id();
-    sqlx::query(
-        r"
-        UPDATE managed_secret_delivery_operations
-        SET state = 'expired'
-        WHERE tenant_id = $1 AND operation_id = $2 AND state = 'pending'
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(operation_id.as_uuid())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(())
-}
-
-async fn acknowledge_delivery_operation(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-) -> Result<UnixMillis, ManagedSecretAuthorityStoreError> {
-    let operation_id = request
-        .delivery()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?
-        .operation_id();
-    sqlx::query(
-        r"
-        UPDATE managed_secret_delivery_operations
-        SET state = 'acknowledged', acknowledged_at_ms = $3
-        WHERE tenant_id = $1 AND operation_id = $2 AND state = 'pending'
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(operation_id.as_uuid())
-    .bind(request.observed_at().get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(request.observed_at())
 }
 
 #[allow(clippy::too_many_lines)] // Keep the one-transaction check order visible and auditable.
 async fn check_managed_secret_authority(
     pool: &PgPool,
     request: &ResolveManagedSecretAuthority,
-) -> Result<ManagedSecretAuthorityReceipt, ManagedSecretAuthorityStoreError> {
-    let delivery = request
-        .delivery()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
+) -> Result<(), ManagedSecretAuthorityStoreError> {
     let mut transaction = pool.begin().await.map_err(operation_error)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *transaction)
@@ -550,8 +182,6 @@ async fn check_managed_secret_authority(
         .filter_map(|grant| grant.approval_id)
         .collect::<BTreeSet<_>>();
     let approvals = lock_approvals(&mut transaction, request, &approval_ids).await?;
-    let approval_decisions =
-        lock_approval_decisions(&mut transaction, request, &approval_ids).await?;
 
     let mut usable_until = request.lease().expires_at();
     let mut checked_bindings = Vec::with_capacity(grants.len());
@@ -563,7 +193,6 @@ async fn check_managed_secret_authority(
             &repository_access,
             &environments,
             &approvals,
-            &approval_decisions,
         )?;
         usable_until = UnixMillis::new(usable_until.get().min(grant.expires_at_ms));
         if let Some(approval_id) = grant.approval_id {
@@ -577,7 +206,7 @@ async fn check_managed_secret_authority(
     if usable_until <= request.observed_at() {
         return Err(ManagedSecretAuthorityStoreError::Unauthorized);
     }
-    let authority_evidence_digest = evidence_digest(
+    let _pending_evidence_digest = evidence_digest(
         request,
         &execution,
         &checked_bindings,
@@ -585,32 +214,26 @@ async fn check_managed_secret_authority(
         &repository_access,
         &environments,
         &approvals,
-        &approval_decisions,
         usable_until,
     );
-    if request.machine().is_some() {
-        validate_authenticated_machine(&mut transaction, request).await?;
-    }
-    let binding_set_digest = binding_set_digest(request);
-    let reserved = reserve_delivery_operation(
-        &mut transaction,
-        request,
-        delivery.operation_id(),
-        binding_set_digest,
-        authority_evidence_digest,
-        usable_until,
-    )
-    .await?;
     transaction.commit().await.map_err(operation_error)?;
-    Ok(ManagedSecretAuthorityReceipt::from_verified_parts(
-        reserved.operation_id,
-        reserved.credential_key_id,
-        reserved.credential_sha256,
-        request,
-        checked_bindings,
-        authority_evidence_digest,
-        usable_until,
-    ))
+
+    // No receipt can be issued on the current schema/credential contract.
+    // Migration 0012 permits a terminal grant to be reactivated, so this
+    // read cannot prove monotonic non-replay. The schema also permits a
+    // terminal historical attempt to become live again and has no exact
+    // one-current-attempt invariant. In addition, the request only carries
+    // public execution/binding identities and never proves possession of
+    // the credential authenticated by `authority_digest`. Keep the fully
+    // checked, value-free foundation closed until those durable invariants
+    // and an exact authenticated credential or control-session binding are
+    // inputs, with a one-operation consumption fence after this transaction.
+    // This port has no proof-of-possession or authenticated control-call
+    // input. Returning a distinct "otherwise matched" result would turn
+    // public binding IDs into an authority-validation oracle, so the
+    // current adapter deliberately collapses its non-issuing outcome into
+    // the same closed result as every unauthorized target.
+    Ok(())
 }
 
 // `FOR UPDATE OF attempt` is deliberate: besides pinning the live lease, it
@@ -679,9 +302,7 @@ async fn lock_current_execution(
           AND repository.tenant_id = $14
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
-              run.id, invocation.id
-          )
+          AND marker.root_invocation_id = invocation.id
           AND invocation.plan_schema = 2
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
@@ -863,8 +484,7 @@ async fn lock_grant_dependencies(
     let rows = sqlx::query(
         r"
         SELECT grant_row.id AS grant_id, grant_row.fencing_token,
-               grant_row.secret_id, secret.canonical_name,
-               grant_row.secret_version_id,
+               grant_row.secret_id, grant_row.secret_version_id,
                grant_row.secret_version_number, grant_row.provider_id,
                grant_row.environment_id,
                grant_row.environment_approval_request_id AS approval_id,
@@ -942,7 +562,6 @@ fn decode_grant(row: &sqlx::postgres::PgRow) -> Result<GrantRow, ManagedSecretAu
         grant_id: field(row, "grant_id")?,
         fencing_token: field(row, "fencing_token")?,
         secret_id: field(row, "secret_id")?,
-        canonical_name: field(row, "canonical_name")?,
         version_id: field(row, "secret_version_id")?,
         version_number: field(row, "secret_version_number")?,
         provider_id: field(row, "provider_id")?,
@@ -1066,8 +685,7 @@ async fn lock_approvals(
     let rows = sqlx::query(
         r"
         SELECT id, environment_id, required_approvals,
-               prevent_self_review, requested_by_principal_id,
-               environment_revision, status, created_at_ms, expires_at_ms,
+               prevent_self_review, status, created_at_ms, expires_at_ms,
                resolved_at_ms, resolution_reason, revision
         FROM protected_environment_approval_requests
         WHERE tenant_id = $1
@@ -1096,8 +714,6 @@ async fn lock_approvals(
             environment_id: field(row, "environment_id")?,
             required_approvals: field(row, "required_approvals")?,
             prevent_self_review: field(row, "prevent_self_review")?,
-            requested_by_principal_id: field(row, "requested_by_principal_id")?,
-            environment_revision: field(row, "environment_revision")?,
             status: field(row, "status")?,
             created_at_ms: field(row, "created_at_ms")?,
             expires_at_ms: field(row, "expires_at_ms")?,
@@ -1115,78 +731,6 @@ async fn lock_approvals(
     Ok(approvals)
 }
 
-async fn lock_approval_decisions(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-    ids: &BTreeSet<Uuid>,
-) -> Result<BTreeMap<Uuid, Vec<ApprovalDecisionRow>>, ManagedSecretAuthorityStoreError> {
-    if ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let values = ids.iter().copied().collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r"
-        SELECT decision.request_id, decision.principal_id, decision.decision,
-               decision.reason, decision.decided_at_ms
-        FROM protected_environment_approval_decisions AS decision
-        JOIN protected_environment_approval_requests AS request
-          ON request.tenant_id = decision.tenant_id
-         AND request.id = decision.request_id
-        WHERE decision.tenant_id = $1
-          AND request.repository_id = $2
-          AND request.run_id = $3
-          AND request.job_id = $4
-          AND request.attempt_id = $5
-          AND decision.request_id = ANY($6)
-        ORDER BY decision.request_id, decision.principal_id
-        FOR SHARE OF decision
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(request.repository_id().as_uuid())
-    .bind(request.run_id().as_uuid())
-    .bind(request.job_id().as_uuid())
-    .bind(request.lease().attempt_id().as_uuid())
-    .bind(&values)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    let mut decisions = BTreeMap::<Uuid, Vec<ApprovalDecisionRow>>::new();
-    for row in &rows {
-        let decision = ApprovalDecisionRow {
-            request_id: field(row, "request_id")?,
-            principal_id: field(row, "principal_id")?,
-            decision: field(row, "decision")?,
-            reason: field(row, "reason")?,
-            decided_at_ms: field(row, "decided_at_ms")?,
-        };
-        if decision.request_id.is_nil()
-            || decision.principal_id.is_nil()
-            || !matches!(decision.decision.as_str(), "approve" | "reject")
-            || decision.reason.as_deref().is_some_and(|reason| {
-                !matches!(
-                    reason,
-                    "policy_reviewed"
-                        | "change_reviewed"
-                        | "security_reviewed"
-                        | "administrative_review"
-                )
-            })
-        {
-            return Err(ManagedSecretAuthorityStoreError::CorruptData);
-        }
-        let request_decisions = decisions.entry(decision.request_id).or_default();
-        if request_decisions
-            .last()
-            .is_some_and(|previous| previous.principal_id >= decision.principal_id)
-        {
-            return Err(ManagedSecretAuthorityStoreError::CorruptData);
-        }
-        request_decisions.push(decision);
-    }
-    Ok(decisions)
-}
-
 fn validate_grant(
     request: &ResolveManagedSecretAuthority,
     execution: &ExecutionRow,
@@ -1194,7 +738,6 @@ fn validate_grant(
     repository_access: &BTreeSet<Uuid>,
     environments: &BTreeMap<Uuid, EnvironmentRow>,
     approvals: &BTreeMap<Uuid, ApprovalRow>,
-    approval_decisions: &BTreeMap<Uuid, Vec<ApprovalDecisionRow>>,
 ) -> Result<ManagedSecretAuthorityBinding, ManagedSecretAuthorityStoreError> {
     if grant.environment_id.is_some_and(|value| value.is_nil())
         || grant.approval_id.is_some_and(|value| value.is_nil())
@@ -1244,7 +787,6 @@ fn validate_grant(
         || grant.authority_digest.len() != 32
         || !canonical_machine_id(&grant.authority_digest_key_id, 128)
         || !canonical_lower_machine_id(&grant.provider_adapter_kind, 128)
-        || !canonical_secret_name(&grant.canonical_name)
         || !matches!(
             grant.storage_kind.as_str(),
             "built_in_ciphertext" | "external_provider"
@@ -1276,15 +818,8 @@ fn validate_grant(
     }
     validate_scope(request, grant, repository_access)?;
     validate_policy(grant)?;
-    validate_environment(request, grant, environments, approvals, approval_decisions)?;
-    verified_binding(grant, provider_id, mode)
-}
+    validate_environment(request, grant, environments, approvals)?;
 
-fn verified_binding(
-    grant: &GrantRow,
-    provider_id: ManagedSecretProviderId,
-    mode: ManagedSecretGrantMode,
-) -> Result<ManagedSecretAuthorityBinding, ManagedSecretAuthorityStoreError> {
     let grant_id = SecretWorkloadGrantId::from_uuid(grant.grant_id)
         .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
     let secret_id = RepositorySecretId::from_uuid(grant.secret_id)
@@ -1293,28 +828,14 @@ fn verified_binding(
         .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
     let version_number = u64::try_from(grant.version_number)
         .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
-    let scope = match grant.secret_scope_kind.as_str() {
-        "tenant" => ManagedSecretScope::Tenant,
-        "repository" => ManagedSecretScope::Repository,
-        "environment" => ManagedSecretScope::Environment {
-            environment_id: grant
-                .secret_environment_id
-                .ok_or(ManagedSecretAuthorityStoreError::CorruptData)?,
-        },
-        _ => return Err(ManagedSecretAuthorityStoreError::CorruptData),
-    };
     Ok(ManagedSecretAuthorityBinding::from_verified_parts(
-        ManagedSecretAuthorityBindingParts {
-            grant_id,
-            provider_id,
-            secret_id,
-            version_id,
-            version_number,
-            canonical_name: grant.canonical_name.clone(),
-            scope,
-            mode,
-            provider_supports_dynamic_leases: grant.provider_supports_dynamic_leases,
-        },
+        grant_id,
+        provider_id,
+        secret_id,
+        version_id,
+        version_number,
+        mode,
+        grant.provider_supports_dynamic_leases,
     ))
 }
 
@@ -1373,7 +894,6 @@ fn validate_environment(
     grant: &GrantRow,
     environments: &BTreeMap<Uuid, EnvironmentRow>,
     approvals: &BTreeMap<Uuid, ApprovalRow>,
-    approval_decisions: &BTreeMap<Uuid, Vec<ApprovalDecisionRow>>,
 ) -> Result<(), ManagedSecretAuthorityStoreError> {
     let Some(environment_id) = grant.environment_id else {
         return if grant.approval_id.is_none() {
@@ -1411,7 +931,6 @@ fn validate_environment(
                 && approval.status == "approved"
                 && approval.required_approvals == environment.required_approvals
                 && approval.prevent_self_review == environment.prevent_self_review
-                && approval.environment_revision == environment.revision
                 && approval.revision > 0
                 && approval.created_at_ms >= 0
                 && resolved_at >= approval.created_at_ms
@@ -1424,32 +943,12 @@ fn validate_environment(
             if !valid {
                 return Err(ManagedSecretAuthorityStoreError::Unauthorized);
             }
-            let decisions = approval_decisions
-                .get(&approval_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let approval_count = decisions
-                .iter()
-                .filter(|decision| decision.decision == "approve")
-                .filter(|decision| {
-                    !approval.prevent_self_review
-                        || Some(decision.principal_id) != approval.requested_by_principal_id
-                })
-                .count();
-            let decisions_are_fresh = decisions.iter().all(|decision| {
-                decision.decided_at_ms >= approval.created_at_ms
-                    && decision.decided_at_ms < approval.expires_at_ms
-                    && decision.decided_at_ms <= request.observed_at().get()
-            });
-            if !decisions_are_fresh
-                || decisions
-                    .iter()
-                    .any(|decision| decision.decision == "reject")
-                || approval_count
-                    < usize::try_from(approval.required_approvals).unwrap_or(usize::MAX)
-            {
-                return Err(ManagedSecretAuthorityStoreError::Unauthorized);
-            }
+            // The approval row snapshots the mutable settings, but migration
+            // 0012 does not pin the approval to an immutable environment
+            // revision or settings digest. Equality here cannot distinguish an
+            // ABA policy change, so protected delivery remains fail-closed
+            // until that missing durable contract exists.
+            return Err(ManagedSecretAuthorityStoreError::Unauthorized);
         }
         _ => return Err(ManagedSecretAuthorityStoreError::CorruptData),
     }
@@ -1465,7 +964,6 @@ fn evidence_digest(
     repository_access: &BTreeSet<Uuid>,
     environments: &BTreeMap<Uuid, EnvironmentRow>,
     approvals: &BTreeMap<Uuid, ApprovalRow>,
-    approval_decisions: &BTreeMap<Uuid, Vec<ApprovalDecisionRow>>,
     usable_until: UnixMillis,
 ) -> Sha256Digest {
     let mut hasher = Sha256::new();
@@ -1494,7 +992,11 @@ fn evidence_digest(
     hasher.update(execution.plan_digest.as_bytes());
     hasher.update(execution.event_digest.as_bytes());
     hasher.update(usable_until.get().to_be_bytes());
-    hash_length(&mut hasher, bindings.len());
+    hasher.update(
+        u64::try_from(bindings.len())
+            .expect("managed-secret binding count is bounded")
+            .to_be_bytes(),
+    );
     for binding in bindings {
         hash_uuid(&mut hasher, binding.grant_id().as_uuid());
         hash_text(&mut hasher, binding.provider_id().as_str());
@@ -1507,7 +1009,11 @@ fn evidence_digest(
         }]);
         hasher.update([u8::from(binding.provider_supports_dynamic_leases())]);
     }
-    hash_length(&mut hasher, grants.len());
+    hasher.update(
+        u64::try_from(grants.len())
+            .expect("managed-secret grant count is bounded")
+            .to_be_bytes(),
+    );
     for grant in grants {
         hash_grant(
             &mut hasher,
@@ -1515,11 +1021,6 @@ fn evidence_digest(
             repository_access.contains(&grant.secret_id),
             grant.environment_id.and_then(|id| environments.get(&id)),
             grant.approval_id.and_then(|id| approvals.get(&id)),
-            grant
-                .approval_id
-                .and_then(|id| approval_decisions.get(&id))
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
         );
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
@@ -1531,12 +1032,10 @@ fn hash_grant(
     repository_access: bool,
     environment: Option<&EnvironmentRow>,
     approval: Option<&ApprovalRow>,
-    approval_decisions: &[ApprovalDecisionRow],
 ) {
     hash_uuid(hasher, grant.grant_id);
     hasher.update(grant.fencing_token.to_be_bytes());
     hash_uuid(hasher, grant.secret_id);
-    hash_text(hasher, &grant.canonical_name);
     hash_uuid(hasher, grant.version_id);
     hasher.update(grant.version_number.to_be_bytes());
     hash_text(hasher, &grant.provider_id);
@@ -1589,14 +1088,6 @@ fn hash_grant(
             hasher.update(environment.revision.to_be_bytes());
         }
     }
-    hash_approval_evidence(hasher, approval, approval_decisions);
-}
-
-fn hash_approval_evidence(
-    hasher: &mut Sha256,
-    approval: Option<&ApprovalRow>,
-    approval_decisions: &[ApprovalDecisionRow],
-) {
     match approval {
         None => hasher.update([0]),
         Some(approval) => {
@@ -1605,8 +1096,6 @@ fn hash_approval_evidence(
             hash_uuid(hasher, approval.environment_id);
             hasher.update(approval.required_approvals.to_be_bytes());
             hasher.update([u8::from(approval.prevent_self_review)]);
-            hash_optional_uuid(hasher, approval.requested_by_principal_id);
-            hasher.update(approval.environment_revision.to_be_bytes());
             hash_text(hasher, &approval.status);
             hasher.update(approval.created_at_ms.to_be_bytes());
             hasher.update(approval.expires_at_ms.to_be_bytes());
@@ -1614,14 +1103,6 @@ fn hash_approval_evidence(
             hash_optional_text(hasher, approval.resolution_reason.as_deref());
             hasher.update(approval.revision.to_be_bytes());
         }
-    }
-    hash_length(hasher, approval_decisions.len());
-    for decision in approval_decisions {
-        hash_uuid(hasher, decision.request_id);
-        hash_uuid(hasher, decision.principal_id);
-        hash_text(hasher, &decision.decision);
-        hash_optional_text(hasher, decision.reason.as_deref());
-        hasher.update(decision.decided_at_ms.to_be_bytes());
     }
 }
 
@@ -1664,12 +1145,12 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 }
 
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
-    hash_length(hasher, value.len());
+    hasher.update(
+        u64::try_from(value.len())
+            .expect("durable managed-secret evidence fields are bounded")
+            .to_be_bytes(),
+    );
     hasher.update(value);
-}
-
-fn hash_length(hasher: &mut Sha256, length: usize) {
-    hasher.update(u64::try_from(length).unwrap_or(u64::MAX).to_be_bytes());
 }
 
 fn canonical_machine_id(value: &str, maximum: usize) -> bool {
@@ -1682,259 +1163,6 @@ fn canonical_machine_id(value: &str, maximum: usize) -> bool {
 
 fn canonical_lower_machine_id(value: &str, maximum: usize) -> bool {
     canonical_machine_id(value, maximum) && !value.bytes().any(|byte| byte.is_ascii_uppercase())
-}
-
-fn canonical_secret_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    value.len() <= 255
-        && (first.is_ascii_uppercase() || first == b'_')
-        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-        && !["GITHUB_", "ACTIONS_", "RUNNER_", "AUTOMATA_"]
-            .iter()
-            .any(|prefix| value.starts_with(prefix))
-}
-
-fn binding_set_digest(request: &ResolveManagedSecretAuthority) -> Sha256Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(b"automata/store/managed-secret-binding-set:v1\0");
-    hash_length(&mut hasher, request.bindings().len());
-    for (grant_id, version_id) in request.bindings().entries() {
-        hash_uuid(&mut hasher, grant_id.as_uuid());
-        hash_uuid(&mut hasher, version_id.as_uuid());
-    }
-    Sha256Digest::from_bytes(hasher.finalize().into())
-}
-
-async fn validate_authenticated_machine(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-) -> Result<(), ManagedSecretAuthorityStoreError> {
-    let machine = request
-        .machine()
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    let current = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-            FROM runners AS runner
-            JOIN runner_machine_certificates AS certificate
-              ON certificate.runner_id = runner.id
-            JOIN runner_sessions AS session
-              ON session.id = $4
-             AND session.runner_id = runner.id
-            WHERE runner.id = $1
-              AND runner.external_identity = $2
-              AND certificate.leaf_sha256 = $3
-              AND certificate.revoked_at_seconds IS NULL
-              AND certificate.expires_at_seconds
-                    > floor($5::numeric / 1000)::bigint
-              AND runner.status = 'online'
-              AND runner.generation = $6
-              AND session.session_epoch = $7
-              AND session.runner_generation = $6
-              AND session.disconnected_at_ms IS NULL
-        )
-        ",
-    )
-    .bind(request.lease().runner_id().as_uuid())
-    .bind(machine.external_identity())
-    .bind(machine.certificate_sha256().as_bytes().as_slice())
-    .bind(request.session().session_id().as_uuid())
-    .bind(request.observed_at().get())
-    .bind(positive_i64(request.session().runner_generation().get())?)
-    .bind(positive_i64(request.session().session_epoch().get())?)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if current {
-        Ok(())
-    } else {
-        Err(ManagedSecretAuthorityStoreError::Unauthorized)
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn reserve_delivery_operation(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &ResolveManagedSecretAuthority,
-    operation_id: ManagedSecretDeliveryOperationId,
-    binding_set_digest: Sha256Digest,
-    authority_evidence_digest: Sha256Digest,
-    usable_until: UnixMillis,
-) -> Result<ReservedDeliveryOperation, ManagedSecretAuthorityStoreError> {
-    let delivery = request
-        .delivery()
-        .filter(|delivery| delivery.operation_id() == operation_id)
-        .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    let lease = request.lease();
-    let session = request.session();
-    sqlx::query(
-        r"
-        INSERT INTO managed_secret_delivery_operations (
-            tenant_id, operation_id, repository_id, run_id, job_id,
-            attempt_id, lease_id, fencing_token, runner_id,
-            runner_session_id, runner_session_epoch, runner_generation,
-            runner_slot, runtime_context_digest, binding_set_digest,
-            authority_evidence_digest, credential_key_id, credential_sha256,
-            state, created_at_ms, usable_until_ms, acknowledged_at_ms
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9,
-            $10, $11, $12,
-            $13, $14, $15,
-            $16, $17, $18,
-            'pending', $19, $20, NULL
-        )
-        ON CONFLICT DO NOTHING
-        ",
-    )
-    .bind(request.tenant().as_str())
-    .bind(operation_id.as_uuid())
-    .bind(request.repository_id().as_uuid())
-    .bind(request.run_id().as_uuid())
-    .bind(request.job_id().as_uuid())
-    .bind(lease.attempt_id().as_uuid())
-    .bind(lease.lease_id().as_uuid())
-    .bind(positive_i64(lease.fencing_token().get())?)
-    .bind(lease.runner_id().as_uuid())
-    .bind(session.session_id().as_uuid())
-    .bind(positive_i64(session.session_epoch().get())?)
-    .bind(positive_i64(session.runner_generation().get())?)
-    .bind(
-        i16::try_from(request.slot().ordinal())
-            .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
-    )
-    .bind(request.runtime_context_digest().as_bytes().as_slice())
-    .bind(binding_set_digest.as_bytes().as_slice())
-    .bind(authority_evidence_digest.as_bytes().as_slice())
-    .bind(delivery.credential_key_id())
-    .bind(delivery.credential_sha256().as_bytes().as_slice())
-    .bind(request.observed_at().get())
-    .bind(usable_until.get())
-    .execute(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-
-    let row = if request.machine().is_none() {
-        sqlx::query(
-            r"
-            SELECT operation_id, credential_key_id, credential_sha256
-            FROM managed_secret_delivery_operations
-            WHERE tenant_id = $1 AND repository_id = $2
-              AND run_id = $3 AND job_id = $4 AND attempt_id = $5
-              AND lease_id = $6 AND fencing_token = $7
-              AND runner_id = $8 AND runner_session_id = $9
-              AND runner_session_epoch = $10 AND runner_generation = $11
-              AND runner_slot = $12 AND runtime_context_digest = $13
-              AND binding_set_digest = $14
-              AND authority_evidence_digest = $15
-              AND credential_key_id = $16 AND credential_sha256 = $17
-              AND state = 'pending' AND created_at_ms <= $18
-              AND usable_until_ms = $19 AND usable_until_ms > $18
-            FOR UPDATE
-            ",
-        )
-        .bind(request.tenant().as_str())
-        .bind(request.repository_id().as_uuid())
-        .bind(request.run_id().as_uuid())
-        .bind(request.job_id().as_uuid())
-        .bind(lease.attempt_id().as_uuid())
-        .bind(lease.lease_id().as_uuid())
-        .bind(positive_i64(lease.fencing_token().get())?)
-        .bind(lease.runner_id().as_uuid())
-        .bind(session.session_id().as_uuid())
-        .bind(positive_i64(session.session_epoch().get())?)
-        .bind(positive_i64(session.runner_generation().get())?)
-        .bind(
-            i16::try_from(request.slot().ordinal())
-                .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
-        )
-        .bind(request.runtime_context_digest().as_bytes().as_slice())
-        .bind(binding_set_digest.as_bytes().as_slice())
-        .bind(authority_evidence_digest.as_bytes().as_slice())
-        .bind(delivery.credential_key_id())
-        .bind(delivery.credential_sha256().as_bytes().as_slice())
-        .bind(request.observed_at().get())
-        .bind(usable_until.get())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-    } else {
-        sqlx::query(
-            r"
-        SELECT operation_id, credential_key_id, credential_sha256, (
-            repository_id = $3 AND run_id = $4 AND job_id = $5
-            AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
-            AND runner_id = $9 AND runner_session_id = $10
-            AND runner_session_epoch = $11 AND runner_generation = $12
-            AND runner_slot = $13 AND runtime_context_digest = $14
-            AND binding_set_digest = $15 AND authority_evidence_digest = $16
-            AND credential_key_id = $17
-            AND state = 'pending' AND created_at_ms <= $18
-            AND usable_until_ms = $19 AND usable_until_ms > $18
-        ) AS exact
-        FROM managed_secret_delivery_operations
-        WHERE tenant_id = $1 AND operation_id = $2
-        FOR UPDATE
-        ",
-        )
-        .bind(request.tenant().as_str())
-        .bind(operation_id.as_uuid())
-        .bind(request.repository_id().as_uuid())
-        .bind(request.run_id().as_uuid())
-        .bind(request.job_id().as_uuid())
-        .bind(lease.attempt_id().as_uuid())
-        .bind(lease.lease_id().as_uuid())
-        .bind(positive_i64(lease.fencing_token().get())?)
-        .bind(lease.runner_id().as_uuid())
-        .bind(session.session_id().as_uuid())
-        .bind(positive_i64(session.session_epoch().get())?)
-        .bind(positive_i64(session.runner_generation().get())?)
-        .bind(
-            i16::try_from(request.slot().ordinal())
-                .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
-        )
-        .bind(request.runtime_context_digest().as_bytes().as_slice())
-        .bind(binding_set_digest.as_bytes().as_slice())
-        .bind(authority_evidence_digest.as_bytes().as_slice())
-        .bind(delivery.credential_key_id())
-        .bind(request.observed_at().get())
-        .bind(usable_until.get())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-    };
-    let Some(row) = row else {
-        return Err(ManagedSecretAuthorityStoreError::Unauthorized);
-    };
-    let reserved_operation_id =
-        ManagedSecretDeliveryOperationId::from_uuid(field(&row, "operation_id")?)
-            .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
-    let reserved_key_id: String = field(&row, "credential_key_id")?;
-    let stored_credential: Vec<u8> = field(&row, "credential_sha256")?;
-    let stored_credential: [u8; 32] = stored_credential
-        .try_into()
-        .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
-    let external_exact = reserved_operation_id == operation_id
-        && reserved_key_id == delivery.credential_key_id()
-        && bool::from(
-            stored_credential
-                .as_slice()
-                .ct_eq(delivery.credential_sha256().as_bytes()),
-        )
-        && (request.machine().is_none() || field::<bool>(&row, "exact")?);
-    if external_exact {
-        Ok(ReservedDeliveryOperation {
-            operation_id: reserved_operation_id,
-            credential_key_id: reserved_key_id,
-            credential_sha256: Sha256Digest::from_bytes(stored_credential),
-        })
-    } else {
-        Err(ManagedSecretAuthorityStoreError::Unauthorized)
-    }
 }
 
 fn positive_i64(value: u64) -> Result<i64, ManagedSecretAuthorityStoreError> {
@@ -1969,70 +1197,4 @@ where
 #[allow(clippy::needless_pass_by_value)]
 fn operation_error(_: sqlx::Error) -> ManagedSecretAuthorityStoreError {
     ManagedSecretAuthorityStoreError::Unavailable
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn approval_digest(approval: &ApprovalRow, decisions: &[ApprovalDecisionRow]) -> Sha256Digest {
-        let mut hasher = Sha256::new();
-        hash_approval_evidence(&mut hasher, Some(approval), decisions);
-        Sha256Digest::from_bytes(hasher.finalize().into())
-    }
-
-    fn approval() -> ApprovalRow {
-        ApprovalRow {
-            id: Uuid::from_u128(1),
-            environment_id: Uuid::from_u128(2),
-            required_approvals: 1,
-            prevent_self_review: true,
-            requested_by_principal_id: Some(Uuid::from_u128(3)),
-            environment_revision: 4,
-            status: "approved".to_owned(),
-            created_at_ms: 10,
-            expires_at_ms: 100,
-            resolved_at_ms: Some(20),
-            resolution_reason: Some("approval_threshold_met".to_owned()),
-            revision: 2,
-        }
-    }
-
-    fn decision() -> ApprovalDecisionRow {
-        ApprovalDecisionRow {
-            request_id: Uuid::from_u128(1),
-            principal_id: Uuid::from_u128(5),
-            decision: "approve".to_owned(),
-            reason: Some("security_reviewed".to_owned()),
-            decided_at_ms: 15,
-        }
-    }
-
-    #[test]
-    fn approval_evidence_digest_binds_requester_revision_and_decisions() {
-        let approval = approval();
-        let decision = decision();
-        let baseline = approval_digest(&approval, std::slice::from_ref(&decision));
-
-        let mut changed_requester = approval.clone();
-        changed_requester.requested_by_principal_id = Some(Uuid::from_u128(6));
-        assert_ne!(
-            baseline,
-            approval_digest(&changed_requester, std::slice::from_ref(&decision))
-        );
-
-        let mut changed_revision = approval.clone();
-        changed_revision.environment_revision += 1;
-        assert_ne!(
-            baseline,
-            approval_digest(&changed_revision, std::slice::from_ref(&decision))
-        );
-
-        let mut changed_decision = decision;
-        changed_decision.decision = "reject".to_owned();
-        assert_ne!(
-            baseline,
-            approval_digest(&approval, std::slice::from_ref(&changed_decision))
-        );
-    }
 }

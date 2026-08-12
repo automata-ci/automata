@@ -6,9 +6,8 @@ use automata_ci_core::{
     CompiledBooleanTemplate, CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerPort,
     DeploymentSelection, ExpressionContext, InvocationInputDefault, InvocationInputDefinition,
     InvocationInputType, InvocationSecretDefinition, Located, LogicalConcurrencyTemplate,
-    LogicalJobKind, LogicalJobOutputDefinition, LogicalJobOutputSource,
-    LogicalJobResourcesTemplate, LogicalJobTemplate, LogicalJobTemplateBuilder,
-    LogicalOutputMergePolicy, LogicalResourceVectorTemplate, LogicalResultReference,
+    LogicalJobKind, LogicalJobOutputDefinition, LogicalJobOutputSource, LogicalJobTemplate,
+    LogicalJobTemplateBuilder, LogicalOutputMergePolicy, LogicalResultReference,
     LogicalResultValue, LogicalRunDefaultsTemplate, LogicalRunStepTemplate, LogicalRunnerTemplate,
     LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate,
     LogicalUsesStepTemplate, MAX_MATRIX_EXPANSION, MatrixAxis, MatrixAxisValues, MatrixPatch,
@@ -18,17 +17,16 @@ use automata_ci_core::{
     ReusableWorkflowInvocation, StepJobTemplate, TemplateValueMap, TransportProtocol,
     WorkflowInputKey, WorkflowInvocationContract, WorkflowJobKey, WorkflowOutputDefinition,
     WorkflowOutputKey, WorkflowSecretKey, WorkflowServiceKey, WorkflowStepKey,
-    WorkflowStrategyTemplate, parse_cpu_quantity, parse_storage_quantity,
+    WorkflowStrategyTemplate,
 };
 
 use crate::{
     BooleanValue, CompilationDisposition, CompilationReport, CompileWorkflowRequest, Concurrency,
-    ConcurrencyQueue, Defaults, GithubConditionPhase, JobContainer, JobEnvironment,
-    JobResourceVector, JobResources, JobService, JobStrategy, MatrixConfiguration,
-    MatrixConfigurations, MatrixDimensionValues, MatrixValue, Permissions, ReusableWorkflowCall,
-    ReusableWorkflowSecrets, RunnerSelection, ScalarResolution, ScalarValue, SourceSpan, Spanned,
-    Step, StepExecution, StrategyMatrix, TriggerConfiguration, ValueMap, WorkflowJob,
-    YamlMappingEntry, YamlNode,
+    ConcurrencyQueue, Defaults, GithubConditionPhase, JobContainer, JobEnvironment, JobService,
+    JobStrategy, MatrixConfiguration, MatrixConfigurations, MatrixDimensionValues, MatrixValue,
+    Permissions, ReusableWorkflowCall, ReusableWorkflowSecrets, RunnerSelection, ScalarResolution,
+    ScalarValue, SourceSpan, Spanned, Step, StepExecution, StrategyMatrix, TriggerConfiguration,
+    ValueMap, WorkflowJob, YamlMappingEntry, YamlNode,
 };
 
 use super::{
@@ -153,12 +151,6 @@ const STRATEGY_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
 );
 const JOB_ACTIVATION_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
     "job activation field",
-    PlanEvaluationPhase::JobActivation,
-    JOB_ACTIVATION_CONTEXTS,
-    false,
-);
-const JOB_RESOURCE_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
-    "job resource quantity",
     PlanEvaluationPhase::JobActivation,
     JOB_ACTIVATION_CONTEXTS,
     false,
@@ -1114,9 +1106,6 @@ fn compile_step_job_body(
             .filter_map(|service| compile_service(service, references, context))
             .collect()
     });
-    let resources = source_job
-        .resources()
-        .and_then(|resources| compile_job_resources(resources, references, context));
     let environment = compile_template_map(
         source_job.environment(),
         JOB_ENV_POLICY,
@@ -1144,9 +1133,7 @@ fn compile_step_job_body(
         .and_then(|environment| compile_deployment(environment, references, context));
     Some(CompiledJobBody {
         execution: LogicalJobKind::Steps(
-            StepJobTemplate::new(runner, steps, span)
-                .with_resources(resources)
-                .with_services(services),
+            StepJobTemplate::new(runner, steps, span).with_services(services),
         ),
         environment,
         run_defaults,
@@ -1175,18 +1162,6 @@ fn reject_malformed_job_presence(job: &WorkflowJob, context: &mut CompileContext
         context.semantic(
             "github.compile.invalid_job_services",
             format!("`jobs.{}.services` could not be lowered", job.id().as_str()),
-            span.clone(),
-        );
-    }
-    if let Some(span) = source_job.resources_source_span()
-        && source_job.resources().is_none()
-    {
-        context.semantic(
-            "github.compile.invalid_job_resources",
-            format!(
-                "`jobs.{}.resources` could not be lowered",
-                job.id().as_str()
-            ),
             span.clone(),
         );
     }
@@ -1577,100 +1552,12 @@ fn reject_reusable_step_fields(job: &WorkflowJob, context: &mut CompileContext<'
     if let Some(value) = source_job.continue_on_error() {
         reject("continue-on-error", boolean_span(value).clone());
     }
-    if let Some(resources) = source_job.resources() {
-        reject("resources", resources.span().clone());
-    }
     if let Some(span) = source_job.outputs_source_span() {
         reject("outputs", span.clone());
     }
     if let Some(span) = source_job.deployment_environment_source_span() {
         reject("environment", span.clone());
     }
-}
-
-fn compile_job_resources(
-    resources: &JobResources,
-    references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
-    context: &mut CompileContext<'_>,
-) -> Option<LogicalJobResourcesTemplate> {
-    context.reject_extensions(resources.extensions());
-    let requests = resources
-        .requests()
-        .and_then(|values| compile_resource_vector(values, references, context));
-    let limits = resources
-        .limits()
-        .and_then(|values| compile_resource_vector(values, references, context));
-    Some(LogicalJobResourcesTemplate::new(
-        requests,
-        limits,
-        context.span(resources.span())?,
-    ))
-}
-
-#[derive(Clone, Copy)]
-enum ResourceQuantityKind {
-    Cpu,
-    Storage,
-    Gpu,
-}
-
-fn compile_resource_vector(
-    values: &JobResourceVector,
-    references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
-    context: &mut CompileContext<'_>,
-) -> Option<LogicalResourceVectorTemplate> {
-    context.reject_extensions(values.extensions());
-    let cpu =
-        compile_resource_quantity(values.cpu(), ResourceQuantityKind::Cpu, references, context);
-    let memory = compile_resource_quantity(
-        values.memory(),
-        ResourceQuantityKind::Storage,
-        references,
-        context,
-    );
-    let ephemeral_storage = compile_resource_quantity(
-        values.ephemeral_storage(),
-        ResourceQuantityKind::Storage,
-        references,
-        context,
-    );
-    let gpu =
-        compile_resource_quantity(values.gpu(), ResourceQuantityKind::Gpu, references, context);
-    Some(LogicalResourceVectorTemplate::new(
-        cpu,
-        memory,
-        ephemeral_storage,
-        gpu,
-        context.span(values.span())?,
-    ))
-}
-
-fn compile_resource_quantity(
-    value: Option<&ScalarValue>,
-    kind: ResourceQuantityKind,
-    references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
-    context: &mut CompileContext<'_>,
-) -> Option<Located<CompiledValueTemplate>> {
-    let value = value?;
-    if !value.contains_expression_candidate() {
-        let valid = match kind {
-            ResourceQuantityKind::Cpu => parse_cpu_quantity(value.decoded()).is_ok(),
-            ResourceQuantityKind::Storage => parse_storage_quantity(value.decoded()).is_ok(),
-            ResourceQuantityKind::Gpu => value
-                .decoded()
-                .parse::<u16>()
-                .is_ok_and(|quantity| quantity > 0),
-        };
-        if !valid {
-            context.semantic(
-                "github.compile.invalid_resource_quantity",
-                "resource quantity is invalid or outside the supported Kubernetes-style grammar",
-                value.span().clone(),
-            );
-            return None;
-        }
-    }
-    compile_scalar_template(value, JOB_RESOURCE_POLICY, references, context)
 }
 
 fn finish_job(job: PendingJob, context: &mut CompileContext<'_>) -> Option<LogicalJobTemplate> {

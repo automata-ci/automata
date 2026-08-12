@@ -6,7 +6,7 @@ use automata_ci_blob::BlobStoreErrorKind;
 use automata_ci_core::{
     ContextValue, JobRuntimeContext, Sha256Digest, UnixMillis, WorkflowEventProvenance,
 };
-use automata_ci_scm::{ArchiveFormat, RepositorySource};
+use automata_ci_scm::ArchiveFormat;
 use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_ARCHIVE_ACCEPT,
     GITHUB_PROVIDER_ARCHIVE_FORMAT, GITHUB_PROVIDER_ARCHIVE_ORIGIN,
@@ -14,19 +14,18 @@ use automata_ci_store::{
     GITHUB_PROVIDER_REST_ACCEPT, GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_SOURCE_REVISION,
     GITHUB_PROVIDER_WEB_ORIGIN, GithubServerServiceAuthoritySelector,
     LogicalWorkflowAdmissionStoreError, MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
-    ManifestPinnedGithubDeliveryEvidence, ProviderDeliveryFailureKind, ProviderDeliveryIdentity,
-    ProviderDeliveryWorkflowConclusion, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    StoreError, WorkflowAdmissionIdempotency,
+    ProviderDeliveryFailureKind, ProviderDeliveryIdentity, ProviderDeliveryWorkflowConclusion,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, StoreError,
+    WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubChangedFilesV1, GithubEventMetadataV1,
     GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
-    RepositoryWorkflowDiscoveryLimits, SourceId, SourceOrigin, SourceProvenance,
-    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_repository_workflows,
+    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _, WorkflowNotSelectedReason,
 };
 use automata_ci_workflow_service::{
-    AdmissionRepositoryCoordinates, RepositoryWorkflowSource, WorkflowAdmissionError,
-    WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionService,
+    AdmissionRepositoryCoordinates, WorkflowAdmissionError, WorkflowAdmissionRequest,
+    WorkflowAdmissionRequestError, WorkflowAdmissionService,
 };
 use bytes::Bytes;
 use thiserror::Error;
@@ -309,9 +308,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                     merge_group.base_ref().full(),
                 )
             }
-            automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
-                GithubEventMetadataV1::repository_dispatch(dispatch.event_type())
-            }
             _ => return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation),
         };
         let report = compile(
@@ -323,14 +319,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             report.disposition(),
             CompilationDisposition::RequiresChangedFiles
         ) {
-            if matches!(
-                request.event(),
-                automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
-            ) {
-                return Ok(failed(
-                    "github.workflow.repository_dispatch_changed_files_unsupported",
-                ));
-            }
             return Err(GithubDeliveryWorkflowProcessorError::Prerequisite(
                 GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
             ));
@@ -594,10 +582,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         .git_ref(request.push().git_ref().full())
         .workflow_name(workflow_name)
         .run_attempt(1)
-        .repository_workflow_sources(repository_workflow_sources(
-            request.repository_source(),
-            request.manifest_pinned_evidence(),
-        )?)
         .build();
         let admission = match admission {
             Ok(admission) => admission,
@@ -673,14 +657,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             CompilationDisposition::NotSelected(reason) => Ok(skipped(reason)),
             CompilationDisposition::Rejected => Ok(failed("github.workflow.compilation_rejected")),
             CompilationDisposition::RequiresChangedFiles => {
-                if matches!(
-                    request.event(),
-                    automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
-                ) {
-                    return Ok(failed(
-                        "github.workflow.repository_dispatch_changed_files_unsupported",
-                    ));
-                }
                 Err(GithubDeliveryWorkflowProcessorError::Prerequisite(
                     GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
                 ))
@@ -731,10 +707,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         .git_ref(event_coordinates.git_ref())
         .workflow_name(workflow_name)
         .run_attempt(1)
-        .repository_workflow_sources(repository_workflow_sources(
-            request.repository_source(),
-            request.manifest_pinned_evidence(),
-        )?)
         .build();
         let admission = match admission {
             Ok(admission) => admission,
@@ -1044,39 +1016,6 @@ fn compile(
         .compile(CompileWorkflowRequest::new(source_plan, event).with_event_metadata_v1(metadata))
 }
 
-fn repository_workflow_sources(
-    source: &RepositorySource,
-    evidence: &ManifestPinnedGithubDeliveryEvidence,
-) -> Result<Vec<RepositoryWorkflowSource>, GithubDeliveryWorkflowProcessorError> {
-    let limits = evidence.manifest().limits();
-    let discovery_limits = RepositoryWorkflowDiscoveryLimits::new(
-        limits.archive_max_compressed_bytes(),
-        limits.archive_max_decompressed_bytes(),
-        usize::try_from(limits.archive_max_entries())
-            .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?,
-        limits.archive_max_expanded_bytes(),
-        usize::try_from(limits.archive_max_entry_path_bytes())
-            .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?,
-        usize::try_from(limits.archive_max_workflows())
-            .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?,
-        limits.workflow_max_bytes(),
-    )
-    .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    discover_repository_workflows(source.bytes(), discovery_limits)
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
-        .map(|workflows| {
-            workflows
-                .into_iter()
-                .filter_map(|workflow| {
-                    let (path, source) = workflow.into_parts();
-                    source
-                        .ok()
-                        .map(|source| RepositoryWorkflowSource::new(path, Bytes::from(source)))
-                })
-                .collect()
-        })
-}
-
 fn valid_request(request: &GithubDeliveryWorkflowRequest<'_>) -> bool {
     let identity = request.identity();
     let push = request.push();
@@ -1146,7 +1085,7 @@ fn valid_request(request: &GithubDeliveryWorkflowRequest<'_>) -> bool {
         && source.revision().as_str() == push.after_commit_sha()
         && source.format() == ArchiveFormat::TarGzip
         && source.size() <= manifest.limits().archive_max_compressed_bytes()
-        && manifest.selects_workflow_path(request.workflow_path())
+        && request.workflow_path() == manifest.workflow_path()
         && u64::try_from(request.workflow_source().len()).unwrap_or(u64::MAX)
             <= manifest.limits().workflow_max_bytes()
         && origins.web_origin() == GITHUB_PROVIDER_WEB_ORIGIN
@@ -1169,12 +1108,15 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
     let manifest = evidence.manifest();
     let origins = manifest.origins();
     let raw_size = u64::try_from(event.raw_body().len()).unwrap_or(u64::MAX);
+    let Ok(coordinates) = crate::authenticated_event_coordinates(event) else {
+        return false;
+    };
     let Some(authenticated_event) = evidence.authenticated_event_v1() else {
         return false;
     };
-    let event_coordinates_match =
-        authenticated_event_coordinates_match(event, evidence, authenticated_event);
-    let source_revision_matches = authenticated_event_source_matches(event, evidence, source);
+    let Some(source_revision) = authenticated_event_source_revision(event) else {
+        return false;
+    };
     let visibility_authority_matches = matches!(
         (
             identity.repository_visibility(),
@@ -1202,8 +1144,7 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
                 && path_evidence
         }
         automata_ci_github::VerifiedGithubWebhook::PullRequest(_)
-        | automata_ci_github::VerifiedGithubWebhook::MergeGroup(_)
-        | automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_) => true,
+        | automata_ci_github::VerifiedGithubWebhook::MergeGroup(_) => true,
         _ => false,
     };
     identity.provider() == GITHUB_PROVIDER
@@ -1231,14 +1172,15 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
         && request.raw_event().encoded_size() == raw_size
         && request.raw_event().media_type() == GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
         && raw_size <= manifest.limits().webhook_max_body_bytes()
-        && event_coordinates_match
+        && coordinates.event == *authenticated_event
+        && coordinates.head_sha == evidence.check_head_sha()
         && push_policy_matches
         && source.provider().as_str() == GITHUB_PROVIDER
         && source.repository().as_str() == repository.full_name()
-        && source_revision_matches
+        && source.revision().as_str() == source_revision
         && source.format() == ArchiveFormat::TarGzip
         && source.size() <= manifest.limits().archive_max_compressed_bytes()
-        && manifest.selects_workflow_path(request.workflow_path())
+        && request.workflow_path() == manifest.workflow_path()
         && u64::try_from(request.workflow_source().len()).unwrap_or(u64::MAX)
             <= manifest.limits().workflow_max_bytes()
         && origins.web_origin() == GITHUB_PROVIDER_WEB_ORIGIN
@@ -1250,44 +1192,6 @@ fn valid_authenticated_event_request(request: &GithubDeliveryEventWorkflowReques
         && manifest.source_authentication() == source_authentication
         && manifest.source_revision() == GITHUB_PROVIDER_SOURCE_REVISION
         && manifest.archive_format() == GITHUB_PROVIDER_ARCHIVE_FORMAT
-}
-
-fn authenticated_event_coordinates_match(
-    event: &automata_ci_github::VerifiedGithubWebhook,
-    evidence: &ManifestPinnedGithubDeliveryEvidence,
-    authenticated_event: &automata_ci_store::GithubAuthenticatedEventV1,
-) -> bool {
-    match event {
-        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
-            authenticated_event.kind()
-                == automata_ci_store::GithubAuthenticatedEventKind::RepositoryDispatch
-                && authenticated_event.git_ref() == dispatch.git_ref()
-                && evidence.repository_dispatch_resolution().is_some()
-        }
-        _ => crate::authenticated_event_coordinates(event).is_ok_and(|coordinates| {
-            coordinates.event == *authenticated_event
-                && coordinates.head_sha == evidence.check_head_sha()
-                && evidence.repository_dispatch_resolution().is_none()
-        }),
-    }
-}
-
-fn authenticated_event_source_matches(
-    event: &automata_ci_github::VerifiedGithubWebhook,
-    evidence: &ManifestPinnedGithubDeliveryEvidence,
-    source: &RepositorySource,
-) -> bool {
-    match event {
-        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_) => evidence
-            .repository_dispatch_resolution()
-            .is_some_and(|resolution| {
-                resolution.source_revision() == evidence.check_head_sha()
-                    && crate::check_head_sha_from_revision(source.revision().as_str())
-                        .is_ok_and(|revision| revision == resolution.source_revision())
-            }),
-        _ => authenticated_event_source_revision(event)
-            .is_some_and(|revision| revision == source.revision().as_str()),
-    }
 }
 
 fn authenticated_event_source_revision(
@@ -1349,8 +1253,6 @@ fn admission_error(error: &WorkflowAdmissionError) -> GithubDeliveryWorkflowProc
             StoreError::Operation(_),
         )) => GithubDeliveryWorkflowProcessorError::Unavailable,
         WorkflowAdmissionError::Verification(_)
-        | WorkflowAdmissionError::ReusableExpansion(_)
-        | WorkflowAdmissionError::CredentialDiscovery(_)
         | WorkflowAdmissionError::Blob(_)
         | WorkflowAdmissionError::Store(_)
         | WorkflowAdmissionError::AdmissionValue(_)
@@ -1409,10 +1311,7 @@ mod renewal_tests {
         RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     };
     use automata_ci_workflow_github::GithubChangedFilesV1;
-    use automata_ci_workflow_service::{
-        GithubWorkflowPlanVerifier, ReusableWorkflowExpansionError, WorkflowAdmissionError,
-        WorkflowAdmissionService,
-    };
+    use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
     use bytes::Bytes;
     use flate2::{Compression, write::GzEncoder};
     use tar::{Builder, EntryType, Header};
@@ -1423,7 +1322,6 @@ mod renewal_tests {
     use super::{
         GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
         GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-        admission_error,
     };
     use crate::{
         GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
@@ -1445,24 +1343,6 @@ mod renewal_tests {
     const REPOSITORY_OWNER_ID: u64 = 8_001;
     const INSTALLATION_ID: u64 = 4_242;
     const DELIVERY: &str = "delivery-private-renewal-race";
-
-    #[test]
-    fn workflow_dispatch_evidence_is_a_webhook_delivery_invariant() {
-        assert_eq!(
-            admission_error(&WorkflowAdmissionError::WorkflowDispatchEvidence),
-            crate::GithubDeliveryWorkflowProcessorError::InvariantViolation
-        );
-    }
-
-    #[test]
-    fn reusable_workflow_expansion_failure_is_a_webhook_delivery_invariant() {
-        assert_eq!(
-            admission_error(&WorkflowAdmissionError::ReusableExpansion(
-                ReusableWorkflowExpansionError::RootPlanMismatch,
-            )),
-            crate::GithubDeliveryWorkflowProcessorError::InvariantViolation
-        );
-    }
     const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
     const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
     const SUCCESSOR_TOKEN: &str = "successor-changed-files-token";

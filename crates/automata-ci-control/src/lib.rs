@@ -32,6 +32,5 @@ pub use observer::{
     NoopLeasePollObserver,
 };
 pub use port::{
-    LeaseClock, LeaseIdGenerator, LeasePollRepository, RandomLeaseIdGenerator, RunnableAttemptGate,
-    RunnableAttemptGateDisposition, SystemLeaseClock,
+    LeaseClock, LeaseIdGenerator, LeasePollRepository, RandomLeaseIdGenerator, SystemLeaseClock,
 };

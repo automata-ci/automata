@@ -56,7 +56,6 @@ export AUTOMATA_TEST_S3_ENDPOINT='http://127.0.0.1:9000/'
 export AUTOMATA_TEST_S3_BUCKET='automata-dev'
 export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
 export AUTOMATA_TEST_S3_SECRET_KEY='automata-local-secret-change-me'
-export AUTOMATA_TEST_S3_KMS_KEY_ID='default'
 cargo test -p automata-ci-blob-s3 --test rustfs_contract --all-features --locked -- --ignored
 ```
 
@@ -217,14 +216,6 @@ sys.stdout.write("\n")
 PY
 ```
 
-The checked-in dogfood configuration derives exactly three durable slots for
-one runner process and one `runner_id`; it is not a three-replica deployment.
-The configured 4,000 CPU millicores, 16 GiB memory, and 4,096 PIDs are per-job
-ceilings, so a fully occupied host must provide at least 12,000 CPU millicores,
-48 GiB memory, and 12,288 PIDs, in addition to runner, Podman, and operating
-system overhead. Keep the derived static `slots` value equal to
-`max_parallel_jobs` when adapting either capacity or resources.
-
 The server-side leaf and fleet document have a stricter trust boundary than
 ordinary secret files: every ancestor is root-owned and not group- or
 world-writable, and each file is root-owned, single-linked, and has no write
@@ -355,54 +346,18 @@ command:
 ```
 
 The manifest is strict and current-only. Every repository declares its
-canonical `default_branch`. The provider derives its full `refs/heads/...`
-reference, revisions it in the durable manifest digest, and requires push and
-repository-dispatch source selection to agree with it. Changing the configured
-default branch therefore requires sequential manifest and policy revisions. Cache
-authority uses the same branch only as a read-only fallback after the current
-job reference. Public entries require a null private-source
+canonical `default_branch`; cache authority uses it only as a read-only fallback
+after the current job reference. Public entries require a null private-source
 authority; private entries require one. Checks authority is mandatory,
 all authority UUIDs are unique, nested authority revisions equal the repository
 policy revision, and stable numeric GitHub installation/repository/owner IDs
 must match the App installation. The product reference documents every field,
 rotation rule, webhook path, and `standard` versus `credential_free` output-
-safety choice. Subscribe the App webhook to the configured supported events,
-grant `checks:write` for every registered repository, and grant `contents:read`
-only for Private source. The checked-in example uses the server-owned
-`{"mode":"all_direct"}` workflow selection. It discovers only canonical
-`.yml` and `.yaml` files directly beneath `.github/workflows/` at the exact
-authenticated source revision; nested files and other extensions are not
-selected. Discovery is bounded by the manifest archive limits, and the sorted
-inventory and each path-local result are durable before the delivery completes.
-
-The optional top-level `schedule` object controls the separate periodic
-workflow scheduler; omitting it uses the documented example defaults. It
-enumerates only current manifests in stable order, resolves the configured
-default branch to an exact commit, stores a content-addressed archive, and
-seals schedule definitions before any due occurrence can run. Public discovery
-is anonymous. Private discovery acquires only the matching
-`private_repository_source_read` authority with the dedicated
-`DiscoverPrivateRepositorySchedules` action; it never accepts or invents a
-webhook delivery identity. Each due occurrence has its own fence and atomically
-creates its scheduled Check subject with admission. At most
-`maximum_fires_per_pass` occurrences are caught up in a pass; occurrences older
-than `staleness_millis` are recorded as skipped and their calendar cursor moves
-past the trusted claim time.
-
-Upgrading a repository manifest created before numeric `repository_owner_id`
-evidence was available requires an explicit successor: add the owner ID and
-increment both `manifest_revision` and `policy_revision` by exactly one. Make
-the same policy-revision change in its nested service authorities. Historical
-manifests cannot be backfilled safely because their immutable digests may
-already be referenced by delivery and run evidence; startup reports this case
-as an owner-binding upgrade requirement instead of generic configuration drift.
-
-Existing configurations can instead retain the precise `workflow_path` field.
-That legacy exact mode and `workflow_selection` are mutually exclusive;
-changing modes requires sequential manifest and policy revisions and changes
-the manifest digest. Omitting both preserves the historical exact default rather than
-silently broadening a deployment. Never put the App PEM or webhook HMAC bytes
-in this file.
+safety choice. Subscribe the App webhook to `push`, grant `checks:write` for
+every registered repository, and grant `contents:read` only for Private source.
+The current delivery manifest admits only `.github/workflows/ci.yml` on
+`refs/heads/main` for `push`; every other workflow, ref, or event fails closed.
+Never put the App PEM or webhook HMAC bytes in this file.
 
 Set every repository `tenant_id` to the server's one effective UI tenant. With
 human authentication enabled, this is the tenant in durable installation state
@@ -476,12 +431,6 @@ is also configured, `automata server` exposes authenticated, repository-scoped
 HTTP routes for metadata reads, create/replace, delete, provider inspection, and
 built-in-provider activation.
 
-This configuration also requires `--runner-public-url` (or
-`AUTOMATA_RUNNER_PUBLIC_URL`) set to the exact HTTPS origin used by runner
-`control_endpoint` values. The server enables a private binary value route on
-that same direct-mTLS listener. Do not terminate this route at the human or
-Results proxy.
-
 On the Linux workstation authenticated above, the repository-scoped operator
 commands reuse the stored CLI session and require `secret-tool` plus its
 unlocked Secret Service:
@@ -505,12 +454,8 @@ current permission combinations are `secrets:metadata:read` for list;
 `secret-providers:manage` for activation. The CLI has no replacement command
 and refuses create when the name already exists. The authenticated repository
 Secrets page provides value-free metadata and capability-gated create, replace,
-delete, and built-in-provider activation. The built-in provider can deliver an
-exact immutable version to a current leased attempt after Store-owned gate,
-policy, approval, grant, session, and fence checks. The runner installs the
-complete response in zeroizing job-local custody and masks every value before a
-separate acknowledgement; cancellation or partial decoding never initiates the
-acknowledgement. External and dynamically leased providers remain unsupported. See the
+delete, and built-in-provider activation. Runner delivery and external providers
+remain unsupported, so jobs do not receive managed secret values. See the
 [authentication guide](authentication.md#manage-repository-secrets-from-the-cli) for redirected
 input, safe-file, confirmation, and verification details.
 
@@ -607,10 +552,8 @@ stdout/stderr enters persistent ingestion, preserving unrelated diagnostics.
 
 The server exposes no local bearer workflow ingress. To create durable workflow
 work, first configure the exact GitHub provider above, then deliver a supported
-signed webhook through that provider boundary. In `all_direct` mode, each
-selected direct workflow is evaluated independently; an invalid or unselected
-workflow cannot suppress a different selected workflow from the same immutable
-repository archive.
+signed `push` webhook for `.github/workflows/ci.yml` on `refs/heads/main`
+through that provider boundary.
 
 Admission validates and persists immutable workflow evidence asynchronously.
 Its durable receipt does not mean a job has finished: the mandatory autonomous
@@ -657,8 +600,7 @@ A future production deployment must, at minimum:
   corresponding `--human-trusted-reverse-proxy` or
   `--results-trusted-reverse-proxy` deployment assertion;
 - expose runner control only through direct TLS 1.3 and client-certificate
-  verification, and configure its exact public HTTPS origin when managed-secret
-  delivery is enabled;
+  verification;
 - store secret values outside process arguments and repository files, and use
   authenticated encryption for all recoverable secret-bearing durable data;
 - keep wrapping roots outside the database and encrypt database data, WAL,

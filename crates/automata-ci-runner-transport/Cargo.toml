@@ -31,8 +31,6 @@ tokio = { workspace = true, features = ["io-util"] }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tower-service.workspace = true
-uuid.workspace = true
-zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = { workspace = true, features = ["channel"] }

@@ -37,10 +37,8 @@ does not by itself close the end-to-end gate.
 
 - [x] Preserve ordinary logs and explicitly public outputs while redacting
   registered runtime and repository credential values.
-- [x] Hydrate phase-correct inputs, admission-supplied variable context, and
-  opaque secret references through autonomous preparation and runner
-  execution. Managed repository/environment variable administration and value
-  custody remain part of the open G3 gate below.
+- [x] Hydrate phase-correct inputs, variables, and opaque secret references
+  through autonomous preparation and runner execution.
 - [x] Resolve eligible runner labels and groups to one immutable environment
   profile before JobIR admission, including dynamically evaluated selections.
 - [x] Expose immutable positive numeric run and attempt identities without
@@ -93,11 +91,10 @@ workflow does not satisfy the gate.
 
 ### G2: broader Actions runtime
 
-Exercise JavaScript and composite post-time template re-evaluation in the
-differential fixture, and complete job and service containers, container
-actions, matrices, status functions, fail-fast, max-parallel, reusable
-workflows, artifacts, cache management, cancellation, summaries, and
-annotations.
+Complete the remaining JavaScript and composite post-time template
+re-evaluation, job and service containers, container actions, matrices, status
+functions, fail-fast, max-parallel, reusable workflows, artifacts, cache
+management, cancellation, summaries, and annotations.
 
 Gate: Automata's CI consumes its own artifacts and caches and matches GitHub at
 the same commit.

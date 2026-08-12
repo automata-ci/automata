@@ -105,17 +105,12 @@ async fn accept_github_webhook(
     let raw_body = collect_raw_body(body).await?;
     ensure_before_deadline(deadline)?;
     match ingress_route {
-        GithubWebhookIngressRoute::Legacy => {
-            registry.accept(&parts.headers, raw_body).await.map(|_| ())
+        GithubWebhookIngressRoute::Legacy => registry.accept(&parts.headers, raw_body).await,
+        GithubWebhookIngressRoute::AuthenticatedEventV1 => {
+            registry
+                .accept_authenticated_event_v1(&parts.headers, raw_body)
+                .await
         }
-        GithubWebhookIngressRoute::AuthenticatedEventV1 => registry
-            .accept_authenticated_event_v1(&parts.headers, raw_body)
-            .await
-            .map(|_| ()),
-        GithubWebhookIngressRoute::RepositoryDispatch => registry
-            .accept_repository_dispatch(&parts.headers, raw_body)
-            .await
-            .map(|_| ()),
     }
     .map_err(GithubWebhookHttpOutcome::from_ingress)?;
     ensure_before_deadline(deadline)?;
@@ -177,7 +172,6 @@ fn require_github_header_shapes(
     }
     Ok(match event {
         b"pull_request" | b"merge_group" => GithubWebhookIngressRoute::AuthenticatedEventV1,
-        b"repository_dispatch" => GithubWebhookIngressRoute::RepositoryDispatch,
         _ => GithubWebhookIngressRoute::Legacy,
     })
 }
@@ -186,7 +180,6 @@ fn require_github_header_shapes(
 enum GithubWebhookIngressRoute {
     Legacy,
     AuthenticatedEventV1,
-    RepositoryDispatch,
 }
 
 fn unique_header<'headers>(
@@ -301,45 +294,5 @@ impl GithubWebhookHttpOutcome {
                 .insert(header::ALLOW, HeaderValue::from_static("POST"));
         }
         response
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use automata_ci_github::{X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256};
-    use axum::http::{HeaderMap, HeaderValue};
-
-    use super::{GithubWebhookIngressRoute, require_github_header_shapes};
-
-    fn shaped_headers(event: &'static str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            X_HUB_SIGNATURE_256,
-            HeaderValue::from_static(
-                "sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            ),
-        );
-        headers.insert(X_GITHUB_EVENT, HeaderValue::from_static(event));
-        headers.insert(
-            X_GITHUB_DELIVERY,
-            HeaderValue::from_static("synthetic-delivery-1"),
-        );
-        headers
-    }
-
-    #[test]
-    fn repository_dispatch_uses_the_dedicated_pre_resolution_route() {
-        assert_eq!(
-            require_github_header_shapes(&shaped_headers("repository_dispatch")),
-            Ok(GithubWebhookIngressRoute::RepositoryDispatch)
-        );
-        assert_eq!(
-            require_github_header_shapes(&shaped_headers("pull_request")),
-            Ok(GithubWebhookIngressRoute::AuthenticatedEventV1)
-        );
-        assert_eq!(
-            require_github_header_shapes(&shaped_headers("push")),
-            Ok(GithubWebhookIngressRoute::Legacy)
-        );
     }
 }

@@ -1,10 +1,7 @@
 const BASE_MIGRATION: &str = include_str!("../migrations/0033_github_oidc_issuances.sql");
 const CURRENT_MIGRATION: &str =
     include_str!("../migrations/0039_github_oidc_signed_currentness.sql");
-const RERUN_MIGRATION: &str = include_str!("../migrations/0064_workflow_reruns.sql");
 const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/github_oidc.rs");
-const JOB_RUNTIME_ADAPTER: &str = include_str!("../src/postgres/github_job_runtime_authority.rs");
-const RUNTIME_AUTHORITY_ADAPTER: &str = include_str!("../src/postgres/runtime_authority.rs");
 
 #[test]
 fn base_migration_defines_only_the_three_durable_ledgers() {
@@ -196,33 +193,4 @@ fn schema_and_adapter_never_persist_credential_or_token_plaintext() {
     assert!(BASE_MIGRATION.contains("request_bearer_sha256 BYTEA NOT NULL"));
     assert!(!POSTGRES_ADAPTER.contains("expose_secret"));
     assert!(!POSTGRES_ADAPTER.contains("private_key_pem"));
-}
-
-#[test]
-fn rerun_origin_keeps_current_authority_private_source_and_child_permission_checks() {
-    for contract in [
-        "origin.origin_kind IN ('scheduled_fire', 'workflow_rerun')",
-        "origin.admission_idempotency_kind = 'operation'",
-        "checks_authority.state = 'active'",
-        "automata_workflow_plan_v2_invocation_published",
-        "automata_reusable_workflow_oidc_permission_authorized",
-        "private_repository_source_read",
-        "authority.state = 'active'",
-    ] {
-        assert!(POSTGRES_ADAPTER.contains(contract), "missing {contract}");
-    }
-    for adapter in [JOB_RUNTIME_ADAPTER, RUNTIME_AUTHORITY_ADAPTER] {
-        assert!(adapter.contains("github_manifest_origin_is_closed"));
-        assert!(adapter.contains("private_repository_source_read"));
-        assert!(adapter.contains("authority.state = 'active'"));
-    }
-    for contract in [
-        "'provider_delivery', 'scheduled_fire', 'workflow_rerun'",
-        "automata_workflow_plan_v2_invocation_published",
-        "automata_reusable_workflow_oidc_permission_authorized",
-    ] {
-        assert!(RERUN_MIGRATION.contains(contract), "missing {contract}");
-    }
-    assert!(JOB_RUNTIME_ADAPTER.contains("checks_authority.state = 'active'"));
-    assert!(JOB_RUNTIME_ADAPTER.contains("automata_workflow_plan_v2_invocation_published"));
 }

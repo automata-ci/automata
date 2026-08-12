@@ -235,7 +235,7 @@
       ]
     },
     "control_plane": {
-      "series_budget": 5250,
+      "series_budget": 5000,
       "families": [
         {
           "help": "Unix timestamp of the oldest outstanding artifact reservation by kind, or zero when empty.",
@@ -558,8 +558,6 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
-                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
-                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -598,7 +596,7 @@
               ]
             }
           ],
-          "maximum_series": 615,
+          "maximum_series": 585,
           "name": "automata_ci_control_plane_http_request_duration_seconds",
           "type": "histogram",
           "unit": "seconds"
@@ -616,8 +614,6 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
-                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
-                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -656,7 +652,7 @@
               ]
             }
           ],
-          "maximum_series": 41,
+          "maximum_series": 39,
           "name": "automata_ci_control_plane_http_requests_in_flight",
           "type": "gauge"
         },
@@ -686,8 +682,6 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
-                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
-                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -737,7 +731,7 @@
               ]
             }
           ],
-          "maximum_series": 1968,
+          "maximum_series": 1872,
           "name": "automata_ci_control_plane_http_requests_total",
           "type": "counter"
         },
@@ -1496,13 +1490,12 @@
             {
               "name": "route",
               "values": [
-                "ephemeral_secrets",
                 "handshake",
                 "sync"
               ]
             }
           ],
-          "maximum_series": 6,
+          "maximum_series": 4,
           "name": "automata_ci_control_plane_runner_transport_bytes_total",
           "type": "counter",
           "unit": "bytes"
@@ -1550,30 +1543,6 @@
             "mode": "explicit",
             "tuples": [
               [
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "ephemeral_secrets",
-                "authentication"
-              ],
-              [
-                "ephemeral_secrets",
-                "body"
-              ],
-              [
-                "ephemeral_secrets",
-                "cancelled"
-              ],
-              [
-                "ephemeral_secrets",
-                "head"
-              ],
-              [
-                "ephemeral_secrets",
-                "response"
-              ],
-              [
                 "handshake",
                 "application"
               ],
@@ -1647,7 +1616,6 @@
             {
               "name": "route",
               "values": [
-                "ephemeral_secrets",
                 "handshake",
                 "sync",
                 "unknown"
@@ -1667,7 +1635,7 @@
               ]
             }
           ],
-          "maximum_series": 345,
+          "maximum_series": 255,
           "name": "automata_ci_control_plane_runner_transport_request_duration_seconds",
           "type": "histogram",
           "unit": "seconds"
@@ -1681,13 +1649,12 @@
             {
               "name": "route",
               "values": [
-                "ephemeral_secrets",
                 "handshake",
                 "sync"
               ]
             }
           ],
-          "maximum_series": 3,
+          "maximum_series": 2,
           "name": "automata_ci_control_plane_runner_transport_requests_in_flight",
           "type": "gauge"
         },
@@ -1698,11 +1665,6 @@
             "tuples": [
               [
                 "body_too_large",
-                "ephemeral_secrets",
-                "head"
-              ],
-              [
-                "body_too_large",
                 "handshake",
                 "head"
               ],
@@ -1710,11 +1672,6 @@
                 "body_too_large",
                 "sync",
                 "head"
-              ],
-              [
-                "cancelled",
-                "ephemeral_secrets",
-                "cancelled"
               ],
               [
                 "cancelled",
@@ -1743,11 +1700,6 @@
               ],
               [
                 "conflict",
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "conflict",
                 "handshake",
                 "application"
               ],
@@ -1768,11 +1720,6 @@
               ],
               [
                 "expired",
-                "ephemeral_secrets",
-                "authentication"
-              ],
-              [
-                "expired",
                 "handshake",
                 "authentication"
               ],
@@ -1783,11 +1730,6 @@
               ],
               [
                 "forbidden",
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "forbidden",
                 "handshake",
                 "application"
               ],
@@ -1795,11 +1737,6 @@
                 "forbidden",
                 "sync",
                 "application"
-              ],
-              [
-                "http_version",
-                "ephemeral_secrets",
-                "head"
               ],
               [
                 "http_version",
@@ -1808,11 +1745,6 @@
               ],
               [
                 "internal",
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "internal",
                 "handshake",
                 "application"
               ],
@@ -1823,11 +1755,6 @@
               ],
               [
                 "invalid",
-                "ephemeral_secrets",
-                "body"
-              ],
-              [
-                "invalid",
                 "handshake",
                 "body"
               ],
@@ -1835,11 +1762,6 @@
                 "invalid",
                 "sync",
                 "body"
-              ],
-              [
-                "invalid_content_length",
-                "ephemeral_secrets",
-                "head"
               ],
               [
                 "invalid_content_length",
@@ -1873,11 +1795,6 @@
               ],
               [
                 "length_required",
-                "ephemeral_secrets",
-                "head"
-              ],
-              [
-                "length_required",
                 "handshake",
                 "head"
               ],
@@ -1888,17 +1805,7 @@
               ],
               [
                 "method",
-                "ephemeral_secrets",
-                "head"
-              ],
-              [
-                "method",
                 "unknown",
-                "head"
-              ],
-              [
-                "not_found",
-                "ephemeral_secrets",
                 "head"
               ],
               [
@@ -1923,11 +1830,6 @@
               ],
               [
                 "success",
-                "ephemeral_secrets",
-                "response"
-              ],
-              [
-                "success",
                 "handshake",
                 "response"
               ],
@@ -1938,21 +1840,6 @@
               ],
               [
                 "timeout",
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "timeout",
-                "ephemeral_secrets",
-                "authentication"
-              ],
-              [
-                "timeout",
-                "ephemeral_secrets",
-                "body"
-              ],
-              [
-                "timeout",
                 "handshake",
                 "application"
               ],
@@ -1980,16 +1867,6 @@
                 "timeout",
                 "sync",
                 "body"
-              ],
-              [
-                "too_large",
-                "ephemeral_secrets",
-                "body"
-              ],
-              [
-                "too_large",
-                "ephemeral_secrets",
-                "response"
               ],
               [
                 "too_large",
@@ -2013,11 +1890,6 @@
               ],
               [
                 "transport",
-                "ephemeral_secrets",
-                "body"
-              ],
-              [
-                "transport",
                 "handshake",
                 "body"
               ],
@@ -2028,16 +1900,6 @@
               ],
               [
                 "unavailable",
-                "ephemeral_secrets",
-                "application"
-              ],
-              [
-                "unavailable",
-                "ephemeral_secrets",
-                "authentication"
-              ],
-              [
-                "unavailable",
                 "handshake",
                 "application"
               ],
@@ -2058,11 +1920,6 @@
               ],
               [
                 "unsupported_media_type",
-                "ephemeral_secrets",
-                "head"
-              ],
-              [
-                "unsupported_media_type",
                 "handshake",
                 "head"
               ],
@@ -2070,11 +1927,6 @@
                 "unsupported_media_type",
                 "sync",
                 "head"
-              ],
-              [
-                "untrusted",
-                "ephemeral_secrets",
-                "authentication"
               ],
               [
                 "untrusted",
@@ -2122,7 +1974,6 @@
             {
               "name": "route",
               "values": [
-                "ephemeral_secrets",
                 "handshake",
                 "sync",
                 "unknown"
@@ -2142,7 +1993,7 @@
               ]
             }
           ],
-          "maximum_series": 78,
+          "maximum_series": 55,
           "name": "automata_ci_control_plane_runner_transport_requests_total",
           "type": "counter"
         },

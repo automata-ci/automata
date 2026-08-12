@@ -12,9 +12,8 @@ use automata_ci::{
 };
 use automata_ci_core::JobAuthorityProfile;
 use automata_ci_store::{
-    GithubProviderWorkflowSelection, GithubServerServiceJwtIssuer,
-    MAX_WORKFLOW_RUNTIME_POLICY_BYTES, ProviderRepositoryVisibility, WorkflowRuntimePolicy,
-    github_provider_repository_id,
+    GithubServerServiceJwtIssuer, MAX_WORKFLOW_RUNTIME_POLICY_BYTES, ProviderRepositoryVisibility,
+    WorkflowRuntimePolicy, github_provider_repository_id,
 };
 use clap::Parser as _;
 use serde_json::{Value, json};
@@ -28,7 +27,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"schema":1
 }"#;
 
 fn test_file(name: &str) -> PathBuf {
@@ -98,7 +97,6 @@ fn repository(
         "runtime_policy_revision": 9,
         "authority_profile": authority_profile,
         "runner_policy": runner_policy(),
-        "workflow_path": ".github/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority_id, 7),
@@ -192,11 +190,11 @@ fn runner_policy_preserves_raw_evidence_and_matches_store_codec_golden_values() 
     assert_eq!(repository.runner_policy().runtime_policy(), &expected);
     assert_eq!(
         expected.digest().to_string(),
-        "f056c8bf9c65febd33494c52ed0d402f9b5c01bfe031354c491f366362f3a5c7"
+        "e3eec3e76e41a5f430fe3558fadb4018fc271145cb621ed2b20ee1342bc53471"
     );
     assert_eq!(
         expected.canonical_digest().to_string(),
-        "0c770bf61fef186459c55a27f215e643b210640b6fc3bc89c05f6992f071b858"
+        "5347b0931418cda5e4b5f7de7860a1659ef829dfe3781103d206a7aa9a338d58"
     );
     assert_ne!(expected.digest(), expected.canonical_digest());
 
@@ -242,10 +240,6 @@ fn checked_in_example_matches_the_current_provider_manifest_contract() {
     let config = GithubProviderConfig::load(&SecretSource::File(path))
         .expect("checked-in provider example must remain loadable");
     assert_eq!(config.repositories().len(), 2);
-    assert!(config.repositories().iter().all(|repository| matches!(
-        repository.workflow_selection(),
-        GithubProviderWorkflowSelection::AllDirect
-    )));
     assert_eq!(
         config.repositories()[0].visibility(),
         ProviderRepositoryVisibility::Public
@@ -277,79 +271,6 @@ fn checked_in_example_matches_the_current_provider_manifest_contract() {
         config.repositories()[1]
             .private_source_authority()
             .is_some()
-    );
-}
-
-#[test]
-fn schedule_policy_is_optional_but_bounded_when_configured() {
-    let defaults = load_value(
-        "schedule-defaults.json",
-        &manifest(vec![public_repository()]),
-    )
-    .expect("schedule defaults");
-    assert_eq!(defaults.schedule().service_config().poll_millis(), 1_000);
-    assert_eq!(
-        defaults
-            .schedule()
-            .service_config()
-            .maximum_fires_per_pass(),
-        32
-    );
-
-    let mut configured = manifest(vec![public_repository()]);
-    configured["schedule"] = json!({
-        "poll_millis": 2000,
-        "discovery_claim_millis": 120_000,
-        "fire_claim_millis": 120_000,
-        "retry_millis": 15_000,
-        "staleness_millis": 60_000,
-        "maximum_manifests": 64,
-        "maximum_fires_per_pass": 8
-    });
-    let configured =
-        load_value("schedule-configured.json", &configured).expect("explicit schedule policy");
-    let policy = configured.schedule().service_config();
-    assert_eq!(policy.poll_millis(), 2_000);
-    assert_eq!(policy.maximum_manifests(), 64);
-    assert_eq!(policy.maximum_fires_per_pass(), 8);
-
-    let mut invalid = manifest(vec![public_repository()]);
-    invalid["schedule"] = json!({"maximum_fires_per_pass": 0});
-    assert_eq!(
-        load_value("schedule-invalid.json", &invalid),
-        Err(GithubProviderConfigError)
-    );
-}
-
-#[test]
-fn all_direct_selection_is_explicit_and_legacy_exact_mode_stays_precise() {
-    let exact = load_value("legacy-exact.json", &manifest(vec![public_repository()]))
-        .expect("legacy exact configuration");
-    assert_eq!(
-        exact.repositories()[0].exact_workflow_path(),
-        Some(".github/workflows/main.yml")
-    );
-
-    let mut all_direct_repository = public_repository();
-    let repository = all_direct_repository
-        .as_object_mut()
-        .expect("repository object");
-    repository.remove("workflow_path");
-    repository.insert("default_branch".to_owned(), json!("refs/release"));
-    repository.insert(
-        "workflow_selection".to_owned(),
-        json!({"mode": "all_direct"}),
-    );
-    let all_direct = load_value("all-direct.json", &manifest(vec![all_direct_repository]))
-        .expect("all-direct configuration");
-    assert!(matches!(
-        all_direct.repositories()[0].workflow_selection(),
-        GithubProviderWorkflowSelection::AllDirect
-    ));
-    assert_eq!(all_direct.repositories()[0].exact_workflow_path(), None);
-    assert_eq!(
-        all_direct.repositories()[0].workflow_git_ref().as_str(),
-        "refs/heads/refs/release"
     );
 }
 
@@ -656,7 +577,8 @@ fn document_and_repository_bounds_are_exact() {
     );
 }
 
-fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
+#[test]
+fn typed_values_and_nested_sources_fail_closed() {
     let mut cases = Vec::new();
     let mut value = manifest(vec![private_repository()]);
     value["schema"] = json!(3);
@@ -722,44 +644,11 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
     invalid_name["repositories"][0]["repository"] = json!("owner/repository.git");
     cases.push(("name", invalid_name));
     let mut invalid_default_branch = manifest(vec![private_repository()]);
-    invalid_default_branch["repositories"][0]["default_branch"] = json!("refs//heads/main");
+    invalid_default_branch["repositories"][0]["default_branch"] = json!("refs/heads/main");
     cases.push(("default-branch", invalid_default_branch));
     let mut invalid_check = manifest(vec![private_repository()]);
     invalid_check["repositories"][0]["check_name"] = json!("\n");
     cases.push(("check", invalid_check));
-    cases
-}
-
-#[test]
-fn typed_values_and_nested_sources_fail_closed() {
-    let mut cases = invalid_scalar_configuration_cases();
-    let mut nested_workflow = manifest(vec![private_repository()]);
-    nested_workflow["repositories"][0]["workflow_path"] =
-        json!(".github/workflows/nested/main.yml");
-    cases.push(("nested-workflow", nested_workflow));
-    let mut non_workflow = manifest(vec![private_repository()]);
-    non_workflow["repositories"][0]["workflow_path"] = json!("ci/main.yml");
-    cases.push(("non-workflow", non_workflow));
-    let mut ambiguous_workflow_selection = manifest(vec![private_repository()]);
-    ambiguous_workflow_selection["repositories"][0]["workflow_selection"] =
-        json!({"mode": "all_direct"});
-    cases.push(("ambiguous-workflow-selection", ambiguous_workflow_selection));
-    let mut unknown_workflow_selection = manifest(vec![private_repository()]);
-    unknown_workflow_selection["repositories"][0]
-        .as_object_mut()
-        .expect("repository object")
-        .remove("workflow_path");
-    unknown_workflow_selection["repositories"][0]["workflow_selection"] =
-        json!({"mode": "recursive"});
-    cases.push(("unknown-workflow-selection", unknown_workflow_selection));
-    let mut verbose_workflow_selection = manifest(vec![private_repository()]);
-    verbose_workflow_selection["repositories"][0]
-        .as_object_mut()
-        .expect("repository object")
-        .remove("workflow_path");
-    verbose_workflow_selection["repositories"][0]["workflow_selection"] =
-        json!({"mode": "all_direct", "path": ".github/workflows/main.yml"});
-    cases.push(("verbose-workflow-selection", verbose_workflow_selection));
     let mut plaintext_key = manifest(vec![private_repository()]);
     plaintext_key["app"]["private_key_source"] = json!("plaintext-private-key");
     cases.push(("plaintext-key", plaintext_key));

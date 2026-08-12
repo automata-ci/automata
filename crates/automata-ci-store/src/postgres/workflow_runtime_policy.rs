@@ -175,10 +175,10 @@ async fn insert_revision(
         r"
         INSERT INTO workflow_runtime_policy_revisions (
             tenant_id, repository_id, policy_revision, policy_digest,
-            canonical_policy, resource_policy_canonical,
+            canonical_policy,
             policy_schema, workspace_root, workspace_derivation_version,
             mapping_count, state, registered_at_ms, sealed_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,'staging',$10,NULL)
+        ) VALUES ($1,$2,$3,$4,$5,1,$6,1,$7,'staging',$8,NULL)
         ",
     )
     .bind(request.pin().tenant().as_str())
@@ -186,8 +186,6 @@ async fn insert_revision(
     .bind(request.pin().revision().as_i64())
     .bind(request.pin().digest().as_bytes().as_slice())
     .bind(request.policy().canonical_bytes().map_err(corrupt_value)?)
-    .bind(serde_json::to_vec(&request.policy().resource_policy()).map_err(corrupt_value)?)
-    .bind(i16::try_from(request.policy().schema()).map_err(corrupt_value)?)
     .bind(request.policy().workspace_root())
     .bind(count_i32(request.policy().mappings().len())?)
     .bind(registered_at.get())
@@ -334,9 +332,8 @@ pub(super) async fn load_revision(
 ) -> Result<WorkflowRuntimePolicy, WorkflowRuntimePolicyStoreError> {
     let header = sqlx::query(
         r"
-        SELECT policy_digest, canonical_policy, resource_policy_canonical,
-               policy_schema, workspace_root, workspace_derivation_version,
-               mapping_count, state
+        SELECT policy_digest, canonical_policy, policy_schema, workspace_root,
+               workspace_derivation_version, mapping_count, state
         FROM workflow_runtime_policy_revisions
         WHERE tenant_id = $1 AND repository_id = $2 AND policy_revision = $3
         ",
@@ -352,21 +349,13 @@ pub(super) async fn load_revision(
     let expected_canonical: Vec<u8> = header
         .try_get("canonical_policy")
         .map_err(operation_error)?;
-    let expected_resource_policy: Vec<u8> = header
-        .try_get("resource_policy_canonical")
-        .map_err(operation_error)?;
-    let canonical_policy =
-        WorkflowRuntimePolicy::decode_canonical(&expected_canonical).map_err(corrupt_value)?;
     let schema: i16 = header.try_get("policy_schema").map_err(operation_error)?;
     let derivation: i16 = header
         .try_get("workspace_derivation_version")
         .map_err(operation_error)?;
     let expected_mappings: i32 = header.try_get("mapping_count").map_err(operation_error)?;
     let state: String = header.try_get("state").map_err(operation_error)?;
-    if i16::try_from(canonical_policy.schema()).ok() != Some(schema)
-        || derivation != 1
-        || state != "sealed"
-    {
+    if schema != 1 || derivation != 1 || state != "sealed" {
         return Err(
             StoreError::corrupt_data("workflow runtime policy header is not current").into(),
         );
@@ -433,20 +422,16 @@ pub(super) async fn load_revision(
         .map(|(selector, parts)| decode_mapping(selector, parts))
         .collect::<Result<Vec<_>, _>>()?;
     let workspace_root: String = header.try_get("workspace_root").map_err(operation_error)?;
-    if canonical_policy.workspace_root() != workspace_root
-        || canonical_policy.mappings() != mappings
-        || canonical_policy.digest() != expected_digest
-        || serde_json::to_vec(&canonical_policy.resource_policy()).map_err(corrupt_value)?
-            != expected_resource_policy
-    {
+    let policy = WorkflowRuntimePolicy::new(workspace_root, mappings).map_err(corrupt_value)?;
+    if policy.digest() != expected_digest {
         return Err(StoreError::corrupt_data("workflow runtime policy digest disagrees").into());
     }
-    if canonical_policy.canonical_bytes().map_err(corrupt_value)? != expected_canonical {
+    if policy.canonical_bytes().map_err(corrupt_value)? != expected_canonical {
         return Err(
             StoreError::corrupt_data("workflow runtime policy canonical bytes disagree").into(),
         );
     }
-    Ok(canonical_policy)
+    Ok(policy)
 }
 
 struct MappingParts {

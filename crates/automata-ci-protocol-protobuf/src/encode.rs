@@ -447,14 +447,6 @@ fn runner_requirements(value: &core::RunnerRequirements) -> wire::RunnerRequirem
             .map(|item| item.as_str().to_owned())
             .collect(),
         environment_profile: value.environment_profile().map(environment_profile),
-        resource_allocation: value.resource_allocation().map(job_resource_allocation),
-    }
-}
-
-fn job_resource_allocation(value: core::JobResourceAllocation) -> wire::JobResourceAllocation {
-    wire::JobResourceAllocation {
-        requests: Some(resource_capacity(value.requests())),
-        limits: Some(resource_capacity(value.limits())),
     }
 }
 
@@ -475,34 +467,6 @@ fn lease_offer(value: &protocol::LeaseOffer) -> wire::LeaseOffer {
         lease: Some(lease(value.lease())),
         job: Some(job_ir_envelope(value.job())),
         runtime_authorities: value.runtime_authorities().map(runtime_authorities),
-        managed_secret_bindings: value
-            .managed_secret_bindings()
-            .map(managed_secret_binding_overlay),
-    }
-}
-
-fn managed_secret_binding_overlay(
-    value: &protocol::ManagedSecretBindingOverlay,
-) -> wire::ManagedSecretBindingOverlay {
-    wire::ManagedSecretBindingOverlay {
-        schema_version: u32::from(value.schema_version()),
-        attempt_id: uuid_bytes(value.attempt_id().as_uuid()),
-        lease_id: uuid_bytes(value.lease_id().as_uuid()),
-        fencing_token: value.fencing_token().get(),
-        bindings: value
-            .bindings()
-            .iter()
-            .map(|entry| wire::ManagedSecretBindingOverlayEntry {
-                canonical_name: entry.canonical_name().to_owned(),
-                grant_id: entry.binding().binding_id().to_owned(),
-                version_id: entry
-                    .binding()
-                    .version_id()
-                    .expect("validated overlay entries have immutable versions")
-                    .to_owned(),
-            })
-            .collect(),
-        sha256_digest: value.digest().as_bytes().to_vec(),
     }
 }
 
@@ -690,7 +654,6 @@ fn job_execution_context(value: &core::JobExecutionContext) -> wire::JobExecutio
         event: Some(job_content_reference(value.event())),
         runtime_context: Some(job_content_reference(value.runtime_context())),
         run_id_alias: value.run_id_alias().map(core::RunIdAlias::get),
-        triggering_actor: value.triggering_actor().map(str::to_owned),
     }
 }
 

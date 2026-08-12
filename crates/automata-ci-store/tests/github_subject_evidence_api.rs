@@ -3,22 +3,19 @@ mod github_manifest_fixture;
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    AuthenticatedGithubDeliveryClaim, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
+    GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
+    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    PendingGithubRepositoryDispatchEvidence, ProviderConnectionId, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RecordGithubWorkflowRunSubjectEvidence, RepositoryId, ResolveGithubRepositoryDispatch,
+    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     TenantScope, WorkflowSnapshotId,
 };
 use uuid::Uuid;
@@ -182,12 +179,10 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
 }
 
 fn accepts_repository(_: &dyn GithubSubjectEvidenceRepository) {}
-fn accepts_repository_dispatch(_: &dyn GithubRepositoryDispatchEvidenceRepository) {}
 
 #[test]
 fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() {
     let _ = accepts_repository;
-    let _ = accepts_repository_dispatch;
     for error in [
         GithubSubjectEvidenceStoreError::AuthorityRejected,
         GithubSubjectEvidenceStoreError::ReplayConflict,
@@ -205,62 +200,6 @@ fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() 
         .nth(1)
         .expect("repository trait");
     assert!(!trait_source.contains("record_github_workflow_run_subject_evidence("));
-}
-
-#[test]
-fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
-    let manifest = manifest(ProviderRepositoryVisibility::Private);
-    let checks = selector(&manifest, 0x401, [7; 32]);
-    let private = selector(&manifest, 0x402, [8; 32]);
-    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x403)).expect("delivery");
-    let pending = PendingGithubRepositoryDispatchEvidence::from_durable_parts(
-        delivery_id,
-        ProviderRepositoryOwnerId::new(404).expect("owner"),
-        manifest.clone(),
-        manifest.webhook_verifier_fingerprint(),
-        manifest.webhook_verifier_revision(),
-        checks,
-        Some(private),
-        GithubAuthenticatedEventV1::new(
-            GithubAuthenticatedEventKind::RepositoryDispatch,
-            "refs/heads/main",
-        )
-        .expect("dispatch event"),
-        UnixMillis::new(100),
-    )
-    .expect("pending dispatch");
-    let head = GithubCheckHeadSha::new([9; 20]).expect("head");
-    let resolution = GithubRepositoryDispatchResolution::new(
-        head,
-        GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
-    );
-    let request = ResolveGithubRepositoryDispatch::new(
-        pending.clone(),
-        admission_claim(delivery_id, 100, 300),
-        resolution,
-        UnixMillis::new(200),
-    )
-    .expect("private resolution");
-    assert_eq!(request.pending(), &pending);
-    assert_eq!(request.resolution(), resolution);
-    assert_eq!(
-        format!("{request:?}"),
-        "ResolveGithubRepositoryDispatch([REDACTED])"
-    );
-    assert!(!format!("{pending:?}").contains("refs/heads/main"));
-
-    assert!(
-        ResolveGithubRepositoryDispatch::new(
-            pending,
-            admission_claim(delivery_id, 100, 300),
-            GithubRepositoryDispatchResolution::new(
-                head,
-                GithubRepositoryDispatchResolutionAuthority::PublicAnonymous,
-            ),
-            UnixMillis::new(200),
-        )
-        .is_err()
-    );
 }
 
 #[test]

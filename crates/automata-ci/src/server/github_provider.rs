@@ -148,34 +148,30 @@ impl GithubProviderBootstrapPlan {
                 runner_policies.push(runner_policy_payload);
             }
 
-            let manifest =
-                GithubProviderManifest::new_owner_bound_with_workflow_selection_and_git_ref(
-                    repository.tenant().clone(),
-                    connection_id,
-                    repository.installation_id(),
-                    repository.repository_id(),
-                    repository.repository_owner_id(),
-                    repository.repository_name().clone(),
-                    repository.visibility(),
-                    config.app().app_id(),
-                    config.app().client_id().clone(),
-                    config.app().jwt_issuer(),
-                    app_key_spki_sha256,
-                    config.app().configuration_revision(),
-                    webhook_fingerprint,
-                    config.webhook().verifier_revision(),
-                    repository.policy_revision(),
-                    repository.authority_profile(),
-                    runner_policy,
-                    repository.runtime_policy_revision(),
-                    runtime_policy.digest(),
-                    repository.workflow_selection().clone(),
-                    repository.workflow_git_ref().clone(),
-                    repository.check_name().clone(),
-                    GithubProviderOrigins::github_dot_com(),
-                    GithubProviderManifestLimits::github_dot_com_ci(),
-                    repository.manifest_revision(),
-                );
+            let manifest = GithubProviderManifest::new(
+                repository.tenant().clone(),
+                connection_id,
+                repository.installation_id(),
+                repository.repository_id(),
+                repository.repository_name().clone(),
+                repository.visibility(),
+                config.app().app_id(),
+                config.app().client_id().clone(),
+                config.app().jwt_issuer(),
+                app_key_spki_sha256,
+                config.app().configuration_revision(),
+                webhook_fingerprint,
+                config.webhook().verifier_revision(),
+                repository.policy_revision(),
+                repository.authority_profile(),
+                runner_policy,
+                repository.runtime_policy_revision(),
+                runtime_policy.digest(),
+                repository.check_name().clone(),
+                GithubProviderOrigins::github_dot_com(),
+                GithubProviderManifestLimits::github_dot_com_ci(),
+                repository.manifest_revision(),
+            );
             if manifest.repository_id().as_uuid().as_bytes()
                 != &repository.internal_repository_id().as_bytes()
             {
@@ -245,10 +241,6 @@ impl GithubProviderBootstrapPlan {
                     owner,
                     name,
                 )
-                .and_then(|connection| {
-                    connection
-                        .with_default_branch_ref(repository.cache_repository().default_branch_ref())
-                })
                 .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?,
             );
             manifests.push(manifest);
@@ -610,9 +602,6 @@ pub enum GithubProviderBootstrapError {
     /// Existing durable state conflicts with the exact desired configuration.
     #[error("GitHub provider bootstrap conflicts with durable configuration")]
     ConfigurationDrift,
-    /// A pre-owner manifest needs an explicit sequential configuration upgrade.
-    #[error("GitHub provider owner binding requires incremented manifest and policy revisions")]
-    OwnerBindingUpgradeRequired,
     /// Durable storage is temporarily unavailable.
     #[error("GitHub provider bootstrap storage is unavailable")]
     Unavailable,
@@ -848,9 +837,6 @@ fn map_manifest_store_error(
         GithubProviderManifestStoreError::Operation(_) => GithubProviderBootstrapError::Unavailable,
         GithubProviderManifestStoreError::ConfigurationDrift => {
             GithubProviderBootstrapError::ConfigurationDrift
-        }
-        GithubProviderManifestStoreError::OwnerBindingUpgradeRequired => {
-            GithubProviderBootstrapError::OwnerBindingUpgradeRequired
         }
         GithubProviderManifestStoreError::CorruptData
         | GithubProviderManifestStoreError::NotFound => {

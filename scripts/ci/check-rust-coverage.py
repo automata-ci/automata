@@ -128,8 +128,6 @@ def load_lcov(
                 raise ValueError(f"LCOV line {line_number} ends an incomplete source record")
             if hit > found:
                 raise ValueError(f"LCOV source covers more lines than it measures: {source}")
-            if found > 0 and not data_lines:
-                raise ValueError(f"LCOV source has positive LF but no DA records: {source}")
             records[source] = (hit, found)
             source = None
             found = None
@@ -515,6 +513,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, UnicodeError, ValueError) as error:
+    except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(2) from error

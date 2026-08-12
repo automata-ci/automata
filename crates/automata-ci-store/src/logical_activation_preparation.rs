@@ -1404,13 +1404,6 @@ fn hash_execution(hasher: &mut Sha256, execution: &LogicalActivationExecutionCon
         }
         None => hasher.update([0]),
     }
-    match execution.triggering_actor() {
-        Some(actor) => {
-            hasher.update([1]);
-            hash_text(hasher, actor);
-        }
-        None => hasher.update([0]),
-    }
     hasher.update(execution.run_id_alias().get().to_be_bytes());
     hasher.update(execution.run_number().to_be_bytes());
     hasher.update(execution.run_attempt().to_be_bytes());

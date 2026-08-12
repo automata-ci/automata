@@ -296,7 +296,6 @@ pub struct ServerConfig {
     pub(crate) secret_encryption: Option<SecretEncryptionConfig>,
     pub(crate) control_plane_encryption: ControlPlaneEncryptionConfig,
     pub(crate) runner_listen: SocketAddr,
-    pub(crate) runner_public_authority: Option<Authority>,
     pub(crate) results_listen: SocketAddr,
     pub(crate) results_public_endpoint: ResultsPublicEndpoint,
     pub(crate) results_signing_key: SecretSource,
@@ -616,10 +615,6 @@ impl ServerConfig {
             .map_err(|_| ServerConfigError::InvalidGithubOidcConfiguration)?;
         let human_auth = human_auth_configuration(args)?;
         let secret_encryption = secret_encryption_configuration(args)?;
-        let runner_public_authority = runner_public_authority_configuration(args)?;
-        if secret_encryption.is_some() && runner_public_authority.is_none() {
-            return Err(ServerConfigError::MissingRunnerPublicEndpoint);
-        }
         let control_plane_encryption = control_plane_encryption_configuration(args)?;
         Ok(Self {
             http_listen: args.listen,
@@ -628,7 +623,6 @@ impl ServerConfig {
             secret_encryption,
             control_plane_encryption,
             runner_listen: args.runner_listen,
-            runner_public_authority,
             results_listen: args.results_listen,
             results_public_endpoint,
             results_signing_key: args.results_signing_key_source.clone(),
@@ -753,27 +747,6 @@ fn validate_local_listeners(args: &ServerArgs) -> Result<(), ServerConfigError> 
         return Err(ServerConfigError::MetricsRequiresLoopback);
     }
     Ok(())
-}
-
-fn runner_public_authority_configuration(
-    args: &ServerArgs,
-) -> Result<Option<Authority>, ServerConfigError> {
-    let Some(value) = args.runner_public_url.as_deref() else {
-        return Ok(None);
-    };
-    let uri = value
-        .parse::<Uri>()
-        .map_err(|_| ServerConfigError::InvalidRunnerPublicEndpoint)?;
-    let path = uri.path_and_query().map_or("", |value| value.as_str());
-    if uri.scheme_str() != Some("https")
-        || !matches!(path, "" | "/")
-        || uri
-            .authority()
-            .is_none_or(|authority| authority.as_str().contains('@'))
-    {
-        return Err(ServerConfigError::InvalidRunnerPublicEndpoint);
-    }
-    Ok(uri.authority().cloned())
 }
 
 fn control_plane_encryption_configuration(
@@ -1134,12 +1107,6 @@ pub enum ServerConfigError {
     /// No public Results endpoint was supplied for per-attempt credentials.
     #[error("a public Results endpoint is required")]
     MissingResultsEndpoint,
-    /// Secret delivery requires the exact public direct-mTLS runner origin.
-    #[error("a public runner-control endpoint is required for managed secrets")]
-    MissingRunnerPublicEndpoint,
-    /// The public runner-control endpoint is not an exact HTTPS origin.
-    #[error("runner-control endpoint policy is invalid")]
-    InvalidRunnerPublicEndpoint,
     /// Results endpoint/listener transport policy is invalid or inconsistent.
     #[error("Results endpoint policy is invalid")]
     InvalidResultsEndpoint,

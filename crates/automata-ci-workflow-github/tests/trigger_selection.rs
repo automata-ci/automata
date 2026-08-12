@@ -115,69 +115,6 @@ fn event_absence_is_structured_non_selection_without_diagnostics() {
 }
 
 #[test]
-fn repository_dispatch_types_select_only_the_exact_custom_event() {
-    let filtered = "on:\n  repository_dispatch:\n    types: [synthetic_signal, secondary_signal]\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let matching = compile(
-        filtered,
-        event("repository_dispatch", "refs/heads/main"),
-        Some(GithubEventMetadataV1::repository_dispatch(
-            "synthetic_signal",
-        )),
-    );
-    assert!(matching.is_accepted(), "{:#?}", matching.diagnostics());
-
-    assert_not_selected(
-        &compile(
-            filtered,
-            event("repository_dispatch", "refs/heads/main"),
-            Some(GithubEventMetadataV1::repository_dispatch(
-                "unmatched_signal",
-            )),
-        ),
-        WorkflowNotSelectedReason::EventFiltersNotMatched,
-    );
-
-    let unfiltered = "on: repository_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let any_custom = compile(
-        unfiltered,
-        event("repository_dispatch", "refs/heads/main"),
-        Some(GithubEventMetadataV1::repository_dispatch("any_signal")),
-    );
-    assert!(any_custom.is_accepted(), "{:#?}", any_custom.diagnostics());
-}
-
-#[test]
-fn repository_dispatch_requires_exact_bounded_metadata() {
-    let source = "on: repository_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    assert_rejected_with(
-        &compile(
-            source,
-            event("repository_dispatch", "refs/heads/main"),
-            None,
-        ),
-        "github.compile.event_metadata_required",
-    );
-    assert_rejected_with(
-        &compile(
-            source,
-            event("repository_dispatch", "refs/heads/main"),
-            Some(GithubEventMetadataV1::push(false)),
-        ),
-        "github.compile.event_metadata_mismatch",
-    );
-    for event_type in [String::new(), "x".repeat(101), "bad\nevent".to_owned()] {
-        assert_rejected_with(
-            &compile(
-                source,
-                event("repository_dispatch", "refs/heads/main"),
-                Some(GithubEventMetadataV1::repository_dispatch(event_type)),
-            ),
-            "github.compile.invalid_repository_dispatch_metadata",
-        );
-    }
-}
-
-#[test]
 fn exact_repository_ci_uses_github_default_pull_request_actions() {
     for action in ["opened", "synchronize", "reopened"] {
         let report = compile(

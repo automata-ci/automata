@@ -85,31 +85,6 @@ pub enum JobContainerEngine {
     AttemptScopedDockerApi,
 }
 
-/// One administrator-selected `BuildKit` runtime admitted to the closed Docker
-/// compatibility surface.
-///
-/// The image is always registry-qualified and digest-pinned. Buildx's mutable
-/// default image name is treated only as a client-side compatibility alias;
-/// the proxy never pulls it and always substitutes this exact local image.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuildKitRuntime {
-    image: ImmutableImage,
-}
-
-impl BuildKitRuntime {
-    /// Selects one immutable `BuildKit` image for local verification and use.
-    #[must_use]
-    pub const fn new(image: ImmutableImage) -> Self {
-        Self { image }
-    }
-
-    /// Returns the exact digest-pinned image admitted for Buildx builders.
-    #[must_use]
-    pub const fn image(&self) -> &ImmutableImage {
-        &self.image
-    }
-}
-
 /// An explicit DNS hostname mapped to Podman's host gateway inside a job.
 ///
 /// This is intentionally hostname-only: IP addresses, wildcard names, bare
@@ -266,7 +241,6 @@ pub struct PodmanOptions {
     job_container_engine: JobContainerEngine,
     host_gateway_alias: Option<PodmanHostGatewayAlias>,
     service_proxy_image: Option<ImmutableImage>,
-    buildkit_runtime: Option<BuildKitRuntime>,
 }
 
 impl PodmanOptions {
@@ -295,7 +269,6 @@ impl PodmanOptions {
             job_container_engine: JobContainerEngine::Disabled,
             host_gateway_alias: None,
             service_proxy_image: None,
-            buildkit_runtime: None,
         })
     }
 
@@ -334,14 +307,6 @@ impl PodmanOptions {
     #[must_use]
     pub fn with_service_proxy_image(mut self, image: ImmutableImage) -> Self {
         self.service_proxy_image = Some(image);
-        self
-    }
-
-    /// Enables the closed Buildx docker-container compatibility policy with
-    /// one locally preloaded, immutable `BuildKit` runtime.
-    #[must_use]
-    pub fn with_buildkit_runtime(mut self, runtime: BuildKitRuntime) -> Self {
-        self.buildkit_runtime = Some(runtime);
         self
     }
 
@@ -491,12 +456,6 @@ impl PodmanOptions {
     #[must_use]
     pub const fn service_proxy_image(&self) -> Option<&ImmutableImage> {
         self.service_proxy_image.as_ref()
-    }
-
-    /// Returns the optional immutable `BuildKit` runtime admitted to the job API.
-    #[must_use]
-    pub const fn buildkit_runtime(&self) -> Option<&BuildKitRuntime> {
-        self.buildkit_runtime.as_ref()
     }
 }
 

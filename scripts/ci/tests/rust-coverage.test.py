@@ -112,7 +112,6 @@ def lcov(path: Path, ordinary_covered: int) -> None:
                 f"LH:{ordinary_covered}",
                 "end_of_record",
                 "SF:crates/database/src/adapter.rs",
-                "DA:1,0",
                 "LF:1000",
                 "LH:0",
                 "end_of_record",
@@ -176,8 +175,7 @@ def synthetic_workspace_reports(
     )
     lcov_path.write_text(
         "".join(
-            f"SF:{source}\nDA:1,{1 if covered else 0}\n"
-            f"LF:{measured}\nLH:{covered}\nend_of_record\n"
+            f"SF:{source}\nLF:{measured}\nLH:{covered}\nend_of_record\n"
             for source, covered, measured in sources
         ),
         encoding="utf-8",
@@ -266,24 +264,6 @@ def main() -> None:
             "sha256-framed-git-head-and-nonignored-worktree-content-v1"
         )
 
-        read_only_manifest_directory = scratch / "read-only-manifest"
-        read_only_manifest_directory.mkdir()
-        read_only_manifest_directory.chmod(0o555)
-        try:
-            failed_write = check(
-                policy_path,
-                summary_path,
-                lcov_path,
-                read_only_manifest_directory / "manifest.json",
-                "ordinary",
-            )
-        finally:
-            read_only_manifest_directory.chmod(0o755)
-        assert failed_write.returncode == 2
-        assert "error:" in failed_write.stderr
-        assert "Traceback" not in failed_write.stderr
-        assert not (read_only_manifest_directory / "manifest.json").exists()
-
         mismatched_lcov = lcov_path.read_text(encoding="utf-8").replace(
             "LH:90", "LH:89", 1
         )
@@ -322,10 +302,6 @@ def main() -> None:
             (
                 canonical_lcov.replace("LF:100\n", "LF:100\nLF:100\n", 1),
                 "invalid LF field",
-            ),
-            (
-                canonical_lcov.replace("DA:1,1\nDA:2,1\n", "", 1),
-                "positive LF but no DA records",
             ),
             (canonical_lcov.replace("LH:90\n", "", 1), "incomplete source record"),
             (
@@ -430,15 +406,6 @@ def main() -> None:
         )
         assert selected.returncode == 0, selected.stderr
         assert selected.stdout == "2\n"
-        duplicate_names_across_binaries = subprocess.run(
-            ["python3", str(CHECK_IGNORED)],
-            input="same_name: test\nsame_name: test\n",
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert duplicate_names_across_binaries.returncode == 0
-        assert duplicate_names_across_binaries.stdout == "2\n"
         empty = subprocess.run(
             ["python3", str(CHECK_IGNORED)],
             input="suite::benchmark: benchmark\n0 tests, 1 benchmark\n",
@@ -448,93 +415,6 @@ def main() -> None:
         )
         assert empty.returncode == 2
         assert "selected zero tests" in empty.stderr
-
-        exact_source = scratch / "exact-ignored.rs"
-        exact_source.write_text(
-            """
-#[test]
-#[ignore = "external service"]
-fn selected_by_filter() {}
-
-mod outside_filter {
-    #[test]
-    #[ignore]
-    fn missed_by_filter() {}
-}
-""",
-            encoding="utf-8",
-        )
-        exact_policy = scratch / "exact-ignored-policy.json"
-
-        def write_exact_policy(expected: list[str]) -> None:
-            exact_policy.write_text(
-                json.dumps(
-                    {
-                        "ignored_test_inventory": {
-                            "exact_test_bundles": {
-                                "podman": {exact_source.as_posix(): expected}
-                            }
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-        exact_arguments = [
-            "python3",
-            str(CHECK_IGNORED),
-            "--policy",
-            str(exact_policy),
-            "--bundle",
-            "podman",
-            "--source",
-            str(exact_source),
-        ]
-        write_exact_policy(["podman_probe::tests::selected_by_filter"])
-        unowned_ignored_test = subprocess.run(
-            exact_arguments,
-            input="podman_probe::tests::selected_by_filter: test\n",
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert unowned_ignored_test.returncode == 2
-        assert "source inventory differs" in unowned_ignored_test.stderr
-
-        exact_tests = [
-            "podman_probe::tests::selected_by_filter",
-            "podman_probe::outside_filter::missed_by_filter",
-        ]
-        write_exact_policy(exact_tests)
-        missed_by_filter = subprocess.run(
-            exact_arguments,
-            input="podman_probe::tests::selected_by_filter: test\n",
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert missed_by_filter.returncode == 2
-        assert "selection differs from its exact inventory" in missed_by_filter.stderr
-        exact_selection = subprocess.run(
-            exact_arguments,
-            input="".join(f"{name}: test\n" for name in exact_tests),
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert exact_selection.returncode == 0, exact_selection.stderr
-        assert exact_selection.stdout == "2\n"
-        duplicate_exact_selection = subprocess.run(
-            exact_arguments,
-            input="".join(
-                f"{name}: test\n" for name in [*exact_tests, exact_tests[0]]
-            ),
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert duplicate_exact_selection.returncode == 2
-        assert "listed a test more than once" in duplicate_exact_selection.stderr
 
         fingerprint_repository = scratch / "fingerprint-repository"
         fingerprint_repository.mkdir()
@@ -623,7 +503,6 @@ mod outside_filter {
             "fingerprint-workspace.py",
             "run-rust-coverage.sh",
             "rust-coverage-policy.json",
-            "validate-rust-coverage-failure.py",
         ]:
             shutil.copy2(ROOT / "ci" / script_name, runner_ci / script_name)
         (runner_repository / ".gitignore").write_text("/target/\n", encoding="utf-8")
@@ -848,72 +727,6 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
         )
         assert not list(publication_output.glob(".rust-coverage-stage.*"))
 
-        checker_under_test = runner_ci / "check-rust-coverage.py"
-        real_checker = runner_ci / "real-check-rust-coverage.py"
-        shutil.copy2(checker_under_test, real_checker)
-        checker_under_test.write_text(
-            """#!/usr/bin/env python3
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-arguments = sys.argv[1:]
-manifest = Path(arguments[arguments.index("--manifest") + 1])
-mode = os.environ["AUTOMATA_FAKE_CHECKER_MODE"]
-if mode == "malformed":
-    manifest.write_text("{", encoding="utf-8")
-elif mode == "partial":
-    manifest.write_text(
-        json.dumps({"schema_version": 1, "guard": {"status": "failed"}}),
-        encoding="utf-8",
-    )
-elif mode == "passed":
-    completed = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("real-check-rust-coverage.py")), *arguments],
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(completed.returncode)
-elif mode != "missing":
-    raise SystemExit(99)
-raise SystemExit(1)
-""",
-            encoding="utf-8",
-        )
-        checker_under_test.chmod(0o755)
-        for fake_checker_mode in ["missing", "malformed", "partial", "passed"]:
-            fake_checker_environment = dict(runner_environment)
-            fake_checker_environment["AUTOMATA_FAKE_CHECKER_MODE"] = fake_checker_mode
-            fake_checker_output = (
-                runner_repository
-                / "target"
-                / f"coverage-checker-{fake_checker_mode}"
-            )
-            fake_checker_runner = subprocess.run(
-                [str(runner_under_test), str(fake_checker_output), "ordinary"],
-                cwd=runner_repository,
-                env=fake_checker_environment,
-                check=False,
-                text=True,
-                capture_output=True,
-            )
-            assert fake_checker_runner.returncode == 2, (
-                fake_checker_mode,
-                fake_checker_runner.stdout,
-                fake_checker_runner.stderr,
-            )
-            assert (
-                "coverage checker exited 1 without a complete failed-guard manifest"
-                in fake_checker_runner.stderr
-            )
-            assert not any(
-                (fake_checker_output / name).exists()
-                for name in ["summary.json", "coverage.lcov", "manifest.json"]
-            )
-            assert not list(fake_checker_output.glob(".rust-coverage-stage.*"))
-
         locked_output = scratch / "locked-output"
         locked_output.mkdir()
         for locked_name in ["coverage.lcov", "manifest.json", "summary.json"]:
@@ -956,107 +769,6 @@ raise SystemExit(1)
             for stale_name in ["coverage.lcov", "manifest.json", "summary.json"]
         )
         assert not list(stale_output.glob(".rust-coverage-stage.*"))
-
-        missing_kms_environment = dict(os.environ)
-        missing_kms_environment.update(
-            {
-                "AUTOMATA_TEST_DATABASE_URL": "postgresql://unused.invalid/test",
-                "AUTOMATA_TEST_S3_ENDPOINT": "http://127.0.0.1:9000/",
-                "AUTOMATA_TEST_S3_BUCKET": "coverage-contract",
-                "AUTOMATA_TEST_S3_ACCESS_KEY": "local-access",
-                "AUTOMATA_TEST_S3_SECRET_KEY": "local-secret",
-            }
-        )
-        missing_kms_environment.pop("AUTOMATA_TEST_S3_KMS_KEY_ID", None)
-        missing_kms_output = scratch / "missing-s3-kms-output"
-        missing_kms_probe = subprocess.run(
-            [str(RUN), str(missing_kms_output), "s3"],
-            cwd=ROOT.parent,
-            env=missing_kms_environment,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert missing_kms_probe.returncode == 2
-        assert (
-            "requires AUTOMATA_TEST_S3_KMS_KEY_ID" in missing_kms_probe.stderr
-        )
-        assert not any(
-            (missing_kms_output / name).exists()
-            for name in ["coverage.lcov", "manifest.json", "summary.json"]
-        )
-        assert not list(missing_kms_output.glob(".rust-coverage-stage.*"))
-
-        podman_environment = dict(os.environ)
-        podman_environment.update(
-            {
-                name: "/unused/coverage-contract"
-                for name in [
-                    "HOME",
-                    "XDG_RUNTIME_DIR",
-                    "AUTOMATA_PODMAN_APPROVED_HELPERS",
-                    "AUTOMATA_PODMAN_TEST_IMAGE",
-                    "AUTOMATA_PODMAN_TEST_SERVICE_IMAGE",
-                    "AUTOMATA_PODMAN_TEST_SERVICE_PROXY_IMAGE",
-                    "AUTOMATA_TEST_STATIC_RUNNER",
-                    "AUTOMATA_TEST_PODMAN_BINARY",
-                    "AUTOMATA_TEST_PODMAN_STATE_ROOT",
-                    "AUTOMATA_TEST_PODMAN_HOME",
-                    "AUTOMATA_TEST_PODMAN_RUNTIME",
-                    "AUTOMATA_TEST_PODMAN_APPROVED_HELPERS",
-                    "AUTOMATA_TEST_CONMON",
-                    "AUTOMATA_TEST_OCI_RUNTIME",
-                    "AUTOMATA_TEST_CATATONIT",
-                    "AUTOMATA_TEST_SECCOMP_PROFILE",
-                ]
-            }
-        )
-        podman_environment["AUTOMATA_LIVE_ROOTLESS_PODMAN"] = "1"
-        podman_environment["AUTOMATA_LIVE_ROOTLESS_BUILDX"] = "1"
-        podman_environment.pop("AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE", None)
-        missing_buildkit_output = scratch / "missing-podman-buildkit-output"
-        missing_buildkit_probe = subprocess.run(
-            [str(RUN), str(missing_buildkit_output), "podman"],
-            cwd=ROOT.parent,
-            env=podman_environment,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert missing_buildkit_probe.returncode == 2
-        assert (
-            "requires AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"
-            in missing_buildkit_probe.stderr
-        )
-        assert not any(
-            (missing_buildkit_output / name).exists()
-            for name in ["summary.json", "coverage.lcov", "manifest.json"]
-        )
-        assert not list(missing_buildkit_output.glob(".rust-coverage-stage.*"))
-
-        podman_environment["AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"] = (
-            "unused.invalid/buildkit@sha256:" + "0" * 64
-        )
-        podman_environment["AUTOMATA_LIVE_ROOTLESS_BUILDX"] = "0"
-        disabled_buildx_output = scratch / "disabled-podman-buildx-output"
-        disabled_buildx_probe = subprocess.run(
-            [str(RUN), str(disabled_buildx_output), "podman"],
-            cwd=ROOT.parent,
-            env=podman_environment,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert disabled_buildx_probe.returncode == 2
-        assert (
-            "requires AUTOMATA_LIVE_ROOTLESS_BUILDX=1"
-            in disabled_buildx_probe.stderr
-        )
-        assert not any(
-            (disabled_buildx_output / name).exists()
-            for name in ["summary.json", "coverage.lcov", "manifest.json"]
-        )
-        assert not list(disabled_buildx_output.glob(".rust-coverage-stage.*"))
 
         fake_bin = scratch / "fake-bin"
         fake_bin.mkdir()
@@ -1151,10 +863,6 @@ exit 99
         assert unknown_plan.returncode == 2
         runner_source = RUN.read_text(encoding="utf-8")
         assert "check-ignored-test-list.py" in runner_source
-        assert (
-            "--inventory-source podman "
-            "crates/automata-ci-runner/src/podman_probe/mod.rs"
-        ) in runner_source
         assert "LLVM_PROFILE_FILE=/dev/null" in runner_source
         assert runner_source.index("rm -f --") < runner_source.index('ignore_regex="$(')
         assert "flock --exclusive --nonblock" in runner_source
@@ -1165,9 +873,6 @@ exit 99
         assert runner_source.index("final_source_snapshot=") > runner_source.index(
             "check-rust-coverage.py"
         )
-        assert runner_source.index(
-            "validate-rust-coverage-failure.py"
-        ) > runner_source.index("check-rust-coverage.py")
         assert '--lcov "$coverage_stage/coverage.lcov"' in runner_source
         assert runner_source.index(
             'mv -- "$coverage_stage/summary.json"'
@@ -1177,18 +882,6 @@ exit 99
             (ROOT / "ci" / "rust-coverage-policy.json").read_text(encoding="utf-8")
         )
         assert list(committed_policy["lanes"]) == bundles
-        podman_requirements = "\n".join(
-            committed_policy["lanes"]["podman"]["service_requirements"]
-        )
-        development_guide = (ROOT.parent / "docs" / "development.md").read_text(
-            encoding="utf-8"
-        )
-        for buildkit_requirement in [
-            "AUTOMATA_LIVE_ROOTLESS_BUILDX",
-            "AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE",
-        ]:
-            assert buildkit_requirement in podman_requirements
-            assert buildkit_requirement in development_guide
         lane_declaration = re.search(r"known_lanes=\(([^)]*)\)", runner_source)
         assert lane_declaration is not None
         assert lane_declaration.group(1).split() == bundles
@@ -1223,33 +916,6 @@ exit 99
         }
         intentionally_unexecuted = set(inventory["intentionally_unexecuted_sources"])
         assert intentionally_unexecuted <= ignored_sources
-        exact_test_bundles = inventory["exact_test_bundles"]
-        for lane, sources in exact_test_bundles.items():
-            assert lane in bundle_patterns
-            for source, expected_tests in sources.items():
-                assert any(
-                    source == pattern
-                    or (pattern.endswith("/") and source.startswith(pattern))
-                    for pattern in bundle_patterns[lane]
-                )
-                exact_inventory = subprocess.run(
-                    [
-                        "python3",
-                        str(CHECK_IGNORED),
-                        "--policy",
-                        str(ROOT / "ci" / "rust-coverage-policy.json"),
-                        "--bundle",
-                        lane,
-                        "--source",
-                        source,
-                    ],
-                    cwd=ROOT.parent,
-                    input="".join(f"{name}: test\n" for name in expected_tests),
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                )
-                assert exact_inventory.returncode == 0, exact_inventory.stderr
         for lane, patterns in bundle_patterns.items():
             for pattern in patterns:
                 matched = {

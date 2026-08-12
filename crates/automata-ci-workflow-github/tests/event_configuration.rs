@@ -249,10 +249,10 @@ fn malformed_or_not_yet_evaluable_event_configuration_is_diagnostic() {
             "github.compile.empty_schedule",
         ),
         (
-            "on:\n  schedule:\n    - cron: '0 0 * * *'\n      timezone: Invalid/Nowhere\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
+            "on:\n  schedule:\n    - timezone: UTC\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",
             "schedule",
             Some(GithubEventMetadataV1::schedule("0 0 * * *")),
-            "github.compile.invalid_schedule_timezone",
+            "github.compile.schedule_timezone_requires_scheduler_support",
         ),
         (
             "on:\n  schedule:\n    - cron: '0 12 * *'\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n",

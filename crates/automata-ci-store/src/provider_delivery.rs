@@ -29,8 +29,6 @@ const MAX_REPOSITORY_IDENTITY_BYTES: usize = 1_024;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const MAX_WORKFLOW_PATH_BYTES: usize = 1_024;
 const COMPLETION_DIGEST_DOMAIN: &[u8] = b"automata.store.provider-delivery-completion.v1\0";
-const WORKFLOW_INVENTORY_DIGEST_DOMAIN: &[u8] =
-    b"automata.store.provider-delivery-workflow-inventory.v1\0";
 
 macro_rules! uuid_identity {
     ($(#[$meta:meta])* $name:ident, $field:literal) => {
@@ -958,295 +956,6 @@ impl ProviderDeliveryWorkflowOutcome {
     }
 }
 
-/// Immutable discovery state of one selected workflow path.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProviderDeliveryWorkflowSourceState {
-    /// The bounded workflow source is available and bound by its SHA-256 digest.
-    Ready(Sha256Digest),
-    /// The selected workflow file is empty.
-    Empty,
-    /// The selected workflow file exceeds the manifest's per-file limit.
-    Oversized,
-    /// A precise-path selection did not exist in the authenticated revision.
-    Missing,
-}
-
-impl ProviderDeliveryWorkflowSourceState {
-    fn digest_name(&self) -> &'static [u8] {
-        match self {
-            Self::Ready(_) => b"ready",
-            Self::Empty => b"empty",
-            Self::Oversized => b"oversized",
-            Self::Missing => b"missing",
-        }
-    }
-}
-
-/// One sorted direct-workflow entry in an immutable discovery inventory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderDeliveryWorkflowInventoryEntry {
-    workflow_path: String,
-    source_state: ProviderDeliveryWorkflowSourceState,
-}
-
-impl ProviderDeliveryWorkflowInventoryEntry {
-    /// Constructs one canonical direct workflow entry.
-    ///
-    /// # Errors
-    ///
-    /// Rejects nested, non-workflow, unsafe, or excessive paths.
-    pub fn new(
-        workflow_path: impl Into<String>,
-        source_state: ProviderDeliveryWorkflowSourceState,
-    ) -> Result<Self, ProviderDeliveryValueError> {
-        let workflow_path = workflow_path.into();
-        validate_direct_workflow_path(&workflow_path)?;
-        Ok(Self {
-            workflow_path,
-            source_state,
-        })
-    }
-
-    /// Returns the canonical direct workflow path.
-    #[must_use]
-    pub fn workflow_path(&self) -> &str {
-        &self.workflow_path
-    }
-
-    /// Returns the immutable source discovery state.
-    #[must_use]
-    pub const fn source_state(&self) -> &ProviderDeliveryWorkflowSourceState {
-        &self.source_state
-    }
-}
-
-/// Exact selected-workflow set bound to one manifest and repository archive.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderDeliveryWorkflowInventory {
-    manifest_digest: Sha256Digest,
-    source_revision: String,
-    repository_source_digest: Sha256Digest,
-    entries: Vec<ProviderDeliveryWorkflowInventoryEntry>,
-    digest: Sha256Digest,
-}
-
-impl ProviderDeliveryWorkflowInventory {
-    /// Constructs and deterministically sorts one complete selected set.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid revision text, duplicate paths, or more entries than one
-    /// provider-delivery completion can retain.
-    pub fn new(
-        manifest_digest: Sha256Digest,
-        source_revision: impl Into<String>,
-        repository_source_digest: Sha256Digest,
-        mut entries: Vec<ProviderDeliveryWorkflowInventoryEntry>,
-    ) -> Result<Self, ProviderDeliveryValueError> {
-        let source_revision = source_revision.into();
-        validate_text(
-            &source_revision,
-            MAX_REPOSITORY_IDENTITY_BYTES,
-            "provider delivery source revision",
-        )?;
-        if entries.len() > MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES {
-            return Err(ProviderDeliveryValueError::TooManyWorkflowOutcomes);
-        }
-        entries.sort_unstable_by(|left, right| left.workflow_path.cmp(&right.workflow_path));
-        if entries
-            .windows(2)
-            .any(|pair| pair[0].workflow_path == pair[1].workflow_path)
-        {
-            return Err(ProviderDeliveryValueError::DuplicateWorkflowPath);
-        }
-        let digest = workflow_inventory_digest(
-            manifest_digest,
-            &source_revision,
-            repository_source_digest,
-            &entries,
-        );
-        Ok(Self {
-            manifest_digest,
-            source_revision,
-            repository_source_digest,
-            entries,
-            digest,
-        })
-    }
-
-    /// Returns the exact pinned manifest digest.
-    #[must_use]
-    pub const fn manifest_digest(&self) -> Sha256Digest {
-        self.manifest_digest
-    }
-
-    /// Returns the exact immutable provider source revision.
-    #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
-    }
-
-    /// Returns the digest of the complete fetched repository archive.
-    #[must_use]
-    pub const fn repository_source_digest(&self) -> Sha256Digest {
-        self.repository_source_digest
-    }
-
-    /// Returns entries in canonical lexical path order.
-    #[must_use]
-    pub fn entries(&self) -> &[ProviderDeliveryWorkflowInventoryEntry] {
-        &self.entries
-    }
-
-    /// Returns the domain-separated digest of every inventory field and entry.
-    #[must_use]
-    pub const fn digest(&self) -> Sha256Digest {
-        self.digest
-    }
-}
-
-/// Claim-fenced request to register or exact-replay one workflow inventory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegisterProviderDeliveryWorkflowInventory {
-    claim: ProviderDeliveryClaimFence,
-    inventory: ProviderDeliveryWorkflowInventory,
-    observed_at: UnixMillis,
-}
-
-impl RegisterProviderDeliveryWorkflowInventory {
-    /// Constructs one claim-fenced inventory registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a pre-epoch observation.
-    pub fn new(
-        claim: ProviderDeliveryClaimFence,
-        inventory: ProviderDeliveryWorkflowInventory,
-        observed_at: UnixMillis,
-    ) -> Result<Self, ProviderDeliveryValueError> {
-        validate_timestamp(observed_at, "provider delivery workflow inventory time")?;
-        Ok(Self {
-            claim,
-            inventory,
-            observed_at,
-        })
-    }
-
-    #[must_use]
-    pub const fn claim(&self) -> ProviderDeliveryClaimFence {
-        self.claim
-    }
-    #[must_use]
-    pub const fn inventory(&self) -> &ProviderDeliveryWorkflowInventory {
-        &self.inventory
-    }
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-}
-
-/// Durable inventory plus already committed path-local progress.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderDeliveryWorkflowInventoryReceipt {
-    inventory: ProviderDeliveryWorkflowInventory,
-    outcomes: Vec<ProviderDeliveryWorkflowOutcome>,
-}
-
-impl ProviderDeliveryWorkflowInventoryReceipt {
-    /// Rehydrates a durable inventory and its already-recorded path outcomes.
-    ///
-    /// Outcomes are sorted canonically so repository adapters can return a
-    /// stable receipt regardless of storage order.
-    ///
-    /// # Errors
-    ///
-    /// Rejects duplicate outcomes or an outcome whose path is absent from the
-    /// supplied inventory.
-    pub fn new(
-        inventory: ProviderDeliveryWorkflowInventory,
-        mut outcomes: Vec<ProviderDeliveryWorkflowOutcome>,
-    ) -> Result<Self, ProviderDeliveryValueError> {
-        outcomes.sort_unstable_by(|left, right| left.workflow_path.cmp(&right.workflow_path));
-        if outcomes.len() > inventory.entries.len()
-            || outcomes
-                .windows(2)
-                .any(|pair| pair[0].workflow_path == pair[1].workflow_path)
-            || outcomes.iter().any(|outcome| {
-                inventory
-                    .entries
-                    .binary_search_by(|entry| {
-                        entry.workflow_path.as_str().cmp(outcome.workflow_path())
-                    })
-                    .is_err()
-            })
-        {
-            return Err(ProviderDeliveryValueError::DuplicateWorkflowPath);
-        }
-        Ok(Self {
-            inventory,
-            outcomes,
-        })
-    }
-
-    #[must_use]
-    pub const fn inventory(&self) -> &ProviderDeliveryWorkflowInventory {
-        &self.inventory
-    }
-    #[must_use]
-    pub fn outcomes(&self) -> &[ProviderDeliveryWorkflowOutcome] {
-        &self.outcomes
-    }
-}
-
-/// Claim-fenced append of one path-local terminal result.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordProviderDeliveryWorkflowProgress {
-    claim: ProviderDeliveryClaimFence,
-    inventory_digest: Sha256Digest,
-    outcome: ProviderDeliveryWorkflowOutcome,
-    observed_at: UnixMillis,
-}
-
-impl RecordProviderDeliveryWorkflowProgress {
-    /// Constructs one immutable path-local append request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a pre-epoch observation.
-    pub fn new(
-        claim: ProviderDeliveryClaimFence,
-        inventory_digest: Sha256Digest,
-        outcome: ProviderDeliveryWorkflowOutcome,
-        observed_at: UnixMillis,
-    ) -> Result<Self, ProviderDeliveryValueError> {
-        validate_timestamp(observed_at, "provider delivery workflow progress time")?;
-        Ok(Self {
-            claim,
-            inventory_digest,
-            outcome,
-            observed_at,
-        })
-    }
-
-    #[must_use]
-    pub const fn claim(&self) -> ProviderDeliveryClaimFence {
-        self.claim
-    }
-    #[must_use]
-    pub const fn inventory_digest(&self) -> Sha256Digest {
-        self.inventory_digest
-    }
-    #[must_use]
-    pub const fn outcome(&self) -> &ProviderDeliveryWorkflowOutcome {
-        &self.outcome
-    }
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-}
-
 /// Atomic completion of one exact claimed delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteProviderDelivery {
@@ -1461,12 +1170,6 @@ pub enum ProviderDeliveryStoreError {
     RetryLimitReached,
     #[error("provider delivery admitted outcome does not name a run in the inbox tenant")]
     OutcomeRunRejected,
-    /// This repository has not implemented durable per-workflow progress.
-    #[error("provider delivery workflow progress is unsupported")]
-    WorkflowProgressUnsupported,
-    /// Existing workflow progress disagrees with the exact selected inventory.
-    #[error("provider delivery workflow progress conflicts with durable state")]
-    WorkflowProgressRejected,
     #[error("provider delivery claim fence is exhausted")]
     FenceExhausted,
     #[error("durable provider delivery data violates an Automata invariant")]
@@ -1503,24 +1206,6 @@ pub trait ProviderDeliveryRepository: Send + Sync {
         &self,
         request: CompleteProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError>;
-
-    /// Registers or exact-replays the complete selected workflow inventory.
-    ///
-    /// Implementations that do not support multi-workflow admission fail closed.
-    async fn register_provider_delivery_workflow_inventory(
-        &self,
-        _request: RegisterProviderDeliveryWorkflowInventory,
-    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
-        Err(ProviderDeliveryStoreError::WorkflowProgressUnsupported)
-    }
-
-    /// Appends or exact-replays one path-local terminal outcome.
-    async fn record_provider_delivery_workflow_progress(
-        &self,
-        _request: RecordProviderDeliveryWorkflowProgress,
-    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
-        Err(ProviderDeliveryStoreError::WorkflowProgressUnsupported)
-    }
 
     /// Releases the exact live claim into bounded delayed retry state.
     async fn retry_provider_delivery(
@@ -1600,21 +1285,6 @@ fn validate_workflow_path(value: &str) -> Result<(), ProviderDeliveryValueError>
     Ok(())
 }
 
-fn validate_direct_workflow_path(value: &str) -> Result<(), ProviderDeliveryValueError> {
-    validate_workflow_path(value)?;
-    let Some(file) = value.strip_prefix(".github/workflows/") else {
-        return Err(ProviderDeliveryValueError::InvalidWorkflowPath);
-    };
-    let supported_extension = matches!(
-        file.rsplit_once('.'),
-        Some((stem, "yml" | "yaml")) if !stem.is_empty()
-    );
-    if file.is_empty() || file.contains('/') || !supported_extension {
-        return Err(ProviderDeliveryValueError::InvalidWorkflowPath);
-    }
-    Ok(())
-}
-
 fn validate_timestamp(
     value: UnixMillis,
     field: &'static str,
@@ -1648,32 +1318,6 @@ fn completion_digest(outcomes: &[ProviderDeliveryWorkflowOutcome]) -> Sha256Dige
                 digest.update([3]);
                 update_length_prefixed(&mut digest, failure_kind.as_str().as_bytes());
             }
-        }
-    }
-    Sha256Digest::from_bytes(digest.finalize().into())
-}
-
-fn workflow_inventory_digest(
-    manifest_digest: Sha256Digest,
-    source_revision: &str,
-    repository_source_digest: Sha256Digest,
-    entries: &[ProviderDeliveryWorkflowInventoryEntry],
-) -> Sha256Digest {
-    let mut digest = Sha256::new();
-    digest.update(WORKFLOW_INVENTORY_DIGEST_DOMAIN);
-    digest.update(manifest_digest.as_bytes());
-    update_length_prefixed(&mut digest, source_revision.as_bytes());
-    digest.update(repository_source_digest.as_bytes());
-    digest.update(
-        u64::try_from(entries.len())
-            .expect("bounded inventory count fits u64")
-            .to_be_bytes(),
-    );
-    for entry in entries {
-        update_length_prefixed(&mut digest, entry.workflow_path.as_bytes());
-        update_length_prefixed(&mut digest, entry.source_state.digest_name());
-        if let ProviderDeliveryWorkflowSourceState::Ready(source_digest) = &entry.source_state {
-            digest.update(source_digest.as_bytes());
         }
     }
     Sha256Digest::from_bytes(digest.finalize().into())

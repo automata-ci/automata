@@ -1,19 +1,17 @@
 mod common;
 
 use automata_ci_core::{
-    AttemptId, JobIrVersion, Lease, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION,
-    RunnerSessionId,
+    JobIrVersion, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunnerSessionId,
 };
 use automata_ci_protocol::{
-    CommandAck, CommandCursor, LeaseOffer, LeaseRequest, MessageHeader, MessageValidationError,
-    ProtocolLimits, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerToRunner,
+    CommandAck, CommandCursor, LeaseRequest, MessageHeader, MessageValidationError, ProtocolLimits,
+    RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
 };
 use automata_ci_protocol_protobuf::{
     DecodeError, EncodeError, decode_job_ir, decode_runner_frame, decode_server_frame,
     encode_job_ir, encode_runner_frame, encode_server_frame,
 };
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
 use static_assertions::assert_impl_all;
 use uuid::Uuid;
 
@@ -51,89 +49,6 @@ fn fixture_lease_offer() -> fixture_wire::ServerFrame {
     let encoded =
         encode_server_frame(&message, &ProtocolLimits::default()).expect("encode fixture");
     fixture_wire::ServerFrame::decode(encoded.as_slice()).expect("decode private test DTO")
-}
-
-fn fixture_lease_offer_with_managed_overlay() -> fixture_wire::ServerFrame {
-    let offer = common::lease_offer_with_job(common::rich_job());
-    let overlay = common::managed_secret_overlay(offer.lease());
-    let offer = offer
-        .with_managed_secret_bindings(overlay)
-        .expect("lease-bound overlay");
-    let encoded = encode_server_frame(
-        &ServerToRunner::LeaseOffer(Box::new(offer)),
-        &ProtocolLimits::default(),
-    )
-    .expect("encode managed-overlay fixture");
-    fixture_wire::ServerFrame::decode(encoded.as_slice()).expect("decode private test DTO")
-}
-
-fn lease_offer_payload(frame: &mut fixture_wire::ServerFrame) -> &mut fixture_wire::LeaseOffer {
-    let Some(fixture_wire::server_frame::Payload::LeaseOffer(offer)) = frame.payload.as_mut()
-    else {
-        panic!("lease offer fixture shape");
-    };
-    offer
-}
-
-fn managed_secret_overlay_digest(overlay: &fixture_wire::ManagedSecretBindingOverlay) -> Vec<u8> {
-    fn update_text(hasher: &mut Sha256, value: &str) {
-        hasher.update(
-            u32::try_from(value.len())
-                .expect("fixture text length")
-                .to_be_bytes(),
-        );
-        hasher.update(value.as_bytes());
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"automata.managed-secret-binding-overlay.v1\0");
-    hasher.update(
-        u16::try_from(overlay.schema_version)
-            .expect("fixture schema")
-            .to_be_bytes(),
-    );
-    hasher.update(&overlay.attempt_id);
-    hasher.update(&overlay.lease_id);
-    hasher.update(overlay.fencing_token.to_be_bytes());
-    hasher.update(
-        u32::try_from(overlay.bindings.len())
-            .expect("fixture binding count")
-            .to_be_bytes(),
-    );
-    for binding in &overlay.bindings {
-        update_text(&mut hasher, &binding.canonical_name);
-        update_text(&mut hasher, &binding.grant_id);
-        update_text(&mut hasher, &binding.version_id);
-    }
-    hasher.finalize().to_vec()
-}
-
-fn runner_requirements(
-    frame: &mut fixture_wire::ServerFrame,
-) -> &mut fixture_wire::RunnerRequirements {
-    lease_offer_payload(frame)
-        .job
-        .as_mut()
-        .expect("job envelope")
-        .job
-        .as_mut()
-        .expect("job")
-        .requirements
-        .as_mut()
-        .expect("runner requirements")
-}
-
-fn attach_valid_resource_allocation(frame: &mut fixture_wire::ServerFrame) {
-    let requirements = runner_requirements(frame);
-    let requests = requirements.minimum_resources.expect("minimum resources");
-    let mut limits = requests;
-    limits.cpu_millis *= 2;
-    limits.memory_bytes *= 2;
-    limits.ephemeral_disk_bytes *= 2;
-    requirements.resource_allocation = Some(fixture_wire::JobResourceAllocation {
-        requests: Some(requests),
-        limits: Some(limits),
-    });
 }
 
 fn fixture_runner_hello() -> fixture_wire::RunnerFrame {
@@ -845,129 +760,6 @@ fn required_environment_profile_digest_is_validated_at_the_job_boundary() {
         decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
         Err(DecodeError::InvalidValue {
             field: "environment_profile.sha256_digest"
-        })
-    ));
-}
-
-#[test]
-fn resource_allocation_requires_exact_placement_request_evidence() {
-    let mut frame = fixture_lease_offer();
-    attach_valid_resource_allocation(&mut frame);
-    runner_requirements(&mut frame)
-        .minimum_resources
-        .as_mut()
-        .expect("minimum resources")
-        .cpu_millis += 1;
-
-    assert!(matches!(
-        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
-        Err(DecodeError::InvalidValue {
-            field: "runner_requirements.minimum_resources"
-        })
-    ));
-}
-
-#[test]
-fn resource_allocation_rejects_one_limit_below_its_request() {
-    let mut frame = fixture_lease_offer();
-    attach_valid_resource_allocation(&mut frame);
-    let allocation = runner_requirements(&mut frame)
-        .resource_allocation
-        .as_mut()
-        .expect("resource allocation");
-    let requested_cpu = allocation.requests.as_ref().expect("requests").cpu_millis;
-    allocation.limits.as_mut().expect("limits").cpu_millis = requested_cpu - 1;
-
-    assert!(matches!(
-        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
-        Err(DecodeError::InvalidValue {
-            field: "job_resource_allocation"
-        })
-    ));
-}
-
-#[test]
-fn managed_secret_overlay_rejects_a_lease_attempt_mismatch_with_a_valid_digest() {
-    let mut frame = fixture_lease_offer_with_managed_overlay();
-    let template = common::lease_offer_with_job(common::rich_job());
-    let original_lease = template.lease();
-    let changed_lease = Lease::new(
-        original_lease.lease_id(),
-        AttemptId::new(),
-        original_lease.runner_id(),
-        original_lease.fencing_token(),
-        original_lease.issued_at(),
-        original_lease.expires_at(),
-    )
-    .expect("changed attempt lease");
-    let job = template.job().clone();
-    let authorities = common::runtime_authorities(&job, &changed_lease);
-    let changed_offer = LeaseOffer::new(
-        template.header(),
-        template.slot(),
-        changed_lease.clone(),
-        job,
-        authorities,
-    )
-    .with_managed_secret_bindings(common::managed_secret_overlay(&changed_lease))
-    .expect("internally valid changed-attempt overlay");
-    let encoded = encode_server_frame(
-        &ServerToRunner::LeaseOffer(Box::new(changed_offer)),
-        &ProtocolLimits::default(),
-    )
-    .expect("encode changed-attempt fixture");
-    let mut changed_frame = fixture_wire::ServerFrame::decode(encoded.as_slice())
-        .expect("decode changed-attempt fixture");
-    let changed_overlay = lease_offer_payload(&mut changed_frame)
-        .managed_secret_bindings
-        .take()
-        .expect("managed-secret overlay");
-    lease_offer_payload(&mut frame).managed_secret_bindings = Some(changed_overlay);
-
-    assert!(matches!(
-        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
-        Err(DecodeError::InvalidValue {
-            field: "managed_secret_binding_overlay.lease_binding"
-        })
-    ));
-}
-
-#[test]
-fn managed_secret_overlay_rejects_noncanonical_order_with_a_matching_digest() {
-    let mut frame = fixture_lease_offer_with_managed_overlay();
-    let overlay = lease_offer_payload(&mut frame)
-        .managed_secret_bindings
-        .as_mut()
-        .expect("managed-secret overlay");
-    assert_eq!(
-        overlay.sha256_digest,
-        managed_secret_overlay_digest(overlay),
-        "the test digest helper must reproduce a canonical production digest"
-    );
-    overlay.bindings.reverse();
-    overlay.sha256_digest = managed_secret_overlay_digest(overlay);
-
-    assert!(matches!(
-        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
-        Err(DecodeError::NonCanonicalOrder {
-            field: "managed_secret_binding_overlay.bindings"
-        })
-    ));
-}
-
-#[test]
-fn managed_secret_overlay_rejects_digest_substitution() {
-    let mut frame = fixture_lease_offer_with_managed_overlay();
-    lease_offer_payload(&mut frame)
-        .managed_secret_bindings
-        .as_mut()
-        .expect("managed-secret overlay")
-        .sha256_digest = vec![0x5a; 32];
-
-    assert!(matches!(
-        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
-        Err(DecodeError::InvalidValue {
-            field: "managed_secret_binding_overlay.sha256_digest"
         })
     ));
 }

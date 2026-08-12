@@ -25,7 +25,7 @@ use automata_ci_store::{
     CommitLogicalInstanceMaterialization, ConsumeSelectedLogicalInstanceMaterialization,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
     ConsumedSelectedLogicalInstanceMaterialization, ConsumedSelectedLogicalJobOrchestration,
-    JobEventTrust, JobSourceKind, LogicalActivationBaseContextKind, LogicalActivationClaimFence,
+    LogicalActivationBaseContextKind, LogicalActivationClaimFence,
     LogicalActivationExecutionContext, LogicalActivationGeneration, LogicalActivationObject,
     LogicalActivationPreparationClaimFence, LogicalActivationPreparationDescriptor,
     LogicalActivationPreparationGeneration, LogicalActivationPreparationReceipt,
@@ -47,9 +47,8 @@ use automata_ci_store::{
     RenewLogicalActivationPreparation, RenewLogicalInstanceMaterialization,
     RenewLogicalJobActivation, RenewedLogicalActivationPreparation,
     RenewedLogicalInstanceMaterialization, RenewedLogicalJobActivation, RepositoryId,
-    ReusableSecretPermission, SelectedLogicalInstanceMaterialization,
-    SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicy,
-    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
+    SelectedLogicalInstanceMaterialization, SelectedLogicalJobOrchestration, StoreError,
+    TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
@@ -85,7 +84,7 @@ const RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a","id":"github/ubuntu-24-04"},
     "selector":"ubuntu-latest"
-  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"schema":1
 }"#;
 
 const WORKFLOW_SOURCE: &str = r"name: Autonomous CI
@@ -407,9 +406,9 @@ enum FinalMutationFault {
 
 #[derive(Clone, Debug)]
 enum ReadyPhase {
-    Preparation(Box<LogicalActivationPreparationDescriptor>),
+    Preparation(LogicalActivationPreparationDescriptor),
     Activation(Box<LogicalActivationPreparationReceipt>),
-    Materialization(Box<LogicalInstanceMaterializationDescriptor>),
+    Materialization(LogicalInstanceMaterializationDescriptor),
     Done,
 }
 
@@ -456,7 +455,7 @@ impl HarnessRepository {
     fn new(descriptor: LogicalActivationPreparationDescriptor, trace: HarnessTrace) -> Self {
         Self {
             state: Mutex::new(RepositoryState {
-                ready: ReadyPhase::Preparation(Box::new(descriptor)),
+                ready: ReadyPhase::Preparation(descriptor),
                 orchestration: None,
                 materialization: None,
                 wrong_receipt: WrongReceipt::None,
@@ -679,7 +678,7 @@ impl HarnessRepository {
         let ReadyPhase::Materialization(descriptor) = &state.ready else {
             panic!("materialization-ready descriptor")
         };
-        descriptor.as_ref().clone()
+        descriptor.clone()
     }
 
     fn replace_ready_runtime_context(&self, runtime_context: LogicalActivationObject) {
@@ -702,7 +701,7 @@ impl HarnessRepository {
             current.runtime_policy().clone(),
         )
         .expect("replacement materialization descriptor");
-        state.ready = ReadyPhase::Materialization(Box::new(replacement));
+        state.ready = ReadyPhase::Materialization(replacement);
         state.materialization = None;
     }
 }
@@ -945,7 +944,7 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         if state.orchestration.is_none() {
             let consumed = match state.ready.clone() {
                 ReadyPhase::Preparation(descriptor) => {
-                    Some(selected_preparation(*descriptor, &request))
+                    Some(selected_preparation(descriptor, &request))
                 }
                 ReadyPhase::Activation(preparation) => {
                     Some(selected_activation(*preparation, &request))
@@ -975,7 +974,7 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         if state.materialization.is_none()
             && let ReadyPhase::Materialization(descriptor) = state.ready.clone()
         {
-            state.materialization = Some(selected_materialization(*descriptor, &request));
+            state.materialization = Some(selected_materialization(descriptor, &request));
         }
         Ok(state.materialization.as_ref().map_or(
             LogicalInstanceMaterializationSelectionOutcome::Idle,
@@ -1048,8 +1047,7 @@ impl LogicalWorkSelectionRepository for HarnessRepository {
         assert_eq!(
             Some(request.consumed()),
             state.orchestration.as_ref(),
-            "quarantine must retain the latest exact orchestration authority for {:?}",
-            request.kind(),
+            "quarantine must retain the latest exact orchestration authority"
         );
         state.orchestration_quarantines.push(request.kind());
         Ok(LogicalWorkQuarantineOutcome::Quarantined)
@@ -1370,10 +1368,7 @@ impl LogicalActivationRepository for HarnessRepository {
             state.ready = if request.instances().is_empty() {
                 ReadyPhase::Done
             } else {
-                ReadyPhase::Materialization(Box::new(materialization_descriptor(
-                    &preparation,
-                    &request,
-                )))
+                ReadyPhase::Materialization(materialization_descriptor(&preparation, &request))
             };
             state.orchestration = None;
             fault
@@ -1534,7 +1529,6 @@ async fn new_harness_with(
             WorkflowId::from_uuid(Uuid::from_u128(14)),
             "Autonomous CI".to_owned(),
             GIT_REF.to_owned(),
-            "workflow_dispatch".to_owned(),
             Some("synthetic-actor".to_owned()),
             RunIdAlias::new(11).expect("run ID alias"),
             7,
@@ -2238,17 +2232,6 @@ async fn real_executor_completes_all_phases_without_a_second_claim() {
             HarnessOperation::PublishActivation,
         ],
         "activation must read all inputs, write runtime then JobIR, and publish last"
-    );
-    let publication = harness.repository.publication_attempts();
-    let gate = publication[0].instances()[0]
-        .environment_gate()
-        .expect("activation-derived environment gate evidence");
-    assert_eq!(gate.environment(), None);
-    assert_eq!(gate.event_trust(), JobEventTrust::Trusted);
-    assert_eq!(gate.source_kind(), JobSourceKind::SameRepository);
-    assert_eq!(
-        gate.reusable_secret_permission(),
-        ReusableSecretPermission::None
     );
     assert_eq!(
         harness

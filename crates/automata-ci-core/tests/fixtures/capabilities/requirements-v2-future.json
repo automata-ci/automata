@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 2,
   "labels": [],
   "eligible_groups": [],
   "operating_system": null,
@@ -10,7 +10,6 @@
     "ephemeral_disk_bytes": 0,
     "gpu_count": 0
   },
-  "resource_allocation": null,
   "minimum_isolation": "process",
   "sandbox_features": [],
   "container_features": [],

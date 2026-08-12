@@ -826,9 +826,7 @@ async fn lock_active_preparation_graph(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_workflow_plan_v2_invocation_published(
-                   marker.run_id, $2
-               )
+               AND marker.root_invocation_id = $2
         FROM workflow_plan_v2_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
@@ -915,41 +913,118 @@ async fn lock_target(
     Ok(Some(row))
 }
 
+#[allow(clippy::too_many_lines)] // One exact lock query projects both current and durable evidence.
 async fn fetch_locked_target(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalActivationPreparationTarget,
 ) -> Result<Option<PgRow>, LogicalActivationPreparationStoreError> {
-    fetch_locked_target_kind(transaction, target, "steps").await
-}
-
-async fn fetch_locked_target_kind(
-    transaction: &mut Transaction<'_, Postgres>,
-    target: &LogicalActivationPreparationTarget,
-    execution_kind: &str,
-) -> Result<Option<PgRow>, LogicalActivationPreparationStoreError> {
-    sqlx::query(include_str!(
-        "sql/logical_activation_preparation_locked_target.sql"
-    ))
+    sqlx::query(
+        r"
+        SELECT job.logical_key, job.source_order, job.created_at_ms,
+               manifest.authority_profile,
+               manifest.runner_policy_digest,
+               manifest.runner_policy_object_key,
+               manifest.runner_policy_size_bytes,
+               manifest.runner_policy_media_type,
+               run.workflow_id, run.workflow_name, run.git_ref, run.actor,
+               run.run_id_alias, run.run_number, run.run_attempt,
+               invocation.plan_digest, invocation.plan_object_key,
+               invocation.plan_size_bytes, invocation.plan_media_type,
+               run.event_digest, run.event_object_key, run.event_size_bytes,
+               run.event_media_type,
+               marker.base_context_digest, marker.base_context_object_key,
+               marker.base_context_size_bytes, marker.base_context_media_type,
+               marker.base_context_schema,
+               claim.logical_job_id AS durable_logical_job_id,
+               claim.run_id AS durable_run_id,
+               claim.invocation_id AS durable_invocation_id,
+               claim.descriptor_digest AS durable_descriptor_digest,
+               claim.logical_key AS durable_logical_key,
+               claim.source_order AS durable_source_order,
+               claim.authority_profile AS durable_authority_profile,
+               claim.runtime_policy_revision AS durable_runtime_policy_revision,
+               claim.runtime_policy_digest AS durable_runtime_policy_digest,
+               claim.runner_policy_digest AS durable_runner_policy_digest,
+               claim.runner_policy_object_key AS durable_runner_policy_object_key,
+               claim.runner_policy_size_bytes AS durable_runner_policy_size_bytes,
+               claim.runner_policy_media_type AS durable_runner_policy_media_type,
+               claim.workflow_id AS durable_workflow_id,
+               claim.workflow_name AS durable_workflow_name,
+               claim.git_ref AS durable_git_ref,
+               claim.actor AS durable_actor,
+               run.run_id_alias AS durable_run_id_alias, claim.run_number AS durable_run_number,
+               claim.run_attempt AS durable_run_attempt,
+               claim.plan_digest AS durable_plan_digest,
+               claim.plan_object_key AS durable_plan_object_key,
+               claim.plan_size_bytes AS durable_plan_size_bytes,
+               claim.plan_media_type AS durable_plan_media_type,
+               claim.plan_schema AS durable_plan_schema,
+               claim.event_digest AS durable_event_digest,
+               claim.event_object_key AS durable_event_object_key,
+               claim.event_size_bytes AS durable_event_size_bytes,
+               claim.event_media_type AS durable_event_media_type,
+               claim.base_context_kind AS durable_base_context_kind,
+               claim.base_context_digest AS durable_base_context_digest,
+               claim.base_context_object_key AS durable_base_context_object_key,
+               claim.base_context_size_bytes AS durable_base_context_size_bytes,
+               claim.base_context_media_type AS durable_base_context_media_type,
+               claim.base_context_schema AS durable_base_context_schema,
+               claim.workspace AS durable_workspace,
+               claim.prerequisite_count AS durable_prerequisite_count,
+               claim.prerequisites_digest AS durable_prerequisites_digest,
+               claim.aggregate_status AS durable_aggregate_status,
+               claim.evidence_ready_at_ms AS durable_evidence_ready_at_ms,
+               claim.state AS durable_state, claim.owner_id AS durable_owner_id,
+               claim.generation AS durable_generation,
+               claim.claimed_at_ms AS durable_claimed_at_ms,
+               claim.expires_at_ms AS durable_expires_at_ms,
+               claim.origin_selection_id AS durable_origin_selection_id
+        FROM workflow_plan_v2_jobs AS job
+        JOIN workflow_plan_v2_invocations AS invocation
+          ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
+        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+        JOIN workflow_runs AS run ON run.id = marker.run_id
+        JOIN repositories AS repository ON repository.id = run.repository_id
+        JOIN github_workflow_run_subject_evidence AS subject
+          ON subject.tenant_id = repository.tenant_id
+         AND subject.repository_id = run.repository_id
+         AND subject.run_id = run.id
+        JOIN github_provider_delivery_evidence AS delivery
+          ON delivery.tenant_id = subject.tenant_id
+         AND delivery.repository_id = subject.repository_id
+         AND delivery.provider_delivery_id = subject.provider_delivery_id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = delivery.tenant_id
+         AND manifest.repository_id = delivery.repository_id
+         AND manifest.provider_connection_id = delivery.provider_connection_id
+         AND manifest.manifest_revision = delivery.provider_manifest_revision
+         AND manifest.manifest_digest = delivery.provider_manifest_digest
+        LEFT JOIN workflow_plan_v2_activation_preparation_claims AS claim
+          ON claim.logical_job_id = job.id
+        WHERE repository.tenant_id = $1
+          AND job.run_id = $2 AND job.invocation_id = $3 AND job.id = $4
+          AND job.execution_kind = 'steps'
+          AND invocation.id = marker.root_invocation_id
+          AND invocation.plan_schema = 2
+          AND invocation.plan_media_type =
+              'application/vnd.automata.workflow-plan+json'
+          AND invocation.state IN ('pending', 'active')
+          AND marker.orchestration_schema = 1
+          AND marker.base_context_schema = 2
+          AND marker.state IN ('pending', 'active')
+          AND run.admission_epoch = 4 AND run.plan_schema = 2
+          AND run.event_media_type = 'application/json'
+          AND (job.state = 'pending' OR claim.state = 'prepared')
+        FOR UPDATE OF job
+        ",
+    )
     .bind(target.tenant().as_str())
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
     .bind(target.logical_job_id().as_uuid())
-    .bind(execution_kind)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)
-}
-
-pub(super) async fn load_ready_reusable_preparation_descriptor(
-    transaction: &mut Transaction<'_, Postgres>,
-    target: LogicalActivationPreparationTarget,
-) -> Result<Option<LogicalActivationPreparationDescriptor>, LogicalActivationPreparationStoreError>
-{
-    let Some(row) = fetch_locked_target_kind(transaction, &target, "reusable_workflow").await?
-    else {
-        return Ok(None);
-    };
-    load_current_descriptor(transaction, target, &row).await
 }
 
 async fn load_current_descriptor(
@@ -967,16 +1042,19 @@ async fn load_current_descriptor(
                result.effective_conclusion, result.closure_has_failure,
                result.closure_has_cancelled, result.closure_has_skipped,
                result.output_count, result.finalized_at_ms,
-               result.claim_state AS result_claim_state
+               result_claim.logical_job_id AS finalized_claim_job_id
         FROM workflow_plan_v2_dependencies AS dependency
         JOIN workflow_plan_v2_jobs AS prerequisite
           ON prerequisite.run_id = dependency.run_id
          AND prerequisite.invocation_id = dependency.invocation_id
          AND prerequisite.id = dependency.prerequisite_job_id
-        LEFT JOIN workflow_plan_v2_effective_job_results AS result
+        LEFT JOIN workflow_plan_v2_job_results AS result
           ON result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
          AND result.logical_job_id = dependency.prerequisite_job_id
+        LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
+          ON result_claim.logical_job_id = result.logical_job_id
+         AND result_claim.state = 'finalized'
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
         ORDER BY prerequisite.source_order, prerequisite.id
@@ -989,11 +1067,10 @@ async fn load_current_descriptor(
     .await
     .map_err(operation_error)?;
     if prerequisite_rows.iter().any(|row| {
-        row.try_get::<Option<String>, _>("result_claim_state")
+        row.try_get::<Option<Uuid>, _>("finalized_claim_job_id")
             .ok()
             .flatten()
-            .as_deref()
-            != Some("finalized")
+            .is_none()
     }) {
         return Ok(None);
     }
@@ -1053,12 +1130,14 @@ async fn load_current_outputs(
         SELECT dependency.prerequisite_job_id, output.output_name,
                output.sensitivity, output.public_value
         FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_effective_job_results AS result
+        JOIN workflow_plan_v2_job_results AS result
           ON result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
          AND result.logical_job_id = dependency.prerequisite_job_id
-         AND result.claim_state = 'finalized'
-        JOIN workflow_plan_v2_effective_job_result_outputs AS output
+        JOIN workflow_plan_v2_job_result_claims AS result_claim
+          ON result_claim.logical_job_id = result.logical_job_id
+         AND result_claim.state = 'finalized'
+        JOIN workflow_plan_v2_job_result_outputs AS output
           ON output.logical_job_id = result.logical_job_id
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
@@ -1181,11 +1260,10 @@ fn build_descriptor(
         WorkflowJobKey::new(get_string(row, prefix, "logical_key")?).map_err(corrupt_value)?;
     let source_order = u16::try_from(get_i32(row, prefix, "source_order")?)
         .map_err(|_| StoreError::corrupt_data("invalid preparation source order"))?;
-    let mut execution = LogicalActivationExecutionContext::new(
+    let execution = LogicalActivationExecutionContext::new(
         WorkflowId::from_uuid(get_uuid(row, prefix, "workflow_id")?),
         get_string(row, prefix, "workflow_name")?,
         get_string(row, prefix, "git_ref")?,
-        get_string(row, prefix, "event_name")?,
         get_optional_string(row, prefix, "actor")?,
         RunIdAlias::new(
             u64::try_from(get_i64(row, prefix, "run_id_alias")?)
@@ -1198,11 +1276,6 @@ fn build_descriptor(
             .map_err(|_| StoreError::corrupt_data("invalid preparation run attempt"))?,
     )
     .map_err(corrupt_value)?;
-    if let Some(triggering_actor) = get_optional_string(row, prefix, "triggering_actor")? {
-        execution = execution
-            .with_triggering_actor(triggering_actor)
-            .map_err(corrupt_value)?;
-    }
     let authority_profile =
         parse_authority_profile(&get_string(row, prefix, "authority_profile")?)?;
     let runner_policy =

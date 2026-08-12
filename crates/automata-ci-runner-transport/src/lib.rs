@@ -17,24 +17,18 @@
 mod client;
 mod error;
 mod limits;
-mod managed_secret_delivery;
 mod observer;
 mod port;
 mod prepared;
 mod server;
 mod tls;
 
-pub use client::{HyperRunnerControlClient, HyperRunnerEphemeralClient};
+pub use client::HyperRunnerControlClient;
 pub use error::{
     ApplicationError, ApplicationErrorKind, ClientError, ClientErrorKind, ConfigurationError,
     RetryClass, ServeError,
 };
 pub use limits::TransportLimits;
-pub use managed_secret_delivery::{
-    ManagedSecretDeliveryBinding, ManagedSecretDeliveryCoordinates, ManagedSecretDeliveryOperation,
-    ManagedSecretDeliveryRequest, ManagedSecretDeliveryResponse, ManagedSecretDeliveryValue,
-    ManagedSecretDeliveryWireError,
-};
 pub use observer::{
     NoopRunnerControlClientObserver, NoopRunnerTransportObserver, RunnerControlClientByteDirection,
     RunnerControlClientObserver, RunnerTransportApplicationRejection,
@@ -44,14 +38,10 @@ pub use observer::{
     RunnerTransportResponseRejection, RunnerTransportRoute, RunnerTransportTlsOutcome,
 };
 pub use port::{
-    AuthenticatedRunnerEphemeralRequest, AuthenticatedRunnerRequest, ClientFuture, ControlReply,
-    ControlRoute, EphemeralClientFuture, EphemeralHandlerFuture, HandlerFuture,
-    RunnerControlClient, RunnerControlHandler, RunnerEphemeralClient, RunnerEphemeralHandler,
-    RunnerEphemeralReply, RunnerEphemeralResponse, SessionBinding,
+    AuthenticatedRunnerRequest, ClientFuture, ControlReply, ControlRoute, HandlerFuture,
+    RunnerControlClient, RunnerControlHandler, SessionBinding,
 };
-pub use prepared::{
-    PrepareEphemeralError, PrepareError, PreparedEphemeralRequest, PreparedRequest,
-};
+pub use prepared::{PrepareError, PreparedRequest};
 pub use server::RunnerControlServer;
 pub use tls::{ClientTlsConfig, ServerTlsConfig};
 
@@ -63,19 +53,3 @@ pub const HANDSHAKE_PATH: &str = "/automata.runner.v1.RunnerControl/Handshake";
 
 /// Post-handshake request/reply and long-poll endpoint.
 pub const SYNC_PATH: &str = "/automata.runner.v1.RunnerControl/Sync";
-
-/// Private value-bearing route on the dedicated mTLS runner listener.
-pub const EPHEMERAL_SECRETS_PATH: &str = "/automata.runner.v1.RunnerEphemeralSecrets/Exchange";
-
-/// Exact media type for the bounded ephemeral-secret binary contract.
-pub const EPHEMERAL_SECRETS_CONTENT_TYPE: &str =
-    "application/vnd.automata.runner-ephemeral-secrets.v1";
-
-/// Maximum request bytes admitted on the ephemeral-secret route.
-pub const MAX_EPHEMERAL_REQUEST_BYTES: usize = 128 * 1024;
-
-/// Maximum response bytes admitted on the ephemeral-secret route.
-pub const MAX_EPHEMERAL_RESPONSE_BYTES: usize = 1024 * 1024;
-
-/// Stable verifier-key identity for managed-secret delivery bearer digests.
-pub const MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID: &str = "managed-secret-delivery-v1";

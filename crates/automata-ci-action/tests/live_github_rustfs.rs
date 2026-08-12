@@ -4,9 +4,7 @@ use automata_ci_action::{
     ActionBundleLimits, ActionDefinitionKind, ActionResolver, ActionSubpath,
     ImmutableActionResolver, RepositoryActionRequest,
 };
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use url::Url;
@@ -28,13 +26,7 @@ async fn resolves_pinned_checkout_from_github_into_rustfs() {
         Some("contract/action-bundles-v1".to_owned()),
         Duration::from_secs(30),
     )
-    .expect("test S3 configuration")
-    .with_at_rest_encryption(
-        S3AtRestEncryption::aws_kms(
-            env::var("AUTOMATA_TEST_S3_KMS_KEY_ID").expect("AUTOMATA_TEST_S3_KMS_KEY_ID"),
-        )
-        .expect("test S3 KMS key identity"),
-    );
+    .expect("test S3 configuration");
     let credentials = StaticS3Credentials::new(
         env::var("AUTOMATA_TEST_S3_ACCESS_KEY").expect("AUTOMATA_TEST_S3_ACCESS_KEY"),
         env::var("AUTOMATA_TEST_S3_SECRET_KEY").expect("AUTOMATA_TEST_S3_SECRET_KEY"),

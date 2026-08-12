@@ -48,19 +48,11 @@ use crate::{
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v3";
-const LEGACY_LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-rpc-response-metadata:v1";
-
-fn is_lease_offer_command_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        LEASE_OFFER_COMMAND_KIND | LEGACY_LEASE_OFFER_COMMAND_KIND
-    )
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RunnerCommandEnvelopeMetadata {
@@ -3568,7 +3560,7 @@ impl LockedReplayPublicationEvidence {
                 "lease-offer publication has a mismatched command fence",
             ));
         }
-        if !self.request_kind_is_lease_request || !is_lease_offer_command_kind(&command.kind) {
+        if !self.request_kind_is_lease_request || command.kind != LEASE_OFFER_COMMAND_KIND {
             return Err(StoreError::corrupt_data(
                 "lease-offer publication has mismatched command authority metadata",
             ));
@@ -4130,7 +4122,7 @@ async fn load_generic_receipt(
             StoreError::corrupt_data("lease-request receipt lost its offer publication")
         })?;
         if publication.request() != request
-            || !is_lease_offer_command_kind(publication.command().request().kind().as_str())
+            || publication.command().request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
             || matches!(expectation,
                 ReceiptOfferExpectation::Exact(Some(expected))
                 if expected.session() != publication.command().request().session()
@@ -4193,7 +4185,7 @@ async fn insert_generic_receipt(
     let lease_offer_completion = match (lease_offer_publication, lease_offer_fallback) {
         (Some(publication), Some(fallback)) => {
             if publication.request() != &request
-                || !is_lease_offer_command_kind(publication.command().request().kind().as_str())
+                || publication.command().request().kind().as_str() != LEASE_OFFER_COMMAND_KIND
             {
                 return Err(StoreError::corrupt_data(
                     "lease-request response has a mismatched offer publication",
@@ -5902,13 +5894,65 @@ impl CancellationRepository for PostgresStore {
         &self,
         request: RequestCancellation,
     ) -> Result<CancellationIntent, StoreError> {
+        let encryption = self.runner_payload_encryption.as_ref();
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        let intent = request_cancellation_in_transaction(
+        super::admission::lock_attempt_concurrency(&mut transaction, request.attempt_id()).await?;
+        lock_cancellation_routing(&mut transaction, &request).await?;
+        let attempt = lock_cancellation_attempt(&mut transaction, request.attempt_id()).await?;
+        if let Some(existing) =
+            load_cancellation(&mut transaction, encryption, request.attempt_id()).await?
+        {
+            if same_cancellation_request(existing.request(), &request) {
+                if super::server_cancellation_terminal::server_cancellation_terminal_exists(
+                    &mut transaction,
+                    request.attempt_id(),
+                )
+                .await?
+                {
+                    super::server_cancellation_terminal::verify_queued_server_cancellation_terminal(
+                        &mut transaction,
+                        existing.request(),
+                    )
+                    .await?;
+                }
+                let intent = CancellationIntent::try_new(
+                    existing.request().clone(),
+                    existing.acknowledged_at(),
+                    true,
+                    existing.delivery().cloned(),
+                )
+                .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+                transaction.commit().await.map_err(operation_error)?;
+                return Ok(intent);
+            }
+            return Err(StoreError::ImmutableConflict("cancellation intent"));
+        }
+        if request.requested_at() < attempt.changed_at {
+            return Err(StoreError::AttemptTimeRegression {
+                attempt_id: request.attempt_id(),
+                observed_at: request.requested_at(),
+                changed_at: attempt.changed_at,
+            });
+        }
+        let durable_delivery =
+            prepare_cancellation_delivery(&mut transaction, encryption, &request, &attempt).await?;
+        insert_cancellation_intent(&mut transaction, &request, durable_delivery.as_ref()).await?;
+        if attempt.lifecycle == JobLifecycle::Queued {
+            super::server_cancellation_terminal::insert_queued_server_cancellation_terminal(
+                &mut transaction,
+                &request,
+            )
+            .await?;
+        }
+        transition_cancelled_attempt(&mut transaction, &request, attempt.lifecycle).await?;
+        super::admission::reconcile_attempt_run(
             &mut transaction,
-            self.runner_payload_encryption.as_ref(),
-            request,
+            request.attempt_id(),
+            request.requested_at(),
         )
         .await?;
+        let intent = CancellationIntent::try_new(request, None, false, durable_delivery)
+            .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(intent)
     }
@@ -5923,71 +5967,6 @@ impl CancellationRepository for PostgresStore {
         transaction.commit().await.map_err(operation_error)?;
         Ok(intent)
     }
-}
-
-/// Runs the canonical cancellation state machine inside a caller-owned
-/// transaction. Gate-like schedulability authorities use this to make their
-/// terminal transition atomic with the cancellation intent, queued terminal
-/// result, attempt transition, and run reconciliation.
-pub(super) async fn request_cancellation_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    encryption: Option<&RunnerPayloadEncryption>,
-    request: RequestCancellation,
-) -> Result<CancellationIntent, StoreError> {
-    super::admission::lock_attempt_concurrency(transaction, request.attempt_id()).await?;
-    lock_cancellation_routing(transaction, &request).await?;
-    let attempt = lock_cancellation_attempt(transaction, request.attempt_id()).await?;
-    if let Some(existing) = load_cancellation(transaction, encryption, request.attempt_id()).await?
-    {
-        if same_cancellation_request(existing.request(), &request) {
-            if super::server_cancellation_terminal::server_cancellation_terminal_exists(
-                transaction,
-                request.attempt_id(),
-            )
-            .await?
-            {
-                super::server_cancellation_terminal::verify_queued_server_cancellation_terminal(
-                    transaction,
-                    existing.request(),
-                )
-                .await?;
-            }
-            return CancellationIntent::try_new(
-                existing.request().clone(),
-                existing.acknowledged_at(),
-                true,
-                existing.delivery().cloned(),
-            )
-            .map_err(|error| StoreError::corrupt_data(error.to_string()));
-        }
-        return Err(StoreError::ImmutableConflict("cancellation intent"));
-    }
-    if request.requested_at() < attempt.changed_at {
-        return Err(StoreError::AttemptTimeRegression {
-            attempt_id: request.attempt_id(),
-            observed_at: request.requested_at(),
-            changed_at: attempt.changed_at,
-        });
-    }
-    let durable_delivery =
-        prepare_cancellation_delivery(transaction, encryption, &request, &attempt).await?;
-    insert_cancellation_intent(transaction, &request, durable_delivery.as_ref()).await?;
-    if attempt.lifecycle == JobLifecycle::Queued {
-        super::server_cancellation_terminal::insert_queued_server_cancellation_terminal(
-            transaction,
-            &request,
-        )
-        .await?;
-    }
-    transition_cancelled_attempt(transaction, &request, attempt.lifecycle).await?;
-    super::admission::reconcile_attempt_run(
-        transaction,
-        request.attempt_id(),
-        request.requested_at(),
-    )
-    .await?;
-    CancellationIntent::try_new(request, None, false, durable_delivery)
-        .map_err(|error| StoreError::corrupt_data(error.to_string()))
 }
 
 #[derive(Clone, Copy, Debug)]

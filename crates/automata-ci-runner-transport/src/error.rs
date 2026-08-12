@@ -66,7 +66,7 @@ impl ApplicationError {
 /// Whether the identical prepared request may be retried.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetryClass {
-    /// The exact same prepared control or ephemeral bytes may be submitted again.
+    /// The exact same canonical bytes may be submitted again.
     RetrySameRequest,
     /// The failure is semantic or violates the transport contract and must not be retried.
     Never,
@@ -110,7 +110,7 @@ impl ClientError {
         self.kind
     }
 
-    /// Returns whether only the identical prepared request bytes are safe to retry.
+    /// Returns whether only the identical [`crate::PreparedRequest`] is safe to retry.
     #[must_use]
     pub const fn retry_class(self) -> RetryClass {
         self.retry

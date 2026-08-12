@@ -3,9 +3,7 @@ mod support;
 use std::{env, sync::Arc, time::Duration};
 
 use automata_ci_blob::ImmutableBlobStore as _;
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, Sha256Digest, UnixMillis};
 use automata_ci_results_github::{
     ArtifactRepository as _, ArtifactService, ExecutionAuthority, PostgresArtifactRepository,
@@ -22,11 +20,11 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug)]
-struct FixedClock(u64);
+struct FixedClock;
 
 impl ResultsClock for FixedClock {
     fn now_seconds(&self) -> u64 {
-        self.0
+        1_000
     }
 }
 
@@ -44,7 +42,7 @@ impl ResultsIdGenerator for FixedIds {
 async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
     let endpoint = env::var("AUTOMATA_TEST_S3_ENDPOINT")?;
     run_with_database(|database| async move {
-        let (authority, now_seconds) = active_attempt(&database).await?;
+        let authority = active_attempt(&database).await?;
         let endpoint = Url::parse(&endpoint)?;
         let bucket = env::var("AUTOMATA_TEST_S3_BUCKET")?;
         let access_key = env::var("AUTOMATA_TEST_S3_ACCESS_KEY")?;
@@ -55,10 +53,7 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
             bucket,
             Some(format!("results-contract/{}", Uuid::new_v4().simple())),
             Duration::from_secs(20),
-        )?
-        .with_at_rest_encryption(S3AtRestEncryption::aws_kms(env::var(
-            "AUTOMATA_TEST_S3_KMS_KEY_ID",
-        )?)?);
+        )?;
         let objects = Arc::new(S3BlobStore::new(
             config.client(StaticS3Credentials::new(access_key, secret_key, None)?),
             &config,
@@ -68,7 +63,7 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
         let service = ArtifactService::new(
             repository.clone(),
             objects.clone(),
-            Arc::new(FixedClock(now_seconds)),
+            Arc::new(FixedClock),
             Arc::new(FixedIds(upload_id)),
             ResultsLimits::default(),
         );
@@ -101,7 +96,7 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
             .resolve_download(ResolveArtifactDownload {
                 artifact_id: finalized.artifact_id,
                 content_digest: finalized.content_digest,
-                observed_at_seconds: now_seconds,
+                observed_at_seconds: 1_000,
             })
             .await?;
         assert_eq!(published.artifact_id, finalized.artifact_id);
@@ -117,7 +112,7 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
     .await
 }
 
-async fn active_attempt(database: &TestDatabase) -> TestResult<(ExecutionAuthority, u64)> {
+async fn active_attempt(database: &TestDatabase) -> TestResult<ExecutionAuthority> {
     let seed = seed_control_plane(database.pool()).await?;
     let attempt_id = AttemptId::new();
     database
@@ -126,7 +121,7 @@ async fn active_attempt(database: &TestDatabase) -> TestResult<(ExecutionAuthori
             attempt_id,
             seed.job_id,
             AttemptNumber::new(1)?,
-            seed.observed_at,
+            UnixMillis::new(3),
         ))
         .await?;
     let lease = database
@@ -137,15 +132,16 @@ async fn active_attempt(database: &TestDatabase) -> TestResult<(ExecutionAuthori
                 LeaseId::new(),
                 seed.session_fence,
                 StableRunnerSlot::new(1)?,
-                seed.observed_at,
-                UnixMillis::new(seed.observed_at.get() + 60_000),
+                UnixMillis::new(4),
+                UnixMillis::new(100),
             )
             .expect("valid lease request"),
         )
         .await?;
-    let now_seconds = u64::try_from(seed.observed_at.get())? / 1_000;
-    Ok((
-        ExecutionAuthority::new(seed.run_id, seed.job_id, attempt_id, lease.fencing_token()),
-        now_seconds,
+    Ok(ExecutionAuthority::new(
+        seed.run_id,
+        seed.job_id,
+        attempt_id,
+        lease.fencing_token(),
     ))
 }

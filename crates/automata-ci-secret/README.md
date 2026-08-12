@@ -25,12 +25,9 @@ plaintext must not be written to durable staging, swap, crash dumps, or logs.
 
 These are adapter contracts, not a claim that every provider is available in
 the product. The current product composes repository-scoped management,
-recovery, cleanup, and exact-version job delivery only with the built-in
-PostgreSQL provider. Eligible leased Standard jobs receive values through a
-direct mTLS ephemeral exchange; durable lease offers contain only a value-free
-binding overlay, and the runner masks each value before acknowledging complete
-zeroizing custody. External and dynamically leased providers and variable-value
-delivery remain uncomposed and unadvertised.
+recovery, and cleanup only with the built-in PostgreSQL provider. It delivers
+no managed secret values to jobs, and external providers remain uncomposed and
+unadvertised.
 
 Publication safety is independent of provider selection. When user code can
 read a secret, registered values are masked from stdout/stderr and its complete

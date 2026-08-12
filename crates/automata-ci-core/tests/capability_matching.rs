@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use automata_ci_core::{
     Architecture, ContainerCapabilities, ContainerFeature, EnvironmentProfile,
-    EnvironmentProfileId, IsolationLevel, JobResourceAllocation, OperatingSystem,
-    RequirementMismatch, ResourceCapacity, ResourceKind, RunnerCapabilities, RunnerFeature,
-    RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, SandboxCapabilities,
-    SandboxFeature, SelectorError, Sha256Digest,
+    EnvironmentProfileId, IsolationLevel, OperatingSystem, RequirementMismatch, ResourceCapacity,
+    ResourceKind, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel,
+    RunnerPlatform, RunnerRequirements, SandboxCapabilities, SandboxFeature, SelectorError,
+    Sha256Digest,
 };
 
 fn label(value: &str) -> RunnerLabel {
@@ -117,28 +117,6 @@ fn typed_requirement_matching_checks_groups_resources_and_features() {
                 ContainerFeature::PRIVILEGED_CONTAINERS,
             ),)
     );
-}
-
-#[test]
-fn allocation_requests_are_placement_evidence_but_limits_require_enforcement_capacity() {
-    let allocation = JobResourceAllocation::new(
-        ResourceCapacity::new(500, 512 * 1024 * 1024, 0, 0),
-        ResourceCapacity::new(6_000, 4 * 1024 * 1024 * 1024, 0, 0),
-    )
-    .expect("allocation");
-    let requirements = RunnerRequirements::default().with_resource_allocation(allocation);
-    assert_eq!(requirements.minimum_resources(), allocation.requests());
-    let mismatch = capable_runner()
-        .satisfies(&requirements)
-        .expect_err("limit above runner ceiling must reject placement");
-    assert!(mismatch.iter().any(|value| matches!(
-        value,
-        RequirementMismatch::InsufficientResource {
-            resource: ResourceKind::CpuMillis,
-            required: 6_000,
-            available: 4_000,
-        }
-    )));
 }
 
 #[test]

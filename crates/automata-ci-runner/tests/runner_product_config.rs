@@ -24,7 +24,6 @@ const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
 const PROFILE_DIGEST: &str = "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4";
 const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd";
 const SERVICE_PROXY_IMAGE: &str = "registry.example.test/automata/service-proxy@sha256:4d7a838e047d65bbf708d4fc315db9b3b91ae73c0d50459b519089c0713ff34b";
-const BUILDKIT_RUNTIME_IMAGE: &str = "registry.example.test/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777";
 
 #[test]
 fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
@@ -41,11 +40,6 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     assert_eq!(
         environment.image().expect("container image").reference(),
         IMAGE
-    );
-    assert_eq!(
-        config.inventory().max_parallel_jobs(),
-        3,
-        "the one dogfood runner identity must advertise exactly three host slots"
     );
     assert_eq!(
         environment_value(environment, "CARGO_HOME"),
@@ -82,14 +76,6 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
         Some("/usr/bin/python3")
     );
     assert!(config.executor().toolchain().pwsh().is_none());
-    assert!(
-        config
-            .podman()
-            .expect("Podman config")
-            .buildkit_runtime()
-            .is_none(),
-        "the checked-in runner keeps BuildKit disabled until an operator supplies a local pin"
-    );
     assert!(
         !config
             .inventory()
@@ -650,66 +636,6 @@ fn service_proxy_image_is_optional_strict_and_bounds_registration_authority() {
 }
 
 #[test]
-fn buildkit_runtime_is_optional_pinned_and_requires_the_attempt_api() {
-    let mut value: serde_json::Value =
-        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
-    let absent = parse_value(&value).expect("BuildKit may be disabled");
-    assert!(
-        absent
-            .podman()
-            .expect("Podman config")
-            .buildkit_runtime()
-            .is_none()
-    );
-    assert!(
-        !absent
-            .inventory()
-            .containers()
-            .features()
-            .contains(&ContainerFeature::BUILDKIT)
-    );
-
-    value["podman"]["buildkit_runtime_image"] = serde_json::json!(BUILDKIT_RUNTIME_IMAGE);
-    let configured = parse_value(&value).expect("immutable BuildKit runtime image");
-    assert_eq!(
-        configured
-            .podman()
-            .expect("Podman config")
-            .buildkit_runtime()
-            .expect("configured BuildKit runtime")
-            .image()
-            .reference(),
-        BUILDKIT_RUNTIME_IMAGE
-    );
-    assert!(
-        configured
-            .inventory()
-            .containers()
-            .features()
-            .contains(&ContainerFeature::BUILDKIT)
-    );
-
-    value["podman"]["job_container_engine"] = serde_json::json!("disabled");
-    assert_eq!(
-        parse_value(&value).expect_err("BuildKit without the attempt API must fail closed"),
-        RunnerProductConfigError::InvalidPodman
-    );
-    value["podman"]["job_container_engine"] = serde_json::json!("attempt_scoped_docker_api");
-
-    for invalid in [
-        "registry.example.test/buildkit/runtime:latest",
-        "registry.example.test/buildkit/runtime:reviewed@sha256:7777777777777777777777777777777777777777777777777777777777777777",
-        "registry.example.test/buildkit/runtime@sha256:short",
-        "registry.example.test/buildkit/runtime@sha256:777777777777777777777777777777777777777777777777777777777777777G",
-    ] {
-        value["podman"]["buildkit_runtime_image"] = serde_json::json!(invalid);
-        let error = parse_value(&value).expect_err("invalid BuildKit pin must fail closed");
-        assert_eq!(error, RunnerProductConfigError::InvalidPodman);
-        assert!(!format!("{error:?} {error}").contains(invalid));
-    }
-}
-
-#[test]
 fn rootless_runtime_directory_is_explicit_and_required() {
     let mut value: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
@@ -1046,92 +972,6 @@ fn temporary_hierarchies_and_noncanonical_environment_names_are_rejected() {
 fn parse_value(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProductConfigError> {
     let bytes = serde_json::to_vec(value).expect("serialize modified config");
     RunnerProductConfig::from_json(&bytes)
-}
-
-#[test]
-fn kubernetes_provider_configuration_is_exact_and_mutually_exclusive() {
-    let mut value: serde_json::Value =
-        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
-    let podman = value["podman"].clone();
-    value
-        .as_object_mut()
-        .expect("configuration object")
-        .remove("podman");
-    value["state"]
-        .as_object_mut()
-        .expect("state object")
-        .remove("podman");
-    value["executor"]["network"] = serde_json::json!("disabled");
-    value["executor"]["privilege"] = serde_json::json!("unprivileged");
-    value["executor"]["resources"]["ephemeral_disk_bytes"] = serde_json::json!(2_147_483_648_u64);
-    value["executor"]["resources"]["gpu_count"] = serde_json::json!(1);
-    value["inventory"]["resources_per_job"]["ephemeral_disk_bytes"] =
-        serde_json::json!(2_147_483_648_u64);
-    value["inventory"]["resources_per_job"]["gpu_count"] = serde_json::json!(1);
-    value["kubernetes"] = serde_json::json!({
-        "namespace": "automata-runners",
-        "guest_image": format!(
-            "registry.example/automata/guest@sha256:{}",
-            "ab".repeat(32)
-        ),
-        "network_isolation_verified": true,
-        "ephemeral_storage_enforcement_verified": true,
-        "process_limit_enforcement": 4096,
-        "gpu_resource_name": "nvidia.com/gpu",
-        "node_selector": {"automata.dev/pool": "jobs"},
-        "runtime_class_name": "kata"
-    });
-
-    let configured = parse_value(&value).expect("Kubernetes configuration");
-    assert!(configured.podman().is_none());
-    assert!(configured.state().podman().is_none());
-    let kubernetes = configured.kubernetes().expect("Kubernetes config");
-    assert_eq!(kubernetes.adapter().namespace(), "automata-runners");
-    assert_eq!(kubernetes.adapter().process_limit(), Some(4096));
-    assert!(kubernetes.adapter().ephemeral_storage_enforced());
-    assert_eq!(
-        kubernetes.adapter().gpu_resource_name(),
-        Some("nvidia.com/gpu")
-    );
-    assert_eq!(kubernetes.adapter().runtime_class_name(), Some("kata"));
-    assert_eq!(
-        configured
-            .inventory()
-            .resources_per_job()
-            .ephemeral_disk_bytes(),
-        2_147_483_648
-    );
-    assert_eq!(configured.inventory().resources_per_job().gpu_count(), 1);
-
-    let mut unverified_storage = value.clone();
-    unverified_storage["kubernetes"]["ephemeral_storage_enforcement_verified"] =
-        serde_json::json!(false);
-    assert_eq!(
-        parse_value(&unverified_storage).expect_err("storage evidence is required"),
-        RunnerProductConfigError::InvalidKubernetes
-    );
-
-    let mut ambiguous = value;
-    ambiguous["podman"] = podman;
-    assert_eq!(
-        parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
-        RunnerProductConfigError::InvalidSandboxProvider
-    );
-}
-
-#[test]
-fn only_the_current_product_schema_is_accepted() {
-    let current: serde_json::Value =
-        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
-    assert!(parse_value(&current).is_ok());
-    for unsupported in [0, 1, u16::MAX] {
-        let mut document = current.clone();
-        document["schema_version"] = serde_json::json!(unsupported);
-        assert_eq!(
-            parse_value(&document).expect_err("noncurrent schema must fail closed"),
-            RunnerProductConfigError::UnsupportedSchema
-        );
-    }
 }
 
 fn environment_value<'a>(

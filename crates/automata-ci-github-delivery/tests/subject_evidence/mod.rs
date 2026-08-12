@@ -1,10 +1,9 @@
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
     AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderGitRef, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
-    GithubProviderWorkflowSelection, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubCheckSubjectId, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision,
     ManifestPinnedGithubDeliveryEvidence, ObjectKey, ProviderDeliveryId, ProviderDeliveryIdentity,
@@ -21,7 +20,7 @@ const FIXTURE_RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"schema":1
 }"#;
 
 pub struct FixtureGithubRuntimePolicy {
@@ -89,53 +88,6 @@ pub fn fixture_subject_evidence_with_head(
     seed: u128,
     check_head_sha: GithubCheckHeadSha,
 ) -> ManifestPinnedGithubDeliveryEvidence {
-    fixture_subject_evidence_with_selection_and_head(
-        delivery_id,
-        identity,
-        repository_owner_id,
-        accepted_at,
-        seed,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("workflow path"),
-        ),
-        GithubProviderGitRef::main(),
-        check_head_sha,
-    )
-}
-
-/// Builds all-direct manifest-pinned evidence for worker fan-out tests.
-#[allow(dead_code)] // The shared module is also compiled by non-worker integration targets.
-pub fn fixture_all_direct_subject_evidence(
-    delivery_id: ProviderDeliveryId,
-    identity: &ProviderDeliveryIdentity,
-    repository_owner_id: ProviderRepositoryOwnerId,
-    accepted_at: UnixMillis,
-    seed: u128,
-    git_ref: GithubProviderGitRef,
-) -> ManifestPinnedGithubDeliveryEvidence {
-    fixture_subject_evidence_with_selection_and_head(
-        delivery_id,
-        identity,
-        repository_owner_id,
-        accepted_at,
-        seed,
-        GithubProviderWorkflowSelection::all_direct(),
-        git_ref,
-        fixture_check_head_sha(FIXTURE_AFTER),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fixture_subject_evidence_with_selection_and_head(
-    delivery_id: ProviderDeliveryId,
-    identity: &ProviderDeliveryIdentity,
-    repository_owner_id: ProviderRepositoryOwnerId,
-    accepted_at: UnixMillis,
-    seed: u128,
-    workflow_selection: GithubProviderWorkflowSelection,
-    git_ref: GithubProviderGitRef,
-    check_head_sha: GithubCheckHeadSha,
-) -> ManifestPinnedGithubDeliveryEvidence {
     let app_revision = GithubServerServiceRevision::new(1).expect("App revision");
     let policy_revision = GithubServerServiceRevision::new(1).expect("policy revision");
     let webhook_fingerprint =
@@ -143,7 +95,7 @@ fn fixture_subject_evidence_with_selection_and_head(
             .expect("webhook verifier fingerprint");
     let webhook_revision = GithubServerServiceRevision::new(1).expect("webhook revision");
     let runtime_policy = fixture_github_runtime_policy(1);
-    let manifest = GithubProviderManifest::new_with_workflow_selection_and_git_ref(
+    let manifest = GithubProviderManifest::new(
         identity.tenant().clone(),
         identity.connection_id(),
         identity.installation_id(),
@@ -163,8 +115,6 @@ fn fixture_subject_evidence_with_selection_and_head(
         runtime_policy.runner_policy,
         runtime_policy.revision,
         runtime_policy.semantic_digest,
-        workflow_selection,
-        git_ref,
         GithubCheckName::new("Automata CI").expect("Check name"),
         GithubProviderOrigins::github_dot_com(),
         GithubProviderManifestLimits::github_dot_com_ci(),

@@ -83,9 +83,8 @@ remaining ignored integration targets are explicit operator lanes:
 cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --ignored
 
 # S3/RustFS contracts. Set AUTOMATA_TEST_S3_ENDPOINT,
-# AUTOMATA_TEST_S3_BUCKET, AUTOMATA_TEST_S3_ACCESS_KEY,
-# AUTOMATA_TEST_S3_SECRET_KEY, and the service's exact
-# AUTOMATA_TEST_S3_KMS_KEY_ID. The results contracts also need
+# AUTOMATA_TEST_S3_BUCKET, AUTOMATA_TEST_S3_ACCESS_KEY, and
+# AUTOMATA_TEST_S3_SECRET_KEY. Results and workflow-service also need
 # AUTOMATA_TEST_DATABASE_URL.
 cargo test -p automata-ci-blob-s3 --test rustfs_contract --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-action --test live_github_rustfs --locked -- --ignored --test-threads=1
@@ -99,20 +98,14 @@ cargo test -p automata-ci-workflow-service --test live_admission --locked -- --i
 cargo test -p automata-ci-results-github --test http_compatibility --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-results-github --test cache_http --locked -- --ignored --test-threads=1
 
-# Rootless Podman contracts. Set AUTOMATA_LIVE_ROOTLESS_PODMAN=1 and
-# AUTOMATA_LIVE_ROOTLESS_BUILDX=1. Configure the AUTOMATA_PODMAN_TEST_*
-# variables declared by live_rootless.rs, including a digest-pinned
-# AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE, and the AUTOMATA_TEST_* paths required
-# by the runner active-probe test.
+# Rootless Podman contracts. Configure the AUTOMATA_PODMAN_TEST_* variables
+# declared by live_rootless.rs and the AUTOMATA_TEST_* paths required by the
+# runner active-probe test.
 cargo test -p automata-ci-sandbox-podman --test live_rootless --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-runner --locked \
   configured_rootless_lifecycle_matches_both_production_network_policies -- \
   --ignored --test-threads=1
 ```
-
-The coverage runner checks the filtered runner probe listing against exact test
-identities in the policy and against every ignored function in its source file,
-so adding an ignored test outside the current module filter fails closed.
 
 The three ignored metrics schema printers are maintenance commands rather than
 coverage-bearing tests. Invoke them deliberately with `--ignored --nocapture`
@@ -146,12 +139,12 @@ metadata-sensitive state token detects an edit that restores the original
 bytes during collection; it is provenance for that run, not a reproducible
 content identity. The checker requires the JSON and LCOV source sets and
 per-file line totals to agree exactly. It also validates each LCOV `DA` record's
-syntax and line-number uniqueness, and requires at least one `DA` record when
-`LF` is positive. LLVM region accounting means the number of `DA` records, and
-the subset with a nonzero execution count, need not equal `LF` or `LH`; those
-declared totals remain cross-checked against the JSON export instead. The
-detailed LCOV bytes are integrity-bound by their recorded hash and the runner's
-locked, staged publication rather than being derivable from the summary JSON.
+syntax and line-number uniqueness. LLVM region accounting means the number of
+`DA` records, and the subset with a nonzero execution count, need not equal
+`LF` or `LH`; those declared totals remain cross-checked against the JSON
+export instead. The detailed LCOV bytes are integrity-bound by their recorded
+hash and the runner's locked, staged publication rather than being derivable
+from the summary JSON.
 
 Instrumented artifacts live under `target/llvm-cov-target`, isolated from
 ordinary Cargo fingerprints. Allow disk space for a separate all-feature
@@ -161,10 +154,7 @@ cooperating Linux/util-linux coverage runners from sharing that fixed target;
 it does not lock source files against editors. Reports are staged, the workspace
 fingerprint is checked again after collection, and the manifest is published
 last as the completion marker; a concurrent source edit leaves no final
-artifact. Checker exit status 1 is reserved for an ordinary coverage regression:
-the runner independently verifies a complete failed-guard manifest and both
-report hashes before publishing diagnostics. Checker I/O errors and partial or
-malformed manifests fail closed without a published artifact.
+artifact.
 
 The ordinary regression guard is deliberately narrower than a raw workspace
 percentage. After the policy's renderer and generated-source exclusions, the
@@ -276,7 +266,6 @@ export AUTOMATA_TEST_S3_ENDPOINT='http://127.0.0.1:9000/'
 export AUTOMATA_TEST_S3_BUCKET='automata-dev'
 export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
 export AUTOMATA_TEST_S3_SECRET_KEY='automata-local-secret-change-me'
-export AUTOMATA_TEST_S3_KMS_KEY_ID='default'
 ```
 
 The S3 contract creates the test bucket when necessary and verifies immutable

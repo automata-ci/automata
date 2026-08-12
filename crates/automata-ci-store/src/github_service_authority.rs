@@ -1885,8 +1885,6 @@ pub enum GithubServerServiceAction {
     FetchPrivateRepositoryRevision,
     /// Fetch one exact private repository changed-file set.
     FetchPrivateRepositoryChangedFiles,
-    /// Resolve schedules from one exact claimed private default-branch revision.
-    DiscoverPrivateRepositorySchedules,
 }
 
 impl GithubServerServiceAction {
@@ -1900,7 +1898,6 @@ impl GithubServerServiceAction {
             Self::PublishCheckRun => "publish_check_run",
             Self::FetchPrivateRepositoryRevision => "fetch_private_repository_revision",
             Self::FetchPrivateRepositoryChangedFiles => "fetch_private_repository_changed_files",
-            Self::DiscoverPrivateRepositorySchedules => "discover_private_repository_schedules",
         }
     }
     /// Returns the only credential scope allowed for this action.
@@ -1911,9 +1908,7 @@ impl GithubServerServiceAction {
             | Self::CreateCheckRun
             | Self::ReconcileCheckRun
             | Self::PublishCheckRun => GithubServerServiceScope::ChecksWrite,
-            Self::FetchPrivateRepositoryRevision
-            | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules => {
+            Self::FetchPrivateRepositoryRevision | Self::FetchPrivateRepositoryChangedFiles => {
                 GithubServerServiceScope::PrivateRepositorySourceRead
             }
         }
@@ -1935,8 +1930,7 @@ impl GithubServerServiceAction {
             | Self::CreateCheckRun
             | Self::ReconcileCheckRun
             | Self::FetchPrivateRepositoryRevision
-            | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules => {
+            | Self::FetchPrivateRepositoryChangedFiles => {
                 MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
             }
         }
@@ -1951,7 +1945,6 @@ impl GithubServerServiceAction {
             "fetch_private_repository_changed_files" => {
                 Ok(Self::FetchPrivateRepositoryChangedFiles)
             }
-            "discover_private_repository_schedules" => Ok(Self::DiscoverPrivateRepositorySchedules),
             _ => Err(GithubServerServiceValueError::InvalidAction),
         }
     }

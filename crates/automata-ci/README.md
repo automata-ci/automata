@@ -38,12 +38,6 @@ The runner listener must validate client certificates directly. Do not pass a
 runner identity through reverse-proxy headers. A proxy-terminated runner
 transport would require a separate adapter and trust contract.
 
-When managed-secret encryption is configured, `--runner-public-url` is also
-required. It is the exact HTTPS origin configured as each runner's
-`control_endpoint`; the private value route rejects any different HTTP/2
-authority. Secret delivery uses the same direct mTLS listener, never the human
-listener or a proxy-forwarded identity.
-
 All three mandatory listeners require fixed, nonzero ports. The human/webhook
 listener is raw HTTP: keep it on literal loopback, or place a trusted isolating
 TLS reverse proxy in front of a non-loopback bind and explicitly assert that
@@ -179,10 +173,8 @@ attempt, and fence; no runner-wide Results credential exists.
 
 Cache lookup checks the current ref first and then the server-owned default
 branch read-only. Entries expire after seven inactive days and a repository has
-a 10 GiB LRU quota. Artifact deletion, cache management, and physical object
-collection are not implemented. The bounded Buildx/BuildKit session and
-provenance surface is implemented, but cache interoperability is not yet
-production-proven and live CacheService v2 acceptance remains open. See the
+a 10 GiB LRU quota. Artifact deletion, cache management, physical object
+collection, and BuildKit cache compatibility are not implemented. See the
 [`automata-ci-results-github` reference](../automata-ci-results-github/README.md)
 for the tested protocol slices.
 
@@ -269,41 +261,13 @@ the client stores and verifies the credential before activating it. Status can
 retry an indeterminate activation. The operator is responsible for selecting a
 Secret Service with encrypted backing storage because Automata cannot attest
 the external keyring implementation. Complete GitHub provider configuration
-adds the exact signed webhook, public/private source-delivery, bounded periodic
-schedule discovery, fenced Check Runs, scoped App-credential runtime, and exact lease-bound repository authority
+adds the exact signed webhook, public/private source-delivery, fenced Check
+Runs, scoped App-credential runtime, and exact lease-bound repository authority
 for an already-materialized Standard GitHub job. CredentialFree jobs receive
 no runtime authority, and there is no fallback/default installation route.
 The mandatory autonomous worker supervises asynchronous logical preparation,
 activation, and materialization after admission; a successful receipt alone
 does not mean a runnable job has completed the end-to-end acceptance path.
-
-The same protected CLI session can request a durable workflow rerun:
-
-```console
-automata rerun --server-url https://ci.example.test \
-  automata-ci/automata \
-  20000000-0000-4000-8000-000000000002 \
-  --selection entire-workflow
-```
-
-The command supports failed-job and exact job closures, keeps one operation ID
-across bounded retries, and prints that ID for safe exact replay. See the
-[workflow-rerun guide](../../docs/workflow-reruns.md) for the complete contract.
-
-A current protected-environment reviewer can also record one exact decision for
-a repository and gated job attempt:
-
-```console
-automata environment-review --server-url https://ci.example.test \
-  aaaaaaaa-1111-4111-8111-111111111111 \
-  22222222-2222-4222-8222-222222222222 \
-  --decision approve --output json
-```
-
-The command uses the same Secret Service-only CLI session custody, accepts
-`approve` or `reject`, and returns only the closed gate state. It does not retry
-the mutation automatically; an indeterminate result may be retried only with
-the exact same repository UUID, attempt UUID, and decision.
 
 ## GitHub provider registry
 
@@ -418,16 +382,8 @@ the current browser session. The current CLI permission combinations are
 `secrets:metadata:read` plus `secrets:delete` for delete;
 `secret-providers:read` for provider status; and `secret-providers:read` plus
 `secret-providers:manage` for activation. The CLI has no replacement command
-and refuses create when the name already exists. Exact-version built-in values
-are delivered only after a live lease and current policy/grant/approval check,
-over the direct mTLS runner listener. The runner keeps them in bounded,
-zeroizing execution-local custody, registers every value with output masking,
-and only then acknowledges delivery. The bearer and plaintext never enter
-`JobIR`, the command outbox, the runner journal/spool, or PostgreSQL plaintext
-columns. External and dynamically leased providers remain unsupported.
-Variable-value custody is also not implemented; jobs declaring variable
-references remain unleaseable at both the scheduler gate and PostgreSQL lease
-transition instead of treating durable variable-version selectors as values.
+and refuses create when the name already exists. Runner delivery and external
+providers remain unsupported, so jobs do not receive managed secret values.
 
 The built-in path now fails closed at restart, periodic readiness, and every
 write boundary. Immutable authenticated canaries prove the loaded bytes for the

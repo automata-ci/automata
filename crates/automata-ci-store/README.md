@@ -25,13 +25,9 @@ placing a value or provider handle in an audit or diagnostic.
 The durable secret ledger validates the closed tenant, repository, and
 environment descriptor shapes. Its public management port is currently
 repository-scoped. The product composes that boundary with the built-in
-PostgreSQL provider and supervises ambiguous-mutation recovery and cleanup. For
-an eligible leased Standard job, the store can issue exact pinned-version grants
-and authorize a direct mTLS ephemeral fetch while keeping the durable lease
-overlay value-free. The runner owns bounded zeroizing value custody and masks
-every value before acknowledgement. Tenant/environment management, external and
-dynamically leased providers, and variable-value delivery remain uncomposed and
-unadvertised.
+PostgreSQL provider and supervises ambiguous-mutation recovery and cleanup.
+Jobs receive no managed secret values. Tenant/environment management and
+external providers remain uncomposed and unadvertised.
 
 - [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
 - API documentation: run `cargo doc -p automata-ci-store --open` from a source checkout.

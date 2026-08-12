@@ -4,15 +4,13 @@ mod github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BootstrapGithubProviderRepository, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision,
-    GithubProviderManifestStoreError, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope,
-    github_provider_repository_id,
+    BootstrapGithubProviderRepository, GithubCheckName, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderManifestStoreError, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
+    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
+    ProviderRepositoryVisibility, TenantScope, github_provider_repository_id,
 };
 use uuid::Uuid;
 
@@ -67,20 +65,6 @@ async fn exact_bootstrap_creates_repository_and_replays_original_evidence() -> T
                 .await,
             Err(GithubProviderManifestStoreError::NotFound)
         ));
-        assert!(
-            database
-                .store()
-                .list_current_github_provider_manifests(0)
-                .await?
-                .is_empty()
-        );
-        let scheduled_discovery = database
-            .store()
-            .list_current_github_provider_manifests(1)
-            .await?;
-        assert_eq!(scheduled_discovery.len(), 1);
-        assert_eq!(scheduled_discovery[0].manifest(), &desired);
-        assert!(scheduled_discovery[0].is_current());
 
         let repository: (String, String, String, String, i64) = sqlx::query_as(
             r"
@@ -624,49 +608,6 @@ async fn minimum_length_canonical_repository_identity_is_durable() -> TestResult
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn configured_default_branch_ref_round_trips_with_canonical_digest() -> TestResult {
-    run_with_database(|database| async move {
-        let tenant = tenant("nested-default-branch");
-        let connection = connection(0x508);
-        let desired = manifest_at_ref(
-            tenant.clone(),
-            connection,
-            GithubProviderGitRef::new("refs/heads/refs/release")?,
-        );
-        database
-            .store()
-            .bootstrap_github_provider_repository(request(desired.clone(), 100))
-            .await?;
-
-        let loaded = database
-            .store()
-            .load_current_github_provider_manifest(&tenant, connection)
-            .await?;
-        assert_eq!(loaded.manifest(), &desired);
-        assert_eq!(loaded.manifest().git_ref(), "refs/heads/refs/release");
-
-        let sql_digest: Vec<u8> = sqlx::query_scalar(
-            "SELECT automata_github_provider_manifest_digest(revision) \
-             FROM github_provider_manifest_revisions AS revision \
-             WHERE provider_connection_id = $1 AND manifest_revision = 1",
-        )
-        .bind(connection.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(sql_digest, desired.digest().as_bytes());
-        assert!(
-            sqlx::query_scalar::<_, bool>("SELECT automata_github_provider_git_ref_canonical($1)")
-                .bind("refs/heads/refs/release")
-                .fetch_one(database.pool())
-                .await?
-        );
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
 async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -> TestResult {
     run_with_database(|database| async move {
@@ -864,25 +805,6 @@ fn manifest_named(
     )
 }
 
-fn manifest_at_ref(
-    tenant: TenantScope,
-    connection: ProviderConnectionId,
-    git_ref: GithubProviderGitRef,
-) -> GithubProviderManifest {
-    manifest_with_selection_and_ref(
-        tenant,
-        connection,
-        RevisionSet::new(1, 1, 1),
-        [7; 32],
-        [9; 32],
-        "Automata CI",
-        "automata-ci/automata",
-        ProviderRepositoryVisibility::Public,
-        GithubProviderWorkflowSelection::all_direct(),
-        git_ref,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn manifest_with_visibility_and_verifier(
     tenant: TenantScope,
@@ -894,37 +816,8 @@ fn manifest_with_visibility_and_verifier(
     repository_name: &str,
     visibility: ProviderRepositoryVisibility,
 ) -> GithubProviderManifest {
-    manifest_with_selection_and_ref(
-        tenant,
-        connection,
-        revisions,
-        spki,
-        verifier_fingerprint,
-        check_name,
-        repository_name,
-        visibility,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("workflow path"),
-        ),
-        GithubProviderGitRef::main(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn manifest_with_selection_and_ref(
-    tenant: TenantScope,
-    connection: ProviderConnectionId,
-    revisions: RevisionSet,
-    spki: [u8; 32],
-    verifier_fingerprint: [u8; 32],
-    check_name: &str,
-    repository_name: &str,
-    visibility: ProviderRepositoryVisibility,
-    workflow_selection: GithubProviderWorkflowSelection,
-    git_ref: GithubProviderGitRef,
-) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(revisions.policy);
-    GithubProviderManifest::new_with_workflow_selection_and_git_ref(
+    GithubProviderManifest::new(
         tenant,
         connection,
         ProviderInstallationId::new(101).expect("installation"),
@@ -946,8 +839,6 @@ fn manifest_with_selection_and_ref(
         runtime_policy.runner_policy,
         runtime_policy.revision,
         runtime_policy.semantic_digest,
-        workflow_selection,
-        git_ref,
         GithubCheckName::new(check_name).expect("Check name"),
         GithubProviderOrigins::github_dot_com(),
         GithubProviderManifestLimits::github_dot_com_ci(),

@@ -42,20 +42,12 @@ pub enum SandboxCapability {
     Administrator,
     /// Isolates sandbox identities with a user namespace or equivalent.
     UserNamespace,
-    /// Enforces requested CPU and memory limits through the sandbox boundary.
+    /// Enforces the requested memory, CPU, and process limits as hard limits.
     ResourceLimits,
-    /// Enforces requested ephemeral-storage limits through the sandbox boundary.
-    EphemeralStorageLimits,
-    /// Enforces requested exclusive device allocations through the sandbox boundary.
-    DeviceLimits,
-    /// Enforces the requested process-count limit as a hard limit.
-    ProcessLimits,
     /// Creates, health-checks, discovers, and destroys services with a sandbox.
     ServiceContainers,
     /// A policy-filtered Docker Engine API is scoped to one sandbox.
     DockerCompatibleApi,
-    /// The scoped Docker API admits its verified, closed `BuildKit` runtime.
-    BuildKit,
 }
 
 /// Sorted, unique, bounded provider capability set.

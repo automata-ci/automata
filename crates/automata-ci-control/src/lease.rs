@@ -22,8 +22,7 @@ use automata_ci_store::{
 use crate::{
     CapabilityDocument, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
     LeasePollFailure, LeasePollInvariant, LeasePollObservation, LeasePollObserver,
-    LeasePollRepository, RequestCorrelationError, RunnableAttemptGate,
-    RunnableAttemptGateDisposition, observer::NOOP_LEASE_POLL_OBSERVER,
+    LeasePollRepository, RequestCorrelationError, observer::NOOP_LEASE_POLL_OBSERVER,
 };
 
 /// Exact authenticated connection context established before request dispatch.
@@ -159,7 +158,6 @@ pub struct LeasePollService<'a> {
     scheduler: &'a dyn SchedulerPolicy,
     clock: &'a dyn LeaseClock,
     lease_ids: &'a dyn LeaseIdGenerator,
-    attempt_gate: Option<&'a dyn RunnableAttemptGate>,
     observer: &'a dyn LeasePollObserver,
     config: LeasePollConfig,
 }
@@ -171,7 +169,6 @@ impl std::fmt::Debug for LeasePollService<'_> {
             .field("scheduler", &self.scheduler)
             .field("clock", &self.clock)
             .field("lease_ids", &self.lease_ids)
-            .field("attempt_gate", &self.attempt_gate)
             .field("observer", &self.observer)
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -197,7 +194,6 @@ impl<'a> LeasePollService<'a> {
             scheduler,
             clock,
             lease_ids,
-            attempt_gate: None,
             observer: &NOOP_LEASE_POLL_OBSERVER,
             config,
         }
@@ -207,13 +203,6 @@ impl<'a> LeasePollService<'a> {
     #[must_use]
     pub fn with_observer(mut self, observer: &'a dyn LeasePollObserver) -> Self {
         self.observer = observer;
-        self
-    }
-
-    /// Installs a value-free pre-scheduling attempt gate.
-    #[must_use]
-    pub fn with_attempt_gate(mut self, gate: &'a dyn RunnableAttemptGate) -> Self {
-        self.attempt_gate = Some(gate);
         self
     }
 
@@ -312,18 +301,10 @@ impl<'a> LeasePollService<'a> {
             .map(candidate_from_durable)
             .collect::<Result<Vec<_>, _>>()?;
         self.observer.observe_candidates(candidates.len());
-        let mut scheduler_candidates = Vec::with_capacity(candidates.len());
-        for candidate in &candidates {
-            let disposition = if let Some(gate) = self.attempt_gate {
-                gate.evaluate(candidate.candidate.attempt_id(), observed_at)
-                    .await?
-            } else {
-                RunnableAttemptGateDisposition::Ready
-            };
-            if disposition == RunnableAttemptGateDisposition::Ready {
-                scheduler_candidates.push(candidate.candidate.clone());
-            }
-        }
+        let scheduler_candidates = candidates
+            .iter()
+            .map(|candidate| candidate.candidate.clone())
+            .collect::<Vec<_>>();
         let runners = [effective];
         let input = SchedulingInput::new(&scheduler_candidates, &runners)
             .map_err(LeasePollError::InvalidSchedulingInput)?;

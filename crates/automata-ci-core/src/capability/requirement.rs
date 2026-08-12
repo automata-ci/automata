@@ -5,15 +5,15 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::{
-    Architecture, ContainerFeature, EnvironmentProfile, IsolationLevel, JobResourceAllocation,
-    OperatingSystem, ResourceRequirements, RunnerFeature, RunnerGroup, RunnerLabel, SandboxFeature,
+    Architecture, ContainerFeature, EnvironmentProfile, IsolationLevel, OperatingSystem,
+    ResourceRequirements, RunnerFeature, RunnerGroup, RunnerLabel, SandboxFeature,
 };
 /// Current schema of required runner constraints.
 ///
 /// This version is independent from capability-advertisement schemas. Adding a
 /// required constraint is not forward-compatible with a peer that would ignore
 /// the field, so requirements advance separately from optional advertisements.
-pub const RUNNER_REQUIREMENTS_SCHEMA_VERSION: u16 = 3;
+pub const RUNNER_REQUIREMENTS_SCHEMA_VERSION: u16 = 2;
 
 /// Versioned job requirements used by scheduler policies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -24,7 +24,6 @@ pub struct RunnerRequirements {
     operating_system: Option<OperatingSystem>,
     architecture: Option<Architecture>,
     minimum_resources: ResourceRequirements,
-    resource_allocation: Option<JobResourceAllocation>,
     minimum_isolation: IsolationLevel,
     sandbox_features: BTreeSet<SandboxFeature>,
     container_features: BTreeSet<ContainerFeature>,
@@ -57,7 +56,6 @@ struct UncheckedRunnerRequirements {
     operating_system: Option<OperatingSystem>,
     architecture: Option<Architecture>,
     minimum_resources: ResourceRequirements,
-    resource_allocation: Option<JobResourceAllocation>,
     minimum_isolation: IsolationLevel,
     sandbox_features: BTreeSet<SandboxFeature>,
     container_features: BTreeSet<ContainerFeature>,
@@ -84,7 +82,6 @@ impl<'de> Deserialize<'de> for RunnerRequirements {
             operating_system: value.operating_system,
             architecture: value.architecture,
             minimum_resources: value.minimum_resources,
-            resource_allocation: value.resource_allocation,
             minimum_isolation: value.minimum_isolation,
             sandbox_features: value.sandbox_features,
             container_features: value.container_features,
@@ -131,12 +128,6 @@ impl RunnerRequirements {
     #[must_use]
     pub const fn minimum_resources(&self) -> ResourceRequirements {
         self.minimum_resources
-    }
-
-    /// Returns the resolved request and limit contract, when the workflow selected one.
-    #[must_use]
-    pub const fn resource_allocation(&self) -> Option<JobResourceAllocation> {
-        self.resource_allocation
     }
 
     /// Returns the weakest acceptable isolation boundary.
@@ -197,21 +188,10 @@ impl RunnerRequirements {
         self
     }
 
-    /// Replaces minimum per-job placement resource capacities.
+    /// Replaces minimum enforceable per-job resource capacities.
     #[must_use]
     pub const fn with_minimum_resources(mut self, resources: ResourceRequirements) -> Self {
         self.minimum_resources = resources;
-        self.resource_allocation = None;
-        self
-    }
-
-    /// Attaches the resolved allocation and records its requests for placement.
-    /// Static capability matching separately checks the limits against the
-    /// runner's enforceable per-job ceiling.
-    #[must_use]
-    pub const fn with_resource_allocation(mut self, allocation: JobResourceAllocation) -> Self {
-        self.minimum_resources = allocation.requests();
-        self.resource_allocation = Some(allocation);
         self
     }
 
@@ -266,7 +246,6 @@ impl Default for RunnerRequirements {
             operating_system: None,
             architecture: None,
             minimum_resources: ResourceRequirements::default(),
-            resource_allocation: None,
             minimum_isolation: IsolationLevel::Process,
             sandbox_features: BTreeSet::new(),
             container_features: BTreeSet::new(),

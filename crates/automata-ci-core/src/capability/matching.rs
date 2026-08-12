@@ -75,31 +75,27 @@ impl RunnerCapabilities {
             mismatches.push(RequirementMismatch::NoJobSlots);
         }
 
-        let enforceable = requirements.resource_allocation().map_or(
-            requirements.minimum_resources(),
-            super::resource::JobResourceAllocation::limits,
-        );
         compare_resource(
             ResourceKind::CpuMillis,
-            u64::from(enforceable.cpu_millis()),
+            u64::from(requirements.minimum_resources().cpu_millis()),
             u64::from(self.resources_per_job().cpu_millis()),
             &mut mismatches,
         );
         compare_resource(
             ResourceKind::MemoryBytes,
-            enforceable.memory_bytes(),
+            requirements.minimum_resources().memory_bytes(),
             self.resources_per_job().memory_bytes(),
             &mut mismatches,
         );
         compare_resource(
             ResourceKind::EphemeralDiskBytes,
-            enforceable.ephemeral_disk_bytes(),
+            requirements.minimum_resources().ephemeral_disk_bytes(),
             self.resources_per_job().ephemeral_disk_bytes(),
             &mut mismatches,
         );
         compare_resource(
             ResourceKind::GpuCount,
-            u64::from(enforceable.gpu_count()),
+            u64::from(requirements.minimum_resources().gpu_count()),
             u64::from(self.resources_per_job().gpu_count()),
             &mut mismatches,
         );

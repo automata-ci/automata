@@ -777,9 +777,7 @@ impl RunnerSessionSupervisor {
         match durable.slot(offer.slot()) {
             Some(slot)
                 if slot.offer().job_ir() == &expected_job_ir
-                    && slot.offer().runtime_authorities() == &expected_authorities
-                    && slot.offer().managed_secret_bindings()
-                        == offer.managed_secret_bindings() => {}
+                    && slot.offer().runtime_authorities() == &expected_authorities => {}
             None if record_plan == LeaseOfferRecordPlan::VerifyAppliedReplay => {}
             Some(_) | None => return Err(RunnerRuntimeError::CommandReplayConflict),
         }
@@ -838,7 +836,7 @@ impl RunnerSessionSupervisor {
                         let runtime_authorities =
                             RuntimeAuthorityContentRef::new(authority_content.clone())
                                 .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        let mut record = LeaseOfferRecord::new(
+                        let record = LeaseOfferRecord::new(
                             offer.slot(),
                             offer.lease().clone(),
                             job_ir.clone(),
@@ -846,11 +844,6 @@ impl RunnerSessionSupervisor {
                             command,
                         )
                         .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        if let Some(overlay) = offer.managed_secret_bindings() {
-                            record = record
-                                .with_managed_secret_bindings(overlay.clone())
-                                .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        }
                         self.inner
                             .ports
                             .journal
@@ -1534,7 +1527,7 @@ impl RunnerSessionSupervisor {
             authority_expired.clone(),
             watchdog_stop.clone(),
         );
-        let mut request = ExecutionRequest::new(
+        let request = ExecutionRequest::new(
             session.negotiated.session_id(),
             durable.slot(),
             lease.clone(),
@@ -1545,11 +1538,6 @@ impl RunnerSessionSupervisor {
             durable.lifecycle(),
             durable.sandbox().cloned(),
         );
-        if let Some(overlay) = durable.offer().managed_secret_bindings() {
-            request = request
-                .with_managed_secret_bindings(overlay.clone())
-                .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
-        }
         let executor = Arc::clone(&self.inner.ports.executor);
         let executor_events = Arc::clone(&events);
         let executor_signal = signal.clone();

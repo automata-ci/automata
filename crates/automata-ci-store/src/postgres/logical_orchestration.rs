@@ -1,16 +1,12 @@
 use async_trait::async_trait;
-use automata_ci_core::{OperationId, RunId, UnixMillis, WorkflowId};
+use automata_ci_core::{RunId, UnixMillis, WorkflowId};
 use sha2::{Digest as _, Sha256};
-use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
+use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use super::{
     PostgresStore,
     admission::{RunPublicationSnapshot, lock_repository_publication_snapshot},
-    github_schedule::{
-        record_github_scheduled_run_evidence_in_transaction,
-        validate_github_scheduled_run_evidence_in_transaction,
-    },
     github_subject_evidence::{
         record_github_workflow_run_subject_evidence_in_transaction,
         validate_github_workflow_run_subject_evidence_in_transaction,
@@ -20,10 +16,9 @@ use super::{
 use crate::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
     AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    GithubScheduleFireClaim, GithubSubjectEvidenceStoreError, LOGICAL_ORCHESTRATION_SCHEMA,
-    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, ObjectKey,
-    RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
+    GithubSubjectEvidenceStoreError, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowInvocationId, ObjectKey, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
     ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
     WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
@@ -36,9 +31,6 @@ enum SubjectEvidenceAdmission {
     },
     AuthenticatedWorkflowDispatch {
         claim: AuthenticatedWorkflowDispatchClaim,
-    },
-    ScheduledGithub {
-        claim: GithubScheduleFireClaim,
     },
 }
 
@@ -77,19 +69,6 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
                 current_claim,
                 observed_at,
             },
-        )
-        .await
-    }
-
-    async fn admit_scheduled_github_workflow(
-        &self,
-        command: AdmitLogicalWorkflowRun,
-        claim: GithubScheduleFireClaim,
-    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
-        admit_logical_workflow_transaction(
-            self,
-            command,
-            SubjectEvidenceAdmission::ScheduledGithub { claim },
         )
         .await
     }
@@ -197,15 +176,6 @@ async fn resolve_authenticated_dispatch_source(
         )
         .into());
     };
-    let source = dispatch_source_from_row(row, &request)?;
-    transaction.commit().await.map_err(operation_error)?;
-    Ok(Some(source))
-}
-
-fn dispatch_source_from_row(
-    row: &PgRow,
-    request: &ResolveAuthenticatedWorkflowDispatchSource,
-) -> Result<AuthenticatedWorkflowDispatchSource, LogicalWorkflowAdmissionStoreError> {
     let provider = row
         .try_get::<String, _>("scm_provider")
         .map_err(operation_error)?;
@@ -252,7 +222,7 @@ fn dispatch_source_from_row(
         row.try_get::<String, _>("name").map_err(operation_error)?,
     )
     .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
-    AuthenticatedWorkflowDispatchSource::new(
+    let source = AuthenticatedWorkflowDispatchSource::new(
         repository,
         request.workflow_id(),
         row.try_get::<String, _>("path").map_err(operation_error)?,
@@ -260,7 +230,9 @@ fn dispatch_source_from_row(
         request.commit_sha(),
         source,
     )
-    .map_err(|_| StoreError::corrupt_data("signed GitHub dispatch source is invalid").into())
+    .map_err(|_| StoreError::corrupt_data("signed GitHub dispatch source is invalid"))?;
+    transaction.commit().await.map_err(operation_error)?;
+    Ok(Some(source))
 }
 
 async fn admit_logical_workflow_transaction(
@@ -275,7 +247,6 @@ async fn admit_logical_workflow_transaction(
     let github_subject_evidence_required = matches!(
         &subject_evidence,
         SubjectEvidenceAdmission::AuthenticatedGithub { .. }
-            | SubjectEvidenceAdmission::ScheduledGithub { .. }
     );
 
     if !claim_idempotency_receipt(&mut transaction, &command, github_subject_evidence_required)
@@ -291,11 +262,6 @@ async fn admit_logical_workflow_transaction(
             admitted_at,
         )
         .await?;
-        super::reusable_workflow_admission::validate_reusable_workflow_expansion_replay(
-            &mut transaction,
-            &command,
-        )
-        .await?;
         transaction.commit().await.map_err(operation_error)?;
         return Ok(receipt);
     }
@@ -303,7 +269,6 @@ async fn admit_logical_workflow_transaction(
     if matches!(
         &subject_evidence,
         SubjectEvidenceAdmission::AuthenticatedGithub { .. }
-            | SubjectEvidenceAdmission::ScheduledGithub { .. }
     ) {
         resolve_repository(&mut transaction, &command).await?;
     }
@@ -338,14 +303,6 @@ async fn admit_logical_workflow_transaction(
     .await?;
     insert_logical_jobs(&mut transaction, &command).await?;
     seal_logical_graph(&mut transaction, &command).await?;
-    if let Some(expansion) = command.reusable_workflows() {
-        super::reusable_workflow_admission::insert_reusable_workflow_expansion(
-            &mut transaction,
-            &command,
-            expansion,
-        )
-        .await?;
-    }
     if let Some(concurrency) = command.concurrency() {
         super::admission::assign_concurrency_slot(
             &mut transaction,
@@ -413,25 +370,6 @@ fn validate_subject_evidence_boundary(
             {
                 return Err(StoreError::corrupt_data(
                     "authenticated workflow dispatch has an invalid exact-target boundary",
-                )
-                .into());
-            }
-        }
-        SubjectEvidenceAdmission::ScheduledGithub { claim } => {
-            let operation_matches = matches!(
-                command.idempotency(),
-                WorkflowAdmissionIdempotency::Operation(operation_id)
-                    if *operation_id == OperationId::from_uuid(claim.fire_id().as_uuid())
-            );
-            if command.repository().provider() != "github"
-                || command.event_name() != "schedule"
-                || command.actor() != Some(crate::GITHUB_SCHEDULE_SERVICE_ACTOR)
-                || command.admitted_at() < claim.claimed_at()
-                || command.admitted_at() >= claim.expires_at()
-                || !operation_matches
-            {
-                return Err(StoreError::corrupt_data(
-                    "scheduled GitHub admission has an invalid exact-fire boundary",
                 )
                 .into());
             }
@@ -556,9 +494,6 @@ async fn record_new_subject_evidence(
             })?;
             record_workflow_dispatch_audit(transaction, command, claim, actor).await
         }
-        SubjectEvidenceAdmission::ScheduledGithub { claim } => {
-            record_github_scheduled_run_evidence_in_transaction(transaction, command, *claim).await
-        }
     }
 }
 
@@ -593,15 +528,6 @@ async fn validate_replayed_subject_evidence(
                 StoreError::corrupt_data("workflow dispatch replay lost its authorized actor")
             })?;
             validate_workflow_dispatch_audit(transaction, command, claim, actor, admitted_at).await
-        }
-        SubjectEvidenceAdmission::ScheduledGithub { claim } => {
-            validate_github_scheduled_run_evidence_in_transaction(
-                transaction,
-                command,
-                *claim,
-                admitted_at,
-            )
-            .await
         }
     }
 }
@@ -1206,7 +1132,7 @@ async fn insert_run(
             event_name, event_object_key, head_sha, status, workflow_name,
             git_ref, actor, display_title, commit_subject,
             created_at_ms, updated_at_ms, concurrency_group_key,
-            concurrency_queue_policy, concurrency_cancel_in_progress,
+            concurrency_queue_policy,
             admission_epoch, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
             publication_policy_revision, requested_dashboard_visibility,
@@ -1215,9 +1141,9 @@ async fn insert_run(
             publication_safety_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
-            $11,$12,$13,$14,$15,$15,$16,$17,$18,
-            $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,'repository_policy',1
+            $11,$12,$13,$14,$15,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,
+            $27,$28,$28,$29,$30,'repository_policy',1
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -1247,11 +1173,6 @@ async fn insert_run(
         command
             .concurrency()
             .map(|concurrency| super::admission::queue_policy_name(concurrency.queue_policy())),
-    )
-    .bind(
-        command
-            .concurrency()
-            .map(crate::WorkflowConcurrency::cancel_in_progress),
     )
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(event.digest().as_bytes().as_slice())
@@ -1367,14 +1288,8 @@ async fn insert_logical_jobs(
                 id, run_id, invocation_id, logical_key, source_order,
                 execution_kind, state, activation_fence,
                 created_at_ms, updated_at_ms,
-                runtime_policy_revision, runtime_policy_digest,
-                environment_requirement_kind, environment_template_digest,
-                secret_reference_names, variable_reference_names,
-                credential_requirements_schema
-            ) VALUES (
-                $1,$2,$3,$4,$5,$6,'pending',0,$7,$7,$8,$9,
-                $10,$11,$12,$13,1
-            )
+                runtime_policy_revision, runtime_policy_digest
+            ) VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7,$7,$8,$9)
             ",
         )
         .bind(job.id().as_uuid())
@@ -1386,15 +1301,6 @@ async fn insert_logical_jobs(
         .bind(command.admitted_at().get())
         .bind(runtime_policy_revision)
         .bind(runtime_policy_digest.as_slice())
-        .bind(job.credential_requirements().environment().kind())
-        .bind(
-            job.credential_requirements()
-                .environment()
-                .template_digest()
-                .map(|digest| digest.as_bytes().as_slice().to_vec()),
-        )
-        .bind(job.credential_requirements().secret_names())
-        .bind(job.credential_requirements().variable_names())
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;

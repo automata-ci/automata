@@ -73,11 +73,6 @@ pub enum GithubEventMetadataV1 {
         /// The merge group's fully qualified target branch reference.
         base_ref: String,
     },
-    /// A provider-verified custom `repository_dispatch` invocation.
-    RepositoryDispatch {
-        /// The exact bounded custom event type from the authenticated payload.
-        event_type: String,
-    },
     /// A trusted scheduler invocation for one configured `on.schedule` entry.
     Schedule {
         /// The exact configured cron expression that fired the workflow.
@@ -142,14 +137,6 @@ impl GithubEventMetadataV1 {
         Self::MergeGroup {
             action: action.into(),
             base_ref: base_ref.into(),
-        }
-    }
-
-    /// Creates metadata for a custom repository-dispatch event.
-    #[must_use]
-    pub fn repository_dispatch(event_type: impl Into<String>) -> Self {
-        Self::RepositoryDispatch {
-            event_type: event_type.into(),
         }
     }
 

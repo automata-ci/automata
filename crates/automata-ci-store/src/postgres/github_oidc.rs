@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{PostgresStore, runtime_authority::github_manifest_origin_is_closed};
+use super::PostgresStore;
 use crate::github_oidc::github_oidc_claim_evidence_digest;
 use crate::{
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
@@ -33,8 +33,7 @@ struct CurrentExecutionRow {
     github_owner_id: i64,
     github_repository_name: String,
     github_run_subject_evidence_sha256: Vec<u8>,
-    origin_kind: String,
-    origin_id: Uuid,
+    provider_delivery_id: Uuid,
     repository_visibility: String,
     private_source_authority_id: Option<Uuid>,
     invocation_id: Uuid,
@@ -653,18 +652,18 @@ async fn lock_current_execution(
     let row = sqlx::query(
         r#"
         SELECT repository.tenant_id, repository.id AS repository_id,
-               origin.github_repository_id,
-               origin.github_repository_owner_id,
-               origin.github_repository_name,
-               origin.subject_evidence_sha256,
-               origin.origin_kind, origin.origin_id,
-               origin.repository_visibility,
-               origin.private_source_authority_id,
+               delivery_evidence.github_repository_id,
+               delivery_evidence.github_repository_owner_id,
+               delivery_evidence.github_repository_name,
+               subject_evidence.subject_evidence_sha256,
+               subject_evidence.provider_delivery_id,
+               delivery_evidence.repository_visibility,
+               delivery_evidence.private_source_authority_id,
                concrete.invocation_id, concrete.logical_job_id, concrete.instance_id,
                attempt.attempt_number, invocation.plan_digest, run.event_digest,
-               concrete.runtime_context_digest, origin.workflow_path,
-               origin.event_name, origin.git_ref,
-               origin.github_check_head_sha, run.workflow_name,
+               concrete.runtime_context_digest, subject_evidence.workflow_path,
+               subject_evidence.event_name, subject_evidence.git_ref,
+               subject_evidence.github_check_head_sha, run.workflow_name,
                run.run_number, run.run_attempt
         FROM job_attempts AS attempt
         JOIN jobs AS job ON job.id = attempt.job_id
@@ -721,50 +720,55 @@ async fn lock_current_execution(
         JOIN runner_sessions AS session
           ON session.id = attempt.runner_session_id
          AND session.runner_id = attempt.runner_id
-        JOIN github_workflow_run_manifest_origins AS origin
-          ON origin.tenant_id = repository.tenant_id
-         AND origin.repository_id = repository.id
-         AND origin.workflow_id = run.workflow_id
-         AND origin.snapshot_id = run.snapshot_id
-         AND origin.run_id = run.id
-         AND origin.root_invocation_id = marker.root_invocation_id
+        JOIN github_workflow_run_subject_evidence AS subject_evidence
+          ON subject_evidence.tenant_id = repository.tenant_id
+         AND subject_evidence.repository_id = repository.id
+         AND subject_evidence.workflow_id = run.workflow_id
+         AND subject_evidence.run_id = run.id
+         AND subject_evidence.root_invocation_id = concrete.invocation_id
+        JOIN github_provider_delivery_evidence AS delivery_evidence
+          ON delivery_evidence.tenant_id = subject_evidence.tenant_id
+         AND delivery_evidence.repository_id = subject_evidence.repository_id
+         AND delivery_evidence.provider_delivery_id =
+             subject_evidence.provider_delivery_id
         JOIN workflow_admission_receipts AS admission_receipt
-          ON admission_receipt.tenant_id = origin.tenant_id
-         AND admission_receipt.idempotency_kind =
-             origin.admission_idempotency_kind
+          ON admission_receipt.tenant_id = subject_evidence.tenant_id
+         AND admission_receipt.idempotency_kind = 'provider_delivery'
          AND admission_receipt.idempotency_key =
-             origin.admission_idempotency_key
-         AND admission_receipt.request_digest = origin.logical_admission_digest
-         AND admission_receipt.repository_id = origin.repository_id
-         AND admission_receipt.run_id = origin.run_id
-         AND admission_receipt.committed_at_ms = origin.admitted_at_ms
+             subject_evidence.provider_delivery_idempotency_key
+         AND admission_receipt.request_digest =
+             subject_evidence.logical_admission_digest
+         AND admission_receipt.repository_id = subject_evidence.repository_id
+         AND admission_receipt.run_id = subject_evidence.run_id
+         AND admission_receipt.committed_at_ms = subject_evidence.admitted_at_ms
          AND admission_receipt.github_subject_evidence_required
         JOIN github_provider_manifest_revisions AS manifest
-          ON manifest.tenant_id = origin.tenant_id
-         AND manifest.repository_id = origin.repository_id
+          ON manifest.tenant_id = delivery_evidence.tenant_id
+         AND manifest.repository_id = delivery_evidence.repository_id
          AND manifest.provider_connection_id =
-             origin.provider_connection_id
-         AND manifest.manifest_revision = origin.provider_manifest_revision
-         AND manifest.manifest_digest = origin.provider_manifest_digest
+             delivery_evidence.provider_connection_id
+         AND manifest.manifest_revision =
+             delivery_evidence.provider_manifest_revision
+         AND manifest.manifest_digest = delivery_evidence.provider_manifest_digest
         JOIN github_server_service_authorities AS checks_authority
-          ON checks_authority.tenant_id = origin.tenant_id
-         AND checks_authority.id = origin.checks_authority_id
-         AND checks_authority.repository_id = origin.repository_id
+          ON checks_authority.tenant_id = delivery_evidence.tenant_id
+         AND checks_authority.id = delivery_evidence.checks_authority_id
+         AND checks_authority.repository_id = delivery_evidence.repository_id
          AND checks_authority.provider_connection_id =
-             origin.provider_connection_id
+             delivery_evidence.provider_connection_id
          AND checks_authority.provider_installation_id =
-             origin.provider_installation_id
+             delivery_evidence.provider_installation_id
          AND checks_authority.github_repository_id =
-             origin.github_repository_id
+             delivery_evidence.github_repository_id
          AND checks_authority.github_repository_name =
-             origin.github_repository_name
+             delivery_evidence.github_repository_name
          AND checks_authority.service_scope = 'checks_write'
          AND checks_authority.identity_digest =
-             origin.checks_authority_identity_digest
+             delivery_evidence.checks_authority_identity_digest
          AND checks_authority.app_configuration_revision =
-             origin.checks_authority_app_configuration_revision
+             delivery_evidence.checks_authority_app_configuration_revision
          AND checks_authority.policy_revision =
-             origin.checks_authority_policy_revision
+             delivery_evidence.checks_authority_policy_revision
          AND checks_authority.state = 'active'
         WHERE attempt.id = $1
           AND attempt.job_id = $2
@@ -792,56 +796,43 @@ async fn lock_current_execution(
           AND run.admission_epoch = 4
           AND run.plan_schema = 2
           AND run.status IN ('queued', 'in_progress')
-          AND (
-              concrete.invocation_id <> marker.root_invocation_id
-              OR run.plan_digest = invocation.plan_digest
-          )
-          AND run.plan_digest = origin.plan_digest
-          AND run.event_digest = origin.event_digest
-          AND run.head_sha = origin.github_check_head_sha
-          AND run.event_name = origin.event_name
-          AND run.git_ref = origin.git_ref
+          AND run.plan_digest = invocation.plan_digest
+          AND run.plan_digest = subject_evidence.plan_digest
+          AND run.event_digest = subject_evidence.event_digest
+          AND run.head_sha = subject_evidence.github_check_head_sha
+          AND run.event_name = subject_evidence.event_name
+          AND run.git_ref = subject_evidence.git_ref
           AND repository.scm_provider = 'github'
           AND repository.owner || '/' || repository.name = $18
           AND repository.provider_repository_id =
-              origin.github_repository_id::TEXT
-          AND origin.github_repository_name = $18
-          AND workflow.path = origin.workflow_path
-          AND snapshot.source_digest = origin.source_digest
-          AND marker.root_invocation_id = origin.root_invocation_id
-          AND marker.admission_digest = origin.logical_admission_digest
-          AND marker.admitted_at_ms = origin.admitted_at_ms
+              delivery_evidence.github_repository_id::TEXT
+          AND delivery_evidence.github_repository_name = $18
+          AND delivery_evidence.github_repository_owner_id > 0
+          AND workflow.path = subject_evidence.workflow_path
+          AND snapshot.source_digest = subject_evidence.source_digest
+          AND marker.root_invocation_id = subject_evidence.root_invocation_id
+          AND marker.admission_digest = subject_evidence.logical_admission_digest
+          AND marker.admitted_at_ms = subject_evidence.admitted_at_ms
           AND manifest.webhook_verifier_fingerprint_sha256 =
-              origin.authenticated_webhook_verifier_fingerprint_sha256
+              delivery_evidence.authenticated_webhook_verifier_fingerprint_sha256
           AND manifest.webhook_verifier_revision =
-              origin.authenticated_webhook_verifier_revision
-          AND manifest.provider_installation_id = origin.provider_installation_id
-          AND manifest.github_repository_id = origin.github_repository_id
-          AND manifest.github_repository_name = origin.github_repository_name
-          AND manifest.repository_visibility = origin.repository_visibility
+              delivery_evidence.authenticated_webhook_verifier_revision
+          AND manifest.provider_installation_id =
+              delivery_evidence.provider_installation_id
+          AND manifest.github_repository_id =
+              delivery_evidence.github_repository_id
+          AND manifest.github_repository_name =
+              delivery_evidence.github_repository_name
+          AND manifest.repository_visibility =
+              delivery_evidence.repository_visibility
           AND (
-              origin.origin_kind = 'provider_delivery'
-              AND origin.admission_idempotency_kind = 'provider_delivery'
-              AND origin.github_repository_owner_id > 0
-              OR origin.origin_kind IN ('scheduled_fire', 'workflow_rerun')
-              AND origin.admission_idempotency_kind = 'operation'
-              AND origin.github_repository_owner_id IS NOT NULL
-              AND origin.github_repository_owner_id > 0
-          )
-          AND (
-              origin.repository_visibility = 'public'
-              AND origin.private_source_authority_id IS NULL
-              OR origin.repository_visibility = 'private'
-              AND origin.private_source_authority_id IS NOT NULL
+              delivery_evidence.repository_visibility = 'public'
+              AND delivery_evidence.private_source_authority_id IS NULL
+              OR delivery_evidence.repository_visibility = 'private'
+              AND delivery_evidence.private_source_authority_id IS NOT NULL
           )
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
-              run.id, concrete.invocation_id
-          )
-          AND automata_reusable_workflow_oidc_permission_authorized(
-              run.id, concrete.invocation_id
-          )
           AND invocation.plan_schema = 2
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
@@ -882,7 +873,8 @@ async fn lock_current_execution(
         FOR SHARE OF attempt, job, run, repository, workflow, snapshot, marker,
                      concrete, materialization, instance,
                      logical_job, preparation_claim, preparation, publication,
-                     invocation, runner, session, admission_receipt, manifest,
+                     invocation, runner, session, subject_evidence,
+                     delivery_evidence, admission_receipt, manifest,
                      checks_authority
         "#,
     )
@@ -941,11 +933,6 @@ fn decode_current_execution(
                 .map_err(|_| GithubOidcStoreError::CorruptData)?
         };
     }
-    let origin_kind: String = field!("origin_kind");
-    let origin_id: Uuid = field!("origin_id");
-    if !github_manifest_origin_is_closed(&origin_kind) || origin_id.is_nil() {
-        return Err(GithubOidcStoreError::CorruptData);
-    }
     Ok(CurrentExecutionRow {
         tenant_id: field!("tenant_id"),
         repository_id: field!("repository_id"),
@@ -953,8 +940,7 @@ fn decode_current_execution(
         github_owner_id: field!("github_repository_owner_id"),
         github_repository_name: field!("github_repository_name"),
         github_run_subject_evidence_sha256: field!("subject_evidence_sha256"),
-        origin_kind,
-        origin_id,
+        provider_delivery_id: field!("provider_delivery_id"),
         repository_visibility: field!("repository_visibility"),
         private_source_authority_id: field!("private_source_authority_id"),
         invocation_id: field!("invocation_id"),
@@ -987,33 +973,31 @@ async fn lock_private_source_authority(
             let exact: bool = sqlx::query_scalar(
                 r"
                 SELECT TRUE
-                FROM github_workflow_run_manifest_origins AS origin
+                FROM github_provider_delivery_evidence AS evidence
                 JOIN github_server_service_authorities AS authority
-                  ON authority.tenant_id = origin.tenant_id
-                 AND authority.id = origin.private_source_authority_id
-                 AND authority.repository_id = origin.repository_id
-                 AND authority.provider_connection_id = origin.provider_connection_id
-                 AND authority.provider_installation_id = origin.provider_installation_id
-                 AND authority.github_repository_id = origin.github_repository_id
-                 AND authority.github_repository_name = origin.github_repository_name
+                  ON authority.tenant_id = evidence.tenant_id
+                 AND authority.id = evidence.private_source_authority_id
+                 AND authority.repository_id = evidence.repository_id
+                 AND authority.provider_connection_id = evidence.provider_connection_id
+                 AND authority.provider_installation_id = evidence.provider_installation_id
+                 AND authority.github_repository_id = evidence.github_repository_id
+                 AND authority.github_repository_name = evidence.github_repository_name
                  AND authority.service_scope = 'private_repository_source_read'
                  AND authority.identity_digest =
-                     origin.private_source_authority_identity_digest
+                     evidence.private_source_authority_identity_digest
                  AND authority.app_configuration_revision =
-                     origin.private_source_authority_app_configuration_revision
+                     evidence.private_source_authority_app_configuration_revision
                  AND authority.policy_revision =
-                     origin.private_source_authority_policy_revision
+                     evidence.private_source_authority_policy_revision
                  AND authority.state = 'active'
-                WHERE origin.origin_kind = $1
-                  AND origin.origin_id = $2
-                  AND origin.tenant_id = $3
-                  AND origin.repository_id = $4
-                  AND origin.private_source_authority_id = $5
+                WHERE evidence.provider_delivery_id = $1
+                  AND evidence.tenant_id = $2
+                  AND evidence.repository_id = $3
+                  AND evidence.private_source_authority_id = $4
                 FOR SHARE OF authority
                 ",
             )
-            .bind(&current.origin_kind)
-            .bind(current.origin_id)
+            .bind(current.provider_delivery_id)
             .bind(&current.tenant_id)
             .bind(current.repository_id)
             .bind(authority_id)

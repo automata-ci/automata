@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_core::JobResourceAllocation;
 use automata_ci_execution::{
     Cancellation, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionArgv, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionStage,
@@ -98,7 +97,6 @@ impl ProfileAdmissionPolicy {
         root_filesystem: RootFilesystemPolicy,
         privilege: SandboxPrivilegePolicy,
         resources: ResourceLimits,
-        resource_allocation: JobResourceAllocation,
     ) -> Self {
         Self {
             network,
@@ -1324,19 +1322,11 @@ mod tests {
     }
 
     fn policy() -> ProfileAdmissionPolicy {
-        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources");
-        let capacity = automata_ci_core::ResourceCapacity::new(
-            resources.cpu_millis(),
-            resources.memory_bytes(),
-            0,
-            0,
-        );
         ProfileAdmissionPolicy::new(
             NetworkPolicy::Disabled,
             RootFilesystemPolicy::Writable,
             SandboxPrivilegePolicy::Administrator,
-            resources,
-            JobResourceAllocation::new(capacity, capacity).expect("allocation"),
+            ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources"),
         )
     }
 

@@ -23,33 +23,25 @@ use automata_ci_github_delivery::{
     GithubDeliveryWorkflowRequest,
 };
 use automata_ci_scm::{
-    ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySnapshot,
-    RepositorySource, RepositorySourcePort, RepositorySourceRequest, ResolvedRevision, ScmError,
-    ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
+    RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProviderId,
 };
 use automata_ci_store::{
-    AcceptManifestPinnedGithubRepositoryDispatch, AcceptProviderDelivery, AdmissionObject,
-    ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckSubjectId, GithubProviderGitRef, GithubProviderManifest,
+    AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
+    CompleteProviderDelivery, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
-    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
-    RejectProviderDelivery, RepositoryId as StoreRepositoryId, ResolveGithubRepositoryDispatch,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, RejectProviderDelivery, RepositoryId as StoreRepositoryId,
     RetryProviderDelivery, TenantScope,
 };
 use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
@@ -60,8 +52,8 @@ use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
 use subject_evidence::{
-    fixture_all_direct_subject_evidence, fixture_check_head_sha, fixture_github_runtime_policy,
-    fixture_subject_evidence, fixture_subject_evidence_with_head,
+    fixture_check_head_sha, fixture_github_runtime_policy, fixture_subject_evidence,
+    fixture_subject_evidence_with_head,
 };
 
 const BEFORE: &str = "fedcba9876543210fedcba9876543210fedcba98";
@@ -218,79 +210,6 @@ impl RepositorySourcePort for RecordingSourcePort {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolverObservation {
-    repository: String,
-    revision: String,
-    credential_present: bool,
-    credential_matches: bool,
-    debug: String,
-}
-
-#[derive(Debug)]
-struct RecordingResolver {
-    provider: ScmProviderId,
-    results: Mutex<Vec<Result<RepositorySnapshot, ScmError>>>,
-    observations: Mutex<Vec<ResolverObservation>>,
-}
-
-impl RecordingResolver {
-    fn returning(results: Vec<RepositorySnapshot>) -> Self {
-        assert!(!results.is_empty(), "resolver fixture needs one response");
-        Self {
-            provider: ScmProviderId::new("github").expect("provider"),
-            results: Mutex::new(results.into_iter().map(Ok).collect()),
-            observations: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn failing(error: ScmError) -> Self {
-        Self {
-            provider: ScmProviderId::new("github").expect("provider"),
-            results: Mutex::new(vec![Err(error)]),
-            observations: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn observations(&self) -> Vec<ResolverObservation> {
-        self.observations
-            .lock()
-            .expect("resolver observations lock")
-            .clone()
-    }
-}
-
-#[async_trait]
-impl ScmProvider for RecordingResolver {
-    fn provider_id(&self) -> &ScmProviderId {
-        &self.provider
-    }
-
-    async fn fetch_snapshot(
-        &self,
-        request: SnapshotRequest<'_>,
-    ) -> Result<RepositorySnapshot, ScmError> {
-        self.observations
-            .lock()
-            .expect("resolver observations lock")
-            .push(ResolverObservation {
-                repository: request.repository().as_str().to_owned(),
-                revision: request.revision().as_str().to_owned(),
-                credential_present: request.credential().is_some(),
-                credential_matches: request
-                    .credential()
-                    .is_some_and(|credential| credential.expose_secret() == CREDENTIAL_MARKER),
-                debug: format!("{request:?}"),
-            });
-        let mut results = self.results.lock().expect("resolver results lock");
-        if results.len() > 1 {
-            results.remove(0)
-        } else {
-            results[0].clone()
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkflowObservation {
     path: String,
     ref_kind: GithubPushRefKind,
@@ -307,7 +226,6 @@ struct EventWorkflowObservation {
     git_ref: String,
     revision: String,
     raw_media_type: String,
-    raw_body: Bytes,
     debug: String,
 }
 
@@ -319,7 +237,7 @@ enum ProcessorBehavior {
 
 #[derive(Debug)]
 struct RecordingProcessor {
-    behaviors: Mutex<Vec<ProcessorBehavior>>,
+    behavior: ProcessorBehavior,
     observations: Mutex<Vec<WorkflowObservation>>,
     event_observations: Mutex<Vec<EventWorkflowObservation>>,
 }
@@ -327,7 +245,7 @@ struct RecordingProcessor {
 impl RecordingProcessor {
     fn returning(conclusion: ProviderDeliveryWorkflowConclusion) -> Self {
         Self {
-            behaviors: Mutex::new(vec![ProcessorBehavior::Conclusion(conclusion)]),
+            behavior: ProcessorBehavior::Conclusion(conclusion),
             observations: Mutex::new(Vec::new()),
             event_observations: Mutex::new(Vec::new()),
         }
@@ -335,27 +253,9 @@ impl RecordingProcessor {
 
     fn failing(error: GithubDeliveryWorkflowProcessorError) -> Self {
         Self {
-            behaviors: Mutex::new(vec![ProcessorBehavior::Error(error)]),
+            behavior: ProcessorBehavior::Error(error),
             observations: Mutex::new(Vec::new()),
             event_observations: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn returning_sequence(behaviors: Vec<ProcessorBehavior>) -> Self {
-        assert!(!behaviors.is_empty(), "processor sequence is nonempty");
-        Self {
-            behaviors: Mutex::new(behaviors),
-            observations: Mutex::new(Vec::new()),
-            event_observations: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn next_behavior(&self) -> ProcessorBehavior {
-        let mut behaviors = self.behaviors.lock().expect("processor behaviors lock");
-        if behaviors.len() > 1 {
-            behaviors.remove(0)
-        } else {
-            behaviors[0].clone()
         }
     }
 
@@ -395,9 +295,9 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                     .is_some(),
                 debug: format!("{request:?}"),
             });
-        let result = match self.next_behavior() {
-            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion),
-            ProcessorBehavior::Error(error) => Err(error),
+        let result = match &self.behavior {
+            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion.clone()),
+            ProcessorBehavior::Error(error) => Err(*error),
         };
         request.finish(result).await
     }
@@ -418,12 +318,11 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
                 git_ref: event.git_ref().to_owned(),
                 revision: request.repository_source().revision().as_str().to_owned(),
                 raw_media_type: request.raw_event().media_type().to_owned(),
-                raw_body: request.event().raw_body().clone(),
                 debug: format!("{request:?}"),
             });
-        let result = match self.next_behavior() {
-            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion),
-            ProcessorBehavior::Error(error) => Err(error),
+        let result = match &self.behavior {
+            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion.clone()),
+            ProcessorBehavior::Error(error) => Err(*error),
         };
         request.finish(result).await
     }
@@ -436,8 +335,6 @@ struct RecordingDeliveries {
     completions: Mutex<Vec<CompleteProviderDelivery>>,
     retries: Mutex<Vec<RetryProviderDelivery>>,
     rejections: Mutex<Vec<RejectProviderDelivery>>,
-    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
-    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
 }
 
 impl RecordingDeliveries {
@@ -448,8 +345,6 @@ impl RecordingDeliveries {
             completions: Mutex::new(Vec::new()),
             retries: Mutex::new(Vec::new()),
             rejections: Mutex::new(Vec::new()),
-            inventory: Mutex::new(None),
-            progress: Mutex::new(Vec::new()),
         }
     }
 
@@ -460,8 +355,6 @@ impl RecordingDeliveries {
             completions: Mutex::new(Vec::new()),
             retries: Mutex::new(Vec::new()),
             rejections: Mutex::new(Vec::new()),
-            inventory: Mutex::new(None),
-            progress: Mutex::new(Vec::new()),
         }
     }
 
@@ -510,62 +403,6 @@ impl ProviderDeliveryRepository for RecordingDeliveries {
             return Err(ProviderDeliveryStoreError::OutcomeRunRejected);
         }
         Ok(self.receipt(ProviderDeliveryState::Completed))
-    }
-
-    async fn register_provider_delivery_workflow_inventory(
-        &self,
-        request: RegisterProviderDeliveryWorkflowInventory,
-    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
-        if request.claim().delivery_id() != self.claimed_receipt.id() {
-            return Err(ProviderDeliveryStoreError::ClaimRejected);
-        }
-        let mut inventory = self.inventory.lock().expect("inventory lock");
-        match inventory.as_ref() {
-            Some(existing) if existing != request.inventory() => {
-                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-            }
-            Some(_) => {}
-            None => *inventory = Some(request.inventory().clone()),
-        }
-        ProviderDeliveryWorkflowInventoryReceipt::new(
-            inventory.as_ref().expect("inventory initialized").clone(),
-            self.progress.lock().expect("progress lock").clone(),
-        )
-        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
-    }
-
-    async fn record_provider_delivery_workflow_progress(
-        &self,
-        request: RecordProviderDeliveryWorkflowProgress,
-    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
-        if request.claim().delivery_id() != self.claimed_receipt.id() {
-            return Err(ProviderDeliveryStoreError::ClaimRejected);
-        }
-        let inventory = self.inventory.lock().expect("inventory lock");
-        let Some(inventory) = inventory.as_ref() else {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        };
-        if inventory.digest() != request.inventory_digest()
-            || !inventory
-                .entries()
-                .iter()
-                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
-        {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        }
-        let mut progress = self.progress.lock().expect("progress lock");
-        if let Some(existing) = progress
-            .iter()
-            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
-        {
-            return if existing == request.outcome() {
-                Ok(existing.clone())
-            } else {
-                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
-            };
-        }
-        progress.push(request.outcome().clone());
-        Ok(request.outcome().clone())
     }
 
     async fn retry_provider_delivery(
@@ -695,18 +532,6 @@ impl FixtureSubjectEvidence {
         Self(evidence)
     }
 
-    fn all_direct(claimed: &ClaimedProviderDelivery, git_ref: &str) -> Self {
-        let identity = claimed.identity();
-        Self(fixture_all_direct_subject_evidence(
-            claimed.receipt().id(),
-            identity,
-            ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner ID"),
-            claimed.receipt().accepted_at(),
-            0x7_500,
-            GithubProviderGitRef::new(git_ref).expect("manifest branch ref"),
-        ))
-    }
-
     fn authenticated_event_v1(
         claimed: &ClaimedProviderDelivery,
         check_head_sha: GithubCheckHeadSha,
@@ -761,127 +586,6 @@ impl GithubSubjectEvidenceRepository for FixtureSubjectEvidence {
         _run_id: automata_ci_core::RunId,
     ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
         panic!("run evidence is outside the worker")
-    }
-}
-
-#[derive(Debug)]
-struct RecordingRepositoryDispatchEvidence {
-    pending: PendingGithubRepositoryDispatchEvidence,
-    resolved: Mutex<Option<ManifestPinnedGithubDeliveryEvidence>>,
-    resolutions: Mutex<Vec<GithubRepositoryDispatchResolution>>,
-}
-
-impl RecordingRepositoryDispatchEvidence {
-    fn new(pending: PendingGithubRepositoryDispatchEvidence) -> Self {
-        Self {
-            pending,
-            resolved: Mutex::new(None),
-            resolutions: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn resolution_count(&self) -> usize {
-        self.resolutions.lock().expect("resolutions lock").len()
-    }
-
-    fn has_resolved_evidence(&self) -> bool {
-        self.resolved
-            .lock()
-            .expect("resolved evidence lock")
-            .is_some()
-    }
-}
-
-#[async_trait]
-impl GithubSubjectEvidenceRepository for RecordingRepositoryDispatchEvidence {
-    async fn accept_manifest_pinned_github_delivery(
-        &self,
-        _request: automata_ci_store::AcceptManifestPinnedGithubDelivery,
-    ) -> Result<ManifestPinnedGithubDeliveryReceipt, GithubSubjectEvidenceStoreError> {
-        panic!("acceptance is outside the worker")
-    }
-
-    async fn load_manifest_pinned_github_delivery_evidence(
-        &self,
-        tenant: &TenantScope,
-        delivery_id: ProviderDeliveryId,
-    ) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
-        if self.pending.tenant() != tenant || self.pending.delivery_id() != delivery_id {
-            return Err(GithubSubjectEvidenceStoreError::NotFound);
-        }
-        self.resolved
-            .lock()
-            .expect("resolved evidence lock")
-            .clone()
-            .ok_or(GithubSubjectEvidenceStoreError::NotFound)
-    }
-
-    async fn load_github_workflow_run_subject_evidence(
-        &self,
-        _tenant: &TenantScope,
-        _repository_id: StoreRepositoryId,
-        _run_id: automata_ci_core::RunId,
-    ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
-        panic!("run evidence is outside the worker")
-    }
-}
-
-#[async_trait]
-impl GithubRepositoryDispatchEvidenceRepository for RecordingRepositoryDispatchEvidence {
-    async fn accept_manifest_pinned_github_repository_dispatch(
-        &self,
-        _request: AcceptManifestPinnedGithubRepositoryDispatch,
-    ) -> Result<PendingGithubRepositoryDispatchReceipt, GithubSubjectEvidenceStoreError> {
-        panic!("acceptance is outside the worker")
-    }
-
-    async fn load_pending_github_repository_dispatch_evidence(
-        &self,
-        tenant: &TenantScope,
-        delivery_id: ProviderDeliveryId,
-    ) -> Result<PendingGithubRepositoryDispatchEvidence, GithubSubjectEvidenceStoreError> {
-        if self.pending.tenant() != tenant || self.pending.delivery_id() != delivery_id {
-            return Err(GithubSubjectEvidenceStoreError::NotFound);
-        }
-        if self
-            .resolved
-            .lock()
-            .expect("resolved evidence lock")
-            .is_some()
-        {
-            return Err(GithubSubjectEvidenceStoreError::NotFound);
-        }
-        Ok(self.pending.clone())
-    }
-
-    async fn resolve_github_repository_dispatch(
-        &self,
-        request: ResolveGithubRepositoryDispatch,
-    ) -> Result<ManifestPinnedGithubDeliveryEvidence, GithubSubjectEvidenceStoreError> {
-        assert_eq!(request.pending(), &self.pending);
-        let resolution = request.resolution();
-        self.resolutions
-            .lock()
-            .expect("resolutions lock")
-            .push(resolution);
-        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
-            self.pending.delivery_id(),
-            self.pending.repository_owner_id(),
-            self.pending.manifest().clone(),
-            self.pending.authenticated_webhook_verifier_fingerprint(),
-            self.pending.authenticated_webhook_verifier_revision(),
-            self.pending.checks_authority().clone(),
-            self.pending.private_source_authority().cloned(),
-            GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x9_100))
-                .expect("dispatch Check subject"),
-            resolution.source_revision(),
-            self.pending.event().clone(),
-            resolution,
-            self.pending.accepted_at(),
-        )
-        .expect("resolved dispatch evidence");
-        *self.resolved.lock().expect("resolved evidence lock") = Some(evidence.clone());
-        Ok(evidence)
     }
 }
 
@@ -1034,96 +738,6 @@ fn pull_request_claimed_fixture() -> ClaimedFixture {
     }
 }
 
-fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility) -> ClaimedFixture {
-    let (private, visibility_name) = match visibility {
-        ProviderRepositoryVisibility::Public => (false, "public"),
-        ProviderRepositoryVisibility::Private => (true, "private"),
-    };
-    let body = Bytes::from(format!(
-        r#"{{"action":"synthetic_signal","branch":"main","client_payload":{{"sequence":3}},"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility_name}","default_branch":"main","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
-    ));
-    let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event-v1/sha256/{digest}.json");
-    let descriptor = BlobDescriptor::new(
-        BlobKey::new(key_text.clone()).expect("blob key"),
-        digest,
-        u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("media type"),
-    );
-    let raw_event = AdmissionObject::new_event(
-        digest,
-        ObjectKey::new(key_text).expect("object key"),
-        descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
-    )
-    .expect("raw event");
-    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(21)).expect("delivery id");
-    let receipt = ProviderDeliveryReceipt::from_durable_parts(
-        delivery_id,
-        ProviderDeliveryState::Claimed,
-        1,
-        UnixMillis::new(50),
-    )
-    .expect("claimed receipt");
-    let owner = ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(22)).expect("owner");
-    let claim =
-        ProviderDeliveryClaimFence::from_durable_parts(delivery_id, owner, 7).expect("claim fence");
-    let repository = ProviderRepositoryCoordinates::new(
-        ProviderRepositoryId::new(REPOSITORY_ID).expect("repository"),
-        visibility,
-        format!("{OWNER}/{REPOSITORY}"),
-    )
-    .expect("repository coordinates");
-    let identity = ProviderDeliveryIdentity::new(
-        TenantScope::from_authenticated_tenant_id("tenant-dispatch").expect("tenant"),
-        "github",
-        ProviderConnectionId::from_uuid(Uuid::from_u128(23)).expect("connection"),
-        ProviderInstallationId::new(INSTALLATION_ID).expect("installation"),
-        repository,
-        DELIVERY,
-    )
-    .expect("identity");
-    let claimed = ClaimedProviderDelivery::from_durable_parts(
-        receipt,
-        identity,
-        Sha256Digest::from_bytes([0x44; 32]),
-        raw_event,
-        claim,
-        UnixMillis::new(100),
-        UnixMillis::new(10_000),
-    )
-    .expect("claimed delivery");
-    ClaimedFixture {
-        claimed,
-        receipt,
-        descriptor,
-        body,
-        check_head_sha: fixture_check_head_sha(AFTER),
-    }
-}
-
-fn pending_repository_dispatch_evidence(
-    fixture: &ClaimedFixture,
-) -> PendingGithubRepositoryDispatchEvidence {
-    let legacy = FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha).0;
-    PendingGithubRepositoryDispatchEvidence::from_durable_parts(
-        legacy.delivery_id(),
-        legacy.repository_owner_id(),
-        legacy.manifest().clone(),
-        legacy.authenticated_webhook_verifier_fingerprint(),
-        legacy.authenticated_webhook_verifier_revision(),
-        legacy.checks_authority().clone(),
-        legacy.private_source_authority().cloned(),
-        GithubAuthenticatedEventV1::new(
-            GithubAuthenticatedEventKind::RepositoryDispatch,
-            "refs/heads/main",
-        )
-        .expect("dispatch coordinates"),
-        legacy.accepted_at(),
-    )
-    .expect("pending repository dispatch")
-}
-
 fn push_body(
     git_ref: &str,
     after: &str,
@@ -1144,17 +758,6 @@ fn repository_source(archive: Bytes) -> RepositorySource {
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
         ExactRevision::new(AFTER).expect("revision"),
-        ArchiveFormat::TarGzip,
-        archive,
-    )
-}
-
-fn repository_snapshot(archive: Bytes, resolved_revision: &str) -> RepositorySnapshot {
-    RepositorySnapshot::from_bytes(
-        ScmProviderId::new("github").expect("provider"),
-        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        automata_ci_scm::RevisionSpec::new("refs/heads/main").expect("default branch"),
-        ResolvedRevision::new(resolved_revision).expect("resolved revision"),
         ArchiveFormat::TarGzip,
         archive,
     )
@@ -1201,35 +804,6 @@ fn worker_with_evidence(
         config,
     )
     .expect("worker");
-    (worker, objects)
-}
-
-fn repository_dispatch_worker(
-    fixture: &ClaimedFixture,
-    source: Arc<RecordingSourcePort>,
-    resolver: Arc<RecordingResolver>,
-    processor: Arc<RecordingProcessor>,
-    deliveries: Arc<RecordingDeliveries>,
-    evidence: Arc<RecordingRepositoryDispatchEvidence>,
-) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
-    let objects = Arc::new(FixtureBlobStore::exact(
-        fixture.descriptor.clone(),
-        fixture.body.clone(),
-    ));
-    let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = evidence.clone();
-    let repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository> = evidence;
-    let worker = GithubDeliveryWorker::new_with_repository_dispatch(
-        objects.clone(),
-        source,
-        resolver,
-        processor,
-        deliveries,
-        subject_evidence,
-        repository_dispatches,
-        Arc::new(FixedClock(UnixMillis::new(500))),
-        GithubDeliveryWorkerConfig::default(),
-    )
-    .expect("repository-dispatch worker");
     (worker, objects)
 }
 
@@ -1368,105 +942,6 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
 }
 
 #[tokio::test]
-async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
-    const DEFAULT_BRANCH_REF: &str = "refs/heads/refs/release";
-    let fixture = claimed_fixture(DEFAULT_BRANCH_REF, false, 1);
-    let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::from([
-            (".github/workflows/a.yml", b"on: push\njobs: {}\n".to_vec()),
-            (".github/workflows/b.yaml", b"on: push\njobs: {}\n".to_vec()),
-            (".github/workflows/empty.yml", Vec::new()),
-            (
-                ".github/workflows/nested/ignored.yml",
-                b"ignored\n".to_vec(),
-            ),
-            (".github/workflows/ignored.txt", b"ignored\n".to_vec()),
-        ]),
-    ))));
-    let processor = Arc::new(RecordingProcessor::returning_sequence(vec![
-        ProcessorBehavior::Conclusion(skipped()),
-        ProcessorBehavior::Error(GithubDeliveryWorkflowProcessorError::Unavailable),
-        ProcessorBehavior::Conclusion(skipped()),
-    ]));
-    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
-    let evidence = FixtureSubjectEvidence::all_direct(&fixture.claimed, DEFAULT_BRANCH_REF);
-    let (worker, _) = worker_with_evidence(
-        &fixture,
-        Arc::clone(&source),
-        Arc::clone(&processor),
-        Arc::clone(&deliveries),
-        GithubDeliveryWorkerConfig::default(),
-        evidence,
-    );
-    let credential = SecretString::new(CREDENTIAL_MARKER).expect("credential");
-
-    let first = worker
-        .process_claimed(
-            fixture.claimed.clone(),
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                credential: &credential,
-                changed_files_credentials: None,
-            },
-        )
-        .await
-        .expect("second workflow schedules a durable retry");
-    assert!(matches!(
-        first,
-        GithubDeliveryWorkerOutcome::RetryScheduled(_)
-    ));
-    assert!(
-        deliveries
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
-    assert_eq!(deliveries.progress.lock().expect("progress lock").len(), 1);
-
-    let second = worker
-        .process_claimed(
-            fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                credential: &credential,
-                changed_files_credentials: None,
-            },
-        )
-        .await
-        .expect("retry resumes from durable progress");
-    assert!(matches!(second, GithubDeliveryWorkerOutcome::Completed(_)));
-
-    assert_eq!(source.observations().len(), 2);
-    assert_eq!(
-        processor
-            .observations()
-            .iter()
-            .map(|observation| observation.path.as_str())
-            .collect::<Vec<_>>(),
-        [
-            ".github/workflows/a.yml",
-            ".github/workflows/b.yaml",
-            ".github/workflows/b.yaml",
-        ]
-    );
-    assert_eq!(deliveries.retries.lock().expect("retries lock").len(), 1);
-    assert_eq!(deliveries.progress.lock().expect("progress lock").len(), 3);
-    let completions = deliveries.completions.lock().expect("completions lock");
-    assert_eq!(completions.len(), 1);
-    assert_eq!(
-        completions[0]
-            .outcomes()
-            .iter()
-            .map(ProviderDeliveryWorkflowOutcome::workflow_path)
-            .collect::<Vec<_>>(),
-        [
-            ".github/workflows/a.yml",
-            ".github/workflows/b.yaml",
-            ".github/workflows/empty.yml",
-        ]
-    );
-}
-
-#[tokio::test]
 async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evidence() {
     let fixture = pull_request_claimed_fixture();
     let archive = archive(BTreeMap::from([(
@@ -1518,194 +993,6 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
     );
     assert!(!observations[0].debug.contains(OWNER));
     assert!(!observations[0].debug.contains(REPOSITORY));
-}
-
-#[tokio::test]
-async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha() {
-    let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Private);
-    let source_archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
-        b"on: repository_dispatch\njobs: {}\n".to_vec(),
-    )]));
-    let resolver = Arc::new(RecordingResolver::returning(vec![
-        repository_snapshot(source_archive.clone(), AFTER),
-        repository_snapshot(source_archive.clone(), BEFORE),
-    ]));
-    let source = Arc::new(RecordingSourcePort::returning(repository_source(
-        source_archive,
-    )));
-    let processor = Arc::new(RecordingProcessor::returning(skipped()));
-    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
-    let evidence = Arc::new(RecordingRepositoryDispatchEvidence::new(
-        pending_repository_dispatch_evidence(&fixture),
-    ));
-    let (worker, objects) = repository_dispatch_worker(
-        &fixture,
-        source.clone(),
-        resolver.clone(),
-        processor.clone(),
-        deliveries,
-        evidence.clone(),
-    );
-    let credential = SecretString::new(CREDENTIAL_MARKER).expect("credential");
-
-    for claimed in [fixture.claimed.clone(), fixture.claimed] {
-        assert!(matches!(
-            worker
-                .process_claimed(
-                    claimed,
-                    GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                        credential: &credential,
-                        changed_files_credentials: None,
-                    },
-                )
-                .await
-                .expect("dispatch completion"),
-            GithubDeliveryWorkerOutcome::Completed(_)
-        ));
-    }
-
-    assert_eq!(objects.read_count(), 2);
-    assert_eq!(evidence.resolution_count(), 1);
-    assert!(evidence.has_resolved_evidence());
-    assert_eq!(
-        evidence.resolutions.lock().expect("resolutions lock")[0],
-        GithubRepositoryDispatchResolution::new(
-            fixture_check_head_sha(AFTER),
-            GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
-        )
-    );
-    let resolver_observations = resolver.observations();
-    assert_eq!(resolver_observations.len(), 1);
-    assert_eq!(
-        resolver_observations[0].repository,
-        format!("{OWNER}/{REPOSITORY}")
-    );
-    assert_eq!(resolver_observations[0].revision, "refs/heads/main");
-    assert!(resolver_observations[0].credential_present);
-    assert!(resolver_observations[0].credential_matches);
-    assert!(!resolver_observations[0].debug.contains(CREDENTIAL_MARKER));
-    let source_observations = source.observations();
-    assert_eq!(source_observations.len(), 1);
-    assert_eq!(source_observations[0].revision, AFTER);
-    assert!(source_observations[0].credential_matches);
-    let workflow_observations = processor.event_observations();
-    assert_eq!(workflow_observations.len(), 2);
-    assert!(workflow_observations.iter().all(|observation| {
-        observation.event_name == "repository_dispatch"
-            && observation.git_ref == "refs/heads/main"
-            && observation.revision == AFTER
-            && observation.raw_media_type == GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
-            && observation.raw_body == fixture.body
-    }));
-}
-
-#[tokio::test]
-async fn public_repository_dispatch_resolution_is_credential_free() {
-    let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Public);
-    let source_archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
-        b"on: repository_dispatch\njobs: {}\n".to_vec(),
-    )]));
-    let resolver = Arc::new(RecordingResolver::returning(vec![repository_snapshot(
-        source_archive.clone(),
-        AFTER,
-    )]));
-    let source = Arc::new(RecordingSourcePort::returning(repository_source(
-        source_archive,
-    )));
-    let processor = Arc::new(RecordingProcessor::returning(skipped()));
-    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
-    let evidence = Arc::new(RecordingRepositoryDispatchEvidence::new(
-        pending_repository_dispatch_evidence(&fixture),
-    ));
-    let (worker, _) = repository_dispatch_worker(
-        &fixture,
-        source.clone(),
-        resolver.clone(),
-        processor.clone(),
-        deliveries,
-        evidence.clone(),
-    );
-
-    assert!(matches!(
-        worker
-            .process_claimed(
-                fixture.claimed,
-                GithubDeliverySourceAuthority::PublicAnonymous,
-            )
-            .await
-            .expect("public dispatch completion"),
-        GithubDeliveryWorkerOutcome::Completed(_)
-    ));
-
-    assert_eq!(evidence.resolution_count(), 1);
-    assert_eq!(
-        evidence.resolutions.lock().expect("resolutions lock")[0],
-        GithubRepositoryDispatchResolution::new(
-            fixture_check_head_sha(AFTER),
-            GithubRepositoryDispatchResolutionAuthority::PublicAnonymous,
-        )
-    );
-    let observations = resolver.observations();
-    assert_eq!(observations.len(), 1);
-    assert!(!observations[0].credential_present);
-    assert!(!observations[0].credential_matches);
-    assert!(source.observations().is_empty());
-    assert_eq!(processor.event_observations().len(), 1);
-}
-
-#[tokio::test]
-async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
-    let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Private);
-    let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::new(),
-    ))));
-    let resolver = Arc::new(RecordingResolver::failing(ScmError::new(
-        automata_ci_scm::ScmErrorKind::Unavailable,
-    )));
-    let processor = Arc::new(RecordingProcessor::returning(skipped()));
-    let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
-    let evidence = Arc::new(RecordingRepositoryDispatchEvidence::new(
-        pending_repository_dispatch_evidence(&fixture),
-    ));
-    let (worker, _) = repository_dispatch_worker(
-        &fixture,
-        source.clone(),
-        resolver.clone(),
-        processor.clone(),
-        deliveries.clone(),
-        evidence.clone(),
-    );
-
-    let outcome = worker
-        .process_claimed(
-            fixture.claimed,
-            GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
-                credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
-                changed_files_credentials: None,
-            },
-        )
-        .await
-        .expect("resolution failure is durably retried");
-
-    assert!(matches!(
-        outcome,
-        GithubDeliveryWorkerOutcome::RetryScheduled(_)
-    ));
-    assert_eq!(resolver.observations().len(), 1);
-    assert!(source.observations().is_empty());
-    assert_eq!(evidence.resolution_count(), 0);
-    assert!(!evidence.has_resolved_evidence());
-    assert!(processor.event_observations().is_empty());
-    assert!(
-        deliveries
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
-    assert_eq!(deliveries.retries.lock().expect("retries lock").len(), 1);
 }
 
 #[tokio::test]

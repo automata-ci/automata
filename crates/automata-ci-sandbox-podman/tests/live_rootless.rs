@@ -24,10 +24,9 @@ use automata_ci_execution::{
     Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
-    BuildKitRuntime, CommandRequest, CommandTermination, JobContainerEngine, PodmanBinary,
-    PodmanCommandExecutor, PodmanHostGatewayAlias, PodmanLaunchTrust, PodmanLaunchTrustHandle,
-    PodmanOptions, PodmanProcessEnvironment, PodmanStateRoot, RootlessPodmanProvider,
-    SystemCommandExecutor,
+    CommandRequest, CommandTermination, JobContainerEngine, PodmanBinary, PodmanCommandExecutor,
+    PodmanHostGatewayAlias, PodmanLaunchTrust, PodmanLaunchTrustHandle, PodmanOptions,
+    PodmanProcessEnvironment, PodmanStateRoot, RootlessPodmanProvider, SystemCommandExecutor,
 };
 
 use support::ScratchRoot;
@@ -45,8 +44,6 @@ const LIVE_ENABLE: &str = "AUTOMATA_LIVE_ROOTLESS_PODMAN";
 const LIVE_IMAGE: &str = "AUTOMATA_PODMAN_TEST_IMAGE";
 const LIVE_SERVICE_IMAGE: &str = "AUTOMATA_PODMAN_TEST_SERVICE_IMAGE";
 const LIVE_SERVICE_PROXY_IMAGE: &str = "AUTOMATA_PODMAN_TEST_SERVICE_PROXY_IMAGE";
-const LIVE_BUILDKIT_ENABLE: &str = "AUTOMATA_LIVE_ROOTLESS_BUILDX";
-const LIVE_BUILDKIT_IMAGE: &str = "AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE";
 const CLANG_PACKAGE_VERSION: &str = "1:18.1.3-1ubuntu1";
 const DOCKER_DISTRIBUTION_SURFACE: &str = r#"
 set -euo pipefail
@@ -487,172 +484,19 @@ fn opt_in_attempt_scoped_docker_api_runs_the_distribution_command_surface() {
         )
         .expect("destroy Docker-compatible sandbox");
     cleanup.disarm();
-    assert_job_engines_removed(scratch.path());
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-#[ignore = "requires the explicit Buildx live gate and local digest-pinned profile/BuildKit images"]
-fn opt_in_attempt_scoped_buildx_runs_the_pinned_buildkit_container_driver() {
-    require_live_enable();
-    if std::env::var(LIVE_BUILDKIT_ENABLE).as_deref() != Ok("1") {
-        return;
-    }
-    let image = live_image();
-    let scratch = ScratchRoot::new("live-attempt-buildx");
-    let (options, _, _) = live_options(scratch.path());
-    let provider = RootlessPodmanProvider::open(
-        options
-            .with_job_container_engine(JobContainerEngine::AttemptScopedDockerApi)
-            .with_buildkit_runtime(BuildKitRuntime::new(live_buildkit_image())),
-    )
-    .expect("open BuildKit-compatible live provider");
-    let generation = SandboxGeneration::new(1).expect("generation");
-    let spec = live_spec_with_network(
-        OperationId::new(),
-        generation,
-        image,
-        NetworkPolicy::PrivateEgress,
-    )
-    .with_root_filesystem(RootFilesystemPolicy::Writable)
-    .with_privilege(SandboxPrivilegePolicy::Administrator);
-    let created = match provider.create(&spec, &NeverCancelled) {
-        Ok(created) => created,
-        Err(error) => {
-            if let Some(handle) = error.recovery_handle() {
-                let _ignored = provider.destroy(
-                    &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
-                    &NeverCancelled,
-                );
-            }
-            panic!("create sandbox with attempt-scoped BuildKit API: {error}");
-        }
-    };
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
-    let endpoint = provider
-        .attach(created.handle(), &NeverCancelled)
-        .expect("attach BuildKit-compatible sandbox");
-    install_buildx_live_fixture(endpoint.as_ref());
-    let execute = buildx_live_command();
-    let output = endpoint
-        .exec(&execute, &NeverCancelled)
-        .expect("execute Buildx live command");
-    assert_eq!(
-        output.termination(),
-        ExecutionTermination::Exited(0),
-        "Buildx compatibility command failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(output.stdout()),
-        String::from_utf8_lossy(output.stderr()),
+    assert!(
+        !scratch.path().join("job-engines").exists()
+            || std::fs::read_dir(scratch.path().join("job-engines"))
+                .expect("job engine root")
+                .next()
+                .is_none()
     );
-    assert!(contains_bytes(
-        output.stdout(),
-        b"attempt-scoped-buildx-ok\n"
-    ));
-
-    provider
-        .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
-            &NeverCancelled,
-        )
-        .expect("destroy BuildKit-compatible sandbox");
-    cleanup.disarm();
-    assert_job_engines_removed(scratch.path());
-}
-
-fn install_buildx_live_fixture(endpoint: &dyn automata_ci_execution::ExecutionEndpoint) {
-    for (target, content) in [
-        (
-            "/__w/Buildxfile",
-            b"FROM scratch\nCOPY buildx-payload /payload\n".as_slice(),
-        ),
-        ("/__w/buildx-payload", b"neutral-buildx-live\n".as_slice()),
-    ] {
-        endpoint
-            .copy_to(
-                &CopyToRequest::new(
-                    OperationId::new(),
-                    TargetPath::posix(target).expect("Buildx fixture target"),
-                    content.to_vec(),
-                )
-                .expect("Buildx fixture copy request"),
-                &NeverCancelled,
-            )
-            .expect("copy Buildx fixture");
-    }
-}
-
-fn buildx_live_command() -> ExecutionCommand {
-    let script = r#"
-set -euo pipefail
-builder=neutral-live
-export DOCKER_CONFIG=/__w/.docker-buildx-live
-mkdir -p "$DOCKER_CONFIG"
-docker buildx create \
-  --name "$builder" \
-  --driver docker-container \
-  --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
-  --use >/dev/null
-cleanup() { docker buildx rm --force "$builder" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-docker buildx inspect --bootstrap "$builder" >/dev/null
-rm -rf /__w/buildx-output
-docker buildx build \
-  --builder "$builder" \
-  --file /__w/Buildxfile \
-  --progress plain \
-  --output type=local,dest=/__w/buildx-output \
-  /__w
-test "$(cat /__w/buildx-output/payload)" = neutral-buildx-live
-docker buildx rm --force "$builder" >/dev/null
-trap - EXIT
-printf 'attempt-scoped-buildx-ok\n'
-"#;
-    let environment = ExecutionEnvironment::new(vec![
-        environment_variable("HOME", "/root"),
-        environment_variable(
-            "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        ),
-    ])
-    .expect("Buildx live environment");
-    ExecutionCommand::new(
-        OperationId::new(),
-        ExecutionArgv::new(
-            TargetPath::posix("/usr/bin/bash").expect("bash"),
-            vec!["-c".to_owned(), script.to_owned()],
-        )
-        .expect("Buildx live argv"),
-        TargetPath::posix("/__w").expect("workspace"),
-        environment,
-        Duration::from_mins(5),
-        2 * 1024 * 1024,
-    )
-    .expect("Buildx live command")
 }
 
 fn live_image() -> String {
     require_live_enable();
     std::env::var(LIVE_IMAGE)
         .expect("ignored rootless Podman tests require a local digest-pinned profile image")
-}
-
-fn live_buildkit_image() -> ImmutableImage {
-    ImmutableImage::new(
-        std::env::var(LIVE_BUILDKIT_IMAGE)
-            .expect("Buildx live test requires a local digest-pinned BuildKit image"),
-    )
-    .expect("live BuildKit image must be digest-pinned")
-}
-
-fn assert_job_engines_removed(root: &Path) {
-    let engines = root.join("job-engines");
-    assert!(
-        !engines.exists()
-            || std::fs::read_dir(engines)
-                .expect("job engine root")
-                .next()
-                .is_none()
-    );
 }
 
 fn require_live_enable() {

@@ -56,82 +56,6 @@ pub enum RunnerSelection {
     },
 }
 
-/// Source-level resource values in either the `requests` or `limits` mapping.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct JobResourceVector {
-    pub(crate) cpu: Option<ScalarValue>,
-    pub(crate) memory: Option<ScalarValue>,
-    pub(crate) ephemeral_storage: Option<ScalarValue>,
-    pub(crate) gpu: Option<ScalarValue>,
-    pub(crate) extensions: Vec<PreservedField>,
-    pub(crate) span: SourceSpan,
-}
-
-impl JobResourceVector {
-    /// Returns the CPU quantity or deferred expression.
-    pub const fn cpu(&self) -> Option<&ScalarValue> {
-        self.cpu.as_ref()
-    }
-
-    /// Returns the memory quantity or deferred expression.
-    pub const fn memory(&self) -> Option<&ScalarValue> {
-        self.memory.as_ref()
-    }
-
-    /// Returns the ephemeral-storage quantity or deferred expression.
-    pub const fn ephemeral_storage(&self) -> Option<&ScalarValue> {
-        self.ephemeral_storage.as_ref()
-    }
-
-    /// Returns the integral GPU quantity or deferred expression.
-    pub const fn gpu(&self) -> Option<&ScalarValue> {
-        self.gpu.as_ref()
-    }
-
-    /// Returns fields retained but unsupported by this frontend version.
-    pub fn extensions(&self) -> &[PreservedField] {
-        &self.extensions
-    }
-
-    /// Returns the exact source span covering this vector.
-    pub const fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-}
-
-/// Kubernetes-style resource requests and limits attached to a step job.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct JobResources {
-    pub(crate) requests: Option<JobResourceVector>,
-    pub(crate) limits: Option<JobResourceVector>,
-    pub(crate) extensions: Vec<PreservedField>,
-    pub(crate) span: SourceSpan,
-}
-
-impl JobResources {
-    /// Returns placement and reservation requests, when provided.
-    pub const fn requests(&self) -> Option<&JobResourceVector> {
-        self.requests.as_ref()
-    }
-
-    /// Returns enforceable resource limits, when provided.
-    pub const fn limits(&self) -> Option<&JobResourceVector> {
-        self.limits.as_ref()
-    }
-
-    /// Returns fields retained but unsupported by this frontend version.
-    pub fn extensions(&self) -> &[PreservedField] {
-        &self.extensions
-    }
-
-    /// Returns the exact source span covering the resource allocation.
-    pub const fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-}
-
 /// Inputs supplied by a caller to a reusable workflow.
 ///
 /// The mapping span is retained separately from its values so diagnostics can
@@ -362,8 +286,6 @@ pub struct Job {
     pub(crate) deployment_environment_source_span: Option<SourceSpan>,
     pub(crate) defaults: Option<Defaults>,
     pub(crate) runner: Option<RunnerSelection>,
-    pub(crate) resources: Option<JobResources>,
-    pub(crate) resources_source_span: Option<SourceSpan>,
     pub(crate) container: Option<JobContainer>,
     pub(crate) container_source_span: Option<SourceSpan>,
     pub(crate) services: Option<JobServices>,
@@ -442,15 +364,6 @@ impl Job {
     /// Returns the source-level runner selection, if configured.
     pub fn runner(&self) -> Option<&RunnerSelection> {
         self.runner.as_ref()
-    }
-
-    /// Returns the Automata resource request and limit extension, if configured.
-    pub const fn resources(&self) -> Option<&JobResources> {
-        self.resources.as_ref()
-    }
-
-    pub(crate) const fn resources_source_span(&self) -> Option<&SourceSpan> {
-        self.resources_source_span.as_ref()
     }
 
     /// Returns the job container, if configured.

@@ -215,16 +215,15 @@ async fn seed_control_plane_with_optional_concurrency(
     let run_id = Uuid::new_v4();
     let job_id = JobId::new();
     let tenant_id = format!("tenant-{}", Uuid::new_v4().simple());
-    let (admission_epoch, job_ir_schema, runner_requirements_schema): (i32, i32, i32) =
-        sqlx::query_as(
-            r"
-        SELECT minimum_admission_epoch, job_ir_schema, runner_requirements_schema
+    let (admission_epoch, job_ir_schema): (i32, i32) = sqlx::query_as(
+        r"
+        SELECT minimum_admission_epoch, job_ir_schema
         FROM automata_cluster_compatibility
         WHERE singleton
         ",
-        )
-        .fetch_one(pool)
-        .await?;
+    )
+    .fetch_one(pool)
+    .await?;
     let job_ir_version = JobIrVersion::new(u16::try_from(job_ir_schema)?)?;
     let current_runner_session_schema: bool = sqlx::query_scalar(
         r"
@@ -239,23 +238,6 @@ async fn seed_control_plane_with_optional_concurrency(
     )
     .fetch_one(pool)
     .await?;
-
-    // Upgrade fixtures intentionally seed the contract currently installed in
-    // their temporary schema.  Older schemas require requirements-v2, while
-    // this binary constructs requirements-v3 by default.  The historical
-    // row is never decoded by this binary; its declared schema is what lets
-    // the migration exercise the durable upgrade path faithfully.
-    let mut requirements = serde_json::to_value(RunnerRequirements::default())?;
-    if runner_requirements_schema != 3 {
-        let object = requirements
-            .as_object_mut()
-            .ok_or("runner requirements must serialize as an object")?;
-        object.insert(
-            "schema_version".into(),
-            serde_json::json!(runner_requirements_schema),
-        );
-        object.remove("resource_allocation");
-    }
 
     sqlx::query(
         r"
@@ -376,7 +358,7 @@ async fn seed_control_plane_with_optional_concurrency(
     .bind(job_id.as_uuid())
     .bind(run_id)
     .bind(vec![11_u8; 32])
-    .bind(requirements)
+    .bind(serde_json::to_value(RunnerRequirements::default())?)
     .bind(admission_epoch)
     .bind(job_ir_schema)
     .execute(pool)

@@ -64,83 +64,6 @@ jobs:
 ";
 
 #[tokio::test]
-async fn dispatch_request_debug_omits_private_source_and_subject_data() {
-    let harness = Harness::new();
-    let operation_id = OperationId::from_uuid(Uuid::from_u128(0x99));
-    let request = harness.request(operation_id, "live", true, "private input marker");
-    let debug = format!("{request:?}");
-    for private_value in [
-        TENANT,
-        PRINCIPAL,
-        SESSION,
-        WORKFLOW_PATH,
-        COMMIT_SHA,
-        GIT_REF,
-        "neutral-fixture",
-        "private input marker",
-        "echo synthetic",
-    ] {
-        assert!(
-            !debug.contains(private_value),
-            "Debug leaked {private_value}"
-        );
-    }
-    assert!(debug.contains("source_size_bytes"));
-    assert!(debug.contains("input_count"));
-
-    let authorization =
-        WorkflowDispatchAuthorization::new(actor(), harness.repository_id, harness.workflow_id)
-            .expect("synthetic authority");
-    let authorization_debug = format!("{authorization:?}");
-    assert!(!authorization_debug.contains(TENANT));
-    assert!(!authorization_debug.contains(PRINCIPAL));
-    assert!(!authorization_debug.contains(SESSION));
-
-    let lookup = ResolveAuthenticatedWorkflowDispatchSource::new(
-        actor(),
-        harness.repository_id,
-        harness.workflow_id,
-        GIT_REF,
-        COMMIT_SHA,
-    )
-    .expect("exact source lookup");
-    let lookup_debug = format!("{lookup:?}");
-    assert!(!lookup_debug.contains(TENANT));
-    assert!(!lookup_debug.contains(PRINCIPAL));
-    assert!(!lookup_debug.contains(SESSION));
-    assert!(!lookup_debug.contains(GIT_REF));
-    assert!(!lookup_debug.contains(COMMIT_SHA));
-
-    let inputs = GithubWorkflowDispatchInputsV1::try_new([(
-        "note",
-        GithubWorkflowDispatchInputValue::from("durable private marker"),
-    )])
-    .expect("bounded dispatch inputs");
-    let durable = DurableGithubWorkflowDispatchRequest::new(
-        authorization,
-        GIT_REF,
-        COMMIT_SHA,
-        inputs,
-        operation_id,
-    );
-    let debug = format!("{durable:?}");
-    assert!(!debug.contains(GIT_REF));
-    assert!(!debug.contains(COMMIT_SHA));
-    assert!(!debug.contains("durable private marker"));
-    assert!(debug.contains("input_count"));
-
-    harness.seed_durable_source().await;
-    let source_debug = {
-        let state = harness.repository.state.lock().expect("state lock");
-        format!("{:?}", state.source.as_ref().expect("durable source"))
-    };
-    assert!(!source_debug.contains("neutral-fixture"));
-    assert!(!source_debug.contains(WORKFLOW_PATH));
-    assert!(!source_debug.contains(GIT_REF));
-    assert!(!source_debug.contains(COMMIT_SHA));
-}
-
-#[tokio::test]
 async fn authenticated_dispatch_binds_typed_inputs_and_exact_replay() {
     let operation_id = OperationId::from_uuid(Uuid::from_u128(0x100));
     let harness = Harness::new();
@@ -184,12 +107,6 @@ async fn authenticated_dispatch_binds_typed_inputs_and_exact_replay() {
     assert_eq!(first_claim.workflow_path(), WORKFLOW_PATH);
     assert_eq!(first_claim.git_ref(), GIT_REF);
     assert_eq!(first_claim.operation_id(), operation_id);
-    let claim_debug = format!("{first_claim:?}");
-    assert!(!claim_debug.contains(TENANT));
-    assert!(!claim_debug.contains(PRINCIPAL));
-    assert!(!claim_debug.contains(SESSION));
-    assert!(!claim_debug.contains(WORKFLOW_PATH));
-    assert!(!claim_debug.contains(GIT_REF));
 
     let evidence = harness.load(first_command.event()).await;
     let evidence: serde_json::Value =
@@ -310,42 +227,6 @@ async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
     ));
     assert_eq!(harness.repository.source_calls.load(Ordering::SeqCst), 2);
     harness.repository.assert_only_dispatch_path(1);
-}
-
-#[tokio::test]
-async fn malformed_or_non_branch_tag_refs_fail_before_source_lookup() {
-    let harness = Harness::new();
-    for (index, git_ref) in [
-        "refs/heads/has space",
-        "refs/heads/two..dots",
-        "refs/heads/name@{one}",
-        "refs/heads/double//slash",
-        "refs/heads/.hidden",
-        "refs/heads/topic.lock",
-        "refs/pull/17/merge",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let request = DurableGithubWorkflowDispatchRequest::new(
-            WorkflowDispatchAuthorization::new(actor(), harness.repository_id, harness.workflow_id)
-                .expect("exact authority"),
-            git_ref,
-            COMMIT_SHA,
-            GithubWorkflowDispatchInputsV1::try_new(Vec::<(
-                String,
-                GithubWorkflowDispatchInputValue,
-            )>::new())
-            .expect("empty inputs"),
-            OperationId::from_uuid(Uuid::from_u128(0x200 + index as u128)),
-        );
-        assert!(matches!(
-            harness.service.dispatch_from_durable_source(request).await,
-            Err(GithubWorkflowDispatchError::Request(_))
-        ));
-    }
-    assert_eq!(harness.repository.source_calls.load(Ordering::SeqCst), 0);
-    harness.repository.assert_only_dispatch_path(0);
 }
 
 struct Harness {

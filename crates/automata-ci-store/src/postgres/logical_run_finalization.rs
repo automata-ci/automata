@@ -62,15 +62,17 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
           AND NOT EXISTS (
               SELECT 1
               FROM workflow_plan_v2_jobs AS job
-              LEFT JOIN workflow_plan_v2_effective_job_results AS result
+              LEFT JOIN workflow_plan_v2_job_results AS result
                 ON result.run_id = job.run_id
                AND result.invocation_id = job.invocation_id
                AND result.logical_job_id = job.id
+              LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
+                ON result_claim.logical_job_id = result.logical_job_id
               WHERE job.run_id = marker.run_id
                 AND job.invocation_id = marker.root_invocation_id
                 AND (
                     result.logical_job_id IS NULL
-                    OR result.claim_state IS DISTINCT FROM 'finalized'
+                    OR result_claim.state IS DISTINCT FROM 'finalized'
                     OR result.logical_key IS DISTINCT FROM job.logical_key
                     OR result.source_order IS DISTINCT FROM job.source_order
                     OR job.state IS DISTINCT FROM CASE result.effective_conclusion
@@ -106,7 +108,7 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
               run.updated_at_ms,
               COALESCE((
                   SELECT max(result.finalized_at_ms)
-                  FROM workflow_plan_v2_effective_job_results AS result
+                  FROM workflow_plan_v2_job_results AS result
                   WHERE result.run_id = marker.run_id
                     AND result.invocation_id = marker.root_invocation_id
               ), 0)
@@ -384,14 +386,16 @@ async fn has_exhausted_ready_candidate(
               AND NOT EXISTS (
                   SELECT 1
                   FROM workflow_plan_v2_jobs AS job
-                  LEFT JOIN workflow_plan_v2_effective_job_results AS result
+                  LEFT JOIN workflow_plan_v2_job_results AS result
                     ON result.run_id = job.run_id
                    AND result.invocation_id = job.invocation_id
                    AND result.logical_job_id = job.id
+                  LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
+                    ON result_claim.logical_job_id = result.logical_job_id
                   WHERE job.run_id = marker.run_id
                     AND job.invocation_id = marker.root_invocation_id
                     AND (result.logical_job_id IS NULL
-                         OR result.claim_state IS DISTINCT FROM 'finalized')
+                         OR result_claim.state IS DISTINCT FROM 'finalized')
               )
         )
         ",
@@ -510,12 +514,14 @@ async fn load_job_evidence(
                result.instances_digest, result.prerequisite_count,
                result.prerequisites_digest, result.output_count,
                result.outputs_digest, result.commit_digest,
-               result.finalized_at_ms, result.claim_state AS result_claim_state
+               result.finalized_at_ms, result_claim.state AS result_claim_state
         FROM workflow_plan_v2_jobs AS job
-        LEFT JOIN workflow_plan_v2_effective_job_results AS result
+        LEFT JOIN workflow_plan_v2_job_results AS result
           ON result.run_id = job.run_id
          AND result.invocation_id = job.invocation_id
          AND result.logical_job_id = job.id
+        LEFT JOIN workflow_plan_v2_job_result_claims AS result_claim
+          ON result_claim.logical_job_id = result.logical_job_id
         WHERE job.run_id = $1 AND job.invocation_id = $2
         ORDER BY job.source_order, job.logical_key COLLATE "C", job.id
         "#,

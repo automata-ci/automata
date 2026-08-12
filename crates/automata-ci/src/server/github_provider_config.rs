@@ -3,11 +3,9 @@
 use std::{collections::BTreeSet, fmt, str::FromStr as _, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
-use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
-    GITHUB_PROVIDER_WORKFLOW_PATH, GithubCheckName, GithubCheckSubjectKey, GithubProviderGitRef,
-    GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
+    GithubCheckName, GithubProviderManifestRevision, GithubRepositoryName,
     GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, ProviderInstallationId, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
@@ -22,7 +20,7 @@ use zeroize::Zeroizing;
 use super::SecretSource;
 
 /// Maximum encoded size of the strict GitHub provider configuration document.
-pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
+pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 256 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
@@ -139,7 +137,6 @@ impl fmt::Debug for GithubProviderInternalRepositoryId {
 pub struct GithubProviderConfig {
     app: GithubProviderAppConfig,
     webhook: GithubProviderWebhookConfig,
-    schedule: GithubProviderScheduleConfig,
     repositories: Arc<[GithubProviderRepositoryConfig]>,
 }
 
@@ -178,7 +175,6 @@ impl GithubProviderConfig {
         }
         let app = GithubProviderAppConfig::validate(raw.app)?;
         let webhook = GithubProviderWebhookConfig::validate(raw.webhook)?;
-        let schedule = GithubProviderScheduleConfig::validate(raw.schedule)?;
         let mut repositories = raw
             .repositories
             .into_iter()
@@ -191,7 +187,6 @@ impl GithubProviderConfig {
         Ok(Self {
             app,
             webhook,
-            schedule,
             repositories: repositories.into(),
         })
     }
@@ -206,12 +201,6 @@ impl GithubProviderConfig {
     #[must_use]
     pub const fn webhook(&self) -> &GithubProviderWebhookConfig {
         &self.webhook
-    }
-
-    /// Returns the bounded non-secret scheduler policy.
-    #[must_use]
-    pub const fn schedule(&self) -> GithubProviderScheduleConfig {
-        self.schedule
     }
 
     /// Returns repositories in stable installation/repository numeric order.
@@ -232,60 +221,12 @@ impl fmt::Debug for GithubProviderConfig {
             .debug_struct("GithubProviderConfig")
             .field("app", &self.app)
             .field("webhook", &self.webhook)
-            .field("schedule", &self.schedule)
             .field("repository_count", &self.repositories.len())
             .field("public_repository_count", &public_repositories)
             .field(
                 "private_repository_count",
                 &(self.repositories.len() - public_repositories),
             )
-            .finish()
-    }
-}
-
-/// Validated bounded scheduler policy for the GitHub provider.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct GithubProviderScheduleConfig(GithubScheduleServiceConfig);
-
-impl GithubProviderScheduleConfig {
-    fn validate(raw: Option<RawSchedule>) -> Result<Self, GithubProviderConfigError> {
-        let defaults = GithubScheduleServiceConfig::default();
-        let raw = raw.unwrap_or_default();
-        GithubScheduleServiceConfig::new(
-            raw.poll_millis.unwrap_or(defaults.poll_millis()),
-            raw.discovery_claim_millis
-                .unwrap_or(defaults.discovery_claim_millis()),
-            raw.fire_claim_millis
-                .unwrap_or(defaults.fire_claim_millis()),
-            raw.retry_millis.unwrap_or(defaults.retry_millis()),
-            raw.staleness_millis.unwrap_or(defaults.staleness_millis()),
-            raw.maximum_manifests
-                .unwrap_or(defaults.maximum_manifests()),
-            raw.maximum_fires_per_pass
-                .unwrap_or(defaults.maximum_fires_per_pass()),
-        )
-        .map(Self)
-        .map_err(|_| GithubProviderConfigError)
-    }
-
-    /// Returns the scheduler service's exact validated configuration.
-    #[must_use]
-    pub const fn service_config(self) -> GithubScheduleServiceConfig {
-        self.0
-    }
-}
-
-impl fmt::Debug for GithubProviderScheduleConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GithubProviderScheduleConfig")
-            .field("poll_millis", &self.0.poll_millis())
-            .field("discovery_claim_millis", &self.0.discovery_claim_millis())
-            .field("fire_claim_millis", &self.0.fire_claim_millis())
-            .field("retry_millis", &self.0.retry_millis())
-            .field("staleness_millis", &self.0.staleness_millis())
-            .field("maximum_manifests", &self.0.maximum_manifests())
-            .field("maximum_fires_per_pass", &self.0.maximum_fires_per_pass())
             .finish()
     }
 }
@@ -434,14 +375,12 @@ pub struct GithubProviderRepositoryConfig {
     repository_owner_id: ProviderRepositoryOwnerId,
     repository_name: GithubRepositoryName,
     cache_repository: CacheRepositoryMetadata,
-    workflow_git_ref: GithubProviderGitRef,
     visibility: ProviderRepositoryVisibility,
     manifest_revision: GithubProviderManifestRevision,
     policy_revision: GithubServerServiceRevision,
     runtime_policy_revision: WorkflowRuntimePolicyRevision,
     authority_profile: JobAuthorityProfile,
     runner_policy: GithubRunnerPolicy,
-    workflow_selection: GithubProviderWorkflowSelection,
     check_name: GithubCheckName,
     checks_write_authority: GithubProviderAuthorityConfig,
     private_source_authority: Option<GithubProviderAuthorityConfig>,
@@ -465,8 +404,6 @@ impl GithubProviderRepositoryConfig {
         let cache_repository =
             CacheRepositoryMetadata::new(repository_name.as_str(), raw.default_branch)
                 .map_err(|_| GithubProviderConfigError)?;
-        let workflow_git_ref = GithubProviderGitRef::new(cache_repository.default_branch_ref())
-            .map_err(|_| GithubProviderConfigError)?;
         let visibility = match raw.visibility {
             RawVisibility::Public => ProviderRepositoryVisibility::Public,
             RawVisibility::Private => ProviderRepositoryVisibility::Private,
@@ -488,25 +425,6 @@ impl GithubProviderRepositoryConfig {
         let runner_policy_bytes = raw.runner_policy.get().as_bytes();
         let runner_policy = GithubRunnerPolicy::decode_configuration(runner_policy_bytes)
             .map_err(|_| GithubProviderConfigError)?;
-        let workflow_selection = match (raw.workflow_selection, raw.workflow_path) {
-            (
-                Some(RawWorkflowSelection {
-                    mode: RawWorkflowSelectionMode::AllDirect,
-                }),
-                None,
-            ) => GithubProviderWorkflowSelection::all_direct(),
-            (None, workflow_path) => {
-                let path = GithubCheckSubjectKey::new(
-                    workflow_path.unwrap_or_else(|| GITHUB_PROVIDER_WORKFLOW_PATH.to_owned()),
-                )
-                .map_err(|_| GithubProviderConfigError)?;
-                if !valid_workflow_path(path.as_str()) {
-                    return Err(GithubProviderConfigError);
-                }
-                GithubProviderWorkflowSelection::exact(path)
-            }
-            _ => return Err(GithubProviderConfigError),
-        };
         let check_name =
             GithubCheckName::new(raw.check_name).map_err(|_| GithubProviderConfigError)?;
         let RawAuthorities {
@@ -537,14 +455,12 @@ impl GithubProviderRepositoryConfig {
             repository_owner_id,
             repository_name,
             cache_repository,
-            workflow_git_ref,
             visibility,
             manifest_revision,
             policy_revision,
             runtime_policy_revision,
             authority_profile,
             runner_policy,
-            workflow_selection,
             check_name,
             checks_write_authority,
             private_source_authority,
@@ -599,12 +515,6 @@ impl GithubProviderRepositoryConfig {
         &self.cache_repository
     }
 
-    /// Returns the revisioned full default-branch ref used for workflow selection.
-    #[must_use]
-    pub const fn workflow_git_ref(&self) -> &GithubProviderGitRef {
-        &self.workflow_git_ref
-    }
-
     /// Returns the exact authenticated visibility expected from signed payloads.
     #[must_use]
     pub const fn visibility(&self) -> ProviderRepositoryVisibility {
@@ -639,18 +549,6 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn runner_policy(&self) -> &GithubRunnerPolicy {
         &self.runner_policy
-    }
-
-    /// Returns the explicit immutable workflow discovery policy.
-    #[must_use]
-    pub const fn workflow_selection(&self) -> &GithubProviderWorkflowSelection {
-        &self.workflow_selection
-    }
-
-    /// Returns the precise legacy workflow path, if configured.
-    #[must_use]
-    pub fn exact_workflow_path(&self) -> Option<&str> {
-        self.workflow_selection.exact_path()
     }
 
     /// Returns the exact provider-facing Check Run name.
@@ -690,11 +588,6 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
             .field("runtime_policy_revision", &self.runtime_policy_revision)
             .field("authority_profile", &self.authority_profile)
             .field("runner_policy", &"[validated]")
-            .field("workflow_git_ref", &"[redacted]")
-            .field(
-                "workflow_selection",
-                &self.workflow_selection.as_durable_str(),
-            )
             .field("check_name", &"[redacted]")
             .field("checks_write_authority", &self.checks_write_authority)
             .field("private_source_authority", &self.private_source_authority)
@@ -783,21 +676,7 @@ struct RawConfig {
     schema: u16,
     app: RawApp,
     webhook: RawWebhook,
-    #[serde(default)]
-    schedule: Option<RawSchedule>,
     repositories: Vec<RawRepository>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSchedule {
-    poll_millis: Option<i64>,
-    discovery_claim_millis: Option<i64>,
-    fire_claim_millis: Option<i64>,
-    retry_millis: Option<i64>,
-    staleness_millis: Option<i64>,
-    maximum_manifests: Option<u16>,
-    maximum_fires_per_pass: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -841,35 +720,8 @@ struct RawRepository {
     authority_profile: RawAuthorityProfile,
     /// Exact raw JSON retained until Store's sole typed policy codec consumes it.
     runner_policy: Box<RawValue>,
-    #[serde(default)]
-    workflow_path: Option<String>,
-    #[serde(default)]
-    workflow_selection: Option<RawWorkflowSelection>,
     check_name: String,
     authorities: RawAuthorities,
-}
-
-fn valid_workflow_path(value: &str) -> bool {
-    let Some(file) = value.strip_prefix(".github/workflows/") else {
-        return false;
-    };
-    let supported_extension = matches!(
-        file.rsplit_once('.'),
-        Some((stem, "yml" | "yaml")) if !stem.is_empty()
-    );
-    !file.is_empty() && !file.contains('/') && supported_extension
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWorkflowSelection {
-    mode: RawWorkflowSelectionMode,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RawWorkflowSelectionMode {
-    AllDirect,
 }
 
 #[derive(Clone, Copy, Deserialize)]

@@ -15,7 +15,6 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-async-trait.workspace = true
 automata-ci-control-plane.workspace = true
 automata-ci-core.workspace = true
 automata-ci-protocol.workspace = true
@@ -24,4 +23,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tokio.workspace = true

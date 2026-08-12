@@ -3,11 +3,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use automata_ci_core::{
     Architecture, ContainerFeature, ContextValue, EnvironmentProfile, EnvironmentProfileId,
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIrEnvelope,
-    JobPermissionGrant, JobPermissionRequest, JobResourceAllocation, JobResourcePolicy,
-    JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel, ResourceCapacity,
-    RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SemanticStep, Sha256Digest,
-    ShellTemplate, TransportProtocol, ValueSource, ValueTemplateSegment, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowPlan,
+    JobPermissionGrant, JobPermissionRequest, JobValidationError, OperatingSystem,
+    OutputSensitivity, PermissionLevel, RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit,
+    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, ValueSource,
+    ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
@@ -29,20 +28,6 @@ const REPOSITORY: &str = "synthetic/example";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const WORKFLOW_PATH: &str = ".github/workflows/synthetic.yml";
 const GIT_REF: &str = "refs/heads/main";
-
-fn resource_policy() -> JobResourcePolicy {
-    let defaults = JobResourceAllocation::new(
-        ResourceCapacity::new(100, 256 * 1_024 * 1_024, 0, 0),
-        ResourceCapacity::new(1_000, 1_024 * 1_024 * 1_024, 0, 0),
-    )
-    .expect("resource defaults");
-    JobResourcePolicy::new(
-        defaults,
-        ResourceCapacity::new(100, 256 * 1_024 * 1_024, 0, 0),
-        ResourceCapacity::new(4_000, 8 * 1_024 * 1_024 * 1_024, 0, 0),
-    )
-    .expect("resource policy")
-}
 
 const SOURCE: &str = r"name: Synthetic CI
 on: workflow_dispatch
@@ -272,7 +257,6 @@ fn project_envelope_with_profiles(
             execution(instance),
             profiles,
             JobAuthorityProfile::Standard,
-            resource_policy(),
         ))
         .expect("projection")
         .into_parts()
@@ -381,7 +365,6 @@ jobs:
             execution(instance),
             &profiles,
             JobAuthorityProfile::Standard,
-            resource_policy(),
         ))
         .expect_err("two mapped selectors cannot choose one environment");
     assert!(matches!(
@@ -416,7 +399,6 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
             execution(instance),
             &profiles(),
             JobAuthorityProfile::Standard,
-            resource_policy(),
         ))
         .expect("projection");
 
@@ -555,7 +537,6 @@ jobs:
             execution(instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
-            resource_policy(),
         ))
         .expect("explicit credential-free projection");
     assert_eq!(
@@ -592,7 +573,6 @@ jobs:
             execution(legacy_instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
-            resource_policy(),
         ))
         .expect_err("provider-default permissions are not credential-free");
     assert!(matches!(
@@ -617,7 +597,6 @@ jobs:
             execution(secret_instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
-            resource_policy(),
         ))
         .expect_err("runtime secret bindings are never credential-free");
     assert!(matches!(
@@ -658,7 +637,6 @@ fn runtime_context_reference_must_match_exact_canonical_bytes() {
             mismatched,
             &profiles(),
             JobAuthorityProfile::Standard,
-            resource_policy(),
         ))
         .expect_err("mismatched runtime context");
     assert!(matches!(
@@ -884,7 +862,6 @@ jobs:
                 execution(instance),
                 &profiles(),
                 JobAuthorityProfile::Standard,
-                resource_policy(),
             ))
             .expect_err("unsupported semantics");
         assert!(matches!(
@@ -892,25 +869,6 @@ jobs:
             LogicalJobProjectionError::Unsupported(actual) if actual == expected
         ));
     }
-}
-
-#[test]
-fn reusable_callee_contract_does_not_block_step_job_projection() {
-    let envelope = project_envelope(
-        r"on:
-  workflow_call:
-    inputs:
-      release:
-        type: boolean
-        required: true
-  workflow_dispatch:
-jobs:
-  build:
-    runs-on: linux
-    steps: [{run: echo ok}]
-",
-    );
-    assert_eq!(envelope.job().steps().len(), 1);
 }
 
 #[test]

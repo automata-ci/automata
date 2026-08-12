@@ -89,7 +89,7 @@ fn current_contract_retains_root_and_source_ordered_logical_graph() {
             verify_id,
             "verify",
             1,
-            LogicalWorkflowJobKind::Steps,
+            LogicalWorkflowJobKind::ReusableWorkflow,
             vec![prepare_id],
         ),
     ])
@@ -102,7 +102,10 @@ fn current_contract_retains_root_and_source_ordered_logical_graph() {
     assert_eq!(admitted.root_invocation_id().as_uuid(), Uuid::from_u128(5));
     assert_eq!(admitted.jobs()[1].key().as_str(), "verify");
     assert_eq!(admitted.jobs()[1].source_order(), 1);
-    assert_eq!(admitted.jobs()[1].kind(), LogicalWorkflowJobKind::Steps);
+    assert_eq!(
+        admitted.jobs()[1].kind(),
+        LogicalWorkflowJobKind::ReusableWorkflow
+    );
     assert_eq!(admitted.jobs()[1].prerequisites(), &[prepare_id]);
     assert_eq!(admitted.actor(), Some("sample-actor"));
     assert_eq!(admitted.display_title(), Some("Synthetic build"));
@@ -110,22 +113,6 @@ fn current_contract_retains_root_and_source_ordered_logical_graph() {
         admitted.commit_subject(),
         Some("Exercise logical admission")
     );
-}
-
-#[test]
-fn reusable_call_requires_an_immutable_expansion() {
-    let call_id = LogicalWorkflowJobId::from_uuid(Uuid::from_u128(12)).expect("call identity");
-
-    assert!(matches!(
-        command(vec![job(
-            call_id,
-            "call",
-            0,
-            LogicalWorkflowJobKind::ReusableWorkflow,
-            Vec::new(),
-        )]),
-        Err(LogicalWorkflowAdmissionValueError::InvalidReusableExpansion)
-    ));
 }
 
 #[test]

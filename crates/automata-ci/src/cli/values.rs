@@ -70,7 +70,6 @@ impl FromStr for SecretScope {
 
 fn is_safe_segment(value: &str, maximum_length: usize) -> bool {
     !value.is_empty()
-        && !matches!(value, "." | "..")
         && value.len() <= maximum_length
         && value
             .chars()
