@@ -405,7 +405,7 @@ async fn admit_authenticated_fixture(
             format!("admission-{namespace}"),
         )?,
         WorkflowId::from_uuid(Uuid::from_u128(namespace + 2)),
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "Admission guard",
         "refs/heads/main",
         WorkflowSnapshotId::from_uuid(Uuid::from_u128(namespace + 3)),

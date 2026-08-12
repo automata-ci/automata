@@ -511,7 +511,7 @@ fn canonical_components(
 
 fn is_direct_workflow(relative_components: &[&str]) -> bool {
     relative_components.len() == 3
-        && relative_components[0] == ".github"
+        && relative_components[0] == ".ci"
         && relative_components[1] == "workflows"
         && relative_components[2]
             .rsplit_once('.')

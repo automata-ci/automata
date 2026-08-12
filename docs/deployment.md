@@ -407,7 +407,7 @@ safety choice. Subscribe the App webhook to the configured supported events,
 grant `checks:write` for every registered repository, and grant `contents:read`
 only for Private source. The checked-in example uses the server-owned
 `{"mode":"all_direct"}` workflow selection. It discovers only canonical
-`.yml` and `.yaml` files directly beneath `.github/workflows/` at the exact
+`.yml` and `.yaml` files directly beneath `.ci/workflows/` at the exact
 authenticated source revision; nested files and other extensions are not
 selected. Discovery is bounded by the manifest archive limits, and the sorted
 inventory and each path-local result are durable before the delivery completes.

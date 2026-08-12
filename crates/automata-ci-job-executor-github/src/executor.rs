@@ -2456,6 +2456,12 @@ impl GithubJobExecutor {
                         cancellation,
                     )?;
                 }
+                let checkout_worktree =
+                    github_checkout_worktree(&reference, &paths.workspace, &inputs)?;
+                let compatibility_phase = checkout_worktree
+                    .as_ref()
+                    .map(|_| budget.phase())
+                    .transpose()?;
                 let identity =
                     ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
                 posts.record_occurrence(
@@ -2469,7 +2475,7 @@ impl GithubJobExecutor {
                     call_path.invocation_id(top_step.id().as_str()),
                     cancellation,
                 )?;
-                match loaded.definition.execution() {
+                let outcome = match loaded.definition.execution() {
                     PreparedActionExecution::Javascript(javascript) => {
                         let pre_completed = if !lifecycle.pre_completed
                             && javascript.pre().is_some()
@@ -2556,7 +2562,22 @@ impl GithubJobExecutor {
                         )
                         .await
                     }
+                };
+                if outcome
+                    .as_ref()
+                    .is_ok_and(|outcome| *outcome == CommandOutcome::Success)
+                    && let (Some(worktree), Some(phase)) =
+                        (checkout_worktree.as_ref(), compatibility_phase)
+                {
+                    self.materialize_github_workflow_directory(
+                        request,
+                        endpoint,
+                        worktree,
+                        phase,
+                        cancellation,
+                    )?;
                 }
+                outcome
             }
             .await;
             budget.leave();
@@ -2566,6 +2587,55 @@ impl GithubJobExecutor {
                 result
             }
         })
+    }
+
+    fn materialize_github_workflow_directory(
+        &self,
+        request: &ExecutionRequest,
+        endpoint: &dyn ExecutionEndpoint,
+        worktree: &TargetPath,
+        phase: u32,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<(), ExecutorAdapterError> {
+        let (program, arguments) = match worktree.platform() {
+            TargetPlatform::Posix => (
+                required_tool(self.ports.toolchain.sh())?,
+                vec![
+                    "-c".to_owned(),
+                    "if [ -d .ci/workflows ] && [ ! -e .github/workflows ]; then mkdir -p .github && cp -R -- .ci/workflows .github/workflows; fi"
+                        .to_owned(),
+                ],
+            ),
+            TargetPlatform::Windows => (
+                required_tool(self.ports.toolchain.pwsh())?,
+                vec![
+                    "-NoLogo".to_owned(),
+                    "-NoProfile".to_owned(),
+                    "-NonInteractive".to_owned(),
+                    "-Command".to_owned(),
+                    "if ((Test-Path -LiteralPath '.ci/workflows' -PathType Container) -and -not (Test-Path -LiteralPath '.github/workflows')) { New-Item -ItemType Directory -Force -Path '.github' | Out-Null; Copy-Item -LiteralPath '.ci/workflows' -Destination '.github/workflows' -Recurse }"
+                        .to_owned(),
+                ],
+            ),
+        };
+        let argv = ExecutionArgv::new(program, arguments).map_err(|_| invalid_job())?;
+        let command = ExecutionCommand::new(
+            self.ports.operation_ids.operation_id(
+                request.lease().attempt_id(),
+                OperationPurpose::MaterializeGithubWorkflowDirectory,
+                phase,
+            ),
+            argv,
+            worktree.clone(),
+            request.environment().default_environment().clone(),
+            self.config.default_step_timeout(),
+            self.config.maximum_output_bytes(),
+        )
+        .map_err(|_| invalid_job())?;
+        let output = endpoint
+            .exec(&command, &CancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        require_success(&output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6396,6 +6466,29 @@ fn action_reference_key(reference: &ActionReference) -> String {
         ActionReference::Local { path } => format!("local\0{path}"),
         ActionReference::Container { image } => format!("container\0{image}"),
     }
+}
+
+fn github_checkout_worktree(
+    reference: &ActionReference,
+    workspace: &TargetPath,
+    inputs: &ResolvedActionInputs,
+) -> Result<Option<TargetPath>, ExecutorAdapterError> {
+    let ActionReference::Repository {
+        repository,
+        subpath,
+        ..
+    } = reference
+    else {
+        return Ok(None);
+    };
+    if repository.as_str() != "actions/checkout" || subpath.is_some() {
+        return Ok(None);
+    }
+    let path = inputs
+        .value("path")
+        .map(ResolvedEnvironmentValue::expose)
+        .filter(|path| !path.is_empty());
+    working_directory_path(workspace, path).map(Some)
 }
 
 fn action_phase(

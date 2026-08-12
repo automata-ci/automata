@@ -16,8 +16,8 @@ pub const CI_SOURCE: &str = include_str!("../fixtures/repository-ci.yml");
 pub const REPOSITORY: &str = "automata-ci/automata";
 pub const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const GIT_REF: &str = "refs/heads/main";
-pub const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
-pub const SECOND_WORKFLOW_PATH: &str = ".github/workflows/secondary.yml";
+pub const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
+pub const SECOND_WORKFLOW_PATH: &str = ".ci/workflows/secondary.yml";
 pub const DELIVERY: &str = "delivery-workflow-admission-42";
 
 pub fn ci_request(

@@ -28,7 +28,7 @@ fn migration_is_current_only_immutable_exact_and_value_free() {
         "repository_visibility = 'public'",
         "repository_visibility = 'private'",
         "github_app_installation_token",
-        "workflow_path = '.github/workflows/ci.yml'",
+        "workflow_path = '.ci/workflows/ci.yml'",
         "event_name = 'push'",
         "git_ref = 'refs/heads/main'",
         "github_web_origin = 'https://github.com/'",
@@ -208,7 +208,7 @@ async fn post_migration_direct_unpinned_delivery_and_check_inserts_fail_closed()
                 external_id, created_at_ms, desired_updated_at_ms,
                 github_repository_name
             ) VALUES (
-                $1, 'unmanifested', $2, $3, '.github/workflows/ci.yml',
+                $1, 'unmanifested', $2, $3, '.ci/workflows/ci.yml',
                 $4, 101, 202, 303, $5, 'Automata CI',
                 'automata-check:' || $1::TEXT, 11, 11,
                 'automata-ci/automata'
@@ -435,7 +435,7 @@ async fn insert_ambiguous_github_state(database: &TestDatabase) -> TestResult {
             github_repository_id, github_app_id, head_sha, check_name,
             external_id, created_at_ms, desired_updated_at_ms
         ) VALUES (
-            $1, $2, $3, $4, '.github/workflows/ci.yml',
+            $1, $2, $3, $4, '.ci/workflows/ci.yml',
             $5, 101, 202, 303, $6, 'Automata CI',
             'automata-check:' || $1::TEXT, 11, 11
         )

@@ -156,7 +156,7 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "Verify",
         "refs/heads/main",
         snapshot_id,
@@ -913,7 +913,7 @@ async fn v5_cut_fails_closed_instead_of_converting_obsolete_concrete_jobs() -> T
             r"
             INSERT INTO workflow_definitions (
                 id, repository_id, path, created_at_ms, updated_at_ms
-            ) VALUES ($1,$2,'.github/workflows/ci.yml',1000,1000)
+            ) VALUES ($1,$2,'.ci/workflows/ci.yml',1000,1000)
             ",
         )
         .bind(workflow_id)

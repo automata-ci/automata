@@ -234,7 +234,7 @@ CREATE TABLE github_provider_manifest_revisions (
         github_app_jwt_issuer_kind IN ('app_client_id', 'app_id')
     ),
     CONSTRAINT github_provider_manifest_revisions_selector_exact CHECK (
-        workflow_path = '.github/workflows/ci.yml'
+        workflow_path = '.ci/workflows/ci.yml'
         AND event_name = 'push'
         AND git_ref = 'refs/heads/main'
         AND check_subject_key = workflow_path

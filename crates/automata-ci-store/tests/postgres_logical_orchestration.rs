@@ -351,7 +351,7 @@ fn fixture_at(
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "Verify",
         "refs/heads/main",
         snapshot_id,

@@ -31,7 +31,7 @@ fn job() -> JobIrEnvelope {
             "github",
             "owner/repository",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "workflow_dispatch",
         ),
         automata_ci_core::JobExecutionContext::new(

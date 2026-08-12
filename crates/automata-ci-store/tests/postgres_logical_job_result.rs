@@ -1333,7 +1333,7 @@ fn fixture(tenant: &str, namespace: u128) -> Fixture {
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -1438,7 +1438,7 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -1905,7 +1905,7 @@ fn prepared_instance(
             "github",
             "example/project",
             "0123456789abcdef0123456789abcdef01234567",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         job_execution,

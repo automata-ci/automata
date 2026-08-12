@@ -114,7 +114,7 @@ fn job_envelope_with_profile(
             "github",
             "owner/repository",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         automata_ci_core::JobExecutionContext::new(

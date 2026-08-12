@@ -187,13 +187,13 @@ fn manifest_can_pin_a_nondefault_direct_workflow_path() {
         "Automata CI",
         ProviderRepositoryVisibility::Public,
         automata_ci_core::JobAuthorityProfile::Standard,
-        ".github/workflows/main.yaml",
+        ".ci/workflows/main.yaml",
     );
 
-    assert_eq!(manifest.workflow_path(), ".github/workflows/main.yaml");
+    assert_eq!(manifest.workflow_path(), ".ci/workflows/main.yaml");
     assert_eq!(
         manifest.check_subject_key().as_str(),
-        ".github/workflows/main.yaml"
+        ".ci/workflows/main.yaml"
     );
 }
 
@@ -214,14 +214,14 @@ fn all_direct_selection_is_canonical_and_digest_bound() {
     );
 
     assert_eq!(all_direct.exact_workflow_path(), None);
-    assert_eq!(all_direct.workflow_path(), ".github/workflows");
-    assert!(all_direct.selects_workflow_path(".github/workflows/build.yml"));
-    assert!(all_direct.selects_workflow_path(".github/workflows/release.yaml"));
+    assert_eq!(all_direct.workflow_path(), ".ci/workflows");
+    assert!(all_direct.selects_workflow_path(".ci/workflows/build.yml"));
+    assert!(all_direct.selects_workflow_path(".ci/workflows/release.yaml"));
     for rejected in [
-        ".github/workflows/nested/build.yml",
-        ".github/workflows/build.yaml/extra",
-        ".github/workflows/build.YML",
-        ".github/workflows",
+        ".ci/workflows/nested/build.yml",
+        ".ci/workflows/build.yaml/extra",
+        ".ci/workflows/build.YML",
+        ".ci/workflows",
         "workflows/build.yml",
     ] {
         assert!(!all_direct.selects_workflow_path(rejected), "{rejected}");
@@ -317,7 +317,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     );
     assert_eq!(
         original.digest().to_string(),
-        "56bb579d90d1b06f96ee860ece75f0bd33106285bb454c54ab477f00d23ad644"
+        "8423ad6243d208638154c96d164fc2a32772c07473dc7f6e7085e8c73015df13"
     );
     assert_eq!(
         credential_free.authority_profile(),
@@ -360,7 +360,7 @@ fn owner_binding_uses_a_new_domain_without_changing_legacy_goldens() {
     assert_ne!(owner.digest(), other_owner.digest());
     assert_eq!(
         legacy.digest().to_string(),
-        "56bb579d90d1b06f96ee860ece75f0bd33106285bb454c54ab477f00d23ad644"
+        "8423ad6243d208638154c96d164fc2a32772c07473dc7f6e7085e8c73015df13"
     );
 }
 

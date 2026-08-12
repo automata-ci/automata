@@ -234,7 +234,7 @@ async fn insert_precanonical_check(database: &TestDatabase) -> TestResult {
             github_repository_id, github_app_id, head_sha, check_name,
             external_id, created_at_ms, desired_updated_at_ms
         ) VALUES (
-            $1, $2, $3, $4, '.github/workflows/ci.yml',
+            $1, $2, $3, $4, '.ci/workflows/ci.yml',
             $5, 101, 202, 303, $6, 'Automata CI',
             'automata-check:' || $1::TEXT, 11, 11
         )

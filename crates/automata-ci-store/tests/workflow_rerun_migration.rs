@@ -568,7 +568,7 @@ async fn seed_actor(pool: &PgPool) -> TestResult<ActorSeed> {
         r"
         INSERT INTO workflow_definitions (
             id, repository_id, path, enabled, created_at_ms, updated_at_ms
-        ) VALUES ($1, $2, '.github/workflows/rerun.yml', TRUE, 1, 1)
+        ) VALUES ($1, $2, '.ci/workflows/rerun.yml', TRUE, 1, 1)
         ",
     )
     .bind(workflow_id)

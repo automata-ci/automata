@@ -839,7 +839,7 @@ pub enum ReusableWorkflowExpansionError {
     /// A repository or immutable revision coordinate is invalid.
     #[error("reusable workflow repository coordinates are invalid")]
     InvalidRepositoryCoordinate,
-    /// A path is not a canonical direct `.github/workflows` YAML path.
+    /// A path is not a canonical direct `.ci` YAML path.
     #[error("reusable workflow path is not canonical")]
     InvalidWorkflowPath,
     /// A call uses something other than a canonical `./...` repository-local reference.
@@ -1542,11 +1542,11 @@ fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpans
         return Err(ReusableWorkflowExpansionError::InvalidWorkflowPath);
     }
     let components = value.split('/').collect::<Vec<_>>();
-    let [dot_github, workflows, file] = components.as_slice() else {
+    let [dot_ci, workflows, file] = components.as_slice() else {
         return Err(ReusableWorkflowExpansionError::InvalidWorkflowPath);
     };
     let extension = Path::new(file).extension();
-    if *dot_github != ".github"
+    if *dot_ci != ".ci"
         || *workflows != "workflows"
         || file.is_empty()
         || *file == "."
@@ -1559,13 +1559,14 @@ fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpans
 }
 
 fn resolve_local_reference(reference: &str) -> Result<String, ReusableWorkflowExpansionError> {
-    let Some(path) = reference.strip_prefix("./") else {
+    let Some(file) = reference.strip_prefix("./.github/workflows/") else {
         return Err(ReusableWorkflowExpansionError::NonLocalReference);
     };
-    if path.starts_with('/') || path.contains("//") {
+    if file.is_empty() || file.contains('/') || file.contains('\\') {
         return Err(ReusableWorkflowExpansionError::NonLocalReference);
     }
-    canonical_workflow_path(path).map_err(|_| ReusableWorkflowExpansionError::NonLocalReference)
+    canonical_workflow_path(&format!(".ci/workflows/{file}"))
+        .map_err(|_| ReusableWorkflowExpansionError::NonLocalReference)
 }
 
 fn validate_coordinate(value: &str) -> Result<(), ReusableWorkflowExpansionError> {

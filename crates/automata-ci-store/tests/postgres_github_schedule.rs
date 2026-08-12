@@ -764,7 +764,7 @@ fn registry(
         .next_after(discovery_claim.claimed_at(), timezone)?;
     let entry = GithubScheduleRegistryEntry::new(
         0,
-        GithubCheckSubjectKey::new(".github/workflows/neutral.yml")?,
+        GithubCheckSubjectKey::new(".ci/workflows/neutral.yml")?,
         Sha256Digest::from_bytes([41; 32]),
         0,
         cron_expression,

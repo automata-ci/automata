@@ -72,7 +72,7 @@ impl Fixture {
                 provider,
                 "automata-ci/automata",
                 "0123456789abcdef0123456789abcdef01234567",
-                ".github/workflows/ci.yml",
+                ".ci/workflows/ci.yml",
                 "push",
             ),
             JobExecutionContext::new(

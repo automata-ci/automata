@@ -99,7 +99,7 @@ fn repository(
         "runtime_policy_revision": 9,
         "authority_profile": authority_profile,
         "runner_policy": runner_policy(),
-        "workflow_path": ".github/workflows/main.yml",
+        "workflow_path": ".ci/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority_id, 7),
@@ -374,7 +374,7 @@ fn all_direct_selection_is_explicit_and_legacy_exact_mode_stays_precise() {
         .expect("legacy exact configuration");
     assert_eq!(
         exact.repositories()[0].exact_workflow_path(),
-        Some(".github/workflows/main.yml")
+        Some(".ci/workflows/main.yml")
     );
 
     let mut all_direct_repository = public_repository();
@@ -781,8 +781,7 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
 fn typed_values_and_nested_sources_fail_closed() {
     let mut cases = invalid_scalar_configuration_cases();
     let mut nested_workflow = manifest(vec![private_repository()]);
-    nested_workflow["repositories"][0]["workflow_path"] =
-        json!(".github/workflows/nested/main.yml");
+    nested_workflow["repositories"][0]["workflow_path"] = json!(".ci/workflows/nested/main.yml");
     cases.push(("nested-workflow", nested_workflow));
     let mut non_workflow = manifest(vec![private_repository()]);
     non_workflow["repositories"][0]["workflow_path"] = json!("ci/main.yml");
@@ -805,7 +804,7 @@ fn typed_values_and_nested_sources_fail_closed() {
         .expect("repository object")
         .remove("workflow_path");
     verbose_workflow_selection["repositories"][0]["workflow_selection"] =
-        json!({"mode": "all_direct", "path": ".github/workflows/main.yml"});
+        json!({"mode": "all_direct", "path": ".ci/workflows/main.yml"});
     cases.push(("verbose-workflow-selection", verbose_workflow_selection));
     let mut plaintext_key = manifest(vec![private_repository()]);
     plaintext_key["app"]["private_key_source"] = json!("plaintext-private-key");

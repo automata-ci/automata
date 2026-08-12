@@ -46,7 +46,7 @@ fn envelope_with_job(job: JobIr) -> JobIrEnvelope {
             "github",
             "owner/repository",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         JobExecutionContext::new(

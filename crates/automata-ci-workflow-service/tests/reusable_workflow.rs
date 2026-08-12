@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 const REPOSITORY: &str = "synthetic/repository";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const ROOT_PATH: &str = ".github/workflows/root.yml";
-const CALLEE_PATH: &str = ".github/workflows/reusable.yml";
+const ROOT_PATH: &str = ".ci/workflows/root.yml";
+const CALLEE_PATH: &str = ".ci/workflows/reusable.yml";
 
 const CALLEE: &str = r"name: Reusable
 on:
@@ -164,8 +164,8 @@ fn expand_with_secrets(
 
 #[test]
 fn inherit_forwards_undeclared_secrets_across_each_explicit_direct_call_only() {
-    const MIDDLE_PATH: &str = ".github/workflows/middle.yml";
-    const LEAF_PATH: &str = ".github/workflows/leaf.yml";
+    const MIDDLE_PATH: &str = ".ci/workflows/middle.yml";
+    const LEAF_PATH: &str = ".ci/workflows/leaf.yml";
     const INHERITING_ROOT: &str = r"on: workflow_dispatch
 jobs:
   middle:
@@ -409,8 +409,8 @@ fn literal_input_type_mismatch_and_missing_secret_are_rejected() {
 
 #[test]
 fn depth_invocation_and_aggregate_job_limits_are_independent() {
-    let leaf_path = ".github/workflows/leaf.yml";
-    let middle_path = ".github/workflows/middle.yml";
+    let leaf_path = ".ci/workflows/leaf.yml";
+    let middle_path = ".ci/workflows/middle.yml";
     let leaf = r"on:
   workflow_call: {}
 jobs:
@@ -526,7 +526,7 @@ fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
         [
             RepositoryWorkflowSource::new(CALLEE_PATH, Bytes::from_static(CALLEE.as_bytes())),
             RepositoryWorkflowSource::new(
-                ".github/workflows/unrelated.yml",
+                ".ci/workflows/unrelated.yml",
                 Bytes::from_static(b"this is deliberately not a workflow"),
             ),
         ],
@@ -544,7 +544,7 @@ fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
             REVISION,
             &root_plan,
             [RepositoryWorkflowSource::new(
-                ".github/workflows/unrelated.yml",
+                ".ci/workflows/unrelated.yml",
                 Bytes::from_static(b"on: workflow_dispatch\njobs: {}\n"),
             )],
         ),

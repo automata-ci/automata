@@ -132,7 +132,7 @@ fn v5_envelope_with_profile(
             "github",
             "example/project",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         JobExecutionContext::new(

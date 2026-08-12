@@ -79,7 +79,7 @@ fn repository(
         "runtime_policy_revision": 1,
         "authority_profile": "standard",
         "runner_policy": runner_policy(),
-        "workflow_path": ".github/workflows/main.yml",
+        "workflow_path": ".ci/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority, 7),
@@ -300,10 +300,10 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_eq!(plan.connections().len(), 2);
     assert_eq!(
         plan.manifests()[0].exact_workflow_path(),
-        Some(".github/workflows/main.yml")
+        Some(".ci/workflows/main.yml")
     );
     assert_eq!(plan.manifests()[1].exact_workflow_path(), None);
-    assert_eq!(plan.manifests()[1].workflow_path(), ".github/workflows");
+    assert_eq!(plan.manifests()[1].workflow_path(), ".ci/workflows");
     assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
     assert_eq!(

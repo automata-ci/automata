@@ -65,7 +65,7 @@ fn lease_offer(requirements: RunnerRequirements) -> ServerToRunner {
             "github",
             "owner/repository",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         automata_ci_core::JobExecutionContext::new(

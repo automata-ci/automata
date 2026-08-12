@@ -55,7 +55,7 @@ fn job_for(repository: &str, git_ref: &str, event_name: &str) -> JobIrEnvelope {
             "github",
             repository,
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             event_name,
         ),
         automata_ci_core::JobExecutionContext::new(

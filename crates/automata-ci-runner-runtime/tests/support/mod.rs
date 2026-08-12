@@ -5578,7 +5578,7 @@ fn minimal_job_with_profile(authority_profile: JobAuthorityProfile) -> JobIrEnve
             "github",
             "automata-ci/automata",
             "0123456789abcdef0123456789abcdef01234567",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         automata_ci_core::JobExecutionContext::new(

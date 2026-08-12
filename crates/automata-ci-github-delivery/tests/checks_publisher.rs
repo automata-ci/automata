@@ -1810,7 +1810,7 @@ fn subject_identity() -> GithubCheckSubjectIdentity {
         RepositoryId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000104)),
         ProviderDeliveryId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000105))
             .expect("delivery ID"),
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
         connection_id(),
         ProviderInstallationId::new(11).expect("installation ID"),
         ProviderRepositoryId::new(13).expect("provider repository ID"),

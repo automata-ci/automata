@@ -11,7 +11,7 @@ workflow path:
 
 ```json
 {
-  "workflow_path": ".github/workflows/main.yml"
+  "workflow_path": ".ci/workflows/main.yml"
 }
 ```
 
@@ -23,9 +23,13 @@ or every direct workflow:
 }
 ```
 
-Only direct `.github/workflows/*.yml` and `.github/workflows/*.yaml` files are
-accepted. Every selected workflow is retained as a separate delivery subject
-and Check Run.
+Rename `.github` to `.ci` (or move only `.github/workflows` to
+`.ci/workflows` when the repository keeps other GitHub metadata). Workflow YAML
+does not change. After `actions/checkout`, Automata exposes the checked-out
+workflow files at `.github/workflows` as well, so unchanged steps that read the
+GitHub path continue to work. Only direct `.ci/workflows/*.yml` and
+`.ci/workflows/*.yaml` files are accepted. Every selected workflow is retained
+as a separate delivery subject and Check Run.
 
 ## Delivery export
 
