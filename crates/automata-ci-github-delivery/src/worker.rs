@@ -792,16 +792,21 @@ impl GithubDeliveryClaimLease {
     ) -> Result<GithubDeliveryClaimSnapshot, GithubDeliveryWorkerError> {
         let live = self.live_claim()?;
         let latest = live.snapshot;
-        if observed_at.get() < 0
-            || observed_at < self.initial.claimed_at()
-            || observed_at < latest.renewed_at()
-        {
+        if observed_at.get() < 0 {
             return Err(GithubDeliveryWorkerError::InvalidTrustedTime);
         }
         if Instant::now() >= live.deadline || observed_at >= latest.expires_at() {
             return Err(GithubDeliveryWorkerError::ClaimRejected);
         }
         Ok(latest)
+    }
+
+    pub(crate) fn require_live_observation(
+        &self,
+        observed_at: UnixMillis,
+    ) -> Result<(GithubDeliveryClaimSnapshot, UnixMillis), GithubDeliveryWorkerError> {
+        let latest = self.require_live_at(observed_at)?;
+        Ok((latest, observed_at.max(latest.renewed_at())))
     }
 
     pub(crate) fn apply_renewal(
@@ -2192,7 +2197,7 @@ pub enum GithubDeliveryWorkerError {
     /// Correct processing requires an authority or service not supplied here.
     #[error("the GitHub delivery worker is missing a required prerequisite")]
     Prerequisite(GithubDeliveryWorkerPrerequisite),
-    /// The trusted clock returned a negative or regressed timestamp.
+    /// The trusted clock returned a negative or otherwise invalid timestamp.
     #[error("the trusted GitHub delivery worker clock returned an invalid timestamp")]
     InvalidTrustedTime,
     /// The provider-delivery repository operation was unavailable or ambiguous.
@@ -2922,6 +2927,21 @@ mod lease_tests {
         assert_eq!(
             lease.apply_renewal(invalid, successor_deadline),
             Err(GithubDeliveryWorkerError::InboxRejected)
+        );
+    }
+
+    #[test]
+    fn database_issued_claim_ahead_of_worker_clock_uses_the_monotonic_deadline() {
+        let initial = claimed_delivery();
+        let deadline = Instant::now()
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("live deadline");
+        let lease = GithubDeliveryClaimLease::new(initial.clone(), deadline);
+        let snapshot = lease.latest().expect("initial snapshot");
+
+        assert_eq!(
+            lease.require_live_observation(UnixMillis::new(95)),
+            Ok((snapshot, UnixMillis::new(100)))
         );
     }
 

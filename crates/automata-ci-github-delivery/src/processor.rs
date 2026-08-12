@@ -383,9 +383,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         }
         let operation = request.lease().lock_operation().await;
         let observed_at = request.clock().now();
-        let snapshot = request
+        let (snapshot, observed_at) = request
             .lease()
-            .require_live_at(observed_at)
+            .require_live_observation(observed_at)
             .map_err(processor_claim_error)?;
         if snapshot != request.claim_snapshot() {
             return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
@@ -439,9 +439,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
     ) -> Result<Option<GithubChangedFilesV1>, GithubDeliveryWorkflowProcessorError> {
         let (authority_selector, credentials) = private_changed_files_context(request)?;
         let observed_at = request.clock().now();
-        let requested_snapshot = request
+        let (requested_snapshot, observed_at) = request
             .lease()
-            .require_live_at(observed_at)
+            .require_live_observation(observed_at)
             .map_err(processor_claim_error)?;
         if requested_snapshot != request.claim_snapshot() {
             return Err(GithubDeliveryWorkflowProcessorError::ClaimLost);
@@ -916,8 +916,11 @@ async fn acquire_private_changed_files_credential(
     };
     let operation = request.lease().lock_operation().await;
     let provider_observed_at = request.clock().now();
-    let latest = match request.lease().require_live_at(provider_observed_at) {
-        Ok(latest) => latest,
+    let (latest, provider_observed_at) = match request
+        .lease()
+        .require_live_observation(provider_observed_at)
+    {
+        Ok(observation) => observation,
         Err(error) => {
             drop(operation);
             if let Ok(credential) = credential {
