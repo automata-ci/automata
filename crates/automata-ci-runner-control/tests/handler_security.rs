@@ -3092,6 +3092,7 @@ async fn closed_or_disabled_session_cannot_refresh_liveness_through_a_lease_poll
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One adversarial case binds the complete authenticated stale-session exchange.
 async fn transport_sync_correlates_only_an_authenticated_stale_session() {
     let (stale, identity, _runner_id, _generation) = harness(DesiredRunnerState::Active);
     let request_header = MessageHeader::request(

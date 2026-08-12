@@ -4228,6 +4228,7 @@ fn validate_buildkit_archive(_path: &Path) -> Result<(), ProviderError> {
     ))
 }
 
+#[allow(clippy::too_many_lines)] // The fingerprint binds every admitted sandbox and runtime field.
 fn spec_fingerprint(
     spec: &SandboxSpec,
     job_engine: JobContainerEngine,

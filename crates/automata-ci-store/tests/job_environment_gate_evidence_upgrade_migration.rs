@@ -84,6 +84,7 @@ async fn active_zero_instance_publication_migrates_and_is_retained() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines, clippy::type_complexity)] // One case proves atomic refusal, rollback, and terminal upgrade.
 async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrates() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         apply_before_0067(&database).await?;
@@ -266,6 +267,7 @@ fn assert_migration_refusal(error: sqlx::migrate::MigrateError) {
     }
 }
 
+#[allow(clippy::type_complexity)] // The tuple asserts every schema object remains absent after rollback.
 async fn assert_0067_absent(database: &TestDatabase) -> TestResult {
     let absent: (
         i64,
@@ -333,6 +335,7 @@ async fn insert_zero_instance_activation_publication(
     insert_activation_publication(database, run_id, false, false, false).await
 }
 
+#[allow(clippy::too_many_lines)] // The fixture builds one complete pre-migration publication graph.
 async fn insert_activation_publication(
     database: &TestDatabase,
     run_id: Uuid,
@@ -466,7 +469,7 @@ async fn insert_activation_publication(
         .bind(activation_input_digest.as_slice())
         .bind([0x81_u8; 32].as_slice())
         .bind(owner_id)
-        .bind(if insert_instance { 1_i32 } else { 0_i32 })
+        .bind(i32::from(insert_instance))
         .bind(runtime_policy_digest.as_slice())
         .execute(&mut *transaction)
         .await?;
@@ -531,9 +534,7 @@ async fn insert_activation_publication(
     )
     .await;
     let table_restore = set_fixture_table_triggers(database, true).await;
-    if let Err(error) = insertion {
-        return Err(error);
-    }
+    insertion?;
     instance_restore?;
     table_restore
 }

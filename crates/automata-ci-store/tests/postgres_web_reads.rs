@@ -1233,7 +1233,7 @@ async fn seed_public_completed_run(
 
     let job_id = JobId::new();
     sqlx::query(
-        r#"
+        r"
         INSERT INTO jobs (
             id, run_id, job_key, display_name, job_ir_digest,
             job_ir_object_key, requirements, admission_epoch,
@@ -1243,7 +1243,7 @@ async fn seed_public_completed_run(
             $4::jsonb,
             4, 5, 128, 11
         )
-        "#,
+        ",
     )
     .bind(job_id.as_uuid())
     .bind(run_id.as_uuid())

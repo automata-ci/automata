@@ -412,7 +412,7 @@ mod tests {
             r#"{"state":"unknown"}"#,
             r#"{"state":"ready","extra":true}"#,
             r#"{"state":"ready","state":"ready"}"#,
-            r#"{}"#,
+            r"{}",
         ] {
             assert!(serde_json::from_str::<ReviewResponseDocument>(body).is_err());
         }

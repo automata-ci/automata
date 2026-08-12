@@ -1743,7 +1743,7 @@ async fn seed_higher_precedence_secret(
     environment_id: Option<Uuid>,
 ) -> TestResult<BindingIdentity> {
     let higher = BindingIdentity::fresh();
-    let index = if scope_kind == "repository" { 0 } else { 1 };
+    let index = usize::from(scope_kind != "repository");
     seed_repository_secret(database.pool(), queued.repository_id, actor, higher, index).await?;
     if scope_kind != "repository" {
         reclassify_secret_scope_for_precedence_test(
@@ -2625,6 +2625,64 @@ async fn ready_authority_is_rechecked_at_inspection_lease_and_grant_boundaries()
             JobEnvironmentGatePhase::Ready
         );
         lease_execution(&database, missing).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn in_flight_environment_authority_change_is_linearized_before_lease() -> TestResult {
+    run_with_database(|database| async move {
+        let (queued, _actor, environment_id) =
+            prepare_ready_protected_secret_gate(&database, "repository").await?;
+        let attempt_id = queued.attempt_id;
+        let mut transaction = database.pool().begin().await?;
+        let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let changed = sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET required_approvals = 2, revision = revision + 1, updated_at_ms = $4
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&queued.tenant)
+        .bind(queued.repository_id.as_uuid())
+        .bind(environment_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(&mut *transaction)
+        .await?;
+        assert_eq!(changed.rows_affected(), 1);
+
+        let lease_database = Arc::clone(&database);
+        let lease = tokio::spawn(async move { lease_execution(&lease_database, queued).await });
+        wait_for_backend_blocked_by(database.pool(), blocking_backend_pid).await?;
+        let lifecycle_while_blocked: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(attempt_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_while_blocked, "queued");
+
+        transaction.commit().await?;
+        let lease_result = tokio::time::timeout(Duration::from_secs(5), lease).await??;
+        let Err(lease_error) = lease_result else {
+            return Err("lease accepted authority that changed while its guard was blocked".into());
+        };
+        assert!(
+            lease_error
+                .to_string()
+                .contains("job environment and credential authority is no longer current"),
+            "unexpected lease rejection: {lease_error}"
+        );
+        let lifecycle_after_rejection: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(attempt_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_after_rejection, "queued");
         Ok(())
     })
     .await
@@ -3575,5 +3633,5 @@ async fn wait_for_backend_blocked_by(pool: &PgPool, blocking_backend_pid: i32) -
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Err("authority resolver did not block behind the in-flight grant insert".into())
+    Err("authority operation did not block behind the in-flight mutation".into())
 }

@@ -877,6 +877,7 @@ impl DurableRunnerControlHandler {
             .map_err(port_application_error)
     }
 
+    #[allow(clippy::too_many_lines)] // One handler keeps validation, claim, and response stages adjacent.
     async fn handle_lease_request(
         &self,
         fence: RunnerSessionFence,

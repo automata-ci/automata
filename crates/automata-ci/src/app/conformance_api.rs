@@ -64,7 +64,7 @@ enum ConformanceAuthorization {
 }
 
 enum PresentedAuthorization {
-    HumanSession(AuthenticatedRequestSnapshot),
+    HumanSession(Box<AuthenticatedRequestSnapshot>),
     DeploymentToken(String),
 }
 
@@ -203,9 +203,9 @@ fn presented_authorization(
     request: &Request,
 ) -> Result<PresentedAuthorization, ApiError> {
     match &state.authorization {
-        ConformanceAuthorization::HumanSession => {
-            Ok(PresentedAuthorization::HumanSession(cli_snapshot(request)?))
-        }
+        ConformanceAuthorization::HumanSession => Ok(PresentedAuthorization::HumanSession(
+            Box::new(cli_snapshot(request)?),
+        )),
         ConformanceAuthorization::DeploymentToken { .. } => Ok(
             PresentedAuthorization::DeploymentToken(exact_bearer(request.headers())?.to_owned()),
         ),

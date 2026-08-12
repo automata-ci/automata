@@ -107,6 +107,10 @@ fn migration_0065_seals_public_identity_authority_and_source_lineage() {
         "automata_require_preparation_runner_policy_provenance",
         "automata_validate_logical_activation_preparation_claim",
         "LEFT JOIN workflow_plan_v2_effective_job_results AS result",
+        "target_marker.runner_requirements_schema = 3",
+        "source_marker.runner_requirements_schema = 3",
+        "target_run.runner_requirements_schema = 3",
+        "source_run.runner_requirements_schema = 3",
     ] {
         assert!(
             MIGRATION.contains(required),

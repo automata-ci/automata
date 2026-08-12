@@ -1265,6 +1265,12 @@ fn classify_github_job_source(
     {
         return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
     }
+    // workflow_run identifies only the upstream actor, while merge_group omits
+    // constituent PR provenance. Neither payload can authorize a secret-bearing
+    // job until admission durably binds the transitive source dimensions.
+    if job_may_consume_secret && matches!(event_name, "workflow_run" | "merge_group") {
+        return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
+    }
     let source = match event_name {
         "pull_request"
         | "pull_request_target"
@@ -1280,14 +1286,6 @@ fn classify_github_job_source(
                 .filter(|login| !login.is_empty())
                 .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
         )),
-        // The workflow_run payload identifies the upstream run actor, not the
-        // author of an upstream PR. A human review/label action on a
-        // Dependabot PR can therefore look like trusted same-repository work.
-        // Until admission binds the transitive PR subject, secret-bearing
-        // downstream jobs must not infer authority from this lossy payload.
-        "workflow_run" if job_may_consume_secret => {
-            return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-        }
         "workflow_run" => Some((
             event
                 .pointer("/workflow_run/head_repository/full_name")
@@ -1299,14 +1297,6 @@ fn classify_github_job_source(
                 .filter(|login| !login.is_empty())
                 .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
         )),
-        // A merge queue may contain fork or dependency-automation changes,
-        // but GitHub's merge_group payload does not carry the constituent PR
-        // provenance needed by the closed secret-policy model. Non-secret
-        // jobs may run; secret-bearing jobs fail closed until admission binds
-        // every constituent source dimension durably.
-        "merge_group" if job_may_consume_secret => {
-            return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-        }
         _ => None,
     };
     let Some((source_repository, source_actor)) = source else {

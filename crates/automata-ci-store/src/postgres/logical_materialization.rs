@@ -1081,6 +1081,7 @@ async fn lock_fresh_target(
     lock_claim_target(transaction, target).await
 }
 
+#[allow(clippy::too_many_lines)] // Keep the complete immutable instance projection auditable.
 fn instance_query() -> &'static str {
     r"
     SELECT instance.matrix_index, instance.matrix_total,

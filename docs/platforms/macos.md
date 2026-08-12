@@ -99,4 +99,3 @@ scoped self-hosted Apple Silicon runner.
   filesystem separation, network modes, CPU/memory/process enforcement, helper
   crash cleanup, WAL reopen, and repeated clean execution on physical Apple
   Silicon.
-

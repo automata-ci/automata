@@ -73,17 +73,21 @@ through their normal boot configuration.
 
 ## Rootless identity and cgroups
 
-Give the dedicated runner account non-overlapping subordinate ID ranges and
-verify unified cgroup v2. The `podman info` invocation below is a manual
-operator diagnostic; production admission does not invoke it:
+Give the three dedicated runner accounts mutually non-overlapping subordinate
+ID ranges and verify unified cgroup v2. Run the `podman info` diagnostic once
+as each service account; production admission does not invoke it:
 
 ```console
-getsubids "${USER}"
 test -r /sys/fs/cgroup/cgroup.controllers
-podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}'
+for instance in 1 2 3; do
+  getsubids "automata-runner-${instance}"
+  sudo -u "automata-runner-${instance}" \
+    podman info --format '{{.Host.Security.Rootless}} {{.Host.CgroupsVersion}}'
+done
 ```
 
-Run the production daemon in a systemd service with this cgroup shape:
+Run each of the three production processes in its own delegated systemd
+service with this cgroup shape:
 
 ```systemd
 [Service]
@@ -92,37 +96,48 @@ DelegateSubgroup=supervisor
 MemorySwapMax=0
 ```
 
-`DelegateSubgroup=supervisor` keeps the service's delegated root empty while
+`DelegateSubgroup=supervisor` keeps each service's delegated root empty while
 placing the runner process in a child. The sandbox provider validates the empty
 root, enables and re-reads the CPU, memory, and process controllers, forces
 rootless Podman's cgroupfs manager beneath that root, and verifies each started
 workload is a descendant. Both `memory.swap.max` and `memory.swap.current` must
 be zero at the effective boundary on every create, replay, and attach. A normal
 login shell, a unit without the supervisor subgroup, or systemd-managed Podman
-scopes outside the delegation fail closed at that provider boundary. The active
-network probe does not inspect or certify this cgroup/resource contract.
+scopes outside the delegation fail closed at that provider boundary. The
+[checked-in host units](../../deploy/runner-host/README.md) provide three
+service instances plus per-process and aggregate CPU, memory, swap, and task
+limits. The active network probe does not inspect or certify this cgroup/resource
+contract.
 
 ## Dedicated Podman runtime mount
 
 Production requires Linux 6.4 or newer, where tmpfs supports the exact
-`noswap` mount option. Provision one dedicated tmpfs whose mountpoint is the
-configured `podman.runtime_directory` itself. A directory that merely resides
-on the shared `/run` or `/run/user/<uid>` tmpfs is not sufficient. Give the
-mount exact mode 0700 and the dedicated runner UID/GID, and choose finite
-`size=` and `nr_inodes=` bounds appropriate to the runner's concurrency. For
-the checked-in UID-1000 example:
+`noswap` mount option. Provision one dedicated tmpfs per runner process whose
+mountpoint is that process's configured `podman.runtime_directory`. A directory
+that merely resides on the shared `/run` or `/run/user/<uid>` tmpfs is not
+sufficient, and the three processes must not share one mount. Give every mount
+exact mode 0700 and the dedicated runner UID/GID, and choose finite `size=` and
+`nr_inodes=` bounds appropriate to one job. For the checked-in UID/GID
+1001-through-1003 shape:
 
 ```console
-sudo install -d -m 0700 -o automata-runner -g automata-runner /run/automata-runner
-sudo mount -t tmpfs automata-runner-runtime /run/automata-runner \
-  -o nodev,nosuid,noswap,size=64G,nr_inodes=1048576,mode=0700,uid=1000,gid=1000
-findmnt -no TARGET,FSTYPE,OPTIONS --target /run/automata-runner
+for instance in 1 2 3; do
+  runner_account="automata-runner-${instance}"
+  runner_uid="$((1000 + instance))"
+  sudo install -d -m 0700 -o "$runner_account" -g "$runner_account" \
+    "/run/automata-runner-${instance}"
+  sudo mount -t tmpfs "automata-runner-runtime-${instance}" \
+    "/run/automata-runner-${instance}" \
+    -o "nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=${runner_uid},gid=${runner_uid}"
+  findmnt -no TARGET,FSTYPE,OPTIONS \
+    --target "/run/automata-runner-${instance}"
+done
 ```
 
-Use a boot-managed mount unit ordered before `automata-runner`; the command is
-only an explicit development illustration. Do not bind the tmpfs at another
-path and do not create any mount below it. The current configuration requires
-`state.podman` to equal
+Use the checked-in boot-managed mount units ordered before the matching
+`automata-runner@N` service; the command is only a development illustration.
+Do not bind a tmpfs at another path and do not create any mount below it. Each
+configuration requires `state.podman` to equal
 `podman.runtime_directory/automata-ci-podman/state`. Journal and spool roots
 remain durable and cannot overlap the transient runtime mount.
 

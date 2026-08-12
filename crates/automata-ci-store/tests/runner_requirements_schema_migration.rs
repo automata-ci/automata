@@ -75,6 +75,7 @@ fn migration_0054_drains_v2_and_requires_v3_for_new_work() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One upgrade case proves retention and every resurrection guard.
 async fn terminal_v2_history_is_retained_but_cannot_be_resurrected() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let mut connection = database.pool().acquire().await?;

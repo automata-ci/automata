@@ -619,7 +619,7 @@ impl ServerConfig {
             .transpose()
             .map_err(|_| ServerConfigError::InvalidGithubOidcConfiguration)?;
         let human_auth = human_auth_configuration(args)?;
-        let conformance_export_token = conformance_export_configuration(args, &human_auth)?;
+        let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
         if secret_encryption.is_some() && runner_public_authority.is_none() {
@@ -990,7 +990,7 @@ fn required_auth_source(source: Option<&SecretSource>) -> Result<SecretSource, S
 
 fn conformance_export_configuration(
     args: &ServerArgs,
-    human_auth: &Option<HumanAuthConfig>,
+    human_auth: Option<&HumanAuthConfig>,
 ) -> Result<Option<SecretSource>, ServerConfigError> {
     let Some(source) = args.conformance_export_token_source.as_ref() else {
         return Ok(None);

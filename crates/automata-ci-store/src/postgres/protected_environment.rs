@@ -116,7 +116,7 @@ async fn conclude_terminal_job_environment(
         // The canonical cancellation transition changes an unprepared gate to
         // `cancelled`; no unproven environment identity is fabricated merely
         // to represent expiry.
-        state = "cancelled".to_owned();
+        "cancelled".clone_into(&mut state);
     }
     if !matches!(state.as_str(), "rejected" | "expired" | "cancelled") {
         return Err(ProtectedEnvironmentStoreError::Conflict);
@@ -280,6 +280,7 @@ async fn conclude_gate_with_encryption(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One closed predicate proves every ready-gate authority edge.
 async fn ready_gate_is_current(
     transaction: &mut Transaction<'_, Postgres>,
     tenant: &TenantScope,
@@ -428,6 +429,7 @@ async fn ready_gate_is_current(
     .ok_or(ProtectedEnvironmentStoreError::NotFound)
 }
 
+#[allow(clippy::too_many_lines)] // Inspection locks and reconciles one complete gate snapshot.
 async fn inspect_job_environment_gate(
     store: &PostgresStore,
     tenant: &TenantScope,
@@ -471,7 +473,7 @@ async fn inspect_job_environment_gate(
     if state == "selection_pending"
         && database_now_ms >= gate_deadline(row.try_get("created_at_ms").map_err(operation_error)?)?
     {
-        state = "cancelled".to_owned();
+        "cancelled".clone_into(&mut state);
     }
     if state == "waiting" {
         let approval_id: Option<Uuid> = row
@@ -506,20 +508,20 @@ async fn inspect_job_environment_gate(
                 database_now_ms,
             )
             .await?;
-            state = "expired".to_owned();
+            "expired".clone_into(&mut state);
         }
     }
     if state == "resolving"
         && !resolving_gate_is_current(&mut transaction, tenant, attempt_id, database_now_ms).await?
     {
-        state = "cancelled".to_owned();
+        "cancelled".clone_into(&mut state);
     }
     if state == "ready"
         && !ready_gate_is_current(&mut transaction, tenant, attempt_id, database_now_ms).await?
     {
         // `ready` resolution evidence is immutable. Cancellation concludes the
         // attempt while preserving that historical snapshot for audit.
-        state = "cancelled".to_owned();
+        "cancelled".clone_into(&mut state);
     }
     if matches!(state.as_str(), "rejected" | "expired" | "cancelled") {
         conclude_gate_in_transaction(store, &mut transaction, attempt_id, database_now_ms).await?;
@@ -1910,13 +1912,13 @@ fn secret_selection_permission_allows_issue(
     selected_secret_count: i64,
 ) -> bool {
     match (invocation_kind, reusable_permission) {
-        ("direct", "none") => true,
-        ("reusable", "explicit") => true,
+        ("direct", "none") | ("reusable", "explicit") => true,
         ("reusable", "none") => selected_secret_count == 0,
         _ => false,
     }
 }
 
+#[allow(clippy::too_many_lines)] // One snapshot verifies the full leased binding authority.
 async fn inspect_leased_job_secret_bindings(
     pool: &PgPool,
     request: InspectLeasedJobSecretBindings,
@@ -2134,6 +2136,7 @@ async fn lock_gate_for_prepare(
 /// Resolves only immutable, exact human admission evidence for the gate's run.
 /// Provider webhooks and schedules intentionally return `None`: a display login
 /// is not a stable human identity and must never weaken self-review separation.
+#[allow(clippy::too_many_lines)] // The exact human authority union stays visible in one proof.
 async fn derive_requester_principal(
     transaction: &mut Transaction<'_, Postgres>,
     tenant: &TenantScope,
@@ -2525,7 +2528,6 @@ fn human_action_error(error: StoreError) -> ProtectedEnvironmentStoreError {
         operation @ StoreError::Operation(_) => {
             ProtectedEnvironmentStoreError::Operation(operation)
         }
-        StoreError::CorruptData(_) => ProtectedEnvironmentStoreError::CorruptData,
         _ => ProtectedEnvironmentStoreError::CorruptData,
     }
 }

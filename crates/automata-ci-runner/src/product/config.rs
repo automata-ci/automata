@@ -882,6 +882,7 @@ struct RawRunnerProductConfig {
 }
 
 impl RawRunnerProductConfig {
+    #[allow(clippy::too_many_lines)] // Validation binds the complete closed product document.
     fn validate(self) -> Result<RunnerProductConfig, RunnerProductConfigError> {
         if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {
             return Err(RunnerProductConfigError::UnsupportedSchema);
@@ -1296,9 +1297,10 @@ impl RawInventory {
         let host_operating_system = host_operating_system()?;
         if !matches!(
             (provider_kind, &host_operating_system),
-            (ProviderKind::Podman, OperatingSystem::Linux)
-                | (ProviderKind::Kubernetes, OperatingSystem::Linux)
-                | (ProviderKind::WindowsNative, OperatingSystem::Windows)
+            (
+                ProviderKind::Podman | ProviderKind::Kubernetes,
+                OperatingSystem::Linux
+            ) | (ProviderKind::WindowsNative, OperatingSystem::Windows)
         ) {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
@@ -1831,6 +1833,7 @@ struct RawExecutorProductConfig {
 }
 
 impl RawExecutorProductConfig {
+    #[allow(clippy::too_many_lines)] // One validation boundary binds every executor policy field.
     fn validate(
         self,
         provider_kind: ProviderKind,

@@ -1240,13 +1240,13 @@ async fn protocol_v4_lease_head_upgrade_fences_old_live_sessions_and_cleans_clos
         .execute(database.pool())
         .await
         .expect_err("a protocol-v3 session cannot remain live after migration 0008");
-        assert_constraint(&rejected, "runner_sessions_live_protocol_v4");
+        assert_constraint(&rejected, "runner_sessions_live_protocol_v5");
         sqlx::query(
             r"
             INSERT INTO runner_sessions (
                 id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
                 connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch
-            ) VALUES ($1, $2, 4, 5, '{}', 7, 7, 1, 3)
+            ) VALUES ($1, $2, 5, 5, '{}', 7, 7, 1, 3)
             ",
         )
         .bind(Uuid::new_v4())
@@ -2078,7 +2078,7 @@ async fn exercise_g1_constraints(database: &TestDatabase, seed: &SeedData) -> Te
             id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
             connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch
         )
-        VALUES ($1, $2, 4, 5, '{}', 3, 3, 1, 2)
+        VALUES ($1, $2, 5, 5, '{}', 3, 3, 1, 2)
         ",
     )
     .bind(Uuid::new_v4())
