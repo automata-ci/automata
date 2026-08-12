@@ -8,9 +8,17 @@ mod auth;
 mod commands;
 #[cfg(unix)]
 mod credential_store;
+#[cfg(unix)]
+mod environment_review;
+#[cfg(not(unix))]
+#[path = "environment_review_unsupported.rs"]
 mod environment_review;
 mod execution;
 mod output;
+#[cfg(unix)]
+mod rerun;
+#[cfg(not(unix))]
+#[path = "rerun_unsupported.rs"]
 mod rerun;
 #[cfg(unix)]
 mod secret;

@@ -962,15 +962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-schedule"
-version = "0.1.0"
-dependencies = [
- "automata-ci-core",
- "jiff",
- "thiserror",
-]
-
-[[package]]
 name = "automata-ci-sandbox-windows"
 version = "0.1.0"
 dependencies = [
@@ -981,6 +972,15 @@ dependencies = [
  "sha2 0.10.9",
  "static_assertions",
  "tokio",
+]
+
+[[package]]
+name = "automata-ci-schedule"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "jiff",
+ "thiserror",
 ]
 
 [[package]]
