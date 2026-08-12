@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -1082,11 +1084,12 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
     );
 
     let socket = temp.path().join("guest.sock");
-    let mut server = Command::new(GUEST_BINARY)
+    let mut server = Command::new(&installed)
         .args(["serve", socket.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .expect("start command-line server");
     timeout(TEST_TIMEOUT, async {
@@ -1113,11 +1116,12 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
         1_000,
         64,
     );
-    let mut client = Command::new(GUEST_BINARY)
+    let mut client = Command::new(&installed)
         .args(["client", socket.to_str().unwrap()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .expect("start stdio forwarding client");
     let mut stdin = client.stdin.take().unwrap();
@@ -1141,10 +1145,11 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
     );
     assert!(!truncated);
 
-    let mut unavailable = Command::new(GUEST_BINARY)
+    let mut unavailable = Command::new(&installed)
         .args(["client", missing_socket.to_str().unwrap()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
     unavailable

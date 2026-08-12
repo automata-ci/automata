@@ -45,8 +45,9 @@ INSERT INTO workflow_snapshots (
 );
 INSERT INTO workflow_runs (
     id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
-    event_name, event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-    admission_epoch, event_digest, event_size_bytes, event_media_type,
+    public_run_id_alias, event_name, event_object_key, head_sha, status,
+    created_at_ms, updated_at_ms, admission_epoch, event_digest,
+    event_size_bytes, event_media_type,
     plan_digest, plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
     workflow_name, git_ref, actor, runner_requirements_schema
 ) VALUES (
@@ -54,7 +55,7 @@ INSERT INTO workflow_runs (
     '10000000-0000-0000-0000-000000000001',
     '10000000-0000-0000-0000-000000000002',
     '10000000-0000-0000-0000-000000000003',
-    1, 1, 'push', 'reusable/event.json', decode(repeat('09', 20), 'hex'),
+    1, 1, 1, 'push', 'reusable/event.json', decode(repeat('09', 20), 'hex'),
     'in_progress', 1, 1, 4, decode(repeat('02', 32), 'hex'), 128,
     'application/json', decode(repeat('03', 32), 'hex'),
     'reusable/root-plan.json', 128,
