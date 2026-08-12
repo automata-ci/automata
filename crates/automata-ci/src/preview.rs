@@ -64,7 +64,7 @@ mod tests {
         let task = tokio::spawn(serve_listener(listener));
 
         let policy =
-            StatusHttpPolicy::new(Duration::from_secs(5), Duration::from_secs(60), 64 * 1024)
+            StatusHttpPolicy::new(Duration::from_secs(5), Duration::from_mins(1), 64 * 1024)
                 .expect("preview test status policy must be valid");
         let status = fetch_control_plane_status(&format!("http://{address}"), policy)
             .await

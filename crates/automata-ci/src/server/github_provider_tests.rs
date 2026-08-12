@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
+use std::{collections::BTreeMap, sync::Mutex};
 
 use serde_json::{Value, json};
 
@@ -116,32 +116,17 @@ fn mixed_document() -> Value {
     })
 }
 
-fn config_file(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "automata-github-provider-bootstrap-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&directory).expect("temporary configuration directory");
-    directory.join(name)
-}
-
 fn load_config(
     name: &str,
     document: &Value,
 ) -> Result<GithubProviderConfig, super::super::GithubProviderConfigError> {
-    let path = config_file(name);
-    fs::write(
-        &path,
-        serde_json::to_vec(document).expect("configuration JSON"),
-    )
-    .expect("write configuration");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("owner-only configuration");
-    }
+    let directory =
+        crate::server::test_fixtures::private_fixture_directory("github-provider-bootstrap");
+    let path = crate::server::test_fixtures::write_private_file(
+        &directory,
+        name,
+        &serde_json::to_vec(document).expect("configuration JSON"),
+    );
     GithubProviderConfig::load(&super::super::SecretSource::File(path))
 }
 

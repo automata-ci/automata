@@ -592,7 +592,6 @@ fn validate_tenant_alignment<'a>(
 
 #[cfg(test)]
 mod effective_ui_tenant_tests {
-    use std::{fs, path::PathBuf};
 
     use clap::Parser as _;
 
@@ -603,23 +602,14 @@ mod effective_ui_tenant_tests {
     const FOREIGN_PROVIDER_TENANT: &str = "foreign-provider-tenant-sentinel";
 
     fn provider_server_config() -> ServerConfig {
-        let directory = std::env::var_os("CARGO_TARGET_TMPDIR")
-            .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join("effective-ui-tenant-composition");
-        fs::create_dir_all(&directory).expect("target-local configuration directory");
-        let path = directory.join(format!("github-provider-{}.json", std::process::id()));
-        fs::write(
-            &path,
+        let directory = crate::server::test_fixtures::private_fixture_directory(
+            "effective-ui-tenant-composition",
+        );
+        let path = crate::server::test_fixtures::write_private_file(
+            &directory,
+            "github-provider.json",
             include_bytes!("../../config/github-provider.example.json"),
-        )
-        .expect("provider configuration fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .expect("provider configuration fixture must be owner-only");
-        }
+        );
         let source = format!("file:{}", path.display());
         let cli_arguments = vec![
             "automata",

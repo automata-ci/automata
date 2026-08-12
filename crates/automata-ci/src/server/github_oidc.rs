@@ -810,7 +810,7 @@ struct TimeoutResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Mutex};
+    use std::{path::PathBuf, sync::Mutex};
 
     use automata_ci_core::{
         AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId,
@@ -957,23 +957,11 @@ norlX3KEHNe7cTke5cP4OA==";
     }
 
     fn write_private_test_file(name: &str, bytes: &[u8]) -> PathBuf {
-        let test_root =
-            std::env::var_os("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-        let directory = test_root.join(format!(
-            "automata-ci-github-oidc-product-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).expect("test key directory");
-        let path = directory.join(name);
-        fs::write(&path, bytes).expect("test key file");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .expect("owner-only test key");
-        }
-        path
+        static DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let directory = DIRECTORY.get_or_init(|| {
+            crate::server::test_fixtures::private_fixture_directory("github-oidc-product")
+        });
+        crate::server::test_fixtures::write_private_file(directory, name, bytes)
     }
 
     #[test]

@@ -787,6 +787,11 @@ fn fallback_tenant_is_explicit_and_validated_before_adapter_composition() {
 
 #[test]
 fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
+    #[cfg(unix)]
+    const ABSOLUTE_REGISTRATION_PATH: &str = "/etc/automata/static-runners.json";
+    #[cfg(not(unix))]
+    const ABSOLUTE_REGISTRATION_PATH: &str = "C:\\automata\\static-runners.json";
+
     let cli = Cli::try_parse_from([
         "automata",
         "server",
@@ -823,7 +828,7 @@ fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
         "--results-public-url",
         "https://results.example.test/",
         "--static-runner-registration-file",
-        "/etc/automata/static-runners.json",
+        ABSOLUTE_REGISTRATION_PATH,
     ])
     .expect("absolute path syntax");
     let Command::Server(args) = cli.command else {
@@ -831,7 +836,7 @@ fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
     };
     assert_eq!(
         args.static_runner_registration_file.as_deref(),
-        Some(std::path::Path::new("/etc/automata/static-runners.json"))
+        Some(std::path::Path::new(ABSOLUTE_REGISTRATION_PATH))
     );
     assert!(ServerConfig::from_args(&args).is_ok());
 }

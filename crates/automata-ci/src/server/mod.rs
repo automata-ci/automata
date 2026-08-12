@@ -21,6 +21,8 @@ mod secret_mutation_recovery;
 mod secure_file;
 mod state_metrics;
 mod static_registration;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 mod workflow_dispatch;
 
 use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
