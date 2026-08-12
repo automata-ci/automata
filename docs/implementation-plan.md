@@ -144,7 +144,9 @@ target-state work.
 
 Implement macOS shell and keychain semantics, native and
 Virtualization.framework providers, arm64 profiles, and GPU resource locks;
-also complete the workflow-chaining surfaces required by larger fleets.
+the accepted initial implementation and acceptance order are recorded in the
+[macOS runner plan](platforms/macos.md). Also complete the workflow-chaining
+surfaces required by larger fleets.
 
 Gate: unchanged workflows pass per-platform differential comparison. Publish,
 deploy, recovery, and release workflows enter only after read-only and staging
