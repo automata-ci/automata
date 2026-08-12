@@ -21,9 +21,9 @@ mod values;
 use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 
 pub use commands::{
-    AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport, OperatorArgs,
-    EnvironmentReviewArgs, EnvironmentReviewDecision, PreviewArgs, RerunArgs, RerunSelection,
-    SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
+    AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport,
+    EnvironmentReviewArgs, EnvironmentReviewDecision, OperatorArgs, PreviewArgs, RerunArgs,
+    RerunSelection, SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
     SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
 pub use output::OutputFormat;
@@ -73,10 +73,7 @@ impl FromArgMatches for Cli {
         })
     }
 
-    fn update_from_arg_matches(
-        &mut self,
-        matches: &clap::ArgMatches,
-    ) -> Result<(), clap::Error> {
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         *self = Self::from_arg_matches(matches)?;
         Ok(())
     }

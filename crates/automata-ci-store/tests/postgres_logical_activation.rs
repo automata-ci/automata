@@ -444,6 +444,12 @@ fn instance(
             512,
         )
         .expect("runtime descriptor"),
+        JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
     .expect("instance descriptor")
 }
@@ -854,14 +860,12 @@ fn publication_with_changed_job_ir_reference(
         original.workspace(),
         changed_job_ir,
         original.runtime_context().clone(),
-    )
-    .expect("content-reference-only publication change")
-    .with_environment_gate(
         original
             .environment_gate()
             .expect("original environment evidence")
             .clone(),
-    );
+    )
+    .expect("content-reference-only publication change");
     let mut instances = publication.instances().to_vec();
     instances[0] = changed_descriptor;
     PublishLogicalJobActivation::new(

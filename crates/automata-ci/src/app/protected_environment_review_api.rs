@@ -382,6 +382,8 @@ mod tests {
 
     use super::*;
 
+    const REPOSITORY_ID: &str = "aaaaaaaa-1111-4111-8111-111111111111";
+    const ATTEMPT_ID: &str = "22222222-2222-4222-8222-222222222222";
     const PATH: &str = "/api/v1/repositories/aaaaaaaa-1111-4111-8111-111111111111/attempts/22222222-2222-4222-8222-222222222222/environment/reviews";
 
     #[derive(Debug)]
@@ -432,7 +434,22 @@ mod tests {
         let [captured] = requests.as_slice() else {
             panic!("one request expected");
         };
+        assert_eq!(
+            captured.repository_id().as_uuid().to_string(),
+            REPOSITORY_ID
+        );
+        assert_eq!(captured.attempt_id().as_uuid().to_string(), ATTEMPT_ID);
         assert_eq!(captured.decision(), EnvironmentReviewDecision::Approve);
+        assert_eq!(captured.actor().tenant_id().as_str(), "tenant-review-api");
+        assert_eq!(
+            captured.actor().principal_id().as_str(),
+            "55555555-5555-4555-8555-555555555555"
+        );
+        assert_eq!(
+            captured.actor().session_id().as_str(),
+            "66666666-6666-4666-8666-666666666666"
+        );
+        assert_eq!(captured.actor().authorization_revision().value(), 7);
         assert_eq!(captured.actor().now(), UnixTimestamp::from_seconds(777));
     }
 

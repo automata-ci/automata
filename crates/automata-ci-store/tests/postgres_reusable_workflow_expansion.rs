@@ -99,6 +99,61 @@ ALTER TABLE workflow_plan_v2_invocations ENABLE TRIGGER USER;
 ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER;
 ";
 
+// The ordinary expansion fixture has one root call job. The identity-chain
+// matrix exercises seven independent callsites, so seed the other six exact
+// durable root jobs before sealing its 0051 expansion ledger.
+const IDENTITY_ROOT_JOBS_SQL: &str = r"
+ALTER TABLE workflow_plan_v2_jobs DISABLE TRIGGER USER;
+INSERT INTO workflow_plan_v2_jobs (
+    id, run_id, invocation_id, logical_key, source_order, execution_kind,
+    state, activation_fence, created_at_ms, updated_at_ms,
+    runtime_policy_revision, runtime_policy_digest
+) VALUES
+(
+    '20000000-0000-0000-0000-000000000102',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-102', 1, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+),
+(
+    '20000000-0000-0000-0000-000000000103',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-103', 2, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+),
+(
+    '20000000-0000-0000-0000-000000000104',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-104', 3, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+),
+(
+    '20000000-0000-0000-0000-000000000106',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-106', 4, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+),
+(
+    '20000000-0000-0000-0000-000000000108',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-108', 5, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+),
+(
+    '20000000-0000-0000-0000-000000000109',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005',
+    'call-109', 6, 'reusable_workflow', 'pending', 0, 1, 1,
+    1, decode(repeat('05', 32), 'hex')
+);
+ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER;
+";
+
 const COMPLETE_EXPANSION_SQL: &str = r"
 BEGIN;
 INSERT INTO workflow_plan_v2_reusable_workflow_runs (
@@ -212,6 +267,472 @@ INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
 );
 COMMIT;
 ";
+
+const IDENTITY_CHAIN_MATRIX_SQL: &str = r"
+SET CONSTRAINTS ALL DEFERRED;
+INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+    tenant_id, repository_id, run_id, root_invocation_id, expansion_digest,
+    catalog_entry_count, invocation_count, expanded_job_count, maximum_depth,
+    planned_at_ms
+) VALUES (
+    'tenant-reusable-probe', '10000000-0000-0000-0000-000000000001',
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005', decode(repeat('50', 32), 'hex'),
+    3, 15, 21, 2, 2
+);
+INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+    run_id, catalog_entry_id, workflow_path, source_revision, source_digest,
+    source_object_key, source_size_bytes, source_media_type, plan_digest,
+    plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
+    invocation_contract_digest, descriptor_digest, logical_job_count,
+    reusable_call_count, created_at_ms
+) VALUES
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000011',
+    '.github/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
+    'reusable/root-source.yml', 128, 'application/yaml',
+    decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
+    'application/vnd.automata.workflow-plan+json', 2,
+    NULL, decode(repeat('51', 32), 'hex'), 7, 7, 2
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000012',
+    '.github/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
+    'reusable/child-source.yml', 128, 'application/yaml',
+    decode(repeat('13', 32), 'hex'), 'reusable/child-plan.json', 128,
+    'application/vnd.automata.workflow-plan+json', 2,
+    decode(repeat('52', 32), 'hex'), decode(repeat('53', 32), 'hex'), 1, 1, 2
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000013',
+    '.github/workflows/grandchild.yml', repeat('09', 20),
+    decode(repeat('16', 32), 'hex'), 'reusable/grandchild-source.yml', 128,
+    'application/yaml', decode(repeat('17', 32), 'hex'),
+    'reusable/grandchild-plan.json', 128,
+    'application/vnd.automata.workflow-plan+json', 2,
+    decode(repeat('54', 32), 'hex'), decode(repeat('55', 32), 'hex'), 1, 0, 2
+);
+INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+    run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
+    catalog_entry_id, depth, call_path, workflow_path, source_digest, plan_digest,
+    call_reference_digest, input_bindings_digest, secret_bindings_digest,
+    output_contract_digest, permission_digest, descriptor_digest,
+    input_binding_count, secret_binding_count, output_count,
+    permission_grant_count, dependency_count, created_at_ms
+) VALUES (
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000005', NULL, NULL,
+    '10000000-0000-0000-0000-000000000011', 0,
+    ARRAY['.github/workflows/root.yml'], '.github/workflows/root.yml',
+    decode(repeat('01', 32), 'hex'), decode(repeat('03', 32), 'hex'), NULL,
+    decode(repeat('56', 32), 'hex'), decode(repeat('57', 32), 'hex'),
+    decode(repeat('58', 32), 'hex'), decode(repeat('59', 32), 'hex'),
+    decode(repeat('5a', 32), 'hex'), 0, 0, 0, 0, 0, 2
+);
+INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+    run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
+    catalog_entry_id, depth, call_path, workflow_path, source_digest, plan_digest,
+    call_reference_digest, input_bindings_digest, secret_bindings_digest,
+    output_contract_digest, permission_digest, descriptor_digest,
+    input_binding_count, secret_binding_count, output_count,
+    permission_grant_count, dependency_count, created_at_ms
+)
+SELECT
+    '10000000-0000-0000-0000-000000000004', fixture.invocation_id,
+    fixture.parent_invocation_id, fixture.caller_logical_job_id,
+    CASE fixture.depth
+        WHEN 1 THEN '10000000-0000-0000-0000-000000000012'::uuid
+        ELSE '10000000-0000-0000-0000-000000000013'::uuid
+    END,
+    fixture.depth,
+    CASE fixture.depth
+        WHEN 1 THEN ARRAY[
+            '.github/workflows/root.yml',
+            '.github/workflows/child.yml'
+        ]
+        ELSE ARRAY[
+            '.github/workflows/root.yml',
+            '.github/workflows/child.yml',
+            '.github/workflows/grandchild.yml'
+        ]
+    END,
+    CASE fixture.depth
+        WHEN 1 THEN '.github/workflows/child.yml'
+        ELSE '.github/workflows/grandchild.yml'
+    END,
+    decode(repeat(CASE fixture.depth WHEN 1 THEN '12' ELSE '16' END, 32), 'hex'),
+    decode(repeat(CASE fixture.depth WHEN 1 THEN '13' ELSE '17' END, 32), 'hex'),
+    decode(repeat('5b', 32), 'hex'), decode(repeat('5c', 32), 'hex'),
+    decode(repeat('5d', 32), 'hex'), decode(repeat('5e', 32), 'hex'),
+    decode(repeat('5f', 32), 'hex'), decode(repeat('60', 32), 'hex'),
+    0, fixture.secret_binding_count, 0, 0, 0, 2
+FROM (VALUES
+    (
+        '10000000-0000-0000-0000-000000000101'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '10000000-0000-0000-0000-000000000006'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000102'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000102'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000103'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000103'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000104'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000104'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000106'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000106'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000108'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000108'::uuid, 1::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000109'::uuid,
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000109'::uuid, 1::smallint, 2
+    ),
+    (
+        '10000000-0000-0000-0000-000000000110'::uuid,
+        '10000000-0000-0000-0000-000000000101'::uuid,
+        '30000000-0000-0000-0000-000000000101'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000111'::uuid,
+        '10000000-0000-0000-0000-000000000102'::uuid,
+        '30000000-0000-0000-0000-000000000102'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000112'::uuid,
+        '10000000-0000-0000-0000-000000000103'::uuid,
+        '30000000-0000-0000-0000-000000000103'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000105'::uuid,
+        '10000000-0000-0000-0000-000000000104'::uuid,
+        '30000000-0000-0000-0000-000000000104'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000107'::uuid,
+        '10000000-0000-0000-0000-000000000106'::uuid,
+        '30000000-0000-0000-0000-000000000106'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000113'::uuid,
+        '10000000-0000-0000-0000-000000000108'::uuid,
+        '30000000-0000-0000-0000-000000000108'::uuid, 2::smallint, 1
+    ),
+    (
+        '10000000-0000-0000-0000-000000000114'::uuid,
+        '10000000-0000-0000-0000-000000000109'::uuid,
+        '30000000-0000-0000-0000-000000000109'::uuid, 2::smallint, 1
+    )
+) AS fixture(
+    invocation_id, parent_invocation_id, caller_logical_job_id, depth,
+    secret_binding_count
+);
+INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+    run_id, invocation_id, logical_job_id, logical_key, source_order,
+    execution_kind, descriptor_digest
+)
+SELECT
+    '10000000-0000-0000-0000-000000000004', fixture.invocation_id,
+    fixture.logical_job_id, fixture.logical_key, fixture.source_order,
+    fixture.execution_kind,
+    decode(repeat('61', 32), 'hex')
+FROM (VALUES
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '10000000-0000-0000-0000-000000000006'::uuid,
+        'call-child', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000102'::uuid,
+        'call-102', 1, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000103'::uuid,
+        'call-103', 2, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000104'::uuid,
+        'call-104', 3, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000106'::uuid,
+        'call-106', 4, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000108'::uuid,
+        'call-108', 5, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000005'::uuid,
+        '20000000-0000-0000-0000-000000000109'::uuid,
+        'call-109', 6, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000101'::uuid,
+        '30000000-0000-0000-0000-000000000101'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000102'::uuid,
+        '30000000-0000-0000-0000-000000000102'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000103'::uuid,
+        '30000000-0000-0000-0000-000000000103'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000104'::uuid,
+        '30000000-0000-0000-0000-000000000104'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000106'::uuid,
+        '30000000-0000-0000-0000-000000000106'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000108'::uuid,
+        '30000000-0000-0000-0000-000000000108'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000109'::uuid,
+        '30000000-0000-0000-0000-000000000109'::uuid,
+        'call-grandchild', 0, 'reusable_workflow'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000110'::uuid,
+        '40000000-0000-0000-0000-000000000110'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000111'::uuid,
+        '40000000-0000-0000-0000-000000000111'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000112'::uuid,
+        '40000000-0000-0000-0000-000000000112'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000105'::uuid,
+        '40000000-0000-0000-0000-000000000105'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000107'::uuid,
+        '40000000-0000-0000-0000-000000000107'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000113'::uuid,
+        '40000000-0000-0000-0000-000000000113'::uuid,
+        'leaf', 0, 'steps'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000114'::uuid,
+        '40000000-0000-0000-0000-000000000114'::uuid,
+        'leaf', 0, 'steps'
+    )
+) AS fixture(
+    invocation_id, logical_job_id, logical_key, source_order, execution_kind
+);
+INSERT INTO workflow_plan_v2_reusable_secret_bindings (
+    run_id, invocation_id, target_name, source_name, source_order
+) VALUES
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000101', 'token', 'ToKeN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000102',
+    'INHERITED_TOKEN', 'INHERITED_TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000103', 'TOKEN', 'ROOT_TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000104', 'TOKEN', 'ROOT_TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000105', 'TOKEN', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000106', 'TOKEN', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000107', 'TOKEN', 'MIDDLE_TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000108', 'OTHER', 'OTHER', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000109', 'Token', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000109', 'TOKEN', 'TOKEN', 1
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000110', 'TOKEN', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000111',
+    'INHERITED_TOKEN', 'INHERITED_TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000112', 'TOKEN', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000113', 'TOKEN', 'TOKEN', 0
+),
+(
+    '10000000-0000-0000-0000-000000000004',
+    '10000000-0000-0000-0000-000000000114', 'TOKEN', 'TOKEN', 0
+);
+INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+    run_id, invocation_id, default_level, permission_digest
+)
+SELECT
+    '10000000-0000-0000-0000-000000000004', invocation_id, 'none',
+    CASE
+        WHEN invocation_id = '10000000-0000-0000-0000-000000000005'::uuid
+            THEN decode(repeat('59', 32), 'hex')
+        ELSE decode(repeat('5f', 32), 'hex')
+    END
+FROM workflow_plan_v2_reusable_invocation_expansions
+WHERE run_id = '10000000-0000-0000-0000-000000000004';
+SET CONSTRAINTS ALL IMMEDIATE;
+";
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn reusable_secret_identity_chain_accepts_only_unambiguous_same_name_forwarding() -> TestResult
+{
+    run_with_database(|database| async move {
+        sqlx::raw_sql(SEALED_ROOT_SQL)
+            .execute(database.pool())
+            .await?;
+        sqlx::raw_sql(IDENTITY_ROOT_JOBS_SQL)
+            .execute(database.pool())
+            .await?;
+
+        let mut transaction = database.pool().begin().await?;
+        sqlx::raw_sql(IDENTITY_CHAIN_MATRIX_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+
+        let cases: Vec<(String, bool, bool)> = sqlx::query_as(
+            r"
+            SELECT fixture.label::TEXT,
+                   automata_reusable_secret_identity_chain_is_exact(
+                       $1::uuid, fixture.invocation_id, fixture.canonical_name
+                   ),
+                   fixture.expected
+            FROM (VALUES
+                (
+                    'root/direct',
+                    '10000000-0000-0000-0000-000000000005'::uuid,
+                    'TOKEN', TRUE
+                ),
+                (
+                    'one-hop/identity',
+                    '10000000-0000-0000-0000-000000000101'::uuid,
+                    'TOKEN', TRUE
+                ),
+                (
+                    'one-hop/inherit-equivalent',
+                    '10000000-0000-0000-0000-000000000102'::uuid,
+                    'INHERITED_TOKEN', TRUE
+                ),
+                (
+                    'one-hop/renamed',
+                    '10000000-0000-0000-0000-000000000103'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'two-hop/parent-renamed',
+                    '10000000-0000-0000-0000-000000000105'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'two-hop/child-renamed',
+                    '10000000-0000-0000-0000-000000000107'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'two-hop/identity',
+                    '10000000-0000-0000-0000-000000000110'::uuid,
+                    'TOKEN', TRUE
+                ),
+                (
+                    'two-hop/inherit-equivalent',
+                    '10000000-0000-0000-0000-000000000111'::uuid,
+                    'INHERITED_TOKEN', TRUE
+                ),
+                (
+                    'one-hop/unrelated-target',
+                    '10000000-0000-0000-0000-000000000108'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'one-hop/casefold-ambiguity',
+                    '10000000-0000-0000-0000-000000000109'::uuid,
+                    'TOKEN', FALSE
+                )
+            ) AS fixture(label, invocation_id, canonical_name, expected)
+            ORDER BY fixture.label
+            ",
+        )
+        .bind(RUN_ID)
+        .fetch_all(database.pool())
+        .await?;
+
+        for (label, actual, expected) in cases {
+            assert_eq!(actual, expected, "identity-chain matrix case {label}");
+        }
+        Ok(())
+    })
+    .await
+}
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]

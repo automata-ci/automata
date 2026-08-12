@@ -81,6 +81,7 @@ fn execution() -> LogicalActivationExecutionContext {
         WorkflowId::from_uuid(Uuid::from_u128(4)),
         "Checks".to_owned(),
         "refs/heads/main".to_owned(),
+        "push".to_owned(),
         Some("octocat".to_owned()),
         RunIdAlias::new(11).expect("run ID alias"),
         7,

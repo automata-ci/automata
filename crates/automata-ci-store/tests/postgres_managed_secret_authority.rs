@@ -32,9 +32,9 @@ use automata_ci_store::{
     CommitLogicalInstanceMaterialization, ConfirmRepositorySecretVersionMutation,
     ConfirmRepositorySecretVersionMutationOutcome, ConsumeSelectedLogicalInstanceMaterialization,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
-    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    EnsureGithubServerServiceAuthority, EnvironmentReviewDecision, GithubCheckHeadSha,
+    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -59,10 +59,10 @@ use automata_ci_store::{
     RepositorySecretManagementRepository as _, RepositorySecretMutationId, RepositorySecretName,
     RepositorySecretProviderMutationResult, RepositorySecretVersionId,
     ReserveRepositorySecretVersionMutation, ReserveRepositorySecretVersionMutationOutcome,
-    ResolveManagedSecretAuthority, ReusableSecretPermission, RoutingDocument, RunnerGeneration,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _, SecretCustodyKeySet,
-    SecretCustodyRepository as _, SecretWorkloadGrantId, StableRunnerSlot, TenantScope,
-    VerifySecretCustody, VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency,
+    ResolveManagedSecretAuthority, ReusableSecretPermission, ReviewJobEnvironment, RoutingDocument,
+    RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _,
+    SecretCustodyKeySet, SecretCustodyRepository as _, SecretWorkloadGrantId, StableRunnerSlot,
+    TenantScope, VerifySecretCustody, VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency,
     WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
@@ -105,6 +105,7 @@ struct LogicalFixture {
     command: AdmitLogicalWorkflowRun,
     logical_job_id: LogicalWorkflowJobId,
     bindings: Vec<BindingIdentity>,
+    activation_environment: Option<automata_ci_store::DeploymentEnvironmentName>,
 }
 
 struct PreparedInstance {
@@ -269,6 +270,13 @@ fn logical_fixture_with_requirements(
     bindings: Vec<BindingIdentity>,
     credential_requirements: JobCredentialRequirements,
 ) -> LogicalFixture {
+    let activation_environment = match credential_requirements.environment() {
+        JobEnvironmentRequirement::None => None,
+        JobEnvironmentRequirement::Environment(_) => Some(
+            automata_ci_store::DeploymentEnvironmentName::new("production")
+                .expect("test environment"),
+        ),
+    };
     let tenant = format!("secret-authority-{}", Uuid::new_v4().simple());
     let tenant_scope = TenantScope::from_authenticated_tenant_id(&tenant).expect("test tenant");
     let manifest = fixture_manifest(tenant_scope.clone());
@@ -337,6 +345,7 @@ fn logical_fixture_with_requirements(
         command,
         logical_job_id,
         bindings,
+        activation_environment,
     }
 }
 
@@ -738,14 +747,14 @@ fn prepare_instance(
         )
         .expect("test JobIR descriptor"),
         runtime,
+        JobEnvironmentActivationEvidence::new(
+            fixture.activation_environment.clone(),
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
-    .expect("test activated instance")
-    .with_environment_gate(JobEnvironmentActivationEvidence::new(
-        None,
-        JobEventTrust::Trusted,
-        JobSourceKind::SameRepository,
-        ReusableSecretPermission::None,
-    ));
+    .expect("test activated instance");
     PreparedInstance {
         activated,
         envelope,
@@ -1341,6 +1350,1090 @@ async fn seed_environment(
     .execute(pool)
     .await?;
     Ok((environment_id, Some(approval_id)))
+}
+
+async fn assign_environment_reviewer(
+    pool: &PgPool,
+    queued: &QueuedExecutionFixture,
+    environment_id: Uuid,
+    actor: &SecretActor,
+) -> TestResult {
+    let granted_at_ms = pool_now_ms(pool).await?;
+    let authorization_revision: i64 = sqlx::query_scalar(
+        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id = $1 AND principal_id = $2",
+    )
+    .bind(&queued.tenant)
+    .bind(actor.principal_id)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO repository_environment_reviewers (
+            tenant_id, repository_id, environment_id, environment_revision,
+            principal_id, principal_authorization_revision,
+            granted_by_principal_id, grantor_authorization_revision, granted_at_ms
+        ) VALUES ($1, $2, $3, 1, $4, $5, $4, $5, $6)
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(queued.repository_id.as_uuid())
+    .bind(environment_id)
+    .bind(actor.principal_id)
+    .bind(authorization_revision)
+    .bind(granted_at_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn prepare_protected_environment_gate(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+    approval_expires_at_ms: i64,
+) -> TestResult<(Uuid, Uuid)> {
+    prepare_protected_environment_gate_with_self_review(
+        database,
+        queued,
+        actor,
+        approval_expires_at_ms,
+        false,
+    )
+    .await
+}
+
+async fn prepare_protected_environment_gate_with_self_review(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+    approval_expires_at_ms: i64,
+    prevent_self_review: bool,
+) -> TestResult<(Uuid, Uuid)> {
+    let environment_id = Uuid::new_v4();
+    let now = database_now_ms(database).await?;
+    sqlx::query(
+        r"
+        INSERT INTO repository_environments (
+            tenant_id, repository_id, id, name, normalized_name,
+            protection_mode, required_approvals, prevent_self_review,
+            created_by_principal_id, created_at_ms, updated_at_ms
+        ) VALUES (
+            $1, $2, $3, 'Production', 'production',
+            'required_approvals', 1, $4, $5, $6, $6
+        )
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(queued.repository_id.as_uuid())
+    .bind(environment_id)
+    .bind(prevent_self_review)
+    .bind(actor.principal_id)
+    .bind(now)
+    .execute(database.pool())
+    .await?;
+    assign_environment_reviewer(database.pool(), queued, environment_id, actor).await?;
+
+    let approval_id = Uuid::new_v4();
+    let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+    assert_eq!(
+        database
+            .store()
+            .prepare_job_environment(PrepareJobEnvironment::new(
+                tenant,
+                queued.attempt_id,
+                Some(automata_ci_store::DeploymentEnvironmentName::new(
+                    "production",
+                )?),
+                queued.runtime_context_digest,
+                JobEventTrust::Trusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::None,
+                approval_id,
+                UnixMillis::new(now),
+                UnixMillis::new(approval_expires_at_ms),
+            )?)
+            .await?,
+        JobEnvironmentGateState::Waiting
+    );
+    Ok((environment_id, approval_id))
+}
+
+async fn assert_queued_gate_concluded(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    expected_gate_state: &str,
+) -> TestResult {
+    let row: (String, String, String, i64, String, bool, bool) = sqlx::query_as(
+        r"
+        SELECT attempt.lifecycle, gate.state, run.status,
+               (SELECT count(*) FROM attempt_cancellation_intents
+                WHERE attempt_id = attempt.id),
+               terminal.terminal_authority,
+               terminal.server_cancellation_operation_id = cancellation.operation_id,
+               terminal.server_cancellation_digest =
+                   automata_server_cancellation_terminal_digest(
+                       cancellation.attempt_id, cancellation.operation_id,
+                       cancellation.requested_by, cancellation.reason,
+                       cancellation.requested_at_ms
+                   )
+        FROM job_attempts AS attempt
+        JOIN jobs AS job ON job.id = attempt.job_id
+        JOIN workflow_runs AS run ON run.id = job.run_id
+        JOIN job_environment_gates AS gate ON gate.attempt_id = attempt.id
+        JOIN attempt_cancellation_intents AS cancellation
+          ON cancellation.attempt_id = attempt.id
+        JOIN attempt_terminal_results AS terminal
+          ON terminal.attempt_id = attempt.id
+        WHERE attempt.id = $1
+        ",
+    )
+    .bind(queued.attempt_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row.0, "cancelled");
+    assert_eq!(row.1, expected_gate_state);
+    assert_eq!(row.2, "completed");
+    assert_eq!(row.3, 1);
+    assert_eq!(row.4, "server_cancellation");
+    assert!(row.5);
+    assert!(row.6);
+    Ok(())
+}
+
+async fn backdate_gate(
+    database: &TestDatabase,
+    attempt_id: AttemptId,
+    created_at_ms: i64,
+) -> TestResult {
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE job_environment_gates SET created_at_ms = $2 WHERE attempt_id = $1")
+        .bind(attempt_id.as_uuid())
+        .bind(created_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn seed_repository_variable(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+) -> TestResult<Uuid> {
+    let variable_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+    let now = database_now_ms(database).await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_variables (
+            tenant_id, repository_id, id, scope_kind, canonical_name,
+            status, created_by_principal_id, created_at_ms, updated_at_ms
+        ) VALUES ($1, $2, $3, 'repository', 'PENDING_CONFIG',
+                  'provisioning', $4, $5, $5)
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(queued.repository_id.as_uuid())
+    .bind(variable_id)
+    .bind(actor.principal_id)
+    .bind(now)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_variable_versions (
+            tenant_id, id, variable_id, version_number, value_object_key,
+            value_ciphertext_sha256, value_size_bytes, value_media_type,
+            envelope_schema, created_by_principal_id, created_at_ms
+        ) VALUES (
+            $1, $2, $3, 1, $4, $5, 16,
+            'application/vnd.automata.encrypted-variable-value', 1, $6, $7
+        )
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(version_id)
+    .bind(variable_id)
+    .bind(format!("variables/{variable_id}/1"))
+    .bind(digest(0xa4).as_bytes().as_slice())
+    .bind(actor.principal_id)
+    .bind(now)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE workflow_variables
+        SET current_version_id = $3, current_version_number = 1,
+            status = 'active', revision = 2,
+            updated_by_principal_id = $4, updated_at_ms = $5
+        WHERE tenant_id = $1 AND id = $2
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(variable_id)
+    .bind(version_id)
+    .bind(actor.principal_id)
+    .bind(now)
+    .execute(database.pool())
+    .await?;
+    Ok(variable_id)
+}
+
+async fn prepare_and_resolve_unprotected_gate(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+) -> TestResult {
+    let now = database_now_ms(database).await?;
+    let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+    assert_eq!(
+        database
+            .store()
+            .prepare_job_environment(PrepareJobEnvironment::new(
+                tenant.clone(),
+                queued.attempt_id,
+                None,
+                queued.runtime_context_digest,
+                JobEventTrust::Trusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::None,
+                Uuid::new_v4(),
+                UnixMillis::new(now),
+                UnixMillis::new(now + 300_000),
+            )?)
+            .await?,
+        JobEnvironmentGateState::Resolving
+    );
+    assert_eq!(
+        database
+            .store()
+            .resolve_job_credentials(&tenant, queued.attempt_id)
+            .await?,
+        JobEnvironmentGateState::Ready
+    );
+    Ok(())
+}
+
+async fn reclassify_secret_scope_for_precedence_test(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    secret_id: Uuid,
+    scope_kind: &str,
+    environment_id: Option<Uuid>,
+) -> TestResult {
+    let repository_id = (scope_kind != "tenant").then_some(queued.repository_id.as_uuid());
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r"
+        UPDATE secrets
+        SET canonical_name = 'AUTHORITY_TOKEN_0', scope_kind = $3,
+            repository_id = $4, environment_id = $5
+        WHERE tenant_id = $1 AND id = $2
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(secret_id)
+    .bind(scope_kind)
+    .bind(repository_id)
+    .bind(environment_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE secret_policies
+        SET secret_scope_kind = $3,
+            tenant_repository_access_mode = CASE
+                WHEN $3 = 'tenant' THEN 'all_repositories'
+                ELSE tenant_repository_access_mode
+            END
+        WHERE tenant_id = $1 AND secret_id = $2
+        ",
+    )
+    .bind(&queued.tenant)
+    .bind(secret_id)
+    .bind(scope_kind)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn prepare_ready_protected_secret_gate(
+    database: &TestDatabase,
+    initial_scope: &str,
+) -> TestResult<(QueuedExecutionFixture, SecretActor, Uuid)> {
+    let selected = BindingIdentity::fresh();
+    let requirements = JobCredentialRequirements::new(
+        JobEnvironmentRequirement::Environment(digest(0x94)),
+        ["AUTHORITY_TOKEN_0".to_owned()],
+        [],
+    )?;
+    let queued = seed_queued_execution(database, vec![selected], requirements).await?;
+    let now = database_now_ms(database).await?;
+    let actor = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+    activate_builtin_provider(database.pool(), &queued.tenant, now).await?;
+    seed_repository_secret(database.pool(), queued.repository_id, &actor, selected, 0).await?;
+    if initial_scope == "tenant" {
+        reclassify_secret_scope_for_precedence_test(
+            database,
+            &queued,
+            selected.secret_id,
+            "tenant",
+            None,
+        )
+        .await?;
+    }
+    let (environment_id, _) =
+        prepare_protected_environment_gate(database, &queued, &actor, now + 300_000).await?;
+    assert_eq!(
+        database
+            .store()
+            .review_job_environment(ReviewJobEnvironment::new(
+                actor.actor(),
+                queued.repository_id,
+                queued.attempt_id,
+                EnvironmentReviewDecision::Approve,
+            )?)
+            .await?,
+        JobEnvironmentGateState::Resolving
+    );
+    let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+    assert_eq!(
+        database
+            .store()
+            .resolve_job_credentials(&tenant, queued.attempt_id)
+            .await?,
+        JobEnvironmentGateState::Ready
+    );
+    Ok((queued, actor, environment_id))
+}
+
+async fn seed_higher_precedence_secret(
+    database: &TestDatabase,
+    queued: &QueuedExecutionFixture,
+    actor: &SecretActor,
+    scope_kind: &str,
+    environment_id: Option<Uuid>,
+) -> TestResult<BindingIdentity> {
+    let higher = BindingIdentity::fresh();
+    let index = if scope_kind == "repository" { 0 } else { 1 };
+    seed_repository_secret(database.pool(), queued.repository_id, actor, higher, index).await?;
+    if scope_kind != "repository" {
+        reclassify_secret_scope_for_precedence_test(
+            database,
+            queued,
+            higher.secret_id,
+            scope_kind,
+            environment_id,
+        )
+        .await?;
+    }
+    Ok(higher)
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn protected_environment_rejection_is_atomic_and_review_replay_is_exact() -> TestResult {
+    run_with_database(|database| async move {
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x91)),
+            [],
+            [],
+        )?;
+        let queued = seed_queued_execution(&database, Vec::new(), requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let reviewer = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+        let (_environment_id, approval_id) = prepare_protected_environment_gate(
+            &database,
+            &queued,
+            &reviewer,
+            now + 300_000,
+        )
+        .await?;
+        let rejection = ReviewJobEnvironment::new(
+            reviewer.actor(),
+            queued.repository_id,
+            queued.attempt_id,
+            EnvironmentReviewDecision::Reject,
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .review_job_environment(rejection.clone())
+                .await?,
+            JobEnvironmentGateState::Rejected
+        );
+        assert_queued_gate_concluded(&database, &queued, "rejected").await?;
+
+        assert_eq!(
+            database
+                .store()
+                .review_job_environment(rejection)
+                .await?,
+            JobEnvironmentGateState::Rejected,
+            "an exact same-principal and same-decision retry must replay"
+        );
+        let opposite = ReviewJobEnvironment::new(
+            reviewer.actor(),
+            queued.repository_id,
+            queued.attempt_id,
+            EnvironmentReviewDecision::Approve,
+        )?;
+        assert!(matches!(
+            database.store().review_job_environment(opposite).await,
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
+
+        let other = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+        let no_prior_decision = ReviewJobEnvironment::new(
+            other.actor(),
+            queued.repository_id,
+            queued.attempt_id,
+            EnvironmentReviewDecision::Reject,
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .review_job_environment(no_prior_decision)
+                .await,
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM protected_environment_approval_decisions WHERE tenant_id = $1 AND request_id = $2",
+        )
+        .bind(&queued.tenant)
+        .bind(approval_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(decisions, 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn unknown_requester_cannot_approve_self_review_separated_environment() -> TestResult {
+    run_with_database(|database| async move {
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x96)),
+            [],
+            [],
+        )?;
+        let queued = seed_queued_execution(&database, Vec::new(), requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let reviewer = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+        let (_, approval_id) = prepare_protected_environment_gate_with_self_review(
+            &database,
+            &queued,
+            &reviewer,
+            now + 300_000,
+            true,
+        )
+        .await?;
+        let requester: Option<Uuid> = sqlx::query_scalar(
+            "SELECT requested_by_principal_id FROM protected_environment_approval_requests WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(&queued.tenant)
+        .bind(approval_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(requester, None, "push admission has no exact human requester");
+
+        let mut transaction = database.pool().begin().await?;
+        let error = sqlx::query(
+            r"
+            INSERT INTO protected_environment_approval_decisions (
+                tenant_id, request_id, principal_id, decision, decided_at_ms
+            ) VALUES ($1, $2, $3, 'approve', $4)
+            ",
+        )
+        .bind(&queued.tenant)
+        .bind(approval_id)
+        .bind(reviewer.principal_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(&mut *transaction)
+        .await
+        .expect_err("NULL requester must reject approval");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("protected_environment_approval_requester_required")
+        );
+        transaction.rollback().await?;
+
+        let approve = ReviewJobEnvironment::new(
+            reviewer.actor(),
+            queued.repository_id,
+            queued.attempt_id,
+            EnvironmentReviewDecision::Approve,
+        )?;
+        assert!(matches!(
+            database.store().review_job_environment(approve).await,
+            Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        ));
+        let reject = ReviewJobEnvironment::new(
+            reviewer.actor(),
+            queued.repository_id,
+            queued.attempt_id,
+            EnvironmentReviewDecision::Reject,
+        )?;
+        assert_eq!(
+            database.store().review_job_environment(reject).await?,
+            JobEnvironmentGateState::Rejected
+        );
+        assert_queued_gate_concluded(&database, &queued, "rejected").await?;
+        let (status, current): (String, bool) = sqlx::query_as(
+            r"
+            SELECT status,
+                   automata_protected_environment_approval_is_current(
+                       tenant_id, id,
+                       floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+                   )
+            FROM protected_environment_approval_requests
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&queued.tenant)
+        .bind(approval_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(status, "rejected");
+        assert!(!current, "unknown-requester approval can never become current");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn database_time_expires_waiting_and_unprepared_gates_and_replays_conclusion() -> TestResult {
+    const GATE_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+    run_with_database(|database| async move {
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x92)),
+            [],
+            [],
+        )?;
+        let waiting = seed_queued_execution(&database, Vec::new(), requirements.clone()).await?;
+        let tenant = TenantScope::from_authenticated_tenant_id(&waiting.tenant)?;
+        let now = database_now_ms(&database).await?;
+        let reviewer = seed_secret_actor(database.pool(), &waiting.tenant, now).await?;
+        let (_, approval_id) = prepare_protected_environment_gate(
+            &database,
+            &waiting,
+            &reviewer,
+            now + 300_000,
+        )
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&tenant, waiting.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Waiting
+        );
+        let database_now = database_now_ms(&database).await?;
+        let mut transaction = database.pool().begin().await?;
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "UPDATE protected_environment_approval_requests SET expires_at_ms = $3 WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(&waiting.tenant)
+        .bind(approval_id)
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        let expired_review = ReviewJobEnvironment::new(
+            reviewer.actor(),
+            waiting.repository_id,
+            waiting.attempt_id,
+            EnvironmentReviewDecision::Approve,
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .review_job_environment(expired_review.clone())
+                .await,
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
+        assert!(matches!(
+            database
+                .store()
+                .review_job_environment(expired_review)
+                .await,
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
+        assert_queued_gate_concluded(&database, &waiting, "expired").await?;
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM protected_environment_approval_decisions WHERE tenant_id = $1 AND request_id = $2",
+        )
+        .bind(&waiting.tenant)
+        .bind(approval_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(decisions, 0, "expired review must not retain a decision");
+        database
+            .store()
+            .conclude_terminal_job_environment(&tenant, waiting.attempt_id)
+            .await?;
+        database
+            .store()
+            .conclude_terminal_job_environment(&tenant, waiting.attempt_id)
+            .await?;
+
+        let unprepared = seed_queued_execution(&database, Vec::new(), requirements).await?;
+        let unprepared_tenant = TenantScope::from_authenticated_tenant_id(&unprepared.tenant)?;
+        let now = database_now_ms(&database).await?;
+        backdate_gate(
+            &database,
+            unprepared.attempt_id,
+            now - GATE_LIFETIME_MILLIS + 60_000,
+        )
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&unprepared_tenant, unprepared.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::SelectionPending
+        );
+        backdate_gate(
+            &database,
+            unprepared.attempt_id,
+            now - GATE_LIFETIME_MILLIS - 1,
+        )
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&unprepared_tenant, unprepared.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Terminal
+        );
+        assert_queued_gate_concluded(&database, &unprepared, "cancelled").await?;
+        database
+            .store()
+            .conclude_terminal_job_environment(&unprepared_tenant, unprepared.attempt_id)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn stale_ready_environment_secret_and_variable_snapshots_are_concluded() -> TestResult {
+    run_with_database(|database| async move {
+        let protected_requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::Environment(digest(0x93)),
+            [],
+            [],
+        )?;
+        let protected =
+            seed_queued_execution(&database, Vec::new(), protected_requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let reviewer = seed_secret_actor(database.pool(), &protected.tenant, now).await?;
+        let (environment_id, _) =
+            prepare_protected_environment_gate(&database, &protected, &reviewer, now + 300_000)
+                .await?;
+        assert_eq!(
+            database
+                .store()
+                .review_job_environment(ReviewJobEnvironment::new(
+                    reviewer.actor(),
+                    protected.repository_id,
+                    protected.attempt_id,
+                    EnvironmentReviewDecision::Approve,
+                )?)
+                .await?,
+            JobEnvironmentGateState::Resolving
+        );
+        let protected_tenant = TenantScope::from_authenticated_tenant_id(&protected.tenant)?;
+        assert_eq!(
+            database
+                .store()
+                .resolve_job_credentials(&protected_tenant, protected.attempt_id)
+                .await?,
+            JobEnvironmentGateState::Ready
+        );
+        sqlx::query(
+            r"
+            UPDATE repository_environments
+            SET required_approvals = 2, revision = 2, updated_at_ms = $4
+            WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+            ",
+        )
+        .bind(&protected.tenant)
+        .bind(protected.repository_id.as_uuid())
+        .bind(environment_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(database.pool())
+        .await?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&protected_tenant, protected.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Terminal
+        );
+        database
+            .store()
+            .conclude_terminal_job_environment(&protected_tenant, protected.attempt_id)
+            .await?;
+        assert_queued_gate_concluded(&database, &protected, "ready").await?;
+
+        let binding = BindingIdentity::fresh();
+        let secret_requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::None,
+            ["AUTHORITY_TOKEN_0".to_owned()],
+            [],
+        )?;
+        let secret = seed_queued_execution(&database, vec![binding], secret_requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let secret_actor = seed_secret_actor(database.pool(), &secret.tenant, now).await?;
+        activate_builtin_provider(database.pool(), &secret.tenant, now).await?;
+        seed_repository_secret(
+            database.pool(),
+            secret.repository_id,
+            &secret_actor,
+            binding,
+            0,
+        )
+        .await?;
+        prepare_and_resolve_unprotected_gate(&database, &secret).await?;
+        sqlx::query(
+            r"
+            UPDATE secrets
+            SET status = 'disabled', revision = revision + 1,
+                updated_by_principal_id = $3, updated_at_ms = $4
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&secret.tenant)
+        .bind(binding.secret_id)
+        .bind(secret_actor.principal_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(database.pool())
+        .await?;
+        let secret_tenant = TenantScope::from_authenticated_tenant_id(&secret.tenant)?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&secret_tenant, secret.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Terminal
+        );
+        assert_queued_gate_concluded(&database, &secret, "ready").await?;
+
+        let variable_requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::None,
+            [],
+            ["PENDING_CONFIG".to_owned()],
+        )?;
+        let variable = seed_queued_execution(&database, Vec::new(), variable_requirements).await?;
+        let now = database_now_ms(&database).await?;
+        let variable_actor = seed_secret_actor(database.pool(), &variable.tenant, now).await?;
+        let variable_id = seed_repository_variable(&database, &variable, &variable_actor).await?;
+        prepare_and_resolve_unprotected_gate(&database, &variable).await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_variables
+            SET status = 'disabled', revision = revision + 1,
+                updated_by_principal_id = $3, updated_at_ms = $4
+            WHERE tenant_id = $1 AND id = $2
+            ",
+        )
+        .bind(&variable.tenant)
+        .bind(variable_id)
+        .bind(variable_actor.principal_id)
+        .bind(database_now_ms(&database).await?)
+        .execute(database.pool())
+        .await?;
+        let variable_tenant = TenantScope::from_authenticated_tenant_id(&variable.tenant)?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&variable_tenant, variable.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Terminal
+        );
+        assert_queued_gate_concluded(&database, &variable, "ready").await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn stale_resolving_approval_and_environment_are_atomically_concluded() -> TestResult {
+    run_with_database(|database| async move {
+        for stale_kind in [
+            "environment_revision",
+            "environment_disable",
+            "approval_expiry",
+            "reviewer_revocation",
+        ] {
+            let requirements = JobCredentialRequirements::new(
+                JobEnvironmentRequirement::Environment(digest(0x95)),
+                [],
+                [],
+            )?;
+            let queued = seed_queued_execution(&database, Vec::new(), requirements).await?;
+            let now = database_now_ms(&database).await?;
+            let reviewer = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+            let (environment_id, approval_id) = prepare_protected_environment_gate(
+                &database,
+                &queued,
+                &reviewer,
+                now + 300_000,
+            )
+            .await?;
+            assert_eq!(
+                database
+                    .store()
+                    .review_job_environment(ReviewJobEnvironment::new(
+                        reviewer.actor(),
+                        queued.repository_id,
+                        queued.attempt_id,
+                        EnvironmentReviewDecision::Approve,
+                    )?)
+                    .await?,
+                JobEnvironmentGateState::Resolving
+            );
+
+            match stale_kind {
+                "environment_revision" => {
+                    sqlx::query(
+                        r"
+                        UPDATE repository_environments
+                        SET required_approvals = 2, revision = revision + 1, updated_at_ms = $4
+                        WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+                        ",
+                    )
+                    .bind(&queued.tenant)
+                    .bind(queued.repository_id.as_uuid())
+                    .bind(environment_id)
+                    .bind(database_now_ms(&database).await?)
+                    .execute(database.pool())
+                    .await?;
+                }
+                "environment_disable" => {
+                    sqlx::query(
+                        r"
+                        UPDATE repository_environments
+                        SET status = 'disabled', revision = revision + 1, updated_at_ms = $4
+                        WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+                        ",
+                    )
+                    .bind(&queued.tenant)
+                    .bind(queued.repository_id.as_uuid())
+                    .bind(environment_id)
+                    .bind(database_now_ms(&database).await?)
+                    .execute(database.pool())
+                    .await?;
+                }
+                "approval_expiry" => {
+                    let mut transaction = database.pool().begin().await?;
+                    sqlx::query("SET LOCAL session_replication_role = replica")
+                        .execute(&mut *transaction)
+                        .await?;
+                    sqlx::query(
+                        "UPDATE protected_environment_approval_requests SET expires_at_ms = $3 WHERE tenant_id = $1 AND id = $2",
+                    )
+                    .bind(&queued.tenant)
+                    .bind(approval_id)
+                    .bind(database_now_ms(&database).await?)
+                    .execute(&mut *transaction)
+                    .await?;
+                    transaction.commit().await?;
+                }
+                "reviewer_revocation" => {
+                    let current_revision: i64 = sqlx::query_scalar(
+                        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id = $1 AND principal_id = $2",
+                    )
+                    .bind(&queued.tenant)
+                    .bind(reviewer.principal_id)
+                    .fetch_one(database.pool())
+                    .await?;
+                    sqlx::query(
+                        r"
+                        UPDATE tenant_human_memberships
+                        SET authorization_revision = $3, updated_at_ms = $4
+                        WHERE tenant_id = $1 AND principal_id = $2
+                        ",
+                    )
+                    .bind(&queued.tenant)
+                    .bind(reviewer.principal_id)
+                    .bind(current_revision + 1)
+                    .bind(database_now_ms(&database).await?)
+                    .execute(database.pool())
+                    .await?;
+                }
+                _ => unreachable!(),
+            }
+
+            let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+            assert_eq!(
+                database
+                    .store()
+                    .resolve_job_credentials(&tenant, queued.attempt_id)
+                    .await?,
+                JobEnvironmentGateState::Cancelled,
+                "{stale_kind} must close resolving rather than poison the queue"
+            );
+            assert_queued_gate_concluded(&database, &queued, "cancelled").await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn ready_secret_precedence_is_rechecked_for_scheduling_and_grant_issuance() -> TestResult {
+    run_with_database(|database| async move {
+        for (initial_scope, higher_scope) in [
+            ("repository", "environment"),
+            ("tenant", "repository"),
+            ("tenant", "environment"),
+        ] {
+            let (queued, actor, environment_id) =
+                prepare_ready_protected_secret_gate(&database, initial_scope).await?;
+            seed_higher_precedence_secret(
+                &database,
+                &queued,
+                &actor,
+                higher_scope,
+                (higher_scope == "environment").then_some(environment_id),
+            )
+            .await?;
+            let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+            assert_eq!(
+                database
+                    .store()
+                    .inspect_job_environment_gate(&tenant, queued.attempt_id)
+                    .await?
+                    .phase(),
+                JobEnvironmentGatePhase::Terminal,
+                "{initial_scope} selection must be invalidated by {higher_scope} shadow"
+            );
+            assert_queued_gate_concluded(&database, &queued, "ready").await?;
+        }
+
+        let (lease_guarded, actor, environment_id) =
+            prepare_ready_protected_secret_gate(&database, "repository").await?;
+        seed_higher_precedence_secret(
+            &database,
+            &lease_guarded,
+            &actor,
+            "environment",
+            Some(environment_id),
+        )
+        .await?;
+        let Err(lease_error) = lease_execution(&database, lease_guarded).await else {
+            return Err("lease authority accepted a shadowed secret selection".into());
+        };
+        assert!(
+            lease_error
+                .to_string()
+                .contains("job secret selection no longer has highest precedence"),
+            "unexpected lease rejection: {lease_error}"
+        );
+
+        let (grant_guarded, actor, environment_id) =
+            prepare_ready_protected_secret_gate(&database, "repository").await?;
+        seed_higher_precedence_secret(
+            &database,
+            &grant_guarded,
+            &actor,
+            "environment",
+            Some(environment_id),
+        )
+        .await?;
+        // Bypass only the new lease-time guard so this independent case can
+        // prove grant issuance enforces the same precedence boundary.
+        sqlx::query(
+            "ALTER TABLE job_attempts DISABLE TRIGGER job_attempts_require_current_secret_precedence_before_lease",
+        )
+        .execute(database.pool())
+        .await?;
+        let execution = lease_execution(&database, grant_guarded).await?;
+        sqlx::query(
+            "ALTER TABLE job_attempts ENABLE TRIGGER job_attempts_require_current_secret_precedence_before_lease",
+        )
+        .execute(database.pool())
+        .await?;
+        let tenant = TenantScope::from_authenticated_tenant_id(&execution.tenant)?;
+        let issue = IssueLeasedJobSecretGrants::new(
+            tenant,
+            execution.lease.attempt_id(),
+            execution.lease.lease_id(),
+            execution.lease.fencing_token(),
+            execution.lease.issued_at(),
+            execution.lease.expires_at(),
+        )?;
+        assert!(matches!(
+            database.store().issue_leased_job_secret_grants(issue).await,
+            Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        ));
+
+        // Missing-name resolution is an intentional immutable snapshot: a
+        // secret created later does not retroactively inject a credential into
+        // the already-resolved job.
+        let late_binding = BindingIdentity::fresh();
+        let missing_requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::None,
+            ["AUTHORITY_TOKEN_0".to_owned()],
+            [],
+        )?;
+        let missing =
+            seed_queued_execution(&database, vec![late_binding], missing_requirements).await?;
+        prepare_and_resolve_unprotected_gate(&database, &missing).await?;
+        let now = database_now_ms(&database).await?;
+        let late_actor = seed_secret_actor(database.pool(), &missing.tenant, now).await?;
+        activate_builtin_provider(database.pool(), &missing.tenant, now).await?;
+        seed_repository_secret(
+            database.pool(),
+            missing.repository_id,
+            &late_actor,
+            late_binding,
+            0,
+        )
+        .await?;
+        let missing_tenant = TenantScope::from_authenticated_tenant_id(&missing.tenant)?;
+        assert_eq!(
+            database
+                .store()
+                .inspect_job_environment_gate(&missing_tenant, missing.attempt_id)
+                .await?
+                .phase(),
+            JobEnvironmentGatePhase::Ready
+        );
+        Ok(())
+    })
+    .await
 }
 
 async fn insert_workload_grant(

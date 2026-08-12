@@ -143,8 +143,12 @@ Secret Service session and returns the current closed gate state: `waiting`,
 
 The command sends a mutation only once. If transport fails or the server cannot
 return a trustworthy result, the outcome may be indeterminate because the
-decision or subsequent credential resolution could already be durable. Inspect
-the current gate before retrying, and retry only the exact same decision.
+decision or subsequent credential resolution could already be durable. An exact
+same-decision replay by the same reviewer is idempotent only when that decision
+was durably applied. Retry only the same repository UUID, attempt UUID, and
+decision; a different decision conflicts. A review of an expired or cancelled
+gate conflicts on every retry, even when terminalizing the gated attempt is a
+durable side effect of that request.
 
 ## Manage repository secrets from the CLI
 

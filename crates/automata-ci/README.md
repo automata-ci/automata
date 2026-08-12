@@ -302,8 +302,8 @@ automata environment-review --server-url https://ci.example.test \
 
 The command uses the same Secret Service-only CLI session custody, accepts
 `approve` or `reject`, and returns only the closed gate state. It does not retry
-the mutation automatically; an indeterminate result must be inspected before
-the exact same decision is retried.
+the mutation automatically; an indeterminate result may be retried only with
+the exact same repository UUID, attempt UUID, and decision.
 
 ## GitHub provider registry
 

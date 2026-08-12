@@ -35,6 +35,7 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
     LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE, LogicalActivationObject,
     LogicalActivationPreparationStore as _, LogicalActivationRepository as _,
     LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
@@ -51,13 +52,14 @@ use automata_ci_store::{
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    PublishReusableWorkflowCall, ReusableCallOutputMapping, ReusableWorkflowOperationId,
-    ReusableWorkflowRuntimeRepository as _, ReusableWorkflowRuntimeStoreError, RoutingDocument,
-    RunReconciliationRepository as _, RunnableAttemptRepository as _, RunnableScanLimit,
-    RunnableScanRequest, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
-    RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _, WorkflowConcurrency,
-    WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowRuntimePolicyPin, WorkflowSnapshotId,
+    PublishReusableWorkflowCall, ReusableCallOutputMapping, ReusableSecretPermission,
+    ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
+    ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
+    RunnableAttemptRepository as _, RunnableScanLimit, RunnableScanRequest, RunnerGeneration,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _, StableRunnerSlot,
+    StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _,
+    WorkflowConcurrency, WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowRuntimePolicyPin,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
@@ -2649,6 +2651,12 @@ fn prepared_instance(
         )
         .expect("JobIR descriptor"),
         runtime,
+        JobEnvironmentActivationEvidence::new(
+            None,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        ),
     )
     .expect("activated instance");
     PreparedInstance {

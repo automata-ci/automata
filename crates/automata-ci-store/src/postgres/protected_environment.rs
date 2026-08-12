@@ -8,17 +8,22 @@ use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
-    BindLeasedJobSecrets, DeploymentEnvironmentName, InspectLeasedJobSecretBindings,
-    IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding, JobEnvironmentActivationEvidence,
-    JobEnvironmentGatePhase, JobEnvironmentGateSnapshot, JobEnvironmentGateState, JobEventTrust,
-    JobSourceKind, PrepareJobEnvironment, ProtectedEnvironmentRepository,
-    ProtectedEnvironmentStoreError, ReusableSecretPermission, ReviewJobEnvironment, StoreError,
-    TenantScope,
+    BindLeasedJobSecrets, CancellationActor, CancellationReason, DeploymentEnvironmentName,
+    InspectLeasedJobSecretBindings, IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding,
+    JobEnvironmentActivationEvidence, JobEnvironmentGatePhase, JobEnvironmentGateSnapshot,
+    JobEnvironmentGateState, JobEventTrust, JobSourceKind, PrepareJobEnvironment,
+    ProtectedEnvironmentRepository, ProtectedEnvironmentStoreError, RequestCancellation,
+    ReusableSecretPermission, ReviewJobEnvironment, StoreError, TenantScope,
 };
 
 use super::{PostgresStore, secret_management::authorize_human_repository_action};
 
 const PROTECTED_ENVIRONMENT_REVIEW_PERMISSION: &str = "environments:approve";
+const TERMINAL_CANCELLATION_ID_DOMAIN: &[u8] =
+    b"automata.store.protected-environment-terminal-cancellation.v1\0";
+const PROTECTED_ENVIRONMENT_GATE_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const TERMINAL_CANCELLATION_ACTOR: &str = "protected-environment-gate";
+const TERMINAL_CANCELLATION_REASON: &str = "protected environment gate terminated";
 
 #[async_trait]
 impl ProtectedEnvironmentRepository for PostgresStore {
@@ -27,7 +32,7 @@ impl ProtectedEnvironmentRepository for PostgresStore {
         tenant: &TenantScope,
         attempt_id: automata_ci_core::AttemptId,
     ) -> Result<JobEnvironmentGateSnapshot, ProtectedEnvironmentStoreError> {
-        inspect_job_environment_gate(&self.pool, tenant, attempt_id.as_uuid()).await
+        inspect_job_environment_gate(self, tenant, attempt_id).await
     }
 
     async fn prepare_job_environment(
@@ -41,7 +46,15 @@ impl ProtectedEnvironmentRepository for PostgresStore {
         &self,
         request: ReviewJobEnvironment,
     ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
-        review_job_environment(&self.pool, request).await
+        review_job_environment(self, request).await
+    }
+
+    async fn conclude_terminal_job_environment(
+        &self,
+        tenant: &TenantScope,
+        attempt_id: automata_ci_core::AttemptId,
+    ) -> Result<(), ProtectedEnvironmentStoreError> {
+        conclude_terminal_job_environment(self, tenant, attempt_id).await
     }
 
     async fn resolve_job_credentials(
@@ -49,7 +62,7 @@ impl ProtectedEnvironmentRepository for PostgresStore {
         tenant: &TenantScope,
         attempt_id: automata_ci_core::AttemptId,
     ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
-        resolve_job_credentials(&self.pool, tenant, attempt_id.as_uuid()).await
+        resolve_job_credentials(self, tenant, attempt_id.as_uuid()).await
     }
 
     async fn bind_leased_job_secrets(
@@ -74,12 +87,346 @@ impl ProtectedEnvironmentRepository for PostgresStore {
     }
 }
 
-async fn inspect_job_environment_gate(
-    pool: &PgPool,
+const fn terminal_gate_state(state: JobEnvironmentGateState) -> bool {
+    matches!(
+        state,
+        JobEnvironmentGateState::Rejected
+            | JobEnvironmentGateState::Expired
+            | JobEnvironmentGateState::Cancelled
+    )
+}
+
+async fn conclude_terminal_job_environment(
+    store: &PostgresStore,
     tenant: &TenantScope,
-    attempt_id: Uuid,
+    attempt_id: automata_ci_core::AttemptId,
+) -> Result<(), ProtectedEnvironmentStoreError> {
+    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    super::admission::lock_attempt_concurrency(&mut transaction, attempt_id)
+        .await
+        .map_err(ProtectedEnvironmentStoreError::Operation)?;
+    let row = lock_gate_attempt(&mut transaction, tenant, attempt_id).await?;
+    let now = database_now(&mut transaction).await?;
+    let mut state: String = row.try_get("state").map_err(operation_error)?;
+    let attempt_lifecycle: String = row.try_get("lifecycle").map_err(operation_error)?;
+    if state == "ready" && attempt_lifecycle == "cancelled" {
+        // Stale-ready inspection preserves the immutable ready snapshot while
+        // atomically cancelling the attempt. The scheduler's follow-up
+        // conclusion call must therefore replay that canonical cancellation.
+        conclude_gate_in_transaction(store, &mut transaction, attempt_id, now).await?;
+        transaction.commit().await.map_err(operation_error)?;
+        return Ok(());
+    }
+    if state == "selection_pending" {
+        let created_at_ms: i64 = row.try_get("created_at_ms").map_err(operation_error)?;
+        if now < gate_deadline(created_at_ms)? {
+            return Err(ProtectedEnvironmentStoreError::Conflict);
+        }
+        // The canonical cancellation transition changes an unprepared gate to
+        // `cancelled`; no unproven environment identity is fabricated merely
+        // to represent expiry.
+        state = "cancelled".to_owned();
+    }
+    if !matches!(state.as_str(), "rejected" | "expired" | "cancelled") {
+        return Err(ProtectedEnvironmentStoreError::Conflict);
+    }
+    conclude_gate_in_transaction(store, &mut transaction, attempt_id, now).await?;
+    transaction.commit().await.map_err(operation_error)
+}
+
+fn terminal_cancellation_operation_id(
+    attempt_id: automata_ci_core::AttemptId,
+) -> automata_ci_core::OperationId {
+    let mut hasher = Sha256::new();
+    hasher.update(TERMINAL_CANCELLATION_ID_DOMAIN);
+    hasher.update(attempt_id.as_uuid().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    automata_ci_core::OperationId::from_uuid(Uuid::from_bytes(bytes))
+}
+
+async fn lock_gate_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantScope,
+    attempt_id: automata_ci_core::AttemptId,
+) -> Result<PgRow, ProtectedEnvironmentStoreError> {
+    sqlx::query(
+        r"
+        SELECT gate.state, gate.created_at_ms, attempt.lifecycle
+        FROM job_environment_gates AS gate
+        JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
+        WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
+        FOR UPDATE OF gate, attempt
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(attempt_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProtectedEnvironmentStoreError::NotFound)
+}
+
+fn gate_deadline(created_at_ms: i64) -> Result<i64, ProtectedEnvironmentStoreError> {
+    created_at_ms
+        .checked_add(PROTECTED_ENVIRONMENT_GATE_LIFETIME_MILLIS)
+        .ok_or(ProtectedEnvironmentStoreError::CorruptData)
+}
+
+async fn conclude_gate_in_transaction(
+    store: &PostgresStore,
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt_id: automata_ci_core::AttemptId,
+    now: i64,
+) -> Result<(), ProtectedEnvironmentStoreError> {
+    conclude_gate_with_encryption(
+        transaction,
+        store.runner_payload_encryption.as_ref(),
+        attempt_id,
+        now,
+    )
+    .await
+}
+
+async fn conclude_gate_with_encryption(
+    transaction: &mut Transaction<'_, Postgres>,
+    encryption: Option<&super::RunnerPayloadEncryption>,
+    attempt_id: automata_ci_core::AttemptId,
+    now: i64,
+) -> Result<(), ProtectedEnvironmentStoreError> {
+    let attempt_lifecycle: String =
+        sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1 FOR UPDATE")
+            .bind(attempt_id.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(operation_error)?
+            .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
+    if !matches!(attempt_lifecycle.as_str(), "queued" | "cancelled") {
+        return Err(ProtectedEnvironmentStoreError::Conflict);
+    }
+
+    let existing = sqlx::query(
+        r"
+        SELECT operation_id, requested_by, reason, requested_at_ms,
+               delivery_session_id
+        FROM attempt_cancellation_intents
+        WHERE attempt_id = $1
+        FOR UPDATE
+        ",
+    )
+    .bind(attempt_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let request = if let Some(existing) = existing {
+        if existing
+            .try_get::<Option<Uuid>, _>("delivery_session_id")
+            .map_err(operation_error)?
+            .is_some()
+        {
+            return Err(ProtectedEnvironmentStoreError::CorruptData);
+        }
+        let actor: String = existing.try_get("requested_by").map_err(operation_error)?;
+        let reason: Option<String> = existing.try_get("reason").map_err(operation_error)?;
+        RequestCancellation::new(
+            automata_ci_core::OperationId::from_uuid(
+                existing.try_get("operation_id").map_err(operation_error)?,
+            ),
+            attempt_id,
+            CancellationActor::new(actor)
+                .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?,
+            reason
+                .map(CancellationReason::new)
+                .transpose()
+                .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?,
+            automata_ci_core::UnixMillis::new(
+                existing
+                    .try_get("requested_at_ms")
+                    .map_err(operation_error)?,
+            ),
+        )
+    } else {
+        if attempt_lifecycle != "queued" {
+            return Err(ProtectedEnvironmentStoreError::CorruptData);
+        }
+        RequestCancellation::new(
+            terminal_cancellation_operation_id(attempt_id),
+            attempt_id,
+            CancellationActor::new(TERMINAL_CANCELLATION_ACTOR)
+                .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?,
+            Some(
+                CancellationReason::new(TERMINAL_CANCELLATION_REASON)
+                    .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?,
+            ),
+            automata_ci_core::UnixMillis::new(now),
+        )
+    };
+    super::g1::request_cancellation_in_transaction(transaction, encryption, request)
+        .await
+        .map_err(ProtectedEnvironmentStoreError::Operation)?;
+    Ok(())
+}
+
+async fn ready_gate_is_current(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantScope,
+    attempt_id: automata_ci_core::AttemptId,
+    now: i64,
+) -> Result<bool, ProtectedEnvironmentStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT (
+            gate.state = 'ready'
+            AND gate.resolution_digest IS NOT DISTINCT FROM
+                automata_job_credential_resolution_digest(gate.attempt_id)
+            AND (
+                gate.environment_id IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM repository_environments AS environment
+                    WHERE environment.tenant_id = gate.tenant_id
+                      AND environment.repository_id = gate.repository_id
+                      AND environment.id = gate.environment_id
+                      AND environment.status = 'active'
+                      AND environment.revision = gate.environment_revision
+                )
+            )
+            AND (
+                gate.approval_request_id IS NULL
+                OR automata_protected_environment_approval_is_current(
+                    gate.tenant_id, gate.approval_request_id, $3
+                )
+            )
+            AND gate.resolved_secret_count = (
+                SELECT count(*)
+                FROM job_secret_selections AS selection
+                JOIN secrets AS secret
+                  ON secret.tenant_id = selection.tenant_id
+                 AND secret.id = selection.secret_id
+                 AND secret.current_version_id = selection.secret_version_id
+                 AND secret.current_version_number = selection.secret_version_number
+                 AND secret.canonical_name = selection.canonical_name
+                JOIN secret_policies AS policy
+                  ON policy.tenant_id = secret.tenant_id
+                 AND policy.secret_id = secret.id
+                WHERE selection.attempt_id = gate.attempt_id
+                  AND selection.binding_digest IS NOT DISTINCT FROM
+                      automata_job_secret_selection_digest(
+                          selection.attempt_id, selection.canonical_name,
+                          selection.tenant_id, selection.secret_id,
+                          selection.secret_version_id,
+                          selection.secret_version_number,
+                          selection.scope_kind, selection.environment_id
+                      )
+                  AND automata_secret_is_available_to_gate(secret, policy, gate)
+                  AND NOT (
+                      selection.scope_kind = 'repository'
+                      AND EXISTS (
+                          SELECT 1 FROM secrets AS higher
+                          JOIN secret_policies AS higher_policy
+                            ON higher_policy.tenant_id = higher.tenant_id
+                           AND higher_policy.secret_id = higher.id
+                          WHERE higher.tenant_id = gate.tenant_id
+                            AND higher.repository_id = gate.repository_id
+                            AND higher.environment_id = gate.environment_id
+                            AND higher.scope_kind = 'environment'
+                            AND higher.canonical_name = selection.canonical_name
+                            AND automata_secret_is_available_to_gate(
+                                higher, higher_policy, gate
+                            )
+                      )
+                  )
+                  AND NOT (
+                      selection.scope_kind = 'tenant'
+                      AND EXISTS (
+                          SELECT 1 FROM secrets AS higher
+                          JOIN secret_policies AS higher_policy
+                            ON higher_policy.tenant_id = higher.tenant_id
+                           AND higher_policy.secret_id = higher.id
+                          WHERE higher.tenant_id = gate.tenant_id
+                            AND higher.repository_id = gate.repository_id
+                            AND higher.canonical_name = selection.canonical_name
+                            AND higher.scope_kind IN ('repository', 'environment')
+                            AND (higher.scope_kind = 'repository'
+                                 OR higher.environment_id = gate.environment_id)
+                            AND automata_secret_is_available_to_gate(
+                                higher, higher_policy, gate
+                            )
+                      )
+                  )
+            )
+            AND gate.resolved_variable_count = (
+                SELECT count(*)
+                FROM job_variable_bindings AS binding
+                JOIN workflow_variables AS variable
+                  ON variable.tenant_id = binding.tenant_id
+                 AND variable.id = binding.variable_id
+                 AND variable.repository_id = gate.repository_id
+                 AND variable.canonical_name = binding.canonical_name
+                 AND variable.scope_kind = binding.scope_kind
+                 AND variable.environment_id IS NOT DISTINCT FROM binding.environment_id
+                 AND variable.current_version_id = binding.variable_version_id
+                 AND variable.current_version_number = binding.variable_version_number
+                 AND variable.status = 'active'
+                WHERE binding.attempt_id = gate.attempt_id
+                  AND binding.binding_digest IS NOT DISTINCT FROM
+                      automata_job_variable_binding_digest(
+                          binding.attempt_id, binding.canonical_name,
+                          binding.tenant_id, binding.variable_id,
+                          binding.variable_version_id,
+                          binding.variable_version_number,
+                          binding.scope_kind, binding.environment_id
+                      )
+                  AND (binding.scope_kind = 'repository'
+                       OR binding.environment_id = gate.environment_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM workflow_variables AS higher
+                      WHERE higher.tenant_id = gate.tenant_id
+                        AND higher.repository_id = gate.repository_id
+                        AND higher.environment_id = gate.environment_id
+                        AND higher.scope_kind = 'environment'
+                        AND higher.canonical_name = binding.canonical_name
+                        AND higher.status = 'active'
+                        AND binding.scope_kind = 'repository'
+                  )
+            )
+            AND gate.missing_secret_count = (
+                -- Missing bindings deliberately snapshot GitHub-compatible
+                -- absence. A later create does not rewrite an immutable
+                -- resolution; only a selected authority becoming stale or
+                -- shadowed invalidates schedulability.
+                SELECT count(*) FROM job_missing_secret_bindings
+                WHERE attempt_id = gate.attempt_id
+            )
+            AND gate.missing_variable_count = (
+                SELECT count(*) FROM job_missing_variable_bindings
+                WHERE attempt_id = gate.attempt_id
+            )
+        )
+        FROM job_environment_gates AS gate
+        WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(attempt_id.as_uuid())
+    .bind(now)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProtectedEnvironmentStoreError::NotFound)
+}
+
+async fn inspect_job_environment_gate(
+    store: &PostgresStore,
+    tenant: &TenantScope,
+    attempt_id: automata_ci_core::AttemptId,
 ) -> Result<JobEnvironmentGateSnapshot, ProtectedEnvironmentStoreError> {
-    let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    super::admission::lock_attempt_concurrency(&mut transaction, attempt_id)
+        .await
+        .map_err(ProtectedEnvironmentStoreError::Operation)?;
     let row = sqlx::query(
         r"
         SELECT gate.state, gate.created_at_ms, gate.approval_request_id,
@@ -104,12 +451,18 @@ async fn inspect_job_environment_gate(
         ",
     )
     .bind(tenant.as_str())
-    .bind(attempt_id)
+    .bind(attempt_id.as_uuid())
     .fetch_optional(&mut *transaction)
     .await
     .map_err(operation_error)?
     .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
+    let database_now_ms = database_now(&mut transaction).await?;
     let mut state: String = row.try_get("state").map_err(operation_error)?;
+    if state == "selection_pending"
+        && database_now_ms >= gate_deadline(row.try_get("created_at_ms").map_err(operation_error)?)?
+    {
+        state = "cancelled".to_owned();
+    }
     if state == "waiting" {
         let approval_id: Option<Uuid> = row
             .try_get("approval_request_id")
@@ -134,18 +487,32 @@ async fn inspect_job_environment_gate(
         if approval_status != "pending" {
             return Err(ProtectedEnvironmentStoreError::CorruptData);
         }
-        let database_now_ms = database_now(&mut transaction).await?;
         if database_now_ms >= expires_at_ms {
             expire_gate(
                 &mut transaction,
                 tenant,
-                attempt_id,
+                attempt_id.as_uuid(),
                 approval_id,
                 database_now_ms,
             )
             .await?;
             state = "expired".to_owned();
         }
+    }
+    if state == "resolving"
+        && !resolving_gate_is_current(&mut transaction, tenant, attempt_id, database_now_ms).await?
+    {
+        state = "cancelled".to_owned();
+    }
+    if state == "ready"
+        && !ready_gate_is_current(&mut transaction, tenant, attempt_id, database_now_ms).await?
+    {
+        // `ready` resolution evidence is immutable. Cancellation concludes the
+        // attempt while preserving that historical snapshot for audit.
+        state = "cancelled".to_owned();
+    }
+    if matches!(state.as_str(), "rejected" | "expired" | "cancelled") {
+        conclude_gate_in_transaction(store, &mut transaction, attempt_id, database_now_ms).await?;
     }
     let phase = match state.as_str() {
         "selection_pending" => JobEnvironmentGatePhase::SelectionPending,
@@ -182,6 +549,47 @@ async fn inspect_job_environment_gate(
     );
     transaction.commit().await.map_err(operation_error)?;
     Ok(snapshot)
+}
+
+async fn resolving_gate_is_current(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantScope,
+    attempt_id: automata_ci_core::AttemptId,
+    now: i64,
+) -> Result<bool, ProtectedEnvironmentStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT (
+            gate.state = 'resolving'
+            AND (
+                gate.environment_id IS NULL
+                OR EXISTS (
+                    SELECT 1 FROM repository_environments AS environment
+                    WHERE environment.tenant_id = gate.tenant_id
+                      AND environment.repository_id = gate.repository_id
+                      AND environment.id = gate.environment_id
+                      AND environment.status = 'active'
+                      AND environment.revision = gate.environment_revision
+                )
+            )
+            AND (
+                gate.approval_request_id IS NULL
+                OR automata_protected_environment_approval_is_current(
+                    gate.tenant_id, gate.approval_request_id, $3
+                )
+            )
+        )
+        FROM job_environment_gates AS gate
+        WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(attempt_id.as_uuid())
+    .bind(now)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProtectedEnvironmentStoreError::NotFound)
 }
 
 pub(super) fn decode_job_environment_activation_evidence(
@@ -449,10 +857,10 @@ async fn prepare_job_environment(
 
 #[allow(clippy::too_many_lines)] // One transaction serializes review, threshold, and gate state.
 async fn review_job_environment(
-    pool: &PgPool,
+    store: &PostgresStore,
     request: ReviewJobEnvironment,
 ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
-    let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
     let tenant = TenantScope::from_authenticated_tenant_id(request.actor().tenant_id().as_str())
         .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
     let actor = authorize_human_repository_action(
@@ -472,6 +880,9 @@ async fn review_job_environment(
     {
         return Err(ProtectedEnvironmentStoreError::CorruptData);
     }
+    super::admission::lock_attempt_concurrency(&mut transaction, request.attempt_id())
+        .await
+        .map_err(ProtectedEnvironmentStoreError::Operation)?;
     let gate = sqlx::query(
         r"
         SELECT repository_id, approval_request_id, state
@@ -502,15 +913,33 @@ async fn review_job_environment(
                 error
             }
         })?;
-        let approval_id = approval_id.ok_or(ProtectedEnvironmentStoreError::Conflict)?;
-        let existing = existing_review_decision(
-            &mut transaction,
-            &tenant,
-            approval_id,
-            actor.principal_id,
-        )
-        .await?;
-        if existing.as_deref() != Some(request.decision().as_str()) {
+        let decision_is_exact = if let Some(approval_id) = approval_id {
+            existing_review_decision(&mut transaction, &tenant, approval_id, actor.principal_id)
+                .await?
+                .as_deref()
+                == Some(request.decision().as_str())
+        } else {
+            false
+        };
+        if terminal_gate_state(state) {
+            let database_now_ms = database_now(&mut transaction).await?;
+            conclude_gate_in_transaction(
+                store,
+                &mut transaction,
+                request.attempt_id(),
+                database_now_ms,
+            )
+            .await?;
+            // A terminal gate must close the queued attempt even when this is
+            // not an exact review replay. Commit liveness first, then report
+            // the non-applied/opposite decision as a conflict.
+            transaction.commit().await.map_err(operation_error)?;
+            if !decision_is_exact {
+                return Err(ProtectedEnvironmentStoreError::Conflict);
+            }
+            return Ok(state);
+        }
+        if !decision_is_exact {
             return Err(ProtectedEnvironmentStoreError::Conflict);
         }
         transaction.commit().await.map_err(operation_error)?;
@@ -576,8 +1005,18 @@ async fn review_job_environment(
             database_now_ms,
         )
         .await?;
+        conclude_gate_in_transaction(
+            store,
+            &mut transaction,
+            request.attempt_id(),
+            database_now_ms,
+        )
+        .await?;
         transaction.commit().await.map_err(operation_error)?;
-        return Ok(JobEnvironmentGateState::Expired);
+        // The attempted decision was never recorded. Persist expiry and
+        // terminalization, but report a non-applied review rather than echoing
+        // a successful decision response that cannot be replayed exactly.
+        return Err(ProtectedEnvironmentStoreError::Conflict);
     }
 
     let decision = request.decision().as_str();
@@ -598,13 +1037,9 @@ async fn review_job_environment(
     .await
     .map_err(review_operation_error)?;
     if inserted.rows_affected() == 0 {
-        let existing = existing_review_decision(
-            &mut transaction,
-            &tenant,
-            approval_id,
-            actor.principal_id,
-        )
-        .await?;
+        let existing =
+            existing_review_decision(&mut transaction, &tenant, approval_id, actor.principal_id)
+                .await?;
         if existing.as_deref() != Some(decision) {
             return Err(ProtectedEnvironmentStoreError::Conflict);
         }
@@ -699,6 +1134,15 @@ async fn review_job_environment(
     if gate_update.rows_affected() != 1 {
         return Err(ProtectedEnvironmentStoreError::Conflict);
     }
+    if gate_status == "rejected" {
+        conclude_gate_in_transaction(
+            store,
+            &mut transaction,
+            request.attempt_id(),
+            database_now_ms,
+        )
+        .await?;
+    }
     transaction.commit().await.map_err(operation_error)?;
     parse_gate_state(gate_status)
 }
@@ -725,11 +1169,15 @@ async fn existing_review_decision(
 
 #[allow(clippy::too_many_lines)] // One transaction makes the complete resolution immutable.
 async fn resolve_job_credentials(
-    pool: &PgPool,
+    store: &PostgresStore,
     tenant: &TenantScope,
     attempt_id: Uuid,
 ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
-    let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    let typed_attempt_id = automata_ci_core::AttemptId::from_uuid(attempt_id);
+    super::admission::lock_attempt_concurrency(&mut transaction, typed_attempt_id)
+        .await
+        .map_err(ProtectedEnvironmentStoreError::Operation)?;
     let row = sqlx::query(
         r"
         SELECT gate.repository_id, gate.state, job.secret_reference_names,
@@ -758,6 +1206,12 @@ async fn resolve_job_credentials(
     if state != "resolving" {
         return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
     }
+    let now = database_now(&mut transaction).await?;
+    if !resolving_gate_is_current(&mut transaction, tenant, typed_attempt_id, now).await? {
+        conclude_gate_in_transaction(store, &mut transaction, typed_attempt_id, now).await?;
+        transaction.commit().await.map_err(operation_error)?;
+        return Ok(JobEnvironmentGateState::Cancelled);
+    }
     let repository_id: Uuid = row.try_get("repository_id").map_err(operation_error)?;
     let secret_names: Vec<String> = row
         .try_get("secret_reference_names")
@@ -765,8 +1219,6 @@ async fn resolve_job_credentials(
     let variable_names: Vec<String> = row
         .try_get("variable_reference_names")
         .map_err(operation_error)?;
-    let now = database_now(&mut transaction).await?;
-
     for name in &variable_names {
         let candidate = sqlx::query(
             r"
@@ -1161,6 +1613,41 @@ async fn issue_leased_job_secret_grants(
                   selection.environment_id
               )
           AND automata_secret_is_available_to_gate(secret, policy, current_gate)
+          AND NOT (
+              selection.scope_kind = 'repository'
+              AND EXISTS (
+                  SELECT 1 FROM secrets AS higher
+                  JOIN secret_policies AS higher_policy
+                    ON higher_policy.tenant_id = higher.tenant_id
+                   AND higher_policy.secret_id = higher.id
+                  WHERE higher.tenant_id = current_gate.tenant_id
+                    AND higher.repository_id = current_gate.repository_id
+                    AND higher.environment_id = current_gate.environment_id
+                    AND higher.scope_kind = 'environment'
+                    AND higher.canonical_name = selection.canonical_name
+                    AND automata_secret_is_available_to_gate(
+                        higher, higher_policy, current_gate
+                    )
+              )
+          )
+          AND NOT (
+              selection.scope_kind = 'tenant'
+              AND EXISTS (
+                  SELECT 1 FROM secrets AS higher
+                  JOIN secret_policies AS higher_policy
+                    ON higher_policy.tenant_id = higher.tenant_id
+                   AND higher_policy.secret_id = higher.id
+                  WHERE higher.tenant_id = current_gate.tenant_id
+                    AND higher.repository_id = current_gate.repository_id
+                    AND higher.canonical_name = selection.canonical_name
+                    AND higher.scope_kind IN ('repository', 'environment')
+                    AND (higher.scope_kind = 'repository'
+                         OR higher.environment_id = current_gate.environment_id)
+                    AND automata_secret_is_available_to_gate(
+                        higher, higher_policy, current_gate
+                    )
+              )
+          )
           AND secret.provider_id = 'builtin'
           AND version.storage_kind = 'built_in_ciphertext'
           AND lifecycle.status = 'active'

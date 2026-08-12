@@ -707,6 +707,7 @@ pub struct LogicalActivationExecutionContext {
     workflow_id: WorkflowId,
     workflow_name: String,
     git_ref: String,
+    root_event_name: String,
     actor: Option<String>,
     triggering_actor: Option<String>,
     run_id_alias: RunIdAlias,
@@ -725,10 +726,12 @@ impl LogicalActivationExecutionContext {
     ///
     /// Rejects nil workflow identity, invalid execution text or Git ref, and
     /// zero run-number/attempt sentinels.
+    #[allow(clippy::too_many_arguments)] // Mirrors immutable workflow-run execution evidence.
     pub fn new(
         workflow_id: WorkflowId,
         workflow_name: String,
         git_ref: String,
+        root_event_name: String,
         actor: Option<String>,
         run_id_alias: RunIdAlias,
         run_number: u64,
@@ -739,6 +742,7 @@ impl LogicalActivationExecutionContext {
         }
         validate_bounded_text(&workflow_name, "workflow name")?;
         validate_bounded_text(&git_ref, "Git ref")?;
+        validate_bounded_text(&root_event_name, "root event name")?;
         if !git_ref.starts_with("refs/") || git_ref == "refs/" {
             return Err(LogicalActivationValueError::InvalidGitRef);
         }
@@ -755,6 +759,7 @@ impl LogicalActivationExecutionContext {
             workflow_id,
             workflow_name,
             git_ref,
+            root_event_name,
             actor,
             triggering_actor: None,
             run_id_alias,
@@ -779,6 +784,16 @@ impl LogicalActivationExecutionContext {
     #[must_use]
     pub fn git_ref(&self) -> &str {
         &self.git_ref
+    }
+
+    /// Returns the immutable authenticated event name admitted for the root run.
+    ///
+    /// Reusable-workflow plans use the synthetic `workflow_call` trigger, so
+    /// security policy must use this run-level provenance rather than the
+    /// child plan trigger when classifying fork and automation trust.
+    #[must_use]
+    pub fn root_event_name(&self) -> &str {
+        &self.root_event_name
     }
 
     /// Returns the authenticated event actor when one was admitted.
@@ -959,13 +974,16 @@ impl ActivatedLogicalInstanceDescriptor {
     /// # Errors
     ///
     /// Rejects a logical key that does not match the claimed job or object
-    /// descriptors of the wrong kind.
+    /// descriptors of the wrong kind. Value-free environment-gate evidence is
+    /// mandatory for every newly constructed instance; only historical durable
+    /// decoding may represent a pre-evidence row.
     pub fn new(
         claimed: &ClaimedLogicalJobActivation,
         identity: &JobInstanceIdentity,
         workspace: impl Into<String>,
         job_ir: LogicalActivationObject,
         runtime_context: LogicalActivationObject,
+        environment_gate: JobEnvironmentActivationEvidence,
     ) -> Result<Self, LogicalActivationValueError> {
         if identity.logical_job_key() != claimed.logical_key().as_str() {
             return Err(LogicalActivationValueError::LogicalKeyMismatch);
@@ -992,17 +1010,22 @@ impl ActivatedLogicalInstanceDescriptor {
             workspace,
             job_ir,
             runtime_context,
-            environment_gate: None,
+            environment_gate: Some(environment_gate),
         })
     }
 
-    /// Attaches value-free, activation-derived environment-gate evidence.
+    /// Replaces the value-free evidence while constructing a divergent test or
+    /// retry candidate. A descriptor can never transition back to no evidence.
     #[must_use]
     pub fn with_environment_gate(mut self, evidence: JobEnvironmentActivationEvidence) -> Self {
         self.environment_gate = Some(evidence);
         self
     }
 
+    /// Decodes either a current instance or retained pre-evidence history.
+    ///
+    /// `None` is accepted only on this internal durable path so terminal rows
+    /// written before the evidence migration remain readable.
     #[allow(clippy::too_many_arguments)] // Mirrors one immutable durable descriptor row exactly.
     pub(crate) fn from_durable(
         id: LogicalWorkflowInstanceId,

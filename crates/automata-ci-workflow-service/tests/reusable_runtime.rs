@@ -493,6 +493,7 @@ async fn runtime_fixture(
             WorkflowId::from_uuid(Uuid::from_u128(17)),
             "Synthetic CI".to_owned(),
             GIT_REF.to_owned(),
+            "push".to_owned(),
             Some("synthetic-actor".to_owned()),
             RunIdAlias::new(11).expect("run alias"),
             1,

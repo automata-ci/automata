@@ -1,9 +1,9 @@
 # Metrics budget pressure
 
-This warning means a target is approaching its 1,000-runner or 5,000-control-
+This warning means a target is approaching its 1,000-runner or 5,250-control-
 plane sample limit. The current reviewed classic maxima are 939 runner and
-4,779 control-plane series. With native and classic histograms ingested
-together, the reviewed Prometheus maxima are 969 runner and 4,916
+5,024 control-plane series. With native and classic histograms ingested
+together, the reviewed Prometheus maxima are 969 runner and 5,169
 control-plane samples per scrape, before Prometheus-generated target metadata.
 
 1. Compare `scrape_samples_post_metric_relabeling` and response size before and
@@ -20,7 +20,7 @@ control-plane samples per scrape, before Prometheus-generated target metadata.
 
 The runner warning starts above 980 post-relabel samples, leaving a small but
 intentional margin below the 1,000 hard limit; the control-plane warning starts
-above 4,500. If a scrape reaches its hard `sample_limit`, Prometheus rejects the
+above 4,725. If a scrape reaches its hard `sample_limit`, Prometheus rejects the
 entire scrape. Do not increase either limit until both application cardinality
 and native bucket/storage cost have been reviewed.
 

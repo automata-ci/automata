@@ -992,7 +992,8 @@ fn claim_target_query() -> &'static str {
            job.runtime_policy_revision, job.runtime_policy_digest,
            job.logical_key, job.source_order,
            job.execution_kind, job.created_at_ms,
-           run.workflow_id, run.workflow_name, run.git_ref, run.actor,
+           run.workflow_id, run.workflow_name, run.git_ref, run.event_name,
+           run.actor,
            run.triggering_actor,
            run.public_run_id_alias AS run_id_alias,
            run.run_number, run.run_attempt,
@@ -1236,6 +1237,7 @@ async fn decode_claimed(
     let workflow_id: Uuid = row.try_get("workflow_id").map_err(operation_error)?;
     let workflow_name: String = row.try_get("workflow_name").map_err(operation_error)?;
     let git_ref: String = row.try_get("git_ref").map_err(operation_error)?;
+    let root_event_name: String = row.try_get("event_name").map_err(operation_error)?;
     let actor: Option<String> = row.try_get("actor").map_err(operation_error)?;
     let triggering_actor: Option<String> =
         row.try_get("triggering_actor").map_err(operation_error)?;
@@ -1246,6 +1248,7 @@ async fn decode_claimed(
         WorkflowId::from_uuid(workflow_id),
         workflow_name,
         git_ref,
+        root_event_name,
         actor,
         RunIdAlias::new(
             u64::try_from(run_id_alias)
@@ -1406,6 +1409,7 @@ async fn insert_instance(
     request: &PublishLogicalJobActivation,
     instance: &ActivatedLogicalInstanceDescriptor,
 ) -> Result<(), LogicalActivationStoreError> {
+    let evidence = instance.environment_gate().ok_or_else(corrupt_instance)?;
     sqlx::query(
         r"
         INSERT INTO workflow_plan_v2_instances (
@@ -1456,29 +1460,27 @@ async fn insert_instance(
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    if let Some(evidence) = instance.environment_gate() {
-        sqlx::query(
-            r"
-            INSERT INTO workflow_plan_v2_job_environment_evidence (
-                instance_id, environment_normalized_name, event_trust,
-                source_kind, reusable_secret_permission, created_at_ms
-            ) VALUES ($1,$2,$3,$4,$5,$6)
-            ",
-        )
-        .bind(instance.id().as_uuid())
-        .bind(
-            evidence
-                .environment()
-                .map(crate::DeploymentEnvironmentName::normalized),
-        )
-        .bind(evidence.event_trust().as_str())
-        .bind(evidence.source_kind().as_str())
-        .bind(evidence.reusable_secret_permission().as_str())
-        .bind(request.published_at().get())
-        .execute(&mut **transaction)
-        .await
-        .map_err(operation_error)?;
-    }
+    sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_job_environment_evidence (
+            instance_id, environment_normalized_name, event_trust,
+            source_kind, reusable_secret_permission, created_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6)
+        ",
+    )
+    .bind(instance.id().as_uuid())
+    .bind(
+        evidence
+            .environment()
+            .map(crate::DeploymentEnvironmentName::normalized),
+    )
+    .bind(evidence.event_trust().as_str())
+    .bind(evidence.source_kind().as_str())
+    .bind(evidence.reusable_secret_permission().as_str())
+    .bind(request.published_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
     Ok(())
 }
 

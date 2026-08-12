@@ -290,8 +290,19 @@ async fn admit_authorized_rerun(
         return Ok(receipt);
     }
 
+    // Every member of a rerun lineage must take the group advisory lock before
+    // locking its selected source row. Otherwise a root-source request can own
+    // the root row while a nested-source request owns the group lock, and the
+    // nested attempt's root foreign key completes a row/advisory lock cycle.
+    let root_run_id_hint = resolve_rerun_root_hint(&mut transaction, &request).await?;
+    lock_rerun_group(&mut transaction, root_run_id_hint).await?;
     let source = lock_source_run(&mut transaction, &request).await?;
-    lock_rerun_group(&mut transaction, source.root_run_id).await?;
+    if source.root_run_id != root_run_id_hint {
+        return Err(StoreError::corrupt_data(
+            "workflow rerun root changed while acquiring its group lock",
+        )
+        .into());
+    }
     let database_now = database_now_ms(&mut transaction).await?;
     if source.root_created_at_ms > database_now
         || database_now.saturating_sub(source.root_created_at_ms) > MAX_WORKFLOW_RERUN_AGE_MILLIS
@@ -703,6 +714,37 @@ fn validate_replay_audit_evidence(
 
 fn replay_evidence_error() -> WorkflowRerunStoreError {
     StoreError::corrupt_data("workflow rerun replay lacks exact durable evidence").into()
+}
+
+async fn resolve_rerun_root_hint(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RerunWorkflow,
+) -> Result<Uuid, WorkflowRerunStoreError> {
+    // This is deliberately an unlocked hint. Rerun-attempt lineage is
+    // immutable, and an attempt-one source always resolves to itself. The
+    // locked source query below rechecks the value after the group lock is held.
+    let root_run_id: Uuid = sqlx::query_scalar(
+        r"
+        SELECT COALESCE(attempt.root_run_id, run.id)
+        FROM workflow_runs AS run
+        JOIN repositories AS repository ON repository.id = run.repository_id
+        LEFT JOIN workflow_rerun_attempts AS attempt ON attempt.run_id = run.id
+        WHERE repository.tenant_id = $1
+          AND run.repository_id = $2
+          AND run.id = $3
+        ",
+    )
+    .bind(request.actor().tenant_id().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.source_run_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(WorkflowRerunStoreError::NotFound)?;
+    if root_run_id.is_nil() {
+        return Err(StoreError::corrupt_data("workflow rerun root hint is nil").into());
+    }
+    Ok(root_run_id)
 }
 
 async fn lock_source_run(
