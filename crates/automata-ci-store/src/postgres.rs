@@ -1156,10 +1156,13 @@ pub(super) async fn issue_lease_renewal_in_transaction(
     }
     let requested_expires_at = runner_attempt_database_expiry(database_now, requested_duration)?;
     let authority_ceiling = validate_github_runtime_authority_renewal_evidence(
+        transaction,
         authority_evidence,
+        request,
+        current_expiration,
         database_now,
-        request.attempt_id(),
-    )?;
+    )
+    .await?;
     let expires_at = authority_ceiling.map_or(requested_expires_at, |ceiling| {
         requested_expires_at.min(ceiling)
     });
@@ -1209,10 +1212,13 @@ pub(super) async fn commit_database_issued_lease_renewal_in_transaction(
         return Err(AttemptStoreError::LeaseExpired(request.attempt_id));
     }
     let authority_ceiling = validate_github_runtime_authority_renewal_evidence(
+        transaction,
         authority_evidence,
+        request,
+        current_expiration,
         database_now,
-        request.attempt_id(),
-    )?;
+    )
+    .await?;
     if authority_ceiling.is_some_and(|ceiling| request.expires_at() > ceiling) {
         return Err(AttemptStoreError::RuntimeAuthorityCeilingExceeded(
             request.attempt_id(),
@@ -1229,7 +1235,22 @@ pub(super) async fn commit_database_issued_lease_renewal_in_transaction(
     }
 
     if !refreshes_exact_ceiling {
-        update_database_issued_lease_expiration(transaction, request, database_now).await?;
+        if authority_evidence.is_some() {
+            record_github_runtime_authority_lease_renewal(
+                transaction,
+                request,
+                current_expiration,
+                database_now,
+            )
+            .await?;
+        }
+        update_database_issued_lease_expiration(
+            transaction,
+            request,
+            current_expiration,
+            database_now,
+        )
+        .await?;
     }
     let runner_id = snapshot
         .runner_id
@@ -1255,6 +1276,7 @@ pub(super) async fn commit_database_issued_lease_renewal_in_transaction(
 async fn update_database_issued_lease_expiration(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: RenewLease,
+    previous_expires_at: UnixMillis,
     database_now: UnixMillis,
 ) -> Result<(), AttemptStoreError> {
     let result = sqlx::query(
@@ -1269,6 +1291,7 @@ async fn update_database_issued_lease_expiration(
           AND runner_session_id = $7
           AND runner_session_epoch = $8
           AND runner_generation = $9
+          AND lease_expires_at_ms = $10
           AND changed_at_ms <= $6
           AND lease_expires_at_ms > $6
         ",
@@ -1284,6 +1307,42 @@ async fn update_database_issued_lease_expiration(
     .bind(g1::runner_generation_to_i64(
         request.session.runner_generation(),
     )?)
+    .bind(previous_expires_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    require_single_update(result.rows_affected())
+}
+
+async fn record_github_runtime_authority_lease_renewal(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: RenewLease,
+    previous_expires_at: UnixMillis,
+    authorized_at: UnixMillis,
+) -> Result<(), AttemptStoreError> {
+    let result = sqlx::query(
+        r"
+        INSERT INTO github_runtime_authority_lease_renewal_receipts (
+            attempt_id, fencing_token, lease_id, runner_id,
+            runner_session_id, runner_session_epoch, runner_generation,
+            previous_lease_expires_at_ms, renewed_lease_expires_at_ms,
+            authorized_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ",
+    )
+    .bind(request.attempt_id().as_uuid())
+    .bind(fencing_to_i64(request.guard().fencing_token())?)
+    .bind(request.guard().lease_id().as_uuid())
+    .bind(request.runner_id().as_uuid())
+    .bind(request.session().session_id().as_uuid())
+    .bind(g1::session_epoch_to_i64(request.session().session_epoch())?)
+    .bind(g1::runner_generation_to_i64(
+        request.session().runner_generation(),
+    )?)
+    .bind(previous_expires_at.get())
+    .bind(request.expires_at().get())
+    .bind(authorized_at.get())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1363,10 +1422,12 @@ async fn lock_github_runtime_authority_renewal_evidence(
     }))
 }
 
-fn validate_github_runtime_authority_renewal_evidence(
+async fn validate_github_runtime_authority_renewal_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     evidence: Option<LockedGithubRuntimeAuthorityRenewalEvidence>,
+    request: RenewLease,
+    current_expiration: UnixMillis,
     database_now: UnixMillis,
-    attempt_id: AttemptId,
 ) -> Result<Option<UnixMillis>, AttemptStoreError> {
     let Some(evidence) = evidence else {
         return Ok(None);
@@ -1384,7 +1445,31 @@ fn validate_github_runtime_authority_renewal_evidence(
             .is_none_or(|ready_at| ready_at > database_now)
         || ceiling.is_none_or(|ceiling| ceiling <= database_now)
     {
-        return Err(AttemptStoreError::RuntimeAuthorityUnavailable(attempt_id));
+        return Err(AttemptStoreError::RuntimeAuthorityUnavailable(
+            request.attempt_id(),
+        ));
+    }
+    let horizon_is_tail: bool = sqlx::query_scalar(
+        r"
+        SELECT automata_github_runtime_authority_lease_horizon_is_tail(
+            authority, $3, $4
+        )
+        FROM github_runtime_authority_issuances AS authority
+        WHERE authority.attempt_id = $1
+          AND authority.fencing_token = $2
+        ",
+    )
+    .bind(request.attempt_id().as_uuid())
+    .bind(fencing_to_i64(request.guard().fencing_token())?)
+    .bind(current_expiration.get())
+    .bind(database_now.get())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if !horizon_is_tail {
+        return Err(AttemptStoreError::RuntimeAuthorityUnavailable(
+            request.attempt_id(),
+        ));
     }
     Ok(ceiling)
 }
