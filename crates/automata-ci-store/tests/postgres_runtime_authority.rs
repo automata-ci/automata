@@ -66,6 +66,20 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_database};
 
+const INSERT_RENEWAL_RECEIPT: &str = r"
+    INSERT INTO github_runtime_authority_lease_renewal_receipts (
+        attempt_id, fencing_token, lease_id, runner_id,
+        runner_session_id, runner_session_epoch, runner_generation,
+        previous_lease_expires_at_ms, renewed_lease_expires_at_ms,
+        authorized_at_ms
+    )
+    SELECT attempt_id, fencing_token, lease_id, runner_id,
+           runner_session_id, runner_session_epoch, runner_generation,
+           $2, $3, $4
+    FROM github_runtime_authority_issuances
+    WHERE attempt_id = $1 AND fencing_token = 7
+";
+
 fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])
 }
@@ -3054,13 +3068,14 @@ async fn permanent_terminal_replay_precedes_mutable_issuance_and_graph_locks() -
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn lease_extension_invalidates_without_mutating_authority_horizons() -> TestResult {
+async fn unevidenced_lease_extension_is_rejected_without_mutating_authority_horizons() -> TestResult
+{
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         let extended_lease_expires_at = fixture.identity.lease_expires_at().get() + 60_000;
         let now = database_now(&database).await?;
-        sqlx::query(
+        let rejected = sqlx::query(
             r"
             UPDATE job_attempts
             SET lease_expires_at_ms = $2, changed_at_ms = $3
@@ -3071,7 +3086,16 @@ async fn lease_extension_invalidates_without_mutating_authority_horizons() -> Te
         .bind(extended_lease_expires_at)
         .bind(now.get())
         .execute(database.pool())
-        .await?;
+        .await
+        .expect_err("an unevidenced lease extension must fail at commit");
+        let database_error = rejected
+            .as_database_error()
+            .expect("PostgreSQL constraint error");
+        assert_eq!(database_error.code().as_deref(), Some("23514"));
+        assert_eq!(
+            database_error.constraint(),
+            Some("github_runtime_authority_attempt_renewal_final_exact")
+        );
         assert!(
             database
                 .store()
@@ -3080,7 +3104,24 @@ async fn lease_extension_invalidates_without_mutating_authority_horizons() -> Te
                     fixture.at(50),
                 )?)
                 .await?
-                .is_none()
+                .is_some()
+        );
+        let renewal_receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM github_runtime_authority_lease_renewal_receipts \
+             WHERE attempt_id = $1 AND fencing_token = 7",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(renewal_receipts, 0);
+        let durable_attempt_lease: i64 =
+            sqlx::query_scalar("SELECT lease_expires_at_ms FROM job_attempts WHERE id = $1")
+                .bind(fixture.identity.key().attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(
+            durable_attempt_lease,
+            fixture.identity.lease_expires_at().get()
         );
         let immutable_authority_lease: i64 = sqlx::query_scalar(
             "SELECT lease_expires_at_ms FROM github_runtime_authority_issuances \
@@ -3397,6 +3438,467 @@ async fn ready_authority_caps_renewal_and_revalidates_it_atomically() -> TestRes
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn ready_authority_allows_a_finalizing_heartbeat_without_renewal_evidence() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_900_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        sqlx::query("UPDATE job_attempts SET lifecycle = 'running' WHERE id = $1")
+            .bind(fixture.identity.key().attempt_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        let expires_at = commit_finalizing_heartbeat(&database, &fixture).await?;
+        let durable: (String, i64, String, i64) = sqlx::query_as(
+            r"
+            SELECT attempt.lifecycle, attempt.lease_expires_at_ms,
+                   authority.state, count(receipt.renewed_lease_expires_at_ms)
+            FROM job_attempts AS attempt
+            JOIN github_runtime_authority_issuances AS authority
+              ON authority.attempt_id = attempt.id
+             AND authority.fencing_token = attempt.fencing_token
+            LEFT JOIN github_runtime_authority_lease_renewal_receipts AS receipt
+              ON receipt.attempt_id = authority.attempt_id
+             AND receipt.fencing_token = authority.fencing_token
+            WHERE attempt.id = $1 AND attempt.fencing_token = 7
+            GROUP BY attempt.lifecycle, attempt.lease_expires_at_ms, authority.state
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            durable,
+            (
+                "finalizing".to_owned(),
+                expires_at.get(),
+                "ready".to_owned(),
+                0,
+            ),
+            "finalizing is quiescent and must not mint lease-renewal authority"
+        );
+        assert!(
+            database
+                .store()
+                .load_ready_github_runtime_authority(LoadGithubRuntimeAuthority::new(
+                    fixture.identity.clone(),
+                    database_now(&database).await?,
+                )?)
+                .await?
+                .is_none(),
+            "a finalizing attempt must not retain usable runtime authority"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn ready_authority_renewals_form_one_exact_e0_e1_e2_e3_chain() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_400_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        let e0 = fixture.identity.lease_expires_at();
+        let horizons = [
+            e0,
+            UnixMillis::new(e0.get() + 60_000),
+            UnixMillis::new(e0.get() + 120_000),
+            UnixMillis::new(e0.get() + 180_000),
+        ];
+        assert_renewal_tail(&database, &fixture, horizons[0], true).await?;
+
+        for target in &horizons[1..] {
+            renew_ready_authority_to(&database, &fixture, *target).await?;
+        }
+
+        let receipts: Vec<(i64, i64)> = sqlx::query_as(
+            r"
+            SELECT previous_lease_expires_at_ms, renewed_lease_expires_at_ms
+            FROM github_runtime_authority_lease_renewal_receipts
+            WHERE attempt_id = $1 AND fencing_token = 7
+            ORDER BY renewed_lease_expires_at_ms
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(
+            receipts,
+            horizons
+                .windows(2)
+                .map(|edge| (edge[0].get(), edge[1].get()))
+                .collect::<Vec<_>>()
+        );
+        for historical in &horizons[..3] {
+            assert_renewal_tail(&database, &fixture, *historical, false).await?;
+        }
+        assert_renewal_tail(&database, &fixture, horizons[3], true).await?;
+        assert!(
+            database
+                .store()
+                .load_ready_github_runtime_authority(LoadGithubRuntimeAuthority::new(
+                    fixture.identity.clone(),
+                    database_now(&database).await?,
+                )?)
+                .await?
+                .is_some()
+        );
+        let historical_fork = sqlx::query(
+            r"
+            INSERT INTO github_runtime_authority_lease_renewal_receipts (
+                attempt_id, fencing_token, lease_id, runner_id,
+                runner_session_id, runner_session_epoch, runner_generation,
+                previous_lease_expires_at_ms, renewed_lease_expires_at_ms,
+                authorized_at_ms
+            )
+            SELECT attempt_id, fencing_token, lease_id, runner_id,
+                   runner_session_id, runner_session_epoch, runner_generation,
+                   $2, $3, $4
+            FROM github_runtime_authority_issuances
+            WHERE attempt_id = $1 AND fencing_token = 7
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .bind(horizons[1].get())
+        .bind(horizons[3].get() + 1)
+        .bind(database_now(&database).await?.get())
+        .execute(database.pool())
+        .await
+        .expect_err("a historical renewal horizon cannot fork");
+        let database_error = historical_fork
+            .as_database_error()
+            .expect("PostgreSQL constraint error");
+        assert_eq!(database_error.code().as_deref(), Some("23514"));
+        assert_eq!(
+            database_error.constraint(),
+            Some("github_runtime_authority_lease_renewal_receipts_authority")
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn exact_ceiling_replay_fails_without_root_or_tail_evidence() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_500_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        let ceiling = fixture.at(3_440_000);
+
+        let mut corruption = database.pool().begin().await?;
+        sqlx::query(
+            "ALTER TABLE job_attempts DISABLE TRIGGER \
+             job_attempts_github_runtime_authority_renewal_exact",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        sqlx::query(
+            "UPDATE job_attempts SET lease_expires_at_ms = $2, changed_at_ms = $3 \
+             WHERE id = $1 AND fencing_token = 7",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .bind(ceiling.get())
+        .bind(database_now(&database).await?.get())
+        .execute(&mut *corruption)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE job_attempts ENABLE TRIGGER \
+             job_attempts_github_runtime_authority_renewal_exact",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        corruption.commit().await?;
+
+        let observed_at = database_now(&database).await?;
+        let missing_receipt = renewal_request(&fixture.identity, observed_at, ceiling)?;
+        let result = database
+            .store()
+            .authorize_lease_renewal(missing_receipt, JobLifecycle::Running)
+            .await;
+        assert_unavailable(&result, fixture.identity.key().attempt_id());
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM github_runtime_authority_lease_renewal_receipts \
+             WHERE attempt_id = $1 AND fencing_token = 7",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(receipts, 0);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn concurrent_same_horizon_renewals_have_one_durable_winner() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_600_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        let target = UnixMillis::new(fixture.identity.lease_expires_at().get() + 60_000);
+        let request = renewal_request(&fixture.identity, database_now(&database).await?, target)?;
+        let left = database.store().clone();
+        let right = database.store().clone();
+        let (left, right) = tokio::time::timeout(Duration::from_secs(5), async move {
+            tokio::join!(left.renew_lease(request), right.renew_lease(request))
+        })
+        .await
+        .map_err(|_| "concurrent renewals did not serialize")?;
+        let outcomes = [left, right];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(AttemptStoreError::RenewalDoesNotExtend(_))))
+                .count(),
+            1
+        );
+        let receipts: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT previous_lease_expires_at_ms, renewed_lease_expires_at_ms \
+             FROM github_runtime_authority_lease_renewal_receipts \
+             WHERE attempt_id = $1 AND fencing_token = 7",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(
+            receipts,
+            vec![(fixture.identity.lease_expires_at().get(), target.get())]
+        );
+        assert_renewal_tail(&database, &fixture, target, true).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One transaction matrix pins the complete renewal graph.
+async fn renewal_receipts_reject_expired_forks_orphans_rollbacks_and_mutation() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_700_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        let attempt_id = fixture.identity.key().attempt_id().as_uuid();
+        let e0 = fixture.identity.lease_expires_at();
+
+        for (authorized_at, expected_label) in [
+            (e0, "equal predecessor"),
+            (UnixMillis::new(e0.get() + 1), "expired predecessor"),
+        ] {
+            let mut interval = database.pool().begin().await?;
+            sqlx::query("SET LOCAL session_replication_role = replica")
+                .execute(&mut *interval)
+                .await?;
+            let rejected = sqlx::query(INSERT_RENEWAL_RECEIPT)
+                .bind(attempt_id)
+                .bind(e0.get())
+                .bind(e0.get() + 2)
+                .bind(authorized_at.get())
+                .execute(&mut *interval)
+                .await
+                .expect_err(expected_label);
+            assert_postgres_constraint(
+                &rejected,
+                "github_runtime_authority_lease_renewal_receipts_interval",
+            );
+            interval.rollback().await?;
+        }
+
+        let authorized_at = database_now(&database).await?;
+        let e1 = UnixMillis::new(e0.get() + 60_000);
+        let mut orphan = database.pool().begin().await?;
+        sqlx::query(INSERT_RENEWAL_RECEIPT)
+            .bind(attempt_id)
+            .bind(e0.get())
+            .bind(e1.get())
+            .bind(authorized_at.get())
+            .execute(&mut *orphan)
+            .await?;
+        let rejected = orphan
+            .commit()
+            .await
+            .expect_err("an orphan receipt must fail its deferred reciprocal check");
+        assert_postgres_constraint(
+            &rejected,
+            "github_runtime_authority_lease_renewal_final_exact",
+        );
+
+        let e2 = UnixMillis::new(e0.get() + 120_000);
+        let mut wrong_target = database.pool().begin().await?;
+        sqlx::query(INSERT_RENEWAL_RECEIPT)
+            .bind(attempt_id)
+            .bind(e0.get())
+            .bind(e1.get())
+            .bind(authorized_at.get())
+            .execute(&mut *wrong_target)
+            .await?;
+        sqlx::query(
+            "UPDATE job_attempts SET lease_expires_at_ms = $2, changed_at_ms = $3 \
+             WHERE id = $1 AND fencing_token = 7",
+        )
+        .bind(attempt_id)
+        .bind(e2.get())
+        .bind(authorized_at.get())
+        .execute(&mut *wrong_target)
+        .await?;
+        let rejected = wrong_target
+            .commit()
+            .await
+            .expect_err("receipt and attempt targets must match at commit");
+        assert_postgres_constraint_one_of(
+            &rejected,
+            &[
+                "github_runtime_authority_lease_renewal_final_exact",
+                "github_runtime_authority_attempt_renewal_final_exact",
+            ],
+        );
+
+        renew_ready_authority_to(&database, &fixture, e1).await?;
+        renew_ready_authority_to(&database, &fixture, e2).await?;
+        for statement in [
+            "UPDATE github_runtime_authority_lease_renewal_receipts \
+             SET authorized_at_ms = authorized_at_ms",
+            "DELETE FROM github_runtime_authority_lease_renewal_receipts",
+            "TRUNCATE github_runtime_authority_lease_renewal_receipts",
+        ] {
+            let rejected = sqlx::query(statement)
+                .execute(database.pool())
+                .await
+                .expect_err("renewal evidence must be append-only");
+            assert_postgres_constraint(
+                &rejected,
+                "github_runtime_authority_lease_renewal_receipts_append_only",
+            );
+        }
+
+        for historical in [e0, e1] {
+            let rejected = sqlx::query(
+                "UPDATE job_attempts SET lease_expires_at_ms = $2, changed_at_ms = $3 \
+                 WHERE id = $1 AND fencing_token = 7",
+            )
+            .bind(attempt_id)
+            .bind(historical.get())
+            .bind(database_now(&database).await?.get())
+            .execute(database.pool())
+            .await
+            .expect_err("the current attempt cannot roll back to a historical horizon");
+            assert_postgres_constraint(
+                &rejected,
+                "github_runtime_authority_attempt_renewal_final_exact",
+            );
+        }
+        assert_renewal_tail(&database, &fixture, e2, true).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn queued_renewal_precedes_reconciliation_without_lock_inversion() -> TestResult {
+    run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_800_000_000_000).await?;
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+        sqlx::query(
+            r"
+            UPDATE job_attempts
+            SET lifecycle = 'cancelling'
+            WHERE id = $1 AND fencing_token = 7
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+
+        let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        // Hold only the issuance. Renewal must acquire runner/session and the
+        // attempt before it queues here; reconciliation must then queue behind
+        // renewal's runner/session lock. This creates a deterministic wait
+        // chain instead of waking two compatible runner/session SHARE waiters
+        // at once and relying on backend scheduling order.
+        let locked: bool = sqlx::query_scalar(
+            r"
+            SELECT TRUE
+            FROM github_runtime_authority_issuances AS authority
+            WHERE authority.attempt_id = $1 AND authority.fencing_token = 7
+            FOR UPDATE OF authority
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
+        assert!(locked);
+
+        let target = UnixMillis::new(fixture.identity.lease_expires_at().get() + 60_000);
+        let renewal = renewal_request(&fixture.identity, database_now(&database).await?, target)?;
+        let renewal_store = database.store().clone();
+        let renewal_task = tokio::spawn(async move { renewal_store.renew_lease(renewal).await });
+        let renewal_backend = wait_for_blocked_backends(&database, blocker_pid, 1).await?[0];
+
+        let reconciliation_store = database.store().clone();
+        let reconciliation_at = database_now(&database).await?;
+        let reconciliation_task = tokio::spawn(async move {
+            reconciliation_store
+                .reconcile_github_runtime_authorities(
+                    ReconcileGithubRuntimeAuthorities::new(reconciliation_at, 1)
+                        .expect("reconciliation request"),
+                )
+                .await
+        });
+        let reconciliation_backends =
+            wait_for_blocked_backends(&database, renewal_backend, 1).await?;
+        assert_eq!(reconciliation_backends.len(), 1);
+        assert!(!renewal_task.is_finished());
+        assert!(!reconciliation_task.is_finished());
+        blocker.rollback().await?;
+
+        let (renewal_result, reconciliation_result) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(renewal_task, reconciliation_task)
+            })
+            .await
+            .map_err(|_| "lease renewal and reconciliation deadlocked")?;
+        let renewed = renewal_result??;
+        assert_eq!(renewed.expires_at(), target);
+        assert_eq!(
+            reconciliation_result??.ready_marked_revoke_pending(),
+            1,
+            "the non-current cancelling attempt must be reconciled"
+        );
+        let durable: (String, i64, i64) = sqlx::query_as(
+            r"
+            SELECT authority.state, attempt.lease_expires_at_ms,
+                   count(receipt.renewed_lease_expires_at_ms)
+            FROM github_runtime_authority_issuances AS authority
+            JOIN job_attempts AS attempt ON attempt.id = authority.attempt_id
+            LEFT JOIN github_runtime_authority_lease_renewal_receipts AS receipt
+              ON receipt.attempt_id = authority.attempt_id
+             AND receipt.fencing_token = authority.fencing_token
+            WHERE authority.attempt_id = $1 AND authority.fencing_token = 7
+            GROUP BY authority.state, attempt.lease_expires_at_ms
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable.0, "revoke_pending");
+        assert_eq!((durable.1, durable.2), (target.get(), 1));
+        Ok(())
+    })
+    .await
+}
+
 fn renewal_request(
     identity: &GithubRuntimeAuthorityIdentity,
     observed_at: UnixMillis,
@@ -3416,6 +3918,49 @@ fn renewal_request(
     )?)
 }
 
+async fn renew_ready_authority_to(
+    database: &TestDatabase,
+    fixture: &AuthorityFixture,
+    target: UnixMillis,
+) -> TestResult {
+    let request = renewal_request(&fixture.identity, database_now(database).await?, target)?;
+    let authorized = database
+        .store()
+        .authorize_lease_renewal(request, JobLifecycle::Running)
+        .await?;
+    assert_eq!(authorized.expires_at(), target);
+    assert_eq!(
+        database.store().renew_lease(authorized).await?.expires_at(),
+        target
+    );
+    Ok(())
+}
+
+async fn assert_renewal_tail(
+    database: &TestDatabase,
+    fixture: &AuthorityFixture,
+    horizon: UnixMillis,
+    expected: bool,
+) -> TestResult {
+    let is_tail: bool = sqlx::query_scalar(
+        r"
+        SELECT automata_github_runtime_authority_lease_horizon_is_tail(
+            authority, $3, $4
+        )
+        FROM github_runtime_authority_issuances AS authority
+        WHERE authority.attempt_id = $1 AND authority.fencing_token = $2
+        ",
+    )
+    .bind(fixture.identity.key().attempt_id().as_uuid())
+    .bind(i64::try_from(fixture.identity.key().fencing_token().get())?)
+    .bind(horizon.get())
+    .bind(database_now(database).await?.get())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(is_tail, expected, "unexpected tail state for {horizon:?}");
+    Ok(())
+}
+
 async fn assert_ready_renewal_ceiling(
     database: &TestDatabase,
     fixture: &AuthorityFixture,
@@ -3433,6 +3978,37 @@ async fn assert_ready_renewal_ceiling(
     assert_eq!(
         database.store().renew_lease(bounded).await?.expires_at(),
         fixture.at(3_440_000)
+    );
+    let renewal_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM github_runtime_authority_lease_renewal_receipts \
+         WHERE attempt_id = $1 AND fencing_token = 7",
+    )
+    .bind(request.attempt_id().as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(renewal_receipts, 1);
+    assert!(
+        database
+            .store()
+            .load_ready_github_runtime_authority(LoadGithubRuntimeAuthority::new(
+                fixture.identity.clone(),
+                database_now(database).await?,
+            )?)
+            .await?
+            .is_some(),
+        "an evidenced lease extension must preserve deliverable authority"
+    );
+    let reconciliation = database
+        .store()
+        .reconcile_github_runtime_authorities(ReconcileGithubRuntimeAuthorities::new(
+            database_now(database).await?,
+            16,
+        )?)
+        .await?;
+    assert_eq!(
+        reconciliation.ready_marked_revoke_pending(),
+        0,
+        "reconciliation must retain authority backed by exact renewal evidence"
     );
     let first_changed_at: i64 =
         sqlx::query_scalar("SELECT changed_at_ms FROM job_attempts WHERE id = $1")
@@ -3460,6 +4036,17 @@ async fn assert_ready_renewal_ceiling(
     assert_eq!(
         changed_at, first_changed_at,
         "ceiling replay must not forge an extension"
+    );
+    let replay_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM github_runtime_authority_lease_renewal_receipts \
+         WHERE attempt_id = $1 AND fencing_token = 7",
+    )
+    .bind(request.attempt_id().as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        replay_receipts, 1,
+        "ceiling replay must not forge renewal evidence"
     );
     Ok(request)
 }
@@ -3569,29 +4156,7 @@ async fn assert_authority_transition_race(
         .await;
     assert_unavailable(&non_ready_result, request.attempt_id());
 
-    let finalizing = renewal_request(
-        &fixture.identity,
-        database_now(database).await?,
-        fixture.at(3_450_000),
-    )?;
-    let authorized = database
-        .store()
-        .authorize_lease_renewal(finalizing, JobLifecycle::Finalizing)
-        .await?;
-    let finalizing_expires_at = authorized.expires_at();
-    let transaction = CommitLeaseHeartbeat::new(
-        RunnerOperationRequest::new(
-            authorized.session(),
-            OperationId::new(),
-            RunnerOperationKind::new("automata.runner.lease-heartbeat.v1")?,
-            Sha256Digest::from_bytes([0x91; 32]),
-        ),
-        CommandCursor::initial(),
-        authorized,
-        RunnerOperationResponse::new(DocumentSchema::new(1)?, b"finalizing".to_vec())?,
-    )?
-    .with_reported_lifecycle(JobLifecycle::Finalizing)?;
-    database.store().commit_lease_heartbeat(transaction).await?;
+    let finalizing_expires_at = commit_finalizing_heartbeat(database, fixture).await?;
     let durable: (String, i64) =
         sqlx::query_as("SELECT lifecycle, lease_expires_at_ms FROM job_attempts WHERE id = $1")
             .bind(request.attempt_id().as_uuid())
@@ -3605,6 +4170,36 @@ async fn assert_authority_transition_race(
     Ok(())
 }
 
+async fn commit_finalizing_heartbeat(
+    database: &TestDatabase,
+    fixture: &AuthorityFixture,
+) -> TestResult<UnixMillis> {
+    let finalizing = renewal_request(
+        &fixture.identity,
+        database_now(database).await?,
+        fixture.at(3_450_000),
+    )?;
+    let authorized = database
+        .store()
+        .authorize_lease_renewal(finalizing, JobLifecycle::Finalizing)
+        .await?;
+    let expires_at = authorized.expires_at();
+    let transaction = CommitLeaseHeartbeat::new(
+        RunnerOperationRequest::new(
+            authorized.session(),
+            OperationId::new(),
+            RunnerOperationKind::new("automata.runner.lease-heartbeat.v1")?,
+            Sha256Digest::from_bytes([0x91; 32]),
+        ),
+        CommandCursor::initial(),
+        authorized,
+        RunnerOperationResponse::new(DocumentSchema::new(1)?, b"finalizing".to_vec())?,
+    )?
+    .with_reported_lifecycle(JobLifecycle::Finalizing)?;
+    database.store().commit_lease_heartbeat(transaction).await?;
+    Ok(expires_at)
+}
+
 fn assert_unavailable(result: &Result<RenewLease, StoreError>, expected_attempt_id: AttemptId) {
     assert!(
         matches!(
@@ -3613,5 +4208,56 @@ fn assert_unavailable(result: &Result<RenewLease, StoreError>, expected_attempt_
                 if *attempt_id == expected_attempt_id
         ),
         "unexpected unavailable result: {result:?}"
+    );
+}
+
+async fn wait_for_blocked_backends(
+    database: &TestDatabase,
+    blocker_pid: i32,
+    expected: usize,
+) -> TestResult<Vec<i32>> {
+    let blocked = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pids: Vec<i32> = sqlx::query_scalar(
+                r"
+                SELECT pid
+                FROM pg_stat_activity
+                WHERE $1 = ANY(pg_blocking_pids(pid))
+                ORDER BY query_start, pid
+                ",
+            )
+            .bind(blocker_pid)
+            .fetch_all(database.pool())
+            .await?;
+            if pids.len() >= expected {
+                return Ok::<_, sqlx::Error>(pids);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "Store operations did not reach the staged runner/session lock")??;
+    Ok(blocked)
+}
+
+fn assert_postgres_constraint(error: &sqlx::Error, expected: &str) {
+    let database_error = error
+        .as_database_error()
+        .expect("expected a PostgreSQL constraint error");
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert_eq!(database_error.constraint(), Some(expected));
+}
+
+fn assert_postgres_constraint_one_of(error: &sqlx::Error, expected: &[&str]) {
+    let database_error = error
+        .as_database_error()
+        .expect("expected a PostgreSQL constraint error");
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert!(
+        database_error
+            .constraint()
+            .is_some_and(|constraint| expected.contains(&constraint)),
+        "unexpected constraint: {:?}",
+        database_error.constraint()
     );
 }
