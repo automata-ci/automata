@@ -123,7 +123,17 @@ The first audit identified these implementation owners:
 
 ### Shared interfaces
 
-- [ ] Define an explicit CLI session-custody interface.
+- [x] Define an explicit CLI session-custody interface.
+
+  Evidence: the portable `CliCredentialStore` trait, sanitized store and lock
+  errors, and the shared origin-validation and record-identity helpers in
+  `crates/automata-ci/src/cli/credential_store.rs` now compile on every
+  platform; the Linux Secret Service adapter, `secret-tool` subprocess
+  handling, and `flock` process lock are `cfg(unix)`. A Windows adapter can
+  implement the trait additively. Native clippy stays warning-free and the
+  native suites match the pre-change baseline; the Unix build is verified in
+  CI.
+
 - [ ] Define an explicit service secret-custody interface.
 - [x] Define a secure bounded-file input interface.
 

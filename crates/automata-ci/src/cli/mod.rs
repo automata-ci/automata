@@ -6,7 +6,6 @@ mod auth;
 #[path = "auth_unsupported.rs"]
 mod auth;
 mod commands;
-#[cfg(unix)]
 mod credential_store;
 mod execution;
 mod output;

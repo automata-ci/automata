@@ -1,14 +1,18 @@
-//! CLI session custody through the operating system's Secret Service.
+//! CLI session-custody interface and its platform adapters.
 //!
-//! Session bearers are sent to `secret-tool` only over stdin. Searches use an
-//! exact versioned attribute set, enumerate every unlocked match, and accept
-//! exactly zero or one item. Secret output is bounded and zeroized. There is no
-//! plaintext credential-file fallback.
+//! The portable [`CliCredentialStore`] trait binds every stored session to one
+//! exact server origin, bounds record size, treats ambiguity as failure, and
+//! prohibits plaintext or ordinary-file fallback. The Linux adapter fulfils it
+//! through the Secret Service: session bearers are sent to `secret-tool` only
+//! over stdin, searches use an exact versioned attribute set, enumerate every
+//! unlocked match, and accept exactly zero or one item, and secret output is
+//! bounded and zeroized. A platform without a reviewed adapter must fail
+//! closed instead of implementing this trait.
 
+use std::{error::Error, fmt};
+#[cfg(unix)]
 use std::{
-    error::Error,
     ffi::OsStr,
-    fmt,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -18,30 +22,49 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::session_credential::SessionCredential;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(unix)]
 use rustix::fs::{self, FileType, FlockOperation, Mode, OFlags, fstat, mkdirat, openat};
 use sha2::{Digest as _, Sha256};
+#[cfg(unix)]
 use subtle::ConstantTimeEq as _;
+#[cfg(unix)]
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     process::{ChildStdin, ChildStdout, Command},
     time::timeout,
 };
+#[cfg(unix)]
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
 const SECRET_TOOL_PATHS: [&str; 2] = ["/usr/bin/secret-tool", "/bin/secret-tool"];
+#[cfg(unix)]
 const APPLICATION_ATTRIBUTE: &str = "application";
+#[cfg(unix)]
 const APPLICATION_VALUE: &str = "automata-ci";
+#[cfg(unix)]
 const SCHEMA_ATTRIBUTE: &str = "credential-schema";
+#[cfg(unix)]
 const SCHEMA_VALUE: &str = "automata-ci.cli-session.v1";
+#[cfg(unix)]
 const ACCOUNT_ATTRIBUTE: &str = "account-id";
+#[cfg(unix)]
 const SERVER_ATTRIBUTE: &str = "server-origin";
+#[cfg(unix)]
 const ITEM_LABEL_OPTION: &str = "--label=Automata CI CLI session";
+#[cfg(unix)]
 const MAX_SEARCH_OUTPUT_BYTES: usize = 16 * 1_024;
+/// Inclusive byte bound every platform adapter enforces on a stored session.
+#[cfg_attr(not(unix), allow(dead_code))]
 const MAX_STORED_CREDENTIAL_BYTES: usize = 512;
+#[cfg(unix)]
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const LOCK_DIRECTORY: &str = "automata-ci";
 
+/// Per-origin CLI session custody provided by one reviewed platform adapter.
 #[async_trait]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) trait CliCredentialStore: fmt::Debug + Send + Sync {
     async fn load(
         &self,
@@ -62,12 +85,14 @@ pub(crate) trait CliCredentialStore: fmt::Debug + Send + Sync {
 /// A missing or ambiguous Secret Service is a hard failure. Deployment policy
 /// must select a Secret Service implementation whose backing store meets the
 /// installation's encrypted-at-rest requirements.
+#[cfg(unix)]
 #[derive(Clone)]
 pub(crate) struct SecretServiceCredentialStore {
     program: PathBuf,
     operation_timeout: Duration,
 }
 
+#[cfg(unix)]
 impl SecretServiceCredentialStore {
     pub(crate) fn discover() -> Result<Self, CredentialStoreError> {
         SECRET_TOOL_PATHS
@@ -203,6 +228,7 @@ impl SecretServiceCredentialStore {
     }
 }
 
+#[cfg(unix)]
 impl fmt::Debug for SecretServiceCredentialStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -214,6 +240,7 @@ impl fmt::Debug for SecretServiceCredentialStore {
     }
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl CliCredentialStore for SecretServiceCredentialStore {
     async fn load(
@@ -274,6 +301,7 @@ impl CliCredentialStore for SecretServiceCredentialStore {
     }
 }
 
+#[cfg(unix)]
 async fn write_secret_input(
     mut stdin: Option<ChildStdin>,
     input: Option<&str>,
@@ -288,6 +316,7 @@ async fn write_secret_input(
     }
 }
 
+#[cfg(unix)]
 async fn read_bounded_output(
     stdout: Option<ChildStdout>,
 ) -> Result<Zeroizing<Vec<u8>>, std::io::Error> {
@@ -307,17 +336,20 @@ async fn read_bounded_output(
     Ok(output)
 }
 
+#[cfg(unix)]
 struct SecretToolOutput {
     status: ExitStatus,
     stdout: Zeroizing<Vec<u8>>,
 }
 
+#[cfg(unix)]
 enum SearchResult {
     Missing,
     One(String),
     Ambiguous,
 }
 
+#[cfg(unix)]
 fn parse_search_output(output: &[u8]) -> Result<SearchResult, CredentialStoreError> {
     let text = std::str::from_utf8(output).map_err(|_| CredentialStoreError::InvalidCredential)?;
     if output.is_empty() {
@@ -360,6 +392,7 @@ fn parse_search_output(output: &[u8]) -> Result<SearchResult, CredentialStoreErr
     }
 }
 
+#[cfg(unix)]
 fn valid_secret_service_item_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 2_048
@@ -369,6 +402,7 @@ fn valid_secret_service_item_path(path: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_'))
 }
 
+#[cfg(unix)]
 fn valid_secret_service_search_field(line: &str) -> bool {
     if line.is_empty() || line.len() > 4_096 || line.bytes().any(|byte| byte.is_ascii_control()) {
         return false;
@@ -393,6 +427,7 @@ fn valid_secret_service_search_field(line: &str) -> bool {
             })
 }
 
+#[cfg(unix)]
 fn parse_lookup_output(output: &[u8]) -> Result<SessionCredential, CredentialStoreError> {
     if output.is_empty()
         || output.len() > MAX_STORED_CREDENTIAL_BYTES
@@ -404,11 +439,15 @@ fn parse_lookup_output(output: &[u8]) -> Result<SessionCredential, CredentialSto
     SessionCredential::from_raw(value).map_err(|_| CredentialStoreError::InvalidCredential)
 }
 
+/// Derives the fixed non-secret per-origin record identity every adapter uses.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn account_id(server_origin: &str) -> String {
     let digest = Sha256::digest(server_origin.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Requires the bounded non-control ASCII origin form shared by every adapter.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn validate_origin_attribute(server_origin: &str) -> Result<(), CredentialStoreError> {
     if server_origin.is_empty()
         || server_origin.len() > 2_048
@@ -420,7 +459,9 @@ fn validate_origin_attribute(server_origin: &str) -> Result<(), CredentialStoreE
     Ok(())
 }
 
+/// Sanitized session-custody failure shared by every platform adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum CredentialStoreError {
     Unavailable,
     InvalidServerOrigin,
@@ -442,10 +483,12 @@ impl fmt::Display for CredentialStoreError {
 impl Error for CredentialStoreError {}
 
 /// Exact per-origin process lock held across local and remote session lifecycle.
+#[cfg(unix)]
 pub(crate) struct CliAuthProcessLock {
     _file: OwnedFd,
 }
 
+#[cfg(unix)]
 impl CliAuthProcessLock {
     pub(crate) fn acquire(server_origin: &str) -> Result<Self, CliAuthLockError> {
         validate_origin_attribute(server_origin).map_err(|_| CliAuthLockError::Unavailable)?;
@@ -496,12 +539,14 @@ impl CliAuthProcessLock {
     }
 }
 
+#[cfg(unix)]
 impl fmt::Debug for CliAuthProcessLock {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CliAuthProcessLock(..)")
     }
 }
 
+#[cfg(unix)]
 fn open_absolute_directory(path: &Path) -> Result<OwnedFd, CliAuthLockError> {
     if !path.is_absolute() {
         return Err(CliAuthLockError::Unavailable);
@@ -522,6 +567,7 @@ fn open_absolute_directory(path: &Path) -> Result<OwnedFd, CliAuthLockError> {
     Ok(current)
 }
 
+#[cfg(unix)]
 fn verify_private_directory(directory: &OwnedFd) -> Result<(), CliAuthLockError> {
     let metadata = fstat(directory).map_err(|_| CliAuthLockError::Unavailable)?;
     let current_user = rustix::process::getuid().as_raw();
@@ -534,7 +580,9 @@ fn verify_private_directory(directory: &OwnedFd) -> Result<(), CliAuthLockError>
     Ok(())
 }
 
+/// Sanitized per-origin process-lock failure shared by every platform adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum CliAuthLockError {
     Busy,
     Unavailable,
@@ -551,7 +599,7 @@ impl fmt::Display for CliAuthLockError {
 
 impl Error for CliAuthLockError {}
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         os::unix::fs::PermissionsExt as _,
