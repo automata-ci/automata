@@ -175,10 +175,10 @@ async fn insert_revision(
         r"
         INSERT INTO workflow_runtime_policy_revisions (
             tenant_id, repository_id, policy_revision, policy_digest,
-            canonical_policy, resource_policy_canonical,
+            canonical_policy, permission_policy_canonical, resource_policy_canonical,
             policy_schema, workspace_root, workspace_derivation_version,
             mapping_count, state, registered_at_ms, sealed_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,'staging',$10,NULL)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,'staging',$11,NULL)
         ",
     )
     .bind(request.pin().tenant().as_str())
@@ -186,6 +186,13 @@ async fn insert_revision(
     .bind(request.pin().revision().as_i64())
     .bind(request.pin().digest().as_bytes().as_slice())
     .bind(request.policy().canonical_bytes().map_err(corrupt_value)?)
+    .bind(
+        request
+            .policy()
+            .permission_policy()
+            .canonical_bytes()
+            .map_err(corrupt_value)?,
+    )
     .bind(serde_json::to_vec(&request.policy().resource_policy()).map_err(corrupt_value)?)
     .bind(i16::try_from(request.policy().schema()).map_err(corrupt_value)?)
     .bind(request.policy().workspace_root())
@@ -334,7 +341,8 @@ pub(super) async fn load_revision(
 ) -> Result<WorkflowRuntimePolicy, WorkflowRuntimePolicyStoreError> {
     let header = sqlx::query(
         r"
-        SELECT policy_digest, canonical_policy, resource_policy_canonical,
+        SELECT policy_digest, canonical_policy, permission_policy_canonical,
+               resource_policy_canonical,
                policy_schema, workspace_root, workspace_derivation_version,
                mapping_count, state
         FROM workflow_runtime_policy_revisions
@@ -355,6 +363,9 @@ pub(super) async fn load_revision(
     let expected_resource_policy: Vec<u8> = header
         .try_get("resource_policy_canonical")
         .map_err(operation_error)?;
+    let expected_permission_policy: Vec<u8> = header
+        .try_get("permission_policy_canonical")
+        .map_err(operation_error)?;
     let canonical_policy =
         WorkflowRuntimePolicy::decode_canonical(&expected_canonical).map_err(corrupt_value)?;
     let schema: i16 = header.try_get("policy_schema").map_err(operation_error)?;
@@ -366,6 +377,11 @@ pub(super) async fn load_revision(
     if i16::try_from(canonical_policy.schema()).ok() != Some(schema)
         || derivation != 1
         || state != "sealed"
+        || canonical_policy
+            .permission_policy()
+            .canonical_bytes()
+            .map_err(corrupt_value)?
+            != expected_permission_policy
     {
         return Err(
             StoreError::corrupt_data("workflow runtime policy header is not current").into(),

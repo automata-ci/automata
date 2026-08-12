@@ -1,12 +1,11 @@
 #[allow(dead_code)]
 mod common;
 
-use automata_ci_store::WorkflowRuntimePolicy;
 use sha2::{Digest as _, Sha256};
 use sqlx::migrate::Migrate as _;
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_database};
+use common::{TestDatabase, TestResult, run_with_unmigrated_database};
 
 const ORIGINAL_VERSION: i64 = 43;
 const FORWARD_VERSION: i64 = 66;
@@ -15,15 +14,8 @@ const ORIGINAL_MIGRATION: &str =
 const FORWARD_MIGRATION: &str =
     include_str!("../migrations/0066_workflow_runtime_resource_policy.sql");
 const LEGACY_CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}]}"#;
-const POLICY: &[u8] = br#"{
-  "workspace":{"derivation":1,"root":"/__w","schema":1},
-  "mappings":[{
-    "container_features":["automata.core/job-containers@v1"],
-    "architecture":"x86_64","operating_system":"linux",
-    "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
-    "selector":"Ubuntu-24.04"
-  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
-}"#;
+const RESOURCE_POLICY_CANONICAL: &[u8] = br#"{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}}"#;
+const FORWARD_CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[test]
@@ -128,6 +120,27 @@ fn resource_policy_validator_requires_canonical_integer_json_values() {
     }
 }
 
+#[test]
+fn schema_one_forward_fixture_has_exact_golden_identities() {
+    let canonical_digest: [u8; 32] = Sha256::digest(FORWARD_CANONICAL_POLICY).into();
+    assert_eq!(
+        canonical_digest,
+        [
+            0x0c, 0x77, 0x0b, 0xf6, 0x1f, 0xef, 0x18, 0x64, 0x59, 0xc5, 0x5a, 0x27, 0xf2, 0x15,
+            0xe6, 0x43, 0xb2, 0x10, 0x64, 0x0b, 0x6f, 0xc3, 0xbc, 0x89, 0xc0, 0x5f, 0x69, 0x92,
+            0xf0, 0x71, 0xb8, 0x58,
+        ]
+    );
+    assert_eq!(
+        forward_policy_digest(),
+        [
+            0xf0, 0x56, 0xc8, 0xbf, 0x9c, 0x65, 0xfe, 0xbd, 0x33, 0x49, 0x4c, 0x52, 0xed, 0x0d,
+            0x40, 0x2f, 0x9b, 0x5c, 0x01, 0xbf, 0xe0, 0x31, 0x35, 0x4c, 0x49, 0x1f, 0x36, 0x63,
+            0x62, 0xf3, 0xa5, 0xc7,
+        ]
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn pre_resource_schema_upgrades_cleanly_and_matches_a_fresh_install() -> TestResult {
@@ -140,7 +153,8 @@ async fn pre_resource_schema_upgrades_cleanly_and_matches_a_fresh_install() -> T
     })
     .await?;
 
-    run_with_database(|database| async move {
+    run_with_unmigrated_database(|database| async move {
+        apply_before(&database, FORWARD_VERSION + 1).await?;
         assert_resource_schema(&database).await?;
         exercise_resource_policy(&database).await
     })
@@ -385,6 +399,27 @@ async fn insert_pre_resource_policy_revision(database: &TestDatabase) -> TestRes
 }
 
 fn legacy_policy_digest() -> [u8; 32] {
+    schema_one_policy_hasher().finalize().into()
+}
+
+fn forward_policy_digest() -> [u8; 32] {
+    let mut hasher = schema_one_policy_hasher();
+    hasher.update(b"resources\0");
+    for (cpu_millis, memory_bytes, ephemeral_disk_bytes, gpu_count) in [
+        (100_u32, 268_435_456_u64, 0_u64, 0_u16),
+        (1_000, 1_073_741_824, 0, 0),
+        (100, 268_435_456, 0, 0),
+        (4_000, 8_589_934_592, 0, 0),
+    ] {
+        hasher.update(cpu_millis.to_be_bytes());
+        hasher.update(memory_bytes.to_be_bytes());
+        hasher.update(ephemeral_disk_bytes.to_be_bytes());
+        hasher.update(gpu_count.to_be_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn schema_one_policy_hasher() -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(b"automata.store.workflow-runtime-policy.v1\0");
     hasher.update(1_u16.to_be_bytes());
@@ -397,7 +432,7 @@ fn legacy_policy_digest() -> [u8; 32] {
     hasher.update([1, 1]);
     hasher.update(1_u64.to_be_bytes());
     hash_legacy_text(&mut hasher, "automata.core/job-containers@v1");
-    hasher.finalize().into()
+    hasher
 }
 
 fn hash_legacy_text(hasher: &mut Sha256, value: &str) {
@@ -415,9 +450,7 @@ fn hash_legacy_text(hasher: &mut Sha256, value: &str) {
 )]
 async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     let (tenant, repository) = insert_repository(database).await?;
-    let policy = WorkflowRuntimePolicy::decode_configuration(POLICY)?;
-    let canonical = policy.canonical_bytes()?;
-    let resources = serde_json::to_vec(&policy.resource_policy())?;
+    let digest = forward_policy_digest();
 
     let mut transaction = database.pool().begin().await?;
     sqlx::query(
@@ -432,9 +465,9 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     )
     .bind(&tenant)
     .bind(repository)
-    .bind(policy.digest().as_bytes().as_slice())
-    .bind(&canonical)
-    .bind(&resources)
+    .bind(digest.as_slice())
+    .bind(FORWARD_CANONICAL_POLICY)
+    .bind(RESOURCE_POLICY_CANONICAL)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -486,7 +519,7 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     )
     .bind(&tenant)
     .bind(repository)
-    .bind(policy.digest().as_bytes().as_slice())
+    .bind(digest.as_slice())
     .execute(&mut *transaction)
     .await?;
 
@@ -504,11 +537,11 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     .bind(repository)
     .fetch_one(&mut *transaction)
     .await?;
-    assert_eq!(exact.0.as_slice(), policy.digest().as_bytes().as_slice());
-    assert_eq!(exact.1, canonical);
-    assert_eq!(exact.2, resources);
+    assert_eq!(exact.0.as_slice(), digest.as_slice());
+    assert_eq!(exact.1, FORWARD_CANONICAL_POLICY);
+    assert_eq!(exact.2, RESOURCE_POLICY_CANONICAL);
 
-    let noncanonical = [b" ".as_slice(), resources.as_slice()].concat();
+    let noncanonical = [b" ".as_slice(), RESOURCE_POLICY_CANONICAL].concat();
     let rejected: bool =
         sqlx::query_scalar("SELECT automata_workflow_runtime_resource_policy_digest($1) IS NULL")
             .bind(noncanonical)

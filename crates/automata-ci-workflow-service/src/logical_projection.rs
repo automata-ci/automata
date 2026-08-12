@@ -18,7 +18,7 @@ use automata_ci_core::{
     ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId, WorkflowPermissions,
 };
 use automata_ci_protocol::ProtocolLimits;
-use automata_ci_store::ReusableWorkflowPermissionSnapshot;
+use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
 use automata_ci_workflow_github::{
     GithubConditionCompiler, GithubConditionPhase, GithubRunnerProfileCatalog,
     GithubRunnerProfileMapping,
@@ -48,6 +48,7 @@ pub struct ProjectGithubLogicalJobRequest<'a> {
     execution: JobExecutionContext,
     profiles: &'a GithubRunnerProfileCatalog,
     authority_profile: JobAuthorityProfile,
+    permission_policy: &'a WorkflowPermissionPolicy,
     resource_policy: JobResourcePolicy,
     permission_ceiling: Option<&'a ReusableWorkflowPermissionSnapshot>,
 }
@@ -78,6 +79,7 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
         execution: JobExecutionContext,
         profiles: &'a GithubRunnerProfileCatalog,
         authority_profile: JobAuthorityProfile,
+        permission_policy: &'a WorkflowPermissionPolicy,
         resource_policy: JobResourcePolicy,
     ) -> Self {
         Self {
@@ -89,6 +91,7 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
             execution,
             profiles,
             authority_profile,
+            permission_policy,
             resource_policy,
             permission_ceiling: None,
         }
@@ -202,6 +205,7 @@ fn project_github_logical_job(
             .job
             .permissions()
             .or_else(|| plan.logical().permissions()),
+        request.permission_policy,
         request.permission_ceiling,
     )?;
     let requirements = runner_requirements(runner, request.profiles)?.with_resource_allocation(
@@ -302,9 +306,10 @@ fn reject_unsupported_semantics(
 
 fn resolved_permission_request(
     request: Option<&PermissionSnapshotRequest>,
+    permission_policy: &WorkflowPermissionPolicy,
     ceiling: Option<&ReusableWorkflowPermissionSnapshot>,
 ) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
-    let request = source_permission_request(request);
+    let request = permission_policy.resolve(source_permission_request(request));
     let Some(ceiling) = ceiling else {
         return Ok(request);
     };
@@ -317,13 +322,6 @@ fn reduce_permission_request(
     ceiling_grants: &BTreeMap<String, PermissionLevel>,
 ) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
     match request {
-        JobPermissionRequest::ProviderDefault => {
-            if default_level == PermissionLevel::Write && ceiling_grants.is_empty() {
-                Ok(JobPermissionRequest::ProviderDefault)
-            } else {
-                Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
-            }
-        }
         JobPermissionRequest::Mapping(requested_grants) => Ok(JobPermissionRequest::mapping(
             requested_grants.into_iter().filter_map(|grant| {
                 let ceiling = ceiling_grants
@@ -335,11 +333,10 @@ fn reduce_permission_request(
                     .then(|| JobPermissionGrant::new(grant.name().to_owned(), level))
             }),
         )),
-        JobPermissionRequest::ReadAll => {
-            reduce_all_permissions(PermissionLevel::Read, default_level, ceiling_grants)
-        }
-        JobPermissionRequest::WriteAll => {
-            reduce_all_permissions(PermissionLevel::Write, default_level, ceiling_grants)
+        JobPermissionRequest::ProviderDefault
+        | JobPermissionRequest::ReadAll
+        | JobPermissionRequest::WriteAll => {
+            Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
         }
     }
 }
@@ -357,34 +354,6 @@ fn source_permission_request(request: Option<&PermissionSnapshotRequest>) -> Job
             }
         },
     )
-}
-
-fn reduce_all_permissions(
-    requested: PermissionLevel,
-    default_level: PermissionLevel,
-    grants: &BTreeMap<String, PermissionLevel>,
-) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
-    let default = minimum_permission(requested, default_level);
-    let overrides = grants
-        .iter()
-        .filter_map(|(name, level)| {
-            let level = minimum_permission(requested, *level);
-            (level != default).then_some((name, level))
-        })
-        .collect::<Vec<_>>();
-    match (default, overrides.is_empty()) {
-        (PermissionLevel::Write, true) => Ok(JobPermissionRequest::WriteAll),
-        (PermissionLevel::Read, true) => Ok(JobPermissionRequest::ReadAll),
-        (PermissionLevel::None, _) => Ok(JobPermissionRequest::mapping(
-            overrides
-                .into_iter()
-                .filter(|(_, level)| *level != PermissionLevel::None)
-                .map(|(name, level)| JobPermissionGrant::new(name.to_owned(), level)),
-        )),
-        (PermissionLevel::Read | PermissionLevel::Write, false) => {
-            Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
-        }
-    }
 }
 
 const fn minimum_permission(left: PermissionLevel, right: PermissionLevel) -> PermissionLevel {
@@ -1190,39 +1159,41 @@ mod permission_ceiling_tests {
     use super::*;
 
     #[test]
-    fn provider_default_is_preserved_only_by_an_unrestricted_ceiling() {
+    fn repository_policy_resolves_all_permission_shorthands_to_exact_mappings() {
+        let policy = WorkflowPermissionPolicy::new(
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+            BTreeMap::from([
+                ("contents".to_owned(), PermissionLevel::Write),
+                ("id-token".to_owned(), PermissionLevel::Write),
+            ]),
+        )
+        .expect("permission policy");
         assert_eq!(
-            reduce_permission_request(
-                JobPermissionRequest::ProviderDefault,
-                PermissionLevel::Write,
-                &BTreeMap::new(),
-            )
-            .expect("unrestricted ceiling"),
-            JobPermissionRequest::ProviderDefault,
-        );
-        assert!(matches!(
-            reduce_permission_request(
-                JobPermissionRequest::ProviderDefault,
+            resolved_permission_request(None, &policy, None).expect("provider default"),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "contents",
                 PermissionLevel::Read,
-                &BTreeMap::new(),
-            ),
-            Err(LogicalJobProjectionError::UnrepresentablePermissionCeiling)
-        ));
-    }
-
-    #[test]
-    fn all_permissions_reduce_to_the_exact_explicit_ceiling() {
+            )]),
+        );
+        assert_eq!(
+            policy.resolve(JobPermissionRequest::WriteAll),
+            JobPermissionRequest::mapping([
+                JobPermissionGrant::new("contents", PermissionLevel::Write),
+                JobPermissionGrant::new("id-token", PermissionLevel::Write),
+            ]),
+        );
         let ceiling = BTreeMap::from([
             ("contents".to_owned(), PermissionLevel::Read),
             ("id-token".to_owned(), PermissionLevel::None),
         ]);
         assert_eq!(
             reduce_permission_request(
-                JobPermissionRequest::WriteAll,
+                policy.resolve(JobPermissionRequest::WriteAll),
                 PermissionLevel::None,
                 &ceiling,
             )
-            .expect("exact mapping"),
+            .expect("resolved shorthand ceiling"),
             JobPermissionRequest::mapping([JobPermissionGrant::new(
                 "contents",
                 PermissionLevel::Read,

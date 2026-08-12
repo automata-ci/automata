@@ -88,6 +88,11 @@ fn repository(
                 },
                 "selector": "Ubuntu-24.04"
             }],
+            "permissions": {
+                "provider_default": {"contents": "read"},
+                "read_all": {"contents": "read"},
+                "write_all": {"contents": "write"}
+            },
             "resources": {
                 "defaults": {
                     "requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
@@ -96,7 +101,7 @@ fn repository(
                 "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
                 "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
             },
-            "schema": 1
+            "schema": 2
         },
         "check_name": "Automata CI",
         "authorities": {
@@ -146,6 +151,13 @@ fn loopback_transport_builds_one_exact_emulator_origin() {
         GithubInstallationId::new(10).expect("installation"),
     );
     assert!(credential.is_ok());
+    let authority =
+        provider_runtime_authority_endpoint(&transport).expect("provider authority endpoint");
+    assert_eq!(authority.as_str(), "http://automata-git.localhost:18088/");
+    assert_eq!(
+        authority.security(),
+        automata_ci_protocol::RuntimeAuthorityEndpointSecurity::LoopbackDevelopment
+    );
 }
 
 fn config_file() -> PathBuf {

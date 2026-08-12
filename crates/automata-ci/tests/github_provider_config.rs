@@ -29,7 +29,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
 }"#;
 
 fn test_file(name: &str) -> PathBuf {
@@ -194,11 +194,11 @@ fn runner_policy_preserves_raw_evidence_and_matches_store_codec_golden_values() 
     assert_eq!(repository.runner_policy().runtime_policy(), &expected);
     assert_eq!(
         expected.digest().to_string(),
-        "f056c8bf9c65febd33494c52ed0d402f9b5c01bfe031354c491f366362f3a5c7"
+        "5b36186efd97f645401b5d777c91d31a15dce60669733b7e492ad8a8cd73d757"
     );
     assert_eq!(
         expected.canonical_digest().to_string(),
-        "0c770bf61fef186459c55a27f215e643b210640b6fc3bc89c05f6992f071b858"
+        "22f025b7ef17e89a66a70113709e41ff0dfe3a7fb87837c2ffda38a72476ad0c"
     );
     assert_ne!(expected.digest(), expected.canonical_digest());
 

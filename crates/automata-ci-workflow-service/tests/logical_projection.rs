@@ -11,6 +11,7 @@ use automata_ci_core::{
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
+use automata_ci_store::WorkflowPermissionPolicy;
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubRunnerProfileCatalog, GithubRunnerProfileMapping,
     GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin,
@@ -42,6 +43,18 @@ fn resource_policy() -> JobResourcePolicy {
         ResourceCapacity::new(4_000, 8 * 1_024 * 1_024 * 1_024, 0, 0),
     )
     .expect("resource policy")
+}
+
+fn permission_policy() -> WorkflowPermissionPolicy {
+    WorkflowPermissionPolicy::new(
+        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+        BTreeMap::from([
+            ("contents".to_owned(), PermissionLevel::Write),
+            ("id-token".to_owned(), PermissionLevel::Write),
+        ]),
+    )
+    .expect("permission policy")
 }
 
 const SOURCE: &str = r"name: Synthetic CI
@@ -272,6 +285,7 @@ fn project_envelope_with_profiles(
             execution(instance),
             profiles,
             JobAuthorityProfile::Standard,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect("projection")
@@ -381,6 +395,7 @@ jobs:
             execution(instance),
             &profiles,
             JobAuthorityProfile::Standard,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect_err("two mapped selectors cannot choose one environment");
@@ -416,6 +431,7 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
             execution(instance),
             &profiles(),
             JobAuthorityProfile::Standard,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect("projection");
@@ -555,6 +571,7 @@ jobs:
             execution(instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect("explicit credential-free projection");
@@ -592,6 +609,7 @@ jobs:
             execution(legacy_instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect_err("provider-default permissions are not credential-free");
@@ -617,6 +635,7 @@ jobs:
             execution(secret_instance),
             &profiles(),
             JobAuthorityProfile::CredentialFree,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect_err("runtime secret bindings are never credential-free");
@@ -658,6 +677,7 @@ fn runtime_context_reference_must_match_exact_canonical_bytes() {
             mismatched,
             &profiles(),
             JobAuthorityProfile::Standard,
+            &permission_policy(),
             resource_policy(),
         ))
         .expect_err("mismatched runtime context");
@@ -668,22 +688,22 @@ fn runtime_context_reference_must_match_exact_canonical_bytes() {
 }
 
 #[test]
-fn permission_requests_resolve_job_over_workflow_without_source_spans() {
-    let default = project_envelope(
+fn permission_requests_resolve_shorthands_and_job_precedence_without_source_spans() {
+    let default = assert_projected_permissions(
         r"on: workflow_dispatch
 jobs:
   build:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-    );
-    assert_eq!(
-        default.job().permission_request(),
-        &JobPermissionRequest::ProviderDefault
+        &JobPermissionRequest::mapping([JobPermissionGrant::new(
+            "contents",
+            PermissionLevel::Read,
+        )]),
     );
     assert_eq!(default.job().timeout_seconds(), Some(360 * 60));
 
-    let inherited_read = project_envelope(
+    assert_projected_permissions(
         r"on: workflow_dispatch
 permissions: read-all
 jobs:
@@ -691,13 +711,13 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-    );
-    assert_eq!(
-        inherited_read.job().permission_request(),
-        &JobPermissionRequest::ReadAll
+        &JobPermissionRequest::mapping([JobPermissionGrant::new(
+            "contents",
+            PermissionLevel::Read,
+        )]),
     );
 
-    let inherited_write = project_envelope(
+    assert_projected_permissions(
         r"on: workflow_dispatch
 permissions: write-all
 jobs:
@@ -705,13 +725,13 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-    );
-    assert_eq!(
-        inherited_write.job().permission_request(),
-        &JobPermissionRequest::WriteAll
+        &JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::Write),
+            JobPermissionGrant::new("id-token", PermissionLevel::Write),
+        ]),
     );
 
-    let overridden = project_envelope(
+    let overridden = assert_projected_permissions(
         r"on: workflow_dispatch
 permissions: write-all
 jobs:
@@ -723,14 +743,11 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-    );
-    assert_eq!(
-        overridden.job().permission_request(),
-        &JobPermissionRequest::Mapping(vec![
+        &JobPermissionRequest::mapping([
             JobPermissionGrant::new("contents", PermissionLevel::Read),
             JobPermissionGrant::new("id-token", PermissionLevel::Write),
             JobPermissionGrant::new("statuses", PermissionLevel::Write),
-        ])
+        ]),
     );
     let encoded = serde_json::to_value(overridden.job().permission_request())
         .expect("serialize permission request");
@@ -738,7 +755,7 @@ jobs:
     assert!(encoded.to_string().find("span").is_none());
     assert!(encoded.to_string().find(WORKFLOW_PATH).is_none());
 
-    let empty_override = project_envelope(
+    assert_projected_permissions(
         r"on: workflow_dispatch
 permissions: write-all
 jobs:
@@ -747,13 +764,10 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-    );
-    assert_eq!(
-        empty_override.job().permission_request(),
-        &JobPermissionRequest::Mapping(Vec::new())
+        &JobPermissionRequest::mapping([]),
     );
 
-    let empty_workflow = project_envelope(
+    assert_projected_permissions(
         r"on: workflow_dispatch
 permissions: {}
 jobs:
@@ -761,11 +775,18 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
+        &JobPermissionRequest::mapping([]),
     );
+}
+
+fn assert_projected_permissions(source: &str, expected: &JobPermissionRequest) -> JobIrEnvelope {
+    let envelope = project_envelope(source);
     assert_eq!(
-        empty_workflow.job().permission_request(),
-        &JobPermissionRequest::Mapping(Vec::new())
+        envelope.job().permission_request(),
+        expected,
+        "projected permission request"
     );
+    envelope
 }
 
 #[test]
@@ -884,6 +905,7 @@ jobs:
                 execution(instance),
                 &profiles(),
                 JobAuthorityProfile::Standard,
+                &permission_policy(),
                 resource_policy(),
             ))
             .expect_err("unsupported semantics");

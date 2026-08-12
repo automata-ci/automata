@@ -442,6 +442,7 @@ fn backing_mount_evidence(
         }
         if matched.is_some()
             || record.identity != expected
+            || record.root != b"/"
             || record.filesystem_type != b"tmpfs"
             || !has_exact_noswap(record.super_options)
         {
@@ -577,7 +578,7 @@ fn parse_mountinfo_record(
     Ok(ParsedMountinfoRecord {
         identity,
         parent_id,
-        root: decode_mountinfo_path(fields[3])?,
+        root: decode_mountinfo_root(fields[3])?,
         mount_point: decode_mountinfo_path(fields[4])?,
         mount_options: fields[5],
         optional_fields: fields[6..separator].to_vec(),
@@ -589,6 +590,18 @@ fn parse_mountinfo_record(
 
 #[cfg(target_os = "linux")]
 fn decode_mountinfo_path(value: &[u8]) -> Result<Vec<u8>, ProductStateRootError> {
+    let decoded = decode_mountinfo_root(value)?;
+    if decoded.first() != Some(&b'/') {
+        return Err(ProductStateRootError::UnprotectedStorage);
+    }
+    Ok(decoded)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_root(value: &[u8]) -> Result<Vec<u8>, ProductStateRootError> {
+    if value.is_empty() {
+        return Err(ProductStateRootError::UnprotectedStorage);
+    }
     let mut decoded = Vec::with_capacity(value.len());
     let mut index = 0_usize;
     while index < value.len() {
@@ -609,9 +622,6 @@ fn decode_mountinfo_path(value: &[u8]) -> Result<Vec<u8>, ProductStateRootError>
         };
         decoded.push(byte);
         index += 4;
-    }
-    if decoded.first() != Some(&b'/') {
-        return Err(ProductStateRootError::UnprotectedStorage);
     }
     Ok(decoded)
 }
@@ -743,6 +753,7 @@ mod tests {
             mountinfo("rw,noswap,noswap"),
             mountinfo("rw,noswap,"),
             b"41 29 0:77 / /run/automata rw - ext4 /dev/root rw,noswap\n".to_vec(),
+            b"41 29 0:77 opaque /run/automata rw - tmpfs tmpfs rw,noswap\n".to_vec(),
         ] {
             assert_eq!(
                 require_noswap_tmpfs(&document, EXPECTED),
@@ -919,6 +930,22 @@ mod tests {
                 Err(ProductStateRootError::UnprotectedStorage)
             );
         }
+    }
+
+    #[test]
+    fn unrelated_pseudo_filesystem_root_does_not_invalidate_runtime_mount() {
+        let mut document = dedicated_mountinfo(
+            "/",
+            "/run/automata",
+            "rw,nosuid,nodev",
+            "shared:9",
+            "rw,noswap,size=1g,nr_inodes=4096,mode=700",
+        );
+        document.extend_from_slice(
+            b"985 29 0:5 net:[4026531833] /run/docker/netns/default rw shared:517 - nsfs nsfs rw\n",
+        );
+        dedicated_runtime_evidence(&document, EXPECTED, Path::new("/run/automata"))
+            .expect("an unrelated namespace pseudo-root cannot invalidate exact runtime evidence");
     }
 }
 

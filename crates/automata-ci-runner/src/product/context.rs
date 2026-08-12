@@ -30,7 +30,8 @@ const GITHUB_OIDC_API_VERSION_QUERY: &str = "api-version=2.0";
 /// explicit product configuration. Event payloads and job-scoped credentials
 /// are not invented when the orchestrator did not supply them. Results and
 /// repository authorities come only from the exact protected lease offer; the
-/// repository token must also target the configured HTTPS GitHub origin.
+/// repository token must also target the configured GitHub origin and its
+/// exact production-TLS or explicit loopback-development trust class.
 pub struct StandardGithubContext {
     runner_id: RunnerId,
     workspaces: BTreeMap<automata_ci_core::EnvironmentProfile, TargetPath>,
@@ -177,8 +178,13 @@ impl StandardGithubContext {
         authority
             .validate_for(request.job(), request.lease())
             .map_err(|_| invalid_data())?;
+        let expected_security = if self.github.allow_insecure_http() {
+            RuntimeAuthorityEndpointSecurity::LoopbackDevelopment
+        } else {
+            RuntimeAuthorityEndpointSecurity::Tls
+        };
         if request.job().source().provider() != "github"
-            || authority.endpoint().security() != RuntimeAuthorityEndpointSecurity::Tls
+            || authority.endpoint().security() != expected_security
             || authority.endpoint().as_url() != self.github.server_url()
         {
             return Err(invalid_data());

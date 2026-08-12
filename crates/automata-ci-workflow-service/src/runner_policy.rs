@@ -1,4 +1,4 @@
-//! Canonical historical runner and workspace policy for GitHub activations.
+//! Canonical historical runner, permission, resource, and workspace policy for GitHub activations.
 
 use automata_ci_core::RunId;
 use automata_ci_store::{
@@ -18,7 +18,7 @@ pub const MAX_GITHUB_RUNNER_POLICY_MAPPINGS: usize = MAX_WORKFLOW_RUNTIME_POLICY
 /// Maximum provider-neutral container features retained by one mapping.
 pub const MAX_GITHUB_RUNNER_POLICY_CONTAINER_FEATURES: usize = MAX_WORKFLOW_RUNTIME_POLICY_FEATURES;
 
-/// Validated immutable selector catalog and workspace-derivation contract.
+/// Validated immutable GitHub runtime-policy contract.
 ///
 /// Store owns the sole canonical codec and semantic digest. This service type
 /// is only the GitHub runner-catalog projection of that exact value.
@@ -142,6 +142,11 @@ mod tests {
         "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
       }],
+      "permissions":{
+        "provider_default":{"contents":"read"},
+        "read_all":{"contents":"read"},
+        "write_all":{"contents":"write"}
+      },
       "resources":{
         "defaults":{
           "requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},
@@ -150,7 +155,7 @@ mod tests {
         "minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},
         "maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}
       },
-      "schema":1
+      "schema":2
     }"#;
 
     #[test]

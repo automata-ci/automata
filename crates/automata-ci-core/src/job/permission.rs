@@ -46,15 +46,15 @@ impl JobPermissionGrant {
     }
 }
 
-/// Fully resolved source permission request for one executable job.
+/// Provider permission request carried by one executable job.
 ///
 /// Resolution chooses the job declaration over the workflow declaration. An
-/// absent declaration at both layers remains [`Self::ProviderDefault`] rather
-/// than being guessed or expanded by the planner. An explicit mapping is a
-/// complete request: permission names omitted from it are denied, and an empty
-/// mapping denies every provider permission. Mappings are canonical, strictly
-/// name-sorted vectors so every provider adapter consumes one deterministic
-/// request independently of source spans.
+/// absent declaration at both layers is represented as [`Self::ProviderDefault`]
+/// until a provider adapter expands it from immutable repository policy.
+/// Provider activation must likewise expand `read-all` and `write-all` before
+/// runtime credential issuance. An explicit mapping is complete: omitted names
+/// are denied, and an empty mapping denies every provider permission. Mappings
+/// are canonical, strictly name-sorted vectors independent of source spans.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     deny_unknown_fields,

@@ -392,7 +392,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn issuer_rejects_a_plaintext_development_endpoint() {
+async fn issuer_constructors_enforce_the_selected_transport_security() {
     let fixture = Fixture::new();
     let codec = test_codec();
     let store = Arc::new(FakeStore::empty());
@@ -422,19 +422,33 @@ async fn issuer_rejects_a_plaintext_development_endpoint() {
     ));
     let result = GithubRepositoryRuntimeAuthorityIssuer::new(
         Arc::new(ExactIdentityResolver {
-            identity: fixture.identity,
+            identity: fixture.identity.clone(),
         }),
-        coordinator,
-        repository,
-        codec,
-        clock,
+        Arc::clone(&coordinator),
+        Arc::clone(&repository),
+        Arc::clone(&codec),
+        Arc::clone(&clock),
         RuntimeAuthorityEndpoint::loopback_development("http://127.0.0.1/")
             .expect("loopback endpoint"),
     );
     assert!(matches!(
         result,
-        Err(GithubRuntimeAuthorityIssuerConfigurationError::InsecureEndpoint)
+        Err(GithubRuntimeAuthorityIssuerConfigurationError::InvalidEndpointSecurity)
     ));
+    assert!(
+        GithubRepositoryRuntimeAuthorityIssuer::new_for_loopback_emulator(
+            Arc::new(ExactIdentityResolver {
+                identity: fixture.identity,
+            }),
+            coordinator,
+            repository,
+            codec,
+            clock,
+            RuntimeAuthorityEndpoint::loopback_development("http://127.0.0.1/")
+                .expect("loopback endpoint"),
+        )
+        .is_ok()
+    );
 }
 
 fn identity_for(fixture: &Fixture, requested_at: UnixMillis) -> GithubRuntimeAuthorityIdentity {

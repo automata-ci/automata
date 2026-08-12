@@ -99,9 +99,9 @@ pub struct GithubRuntimeAuthorityIdentityResolutionValueError;
 /// Invalid GitHub repository-authority issuer configuration.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubRuntimeAuthorityIssuerConfigurationError {
-    /// Repository credentials may be delivered only to a TLS-protected origin.
-    #[error("the GitHub runtime-authority endpoint must use TLS")]
-    InsecureEndpoint,
+    /// The endpoint trust class does not match the selected provider transport.
+    #[error("the GitHub runtime-authority endpoint security is invalid")]
+    InvalidEndpointSecurity,
 }
 
 /// Sanitized failure from the durable identity-resolution boundary.
@@ -169,8 +169,57 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
         clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
         endpoint: RuntimeAuthorityEndpoint,
     ) -> Result<Self, GithubRuntimeAuthorityIssuerConfigurationError> {
-        if endpoint.security() != RuntimeAuthorityEndpointSecurity::Tls {
-            return Err(GithubRuntimeAuthorityIssuerConfigurationError::InsecureEndpoint);
+        Self::new_with_security(
+            identities,
+            coordinator,
+            repository,
+            envelopes,
+            clock,
+            endpoint,
+            RuntimeAuthorityEndpointSecurity::Tls,
+        )
+    }
+
+    /// Constructs an issuer for one explicit loopback protocol emulator.
+    ///
+    /// This is a development-only trust boundary. The endpoint must carry the
+    /// protocol's validated `LoopbackDevelopment` marker; production HTTPS and
+    /// trusted-private development endpoints are rejected rather than silently
+    /// changing transport policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every endpoint outside the explicit loopback development class.
+    pub fn new_for_loopback_emulator(
+        identities: Arc<dyn GithubRuntimeAuthorityIdentityResolver>,
+        coordinator: Arc<GithubRuntimeAuthorityMintCoordinator>,
+        repository: Arc<dyn GithubRuntimeAuthorityRepository>,
+        envelopes: Arc<EnvelopeCodec>,
+        clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
+        endpoint: RuntimeAuthorityEndpoint,
+    ) -> Result<Self, GithubRuntimeAuthorityIssuerConfigurationError> {
+        Self::new_with_security(
+            identities,
+            coordinator,
+            repository,
+            envelopes,
+            clock,
+            endpoint,
+            RuntimeAuthorityEndpointSecurity::LoopbackDevelopment,
+        )
+    }
+
+    fn new_with_security(
+        identities: Arc<dyn GithubRuntimeAuthorityIdentityResolver>,
+        coordinator: Arc<GithubRuntimeAuthorityMintCoordinator>,
+        repository: Arc<dyn GithubRuntimeAuthorityRepository>,
+        envelopes: Arc<EnvelopeCodec>,
+        clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
+        endpoint: RuntimeAuthorityEndpoint,
+        expected_security: RuntimeAuthorityEndpointSecurity,
+    ) -> Result<Self, GithubRuntimeAuthorityIssuerConfigurationError> {
+        if endpoint.security() != expected_security {
+            return Err(GithubRuntimeAuthorityIssuerConfigurationError::InvalidEndpointSecurity);
         }
         Ok(Self {
             identities,
