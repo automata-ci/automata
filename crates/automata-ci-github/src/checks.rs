@@ -20,6 +20,7 @@ use crate::{
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const MAX_CHECK_NAME_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
+const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = i64::MAX as u64;
 const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
@@ -517,6 +518,12 @@ struct SuiteResponse {
     app: AppResponse,
 }
 
+#[derive(Deserialize)]
+struct CheckSuitesPage {
+    total_count: u64,
+    check_suites: Vec<SuiteResponse>,
+}
+
 #[derive(Serialize)]
 struct CreateRunBody<'a> {
     name: &'a str,
@@ -650,7 +657,55 @@ impl GithubHttpEndpoint {
                 GithubCheckSuiteCreateOutcome::Created(suite)
             });
         }
+        if status == StatusCode::UNPROCESSABLE_ENTITY
+            && let Some(suite) = self
+                .resolve_existing_check_suite(repository, head_sha, app_id, server_service_token)
+                .await?
+        {
+            return Ok(GithubCheckSuiteCreateOutcome::Existing(suite));
+        }
         classify_create_failure(&response).map(GithubCheckSuiteCreateOutcome::Indeterminate)
+    }
+
+    async fn resolve_existing_check_suite(
+        &self,
+        repository: &RepositoryId,
+        head_sha: &ExactRevision,
+        app_id: GithubCheckAppId,
+        server_service_token: &SecretString,
+    ) -> Result<Option<GithubCheckSuite>, GithubChecksError> {
+        let app_id_query = app_id.get().to_string();
+        let mut endpoint = self
+            .checks_repository_url(repository, &["commits", head_sha.as_str(), "check-suites"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("app_id", &app_id_query)
+            .append_pair("per_page", &CHECK_SUITES_PER_PAGE.to_string())
+            .append_pair("page", "1");
+        let response =
+            authenticated_checks_request(self.client.get(endpoint), server_service_token)?
+                .send()
+                .await
+                .map_err(|_| GithubChecksError::Unavailable(GithubCheckRetryEvidence::default()))?;
+        if response.status() != StatusCode::OK {
+            return Err(map_error_response(&response));
+        }
+        let response =
+            read_json_response(response, self.trusted.limits().max_response_bytes, false)
+                .await
+                .map_err(map_endpoint_error)?;
+        let page: CheckSuitesPage = decode_json(&response.body).map_err(map_endpoint_error)?;
+        if page.check_suites.len() > 1
+            || page.check_suites.len() > CHECK_SUITES_PER_PAGE
+            || u64::try_from(page.check_suites.len()).ok() != Some(page.total_count)
+        {
+            return Err(GithubChecksError::InvalidResponse);
+        }
+        page.check_suites
+            .into_iter()
+            .next()
+            .map(|suite| validate_suite(suite, head_sha, app_id))
+            .transpose()
     }
 
     /// Creates one queued Check Run with no output, annotations, actions, or images.
@@ -966,20 +1021,7 @@ impl GithubHttpEndpoint {
                 .await
                 .map_err(map_endpoint_error)?;
         let wire: SuiteResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
-        let id =
-            GithubCheckSuiteId::new(wire.id).map_err(|_| GithubChecksError::InvalidResponse)?;
-        let app_id =
-            GithubCheckAppId::new(wire.app.id).map_err(|_| GithubChecksError::InvalidResponse)?;
-        let head_sha =
-            ExactRevision::new(wire.head_sha).map_err(|_| GithubChecksError::InvalidResponse)?;
-        if app_id != expected_app || &head_sha != expected_sha {
-            return Err(GithubChecksError::InvalidResponse);
-        }
-        Ok(GithubCheckSuite {
-            id,
-            app_id,
-            head_sha,
-        })
+        validate_suite(wire, expected_sha, expected_app)
     }
 
     async fn decode_run_response(
@@ -993,6 +1035,26 @@ impl GithubHttpEndpoint {
         let wire: RunResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
         validate_run(wire)
     }
+}
+
+fn validate_suite(
+    wire: SuiteResponse,
+    expected_sha: &ExactRevision,
+    expected_app: GithubCheckAppId,
+) -> Result<GithubCheckSuite, GithubChecksError> {
+    let id = GithubCheckSuiteId::new(wire.id).map_err(|_| GithubChecksError::InvalidResponse)?;
+    let app_id =
+        GithubCheckAppId::new(wire.app.id).map_err(|_| GithubChecksError::InvalidResponse)?;
+    let head_sha =
+        ExactRevision::new(wire.head_sha).map_err(|_| GithubChecksError::InvalidResponse)?;
+    if app_id != expected_app || &head_sha != expected_sha {
+        return Err(GithubChecksError::InvalidResponse);
+    }
+    Ok(GithubCheckSuite {
+        id,
+        app_id,
+        head_sha,
+    })
 }
 
 fn validate_run(wire: RunResponse) -> Result<ValidatedRun, GithubChecksError> {
