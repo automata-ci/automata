@@ -37,8 +37,11 @@ members = [
     "crates/automata-ci-runner-runtime",
     "crates/automata-ci-runner-spool",
     "crates/automata-ci-runner-transport",
+    "crates/automata-ci-sandbox-guest",
+    "crates/automata-ci-sandbox-kubernetes",
     "crates/automata-ci-sandbox-podman",
     "crates/automata-ci-sandbox-windows",
+    "crates/automata-ci-schedule",
     "crates/automata-ci-scm",
     "crates/automata-ci-secret",
     "crates/automata-ci-secret-postgres",
@@ -104,8 +107,11 @@ automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", versi
 automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }
 automata-ci-runner-spool = { path = "crates/automata-ci-runner-spool", version = "0.1.0" }
 automata-ci-runner-transport = { path = "crates/automata-ci-runner-transport", version = "0.1.0" }
+automata-ci-sandbox-guest = { path = "crates/automata-ci-sandbox-guest", version = "0.1.0" }
+automata-ci-sandbox-kubernetes = { path = "crates/automata-ci-sandbox-kubernetes", version = "0.1.0" }
 automata-ci-sandbox-podman = { path = "crates/automata-ci-sandbox-podman", version = "0.1.0" }
 automata-ci-sandbox-windows = { path = "crates/automata-ci-sandbox-windows", version = "0.1.0" }
+automata-ci-schedule = { path = "crates/automata-ci-schedule", version = "0.1.0" }
 automata-ci-scm = { path = "crates/automata-ci-scm", version = "0.1.0" }
 automata-ci-secret = { path = "crates/automata-ci-secret", version = "0.1.0" }
 automata-ci-secret-postgres = { path = "crates/automata-ci-secret-postgres", version = "0.1.0" }
