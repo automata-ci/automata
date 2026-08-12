@@ -65,6 +65,8 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         administrative.privilege(),
         SandboxPrivilegePolicy::Administrator
     );
+    let host_identity = spec.clone().with_privilege(SandboxPrivilegePolicy::Host);
+    assert_eq!(host_identity.privilege(), SandboxPrivilegePolicy::Host);
     assert_eq!(
         spec.profile().id().as_str(),
         "automata.dev/arch-linux-x86-64-v1"
@@ -73,8 +75,43 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         spec.profile().digest(),
         Sha256Digest::from_bytes([0x11; 32])
     );
-    assert_eq!(spec.profile().image().reference(), IMAGE);
+    assert_eq!(
+        spec.profile().image().expect("container image").reference(),
+        IMAGE
+    );
     assert_eq!(spec.resources().cpu_millis(), 2_000);
+}
+
+#[test]
+fn native_windows_profile_is_explicit_and_carries_exact_scratch_allowlist() {
+    let environment = SandboxEnvironment::native(
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("automata.dev/windows-native-x86-64-v1").expect("profile ID"),
+            Sha256Digest::from_bytes([0x22; 32]),
+        ),
+        TargetPath::windows(r"C:\automata\workspaces").expect("workspace root"),
+        ExecutionEnvironment::empty(),
+    )
+    .expect("native profile");
+    assert!(matches!(
+        environment.launch(),
+        automata_ci_execution::SandboxLaunch::Native
+    ));
+    assert!(environment.image().is_none());
+    assert!(environment.keepalive().is_none());
+
+    let scratch = TargetPath::windows(r"C:\automata\scratch\attempt-7").expect("scratch");
+    let spec = SandboxSpec::new(
+        OperationId::new(),
+        SandboxGeneration::new(8).expect("generation"),
+        environment,
+        TargetPath::windows(r"C:\automata\workspaces\repository").expect("workspace"),
+        NetworkPolicy::Host,
+        RootFilesystemPolicy::Host,
+        ResourceLimits::new(512 * 1024 * 1024, 2_000, 256).expect("limits"),
+    )
+    .with_scratch(scratch.clone());
+    assert_eq!(spec.scratch(), Some(&scratch));
 }
 
 #[test]

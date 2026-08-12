@@ -55,7 +55,6 @@ getrandom.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 prometheus-client.workspace = true
-rustix.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -72,6 +71,9 @@ url.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [build-dependencies]
 automata-ci-build-support.workspace = true

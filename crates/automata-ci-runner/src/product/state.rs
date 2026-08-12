@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt as _;
 
 use thiserror::Error;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::files::{SecureInputError, validate_absolute_path};
 
 /// Sanitized failure while preparing a provider-owned state directory.
@@ -80,12 +80,92 @@ pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), ProductStateRo
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Prepares a stable, non-reparse Windows state-root path.
+///
+/// This establishes path topology only. A Windows deployment must pre-provision
+/// restrictive ACLs on the configured root and its ancestors for the runner
+/// service identity; safe standard-library APIs cannot attest or repair DACL
+/// ownership.
+#[cfg(windows)]
+pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), ProductStateRootError> {
+    use std::{
+        fs::{self, File, OpenOptions},
+        io,
+        os::windows::fs::{MetadataExt as _, OpenOptionsExt as _},
+    };
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    fn open_directory(path: &Path, writable: bool) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options
+            .read(!writable)
+            .write(writable)
+            // Delete sharing is omitted so a retained handle stabilizes the
+            // directory component for the rest of the traversal.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        options.open(path)
+    }
+
+    fn ensure_directory(file: &File) -> Result<(), ProductStateRootError> {
+        let metadata = file
+            .metadata()
+            .map_err(|_| ProductStateRootError::Unavailable)?;
+        if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            Ok(())
+        } else {
+            Err(ProductStateRootError::PathSecurity)
+        }
+    }
+
+    fn sync_directory(path: &Path) -> Result<(), ProductStateRootError> {
+        let directory =
+            open_directory(path, true).map_err(|_| ProductStateRootError::Unavailable)?;
+        ensure_directory(&directory)?;
+        directory
+            .sync_all()
+            .map_err(|_| ProductStateRootError::Unavailable)
+    }
+
+    validate_absolute_path(path).map_err(map_path_error)?;
+    let mut paths = path.ancestors().collect::<Vec<_>>();
+    paths.reverse();
+    let mut handles = Vec::with_capacity(paths.len());
+    for (index, directory_path) in paths.into_iter().enumerate() {
+        let directory = match open_directory(directory_path, false) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && index > 0 => {
+                match fs::create_dir(directory_path) {
+                    Ok(()) => sync_directory(
+                        directory_path
+                            .parent()
+                            .ok_or(ProductStateRootError::PathSecurity)?,
+                    )?,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return Err(ProductStateRootError::Unavailable),
+                }
+                open_directory(directory_path, false)
+                    .map_err(|_| ProductStateRootError::PathSecurity)?
+            }
+            Err(_) => return Err(ProductStateRootError::PathSecurity),
+        };
+        ensure_directory(&directory)?;
+        handles.push(directory);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn ensure_private_directory(_path: &Path) -> Result<(), ProductStateRootError> {
     Err(ProductStateRootError::UnsupportedPlatform)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const fn map_path_error(_error: SecureInputError) -> ProductStateRootError {
     ProductStateRootError::InvalidPath
 }
@@ -839,5 +919,77 @@ mod tests {
                 Err(ProductStateRootError::UnprotectedStorage)
             );
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+
+    static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "automata-state-{label}-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn nested_non_reparse_directories_are_created() {
+        let root = test_root("nested");
+        fs::create_dir(&root).expect("create pre-provisioned test root");
+        let nested = root.join("provider").join("state");
+
+        ensure_private_directory(&nested).expect("prepare nested state root");
+        assert!(nested.is_dir());
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn regular_file_components_are_rejected() {
+        let root = test_root("file-component");
+        fs::create_dir(&root).expect("create pre-provisioned test root");
+        let file = root.join("file");
+        fs::write(&file, b"not a directory").expect("write file component");
+
+        assert_eq!(
+            ensure_private_directory(&file.join("state")),
+            Err(ProductStateRootError::PathSecurity)
+        );
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn reparse_directory_components_are_rejected() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = test_root("reparse");
+        let target = root.join("target");
+        let link = root.join("link");
+        fs::create_dir(&root).expect("create pre-provisioned test root");
+        fs::create_dir(&target).expect("create target directory");
+        if let Err(error) = symlink_dir(&target, &link) {
+            if error.raw_os_error() == Some(1_314) {
+                fs::remove_dir_all(root).expect("remove test root");
+                return;
+            }
+            panic!("create directory symlink: {error}");
+        }
+
+        assert_eq!(
+            ensure_private_directory(&link.join("state")),
+            Err(ProductStateRootError::PathSecurity)
+        );
+
+        fs::remove_dir_all(root).expect("remove test root");
     }
 }

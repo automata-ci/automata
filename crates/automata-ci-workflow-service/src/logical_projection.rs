@@ -443,10 +443,12 @@ fn validate_workspace_platform(
     let compatible = match requirements.operating_system() {
         Some(OperatingSystem::Windows) => {
             let bytes = workspace.as_bytes();
-            bytes.len() >= 3
+            (bytes.len() >= 3
                 && bytes[0].is_ascii_alphabetic()
                 && bytes[1] == b':'
-                && bytes[2] == b'\\'
+                && bytes[2] == b'\\')
+                || workspace == "/__w"
+                || workspace.starts_with("/__w/")
         }
         Some(OperatingSystem::Linux | OperatingSystem::Macos) => workspace.starts_with('/'),
         Some(OperatingSystem::Other(_)) | None => true,

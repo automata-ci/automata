@@ -15,8 +15,8 @@ As of 2026-08-11, the source tree contains:
   expansion, and JobIR projection;
 - PostgreSQL admission, scheduling, leases, fencing, maintenance, result
   projection, and immutable numeric run aliases;
-- mTLS runner transport, provider admission, rootless Podman execution, crash
-  journals, and cleanup;
+- mTLS runner transport, provider admission, rootless Podman and trusted native
+  Windows execution, crash journals, and cleanup;
 - Results, artifact, and CacheService v2 boundaries backed by
   S3-compatible storage;
 - configured GitHub provider ingress, source delivery, authentication, Check
@@ -58,8 +58,8 @@ does not by itself close the end-to-end gate.
   REST surface.
 - [ ] Pass heterogeneous Linux fleet fixtures for isolated Docker and BuildKit,
   large transfers, persistent-cache trust boundaries, and exclusive devices.
-- [ ] Pass scale, fault-injection, strong-isolation, workflow-chaining, Windows,
-  and macOS gates before advertising those capabilities.
+- [ ] Pass scale, fault-injection, strong-isolation, workflow-chaining, broader
+  Windows, and macOS gates before advertising those remaining capabilities.
 
 ## Acceptance gates
 
@@ -132,19 +132,26 @@ escape the isolation class advertised by their runner.
 
 ### G6: Windows, macOS, and fleet migration
 
-Implement Windows shell, path, process, service, native, and Hyper-V behavior;
-macOS shell, keychain, native, arm64, and Virtualization.framework behavior;
-and the workflow-chaining surfaces required by larger fleets.
+The initial trusted native Windows slice covers PowerShell and `cmd.exe` shell
+steps, an optional explicitly configured Python interpreter, and Job Object
+process containment with an explicit unchanged-host-identity policy.
+Restricted-token launch, broader Windows path and process semantics, services,
+Hyper-V isolation, signing environments, and parallel native jobs remain
+target-state work.
+
+Implement macOS shell and keychain semantics, native and
+Virtualization.framework providers, arm64 profiles, and GPU resource locks;
+also complete the workflow-chaining surfaces required by larger fleets.
 
 Gate: unchanged workflows pass per-platform differential comparison. Publish,
 deploy, recovery, and release workflows enter only after read-only and staging
 gates have completed their agreed soak periods.
 
-## Planned provider scope
+## Provider scope
 
-Rootless Podman on Linux is the current execution path. The other providers are
-planned and must not appear in runner capability inventory before their gates
-pass.
+Rootless Podman on Linux and the experimental trusted native Windows slice are
+the current execution paths. The providers below are planned and must not
+appear in runner capability inventory before their gates pass.
 
 | Provider | Planned use | Isolation boundary |
 | --- | --- | --- |
@@ -153,7 +160,7 @@ pass.
 | Kubernetes with Kata | VM-backed pod sandbox | One VM-backed pod per runner |
 | KubeVirt | VM fleet or job sandbox | One VMI per runner or job |
 | Linux native | Trusted jobs | Account, cgroup, and LSM policy |
-| Windows native / Hyper-V | Windows jobs | Restricted host process or disposable VM |
+| Windows Hyper-V | Hostile Windows jobs | Disposable VM |
 | macOS native / Virtualization.framework | macOS jobs | Dedicated account or disposable VM |
 
 Kubernetes is not treated as “one workflow job equals one fixed Pod.” Dynamic

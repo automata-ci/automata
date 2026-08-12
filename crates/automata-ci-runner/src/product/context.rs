@@ -4,7 +4,7 @@ use automata_ci_core::{
     ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, PermissionLevel, RunnerId,
     SemanticStep, StrategyContext, ValueSource,
 };
-use automata_ci_execution::TargetPath;
+use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_expression_github::{
     GithubObject, GithubStatus, GithubValue, MapContext, NoExtensionFunctions,
 };
@@ -24,7 +24,7 @@ const GITHUB_ID_TOKEN_PERMISSION: &str = "id-token";
 const GITHUB_OIDC_TOKEN_PATH: &str = "/oidc/token";
 const GITHUB_OIDC_API_VERSION_QUERY: &str = "api-version=2.0";
 
-/// Standard Linux GitHub context and default-environment authority.
+/// Standard platform-aware GitHub context and default-environment authority.
 ///
 /// Values are derived only from immutable `JobIR`, durable command state, and
 /// explicit product configuration. Event payloads and job-scoped credentials
@@ -33,7 +33,8 @@ const GITHUB_OIDC_API_VERSION_QUERY: &str = "api-version=2.0";
 /// repository token must also target the configured HTTPS GitHub origin.
 pub struct StandardGithubContext {
     runner_id: RunnerId,
-    workspaces: BTreeMap<automata_ci_core::EnvironmentProfile, String>,
+    workspaces: BTreeMap<automata_ci_core::EnvironmentProfile, TargetPath>,
+    platform: TargetPlatform,
     runner_root: String,
     home: String,
     path: String,
@@ -61,15 +62,29 @@ impl StandardGithubContext {
         if environments.is_empty() {
             return Err(invalid_data());
         }
-        let workspaces = environments
+        let workspaces: BTreeMap<_, _> = environments
             .iter()
-            .map(|(profile, environment)| {
-                (profile.clone(), environment.workspace().as_str().to_owned())
-            })
+            .map(|(profile, environment)| (profile.clone(), environment.workspace().clone()))
             .collect();
+        let platform = workspaces
+            .values()
+            .next()
+            .map(TargetPath::platform)
+            .ok_or_else(invalid_data)?;
+        if workspaces
+            .values()
+            .any(|workspace| workspace.platform() != platform)
+            || executor.runner_root().platform() != platform
+            || executor.home().platform() != platform
+            || executor.temp().platform() != platform
+            || executor.tool_cache().platform() != platform
+        {
+            return Err(invalid_data());
+        }
         Ok(Self {
             runner_id,
             workspaces,
+            platform,
             runner_root: executor.runner_root().as_str().to_owned(),
             home: executor.home().as_str().to_owned(),
             path: executor.path().to_owned(),
@@ -79,28 +94,34 @@ impl StandardGithubContext {
         })
     }
 
-    fn workspace<'request>(
-        &self,
-        request: GithubContextRequest<'request>,
-    ) -> Result<&'request str, PortError> {
+    fn workspace(&self, request: GithubContextRequest<'_>) -> Result<String, PortError> {
         let profile = request
             .job()
             .job()
             .requirements()
             .environment_profile()
             .ok_or_else(invalid_data)?;
-        let root = self
-            .workspaces
-            .get(profile)
-            .map(String::as_str)
-            .ok_or_else(invalid_data)?;
+        let root = self.workspaces.get(profile).ok_or_else(invalid_data)?;
         let workspace = request.job().execution().workspace();
-        TargetPath::posix(workspace).map_err(|_| invalid_data())?;
-        let prefix = format!("{}/", root.trim_end_matches('/'));
-        if workspace == root || !workspace.starts_with(&prefix) {
-            return Err(invalid_data());
+        match self.platform {
+            TargetPlatform::Posix => {
+                TargetPath::posix(workspace).map_err(|_| invalid_data())?;
+                let prefix = format!("{}/", root.as_str().trim_end_matches('/'));
+                if workspace == root.as_str() || !workspace.starts_with(&prefix) {
+                    return Err(invalid_data());
+                }
+                Ok(workspace.to_owned())
+            }
+            TargetPlatform::Windows => {
+                TargetPath::posix(workspace).map_err(|_| invalid_data())?;
+                let suffix = workspace.strip_prefix("/__w/").ok_or_else(invalid_data)?;
+                let mut mapped = root.as_str().trim_end_matches('\\').to_owned();
+                mapped.push('\\');
+                mapped.push_str(&suffix.replace('/', "\\"));
+                TargetPath::windows(mapped.clone()).map_err(|_| invalid_data())?;
+                Ok(mapped)
+            }
         }
-        Ok(workspace)
     }
 
     fn expression_context(
@@ -194,7 +215,7 @@ impl StandardGithubContext {
     fn runner_value(&self) -> Result<GithubValue, PortError> {
         object(vec![
             string_entry("name", self.runner_id.to_string()),
-            string_entry("os", "Linux"),
+            string_entry("os", self.runner_os()),
             string_entry("arch", github_architecture()),
             string_entry("environment", "self-hosted"),
             string_entry("temp", &self.temp),
@@ -242,7 +263,7 @@ impl StandardGithubContext {
             plain("RUNNER_ARCH", github_architecture()),
             plain("RUNNER_ENVIRONMENT", "self-hosted"),
             plain("RUNNER_NAME", self.runner_id.to_string()),
-            plain("RUNNER_OS", "Linux"),
+            plain("RUNNER_OS", self.runner_os()),
             plain("RUNNER_TEMP", &self.temp),
             plain("RUNNER_TOOL_CACHE", &self.tool_cache),
         ];
@@ -296,6 +317,13 @@ impl StandardGithubContext {
         }
         values
     }
+
+    const fn runner_os(&self) -> &'static str {
+        match self.platform {
+            TargetPlatform::Posix => "Linux",
+            TargetPlatform::Windows => "Windows",
+        }
+    }
 }
 
 impl GithubContextPort for StandardGithubContext {
@@ -328,8 +356,8 @@ impl GithubContextPort for StandardGithubContext {
                 (None, None, None)
             }
         };
-        let expression = Arc::new(self.expression_context(request, workspace, repository)?);
-        let environment = self.standard_environment(request, workspace, results, oidc);
+        let expression = Arc::new(self.expression_context(request, &workspace, repository)?);
+        let environment = self.standard_environment(request, &workspace, results, oidc);
         let secret_masks = repository
             .map(|authority| vec![authority.credential().shared_secret()])
             .unwrap_or_default();

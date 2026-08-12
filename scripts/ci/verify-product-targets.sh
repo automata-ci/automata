@@ -118,10 +118,10 @@ runner_package = next(
     package for package in metadata["packages"] if package["name"] == "automata-ci-runner"
 )
 if runner_package["description"] != (
-    "Automata workflow runner for rootless Linux execution hosts"
+    "Automata workflow runner for Linux and trusted native Windows hosts"
 ):
     print(
-        "error: runner package description must match its current Linux support boundary",
+        "error: runner package description must match its current Linux and trusted Windows support boundary",
         file=sys.stderr,
     )
     raise SystemExit(1)

@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -44,7 +44,7 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
 
     assert_eq!(environment["GITHUB_WORKFLOW"], "CI");
     assert_eq!(environment["GITHUB_REF"], "refs/heads/main");
-    assert_eq!(environment["GITHUB_WORKSPACE"], "/__w/automata/automata");
+    assert_eq!(environment["GITHUB_WORKSPACE"], expected_workspace());
     assert_eq!(environment["GITHUB_REPOSITORY_OWNER"], "automata-ci");
     assert_eq!(environment["GITHUB_REF_NAME"], "main");
     assert_eq!(environment["GITHUB_REF_TYPE"], "branch");
@@ -57,10 +57,8 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
         "0123456789abcdef0123456789abcdef01234567"
     );
     assert_eq!(environment["RUNNER_ENVIRONMENT"], "self-hosted");
-    assert_eq!(
-        environment["GITHUB_EVENT_PATH"],
-        "/__automata/attempts/fixture/event.json"
-    );
+    assert_eq!(environment["RUNNER_OS"], expected_runner_os());
+    assert_eq!(environment["GITHUB_EVENT_PATH"], expected_event_path());
     assert_eq!(environment["GITHUB_ACTOR"], "local-bootstrap");
     assert_eq!(environment["GITHUB_RUN_ID"], "42");
     assert_eq!(environment["GITHUB_RUN_ATTEMPT"], "1");
@@ -83,11 +81,11 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     );
     assert_eq!(
         github.get("workspace").and_then(GithubValue::as_str),
-        Some("/__w/automata/automata")
+        Some(expected_workspace())
     );
     assert_eq!(
         github.get("event_path").and_then(GithubValue::as_str),
-        Some("/__automata/attempts/fixture/event.json")
+        Some(expected_event_path())
     );
     assert_eq!(
         github.get("workflow_ref").and_then(GithubValue::as_str),
@@ -98,6 +96,18 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
         Some("42")
     );
     assert!(github.get("run_number").is_none());
+
+    let GithubValue::Object(runner) = snapshot
+        .expression()
+        .named_value("runner")
+        .expect("runner context")
+    else {
+        panic!("runner context must be an object");
+    };
+    assert_eq!(
+        runner.get("os").and_then(GithubValue::as_str),
+        Some(expected_runner_os())
+    );
 }
 
 #[test]
@@ -710,17 +720,24 @@ struct ContextFixture {
     runtime_authorities: JobRuntimeAuthorities,
 }
 
+fn fixture_runner_config() -> RunnerProductConfig {
+    #[cfg(windows)]
+    let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
+    #[cfg(target_os = "linux")]
+    let config_bytes = include_bytes!("../config/runner.local.example.json").as_slice();
+    let mut document: serde_json::Value =
+        serde_json::from_slice(config_bytes).expect("runner config JSON");
+    document["github"]["server_url"] = serde_json::json!("https://github.com/");
+    document["github"]["api_url"] = serde_json::json!("https://api.github.com/");
+    document["github"]["graphql_url"] = serde_json::json!("https://api.github.com/graphql");
+    document["github"]["allow_insecure_http"] = serde_json::json!(false);
+    let encoded = serde_json::to_vec(&document).expect("runner config encoding");
+    RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
+}
+
 impl ContextFixture {
     fn new() -> Self {
-        let mut document: serde_json::Value =
-            serde_json::from_slice(include_bytes!("../config/runner.local.example.json"))
-                .expect("runner config JSON");
-        document["github"]["server_url"] = serde_json::json!("https://github.com/");
-        document["github"]["api_url"] = serde_json::json!("https://api.github.com/");
-        document["github"]["graphql_url"] = serde_json::json!("https://api.github.com/graphql");
-        document["github"]["allow_insecure_http"] = serde_json::json!(false);
-        let encoded = serde_json::to_vec(&document).expect("runner config encoding");
-        let config = RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture");
+        let config = fixture_runner_config();
         let (profile, _) = config
             .environments()
             .first_key_value()
@@ -1016,7 +1033,34 @@ fn fixture_runtime_context() -> JobRuntimeContext {
 }
 
 fn fixture_event_path() -> TargetPath {
-    TargetPath::posix("/__automata/attempts/fixture/event.json").expect("event target")
+    #[cfg(windows)]
+    {
+        TargetPath::windows(expected_event_path()).expect("event target")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        TargetPath::posix(expected_event_path()).expect("event target")
+    }
+}
+
+const fn expected_runner_os() -> &'static str {
+    if cfg!(windows) { "Windows" } else { "Linux" }
+}
+
+const fn expected_workspace() -> &'static str {
+    if cfg!(windows) {
+        r"C:\automata\native\workspaces\automata\automata"
+    } else {
+        "/__w/automata/automata"
+    }
+}
+
+const fn expected_event_path() -> &'static str {
+    if cfg!(windows) {
+        r"C:\automata\native\runner\attempts\fixture\event.json"
+    } else {
+        "/__automata/attempts/fixture/event.json"
+    }
 }
 
 fn empty_event() -> GithubValue {

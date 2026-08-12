@@ -963,52 +963,48 @@ pub(crate) fn prepare(_options: &crate::PodmanOptions) -> Result<(), PodmanState
 
 #[cfg(not(unix))]
 #[derive(Debug)]
-pub(crate) struct LocalState;
+pub(crate) struct LocalState(std::convert::Infallible);
 
 #[cfg(not(unix))]
 impl LocalState {
-    pub(crate) fn open(_options: &crate::PodmanOptions) -> Result<Self, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
-    }
-
     pub(crate) fn ensure_workspace(&self, _name: &str) -> Result<PathBuf, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn workspace_cleanup_target(
         &self,
         _name: &str,
     ) -> Result<Option<PathBuf>, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn confirm_workspace_removed(
         &self,
         _name: &str,
     ) -> Result<(), PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn workspace_exists(&self, _name: &str) -> Result<bool, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn ensure_job_engine(
         &self,
         _name: &str,
     ) -> Result<JobEnginePaths, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn remove_job_engine(&self, _name: &str) -> Result<bool, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn read_service_manifest(
         &self,
         _name: &str,
     ) -> Result<Option<Vec<u8>>, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn write_service_manifest(
@@ -1016,14 +1012,14 @@ impl LocalState {
         _name: &str,
         _content: &[u8],
     ) -> Result<(), PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 
     pub(crate) fn remove_service_manifest(
         &self,
         _name: &str,
     ) -> Result<bool, PodmanStateRootError> {
-        Err(PodmanStateRootError::UnsupportedPlatform)
+        match self.0 {}
     }
 }
 
@@ -1044,10 +1040,6 @@ impl JobEnginePaths {
     }
 
     pub(crate) fn tmp_dir(&self) -> &Path {
-        &self.root
-    }
-
-    pub(crate) fn backend_socket(&self) -> &Path {
         &self.root
     }
 

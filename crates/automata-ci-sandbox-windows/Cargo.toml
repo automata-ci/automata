@@ -1,0 +1,28 @@
+[package]
+name = "automata-ci-sandbox-windows"
+description = "Trusted native Windows whole-job sandbox adapter for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-execution.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+processkit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+static_assertions.workspace = true

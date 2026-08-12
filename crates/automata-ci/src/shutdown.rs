@@ -1,4 +1,7 @@
-use tracing::{error, info, warn};
+use tracing::{error, info};
+
+#[cfg(unix)]
+use tracing::warn;
 
 /// Waits for the platform's normal process shutdown signal.
 pub async fn wait() {

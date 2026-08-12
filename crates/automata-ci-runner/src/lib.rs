@@ -1,9 +1,10 @@
 //! Automata execution-host runner.
 //!
-//! The crate diagnoses Linux host capabilities and validates runner
-//! configuration. Before the production command opens a control-plane session,
-//! it requires the configured rootless-Podman network probe and cleanup to
-//! succeed. It then supervises fenced job execution through that provider.
+//! The crate diagnoses host capabilities and validates runner configuration.
+//! Linux execution uses the configured rootless-Podman isolation probe;
+//! trusted Windows execution uses native processes contained by a Job Object
+//! with explicit host-network and host-filesystem semantics. It then
+//! supervises fenced job execution through the selected provider.
 //! [`run`] is the `automata-runner` process entry point; diagnostic and product
 //! modules expose the same typed boundaries for embedding and tests.
 
@@ -51,7 +52,11 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Run(args) => {
             let shutdown = product::RunnerShutdown::new();
             let signal_shutdown = shutdown.clone();
-            let _signal_observer = ProcessSignalObserver::start(move || signal_shutdown.request())?;
+            let request_shutdown = move || signal_shutdown.request();
+            #[cfg(unix)]
+            let _signal_observer = ProcessSignalObserver::start(request_shutdown)?;
+            #[cfg(not(unix))]
+            let _signal_observer = ProcessSignalObserver::start(request_shutdown);
             Box::pin(product::run(&args.config, shutdown))
                 .await
                 .map_err(Into::into)
@@ -61,9 +66,14 @@ async fn execute(cli: Cli) -> Result<()> {
             let cancellation = podman_probe::ProbeCancellation::default();
             let _signal_observer = if args.active {
                 let signal_cancellation = cancellation.clone();
-                Some(ProcessSignalObserver::start(move || {
+                let request_shutdown = move || {
                     signal_cancellation.cancel();
-                })?)
+                };
+                #[cfg(unix)]
+                let observer = ProcessSignalObserver::start(request_shutdown)?;
+                #[cfg(not(unix))]
+                let observer = ProcessSignalObserver::start(request_shutdown);
+                Some(observer)
             } else {
                 None
             };
@@ -109,13 +119,13 @@ impl ProcessSignalObserver {
     }
 
     #[cfg(not(unix))]
-    fn start(request_shutdown: impl Fn() + Send + 'static) -> Result<Self> {
+    fn start(request_shutdown: impl Fn() + Send + 'static) -> Self {
         let task = tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
                 request_shutdown();
             }
         });
-        Ok(Self { task })
+        Self { task }
     }
 }
 

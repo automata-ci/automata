@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
@@ -31,7 +33,7 @@ use automata_ci_execution::{
     ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
     SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord,
     SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
-    ServicePortBinding, SignalRequest, TargetPath, WaitRequest,
+    ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -64,6 +66,8 @@ use automata_ci_runner_runtime::{
     ExecutionRequest, LogEvent,
 };
 use automata_ci_runner_spool::ProtectionId;
+#[cfg(windows)]
+use automata_ci_sandbox_windows::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -81,9 +85,92 @@ pub struct Fixture {
     pub environment: SandboxEnvironment,
 }
 
+#[cfg(windows)]
+pub struct NativeWindowsFixture {
+    pub executor: GithubJobExecutor,
+    pub events: Arc<FakeEvents>,
+    pub environment: SandboxEnvironment,
+}
+
+#[cfg(windows)]
+impl NativeWindowsFixture {
+    pub fn new(
+        provider_root: PathBuf,
+        profile_workspace: TargetPath,
+        runner_root: TargetPath,
+        default_environment: ExecutionEnvironment,
+        toolchain: StaticGithubToolchain,
+    ) -> Self {
+        let environment =
+            SandboxEnvironment::native(windows_profile(), profile_workspace, default_environment)
+                .expect("valid native Windows environment");
+        let provider = Arc::new(
+            WindowsSandboxProvider::open(
+                WindowsSandboxProviderOptions::new(provider_root)
+                    .expect("valid native Windows provider root"),
+            )
+            .expect("native Windows provider opens"),
+        );
+        let catalog = Arc::new(
+            ImmutableSandboxEnvironmentCatalog::new([environment.clone()])
+                .expect("valid native Windows catalog"),
+        );
+        let ports = GithubJobExecutorPorts::new(
+            provider,
+            catalog,
+            Arc::new(FakeActionPreparer::new(Vec::new())),
+            Arc::new(FakeJobContent::default()),
+            Arc::new(FakeSecrets),
+            Arc::new(FakeContexts::windows_secretless()),
+            Arc::new(toolchain),
+            Arc::new(DeterministicOperationIds),
+            Arc::new(FakeClock::default()),
+        );
+        let config = GithubJobExecutorConfig::new(
+            ResourceLimits::new(2 * 1024 * 1024 * 1024, 2_000, 1_024).expect("valid resources"),
+            NetworkPolicy::Host,
+            RootFilesystemPolicy::Host,
+            SandboxPrivilegePolicy::Host,
+            Duration::from_mins(5),
+            4 * 1024 * 1024,
+            runner_root,
+        )
+        .expect("valid native Windows executor config");
+        Self {
+            executor: GithubJobExecutor::new(config, ports),
+            events: Arc::new(FakeEvents::default()),
+            environment,
+        }
+    }
+
+    pub fn request(&self, job: JobIrEnvelope) -> ExecutionRequest {
+        execution_request(self.environment.clone(), job)
+    }
+}
+
 impl Fixture {
     pub fn new(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
         Self::with_default_environment(actions, responses, ExecutionEnvironment::empty())
+    }
+
+    pub fn windows(responses: Vec<PhaseResponse>) -> Self {
+        Self::windows_with_default_environment(responses, ExecutionEnvironment::empty())
+    }
+
+    pub fn windows_with_default_environment(
+        responses: Vec<PhaseResponse>,
+        default_environment: ExecutionEnvironment,
+    ) -> Self {
+        Self::with_platform_components_and_timeout(
+            Vec::new(),
+            responses,
+            default_environment,
+            false,
+            Arc::new(FakeJobContent::default()),
+            Arc::new(FakeContexts::windows_secretless()),
+            Duration::from_mins(5),
+            TargetPlatform::Windows,
+        )
     }
 
     pub fn secretless(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
@@ -316,7 +403,33 @@ impl Fixture {
         contexts: Arc<dyn GithubContextPort>,
         timeout: Duration,
     ) -> Self {
-        let environment = sandbox_environment(default_environment);
+        Self::with_platform_components_and_timeout(
+            actions,
+            responses,
+            default_environment,
+            service_containers,
+            content,
+            contexts,
+            timeout,
+            TargetPlatform::Posix,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn with_platform_components_and_timeout(
+        actions: Vec<PreparedAction>,
+        responses: Vec<PhaseResponse>,
+        default_environment: ExecutionEnvironment,
+        service_containers: bool,
+        content: Arc<dyn JobContentPort>,
+        contexts: Arc<dyn GithubContextPort>,
+        timeout: Duration,
+        platform: TargetPlatform,
+    ) -> Self {
+        let environment = match platform {
+            TargetPlatform::Posix => sandbox_environment(default_environment),
+            TargetPlatform::Windows => windows_sandbox_environment(default_environment),
+        };
         let endpoint_state = Arc::new(Mutex::new(EndpointState {
             files: BTreeMap::new(),
             commands: Vec::new(),
@@ -334,20 +447,32 @@ impl Fixture {
         let catalog = Arc::new(
             ImmutableSandboxEnvironmentCatalog::new([environment.clone()]).expect("valid catalog"),
         );
-        let toolchain = StaticGithubToolchain::new(
-            target("/usr/bin/bash"),
-            target("/usr/bin/sh"),
-            target("/usr/bin/install"),
-            target("/usr/bin/tar"),
-            target("/usr/bin/sha256sum"),
-        )
-        .expect("valid tools")
-        .with_python(target("/usr/bin/python3"))
-        .expect("valid python")
-        .with_pwsh(target("/usr/bin/pwsh"))
-        .expect("valid pwsh")
-        .with_node(JavascriptRuntime::Node24, target("/opt/node24/bin/node"))
-        .expect("valid node");
+        let toolchain = match platform {
+            TargetPlatform::Posix => StaticGithubToolchain::new(
+                target("/usr/bin/bash"),
+                target("/usr/bin/sh"),
+                target("/usr/bin/install"),
+                target("/usr/bin/tar"),
+                target("/usr/bin/sha256sum"),
+            )
+            .expect("valid tools")
+            .with_python(target("/usr/bin/python3"))
+            .expect("valid python")
+            .with_pwsh(target("/usr/bin/pwsh"))
+            .expect("valid pwsh")
+            .with_node(JavascriptRuntime::Node24, target("/opt/node24/bin/node"))
+            .expect("valid node"),
+            TargetPlatform::Windows => StaticGithubToolchain::windows(
+                windows_target(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                windows_target(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                windows_target(r"C:\Windows\System32\cmd.exe"),
+            )
+            .expect("valid Windows tools")
+            .with_python(windows_target(
+                r"C:\hostedtoolcache\windows\Python\3.13.0\x64\python.exe",
+            ))
+            .expect("valid Windows python"),
+        };
         let ports = GithubJobExecutorPorts::new(
             provider.clone(),
             catalog,
@@ -359,14 +484,28 @@ impl Fixture {
             Arc::new(DeterministicOperationIds),
             Arc::new(FakeClock::default()),
         );
+        let (network, filesystem, privilege, runner_root) = match platform {
+            TargetPlatform::Posix => (
+                NetworkPolicy::PrivateEgress,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Administrator,
+                target("/__automata"),
+            ),
+            TargetPlatform::Windows => (
+                NetworkPolicy::Host,
+                RootFilesystemPolicy::Host,
+                SandboxPrivilegePolicy::Host,
+                windows_target(r"D:\_automata"),
+            ),
+        };
         let config = GithubJobExecutorConfig::new(
             ResourceLimits::new(2 * 1024 * 1024 * 1024, 2_000, 1_024).expect("valid resources"),
-            NetworkPolicy::PrivateEgress,
-            RootFilesystemPolicy::Writable,
-            SandboxPrivilegePolicy::Administrator,
+            network,
+            filesystem,
+            privilege,
             timeout,
             4 * 1024 * 1024,
-            target("/__automata"),
+            runner_root,
         )
         .expect("valid config");
         Self {
@@ -379,58 +518,60 @@ impl Fixture {
     }
 
     pub fn request(&self, job: JobIrEnvelope) -> ExecutionRequest {
-        let attempt_id = AttemptId::new();
-        let lease = Lease::new(
-            LeaseId::new(),
-            attempt_id,
-            RunnerId::new(),
-            FencingToken::new(7).expect("valid fence"),
-            UnixMillis::new(1),
-            UnixMillis::new(1_000_000),
-        )
-        .expect("valid lease");
-        let content = DurableContentRef::after_commit(
-            ContentKind::JobIr,
-            1,
-            Sha256Digest::from_bytes([3; 32]),
-            ProtectionId::new("tests").expect("valid protection"),
-        )
-        .expect("valid content");
-        let authorities = match job.job().authority_profile() {
-            JobAuthorityProfile::Standard => {
-                let authority = JobRuntimeAuthority::new(
-                    RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
-                    job.job().run_id(),
-                    job.job().job_id(),
-                    lease.attempt_id(),
-                    lease.fencing_token(),
-                    RuntimeAuthorityEndpoint::new("https://results.example.test/")
-                        .expect("authority endpoint"),
-                    RuntimeAuthorityCredential::new("test-runtime-token").expect("authority token"),
-                    UnixMillis::new(1),
-                    UnixMillis::new(1_000_000),
-                )
-                .expect("valid authority");
-                JobRuntimeAuthorities::new(vec![authority], &job, &lease)
-                    .expect("valid standard authority bundle")
-            }
-            JobAuthorityProfile::CredentialFree => {
-                JobRuntimeAuthorities::new(Vec::new(), &job, &lease)
-                    .expect("valid credential-free authority bundle")
-            }
-        };
-        ExecutionRequest::new(
-            RunnerSessionId::new(),
-            RunnerSlotOrdinal::new(1).expect("valid slot"),
-            lease,
-            job,
-            authorities,
-            content,
-            self.environment.clone(),
-            JobLifecycle::Preparing,
-            None,
-        )
+        execution_request(self.environment.clone(), job)
     }
+}
+
+fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> ExecutionRequest {
+    let attempt_id = AttemptId::new();
+    let lease = Lease::new(
+        LeaseId::new(),
+        attempt_id,
+        RunnerId::new(),
+        FencingToken::new(7).expect("valid fence"),
+        UnixMillis::new(1),
+        UnixMillis::new(1_000_000),
+    )
+    .expect("valid lease");
+    let content = DurableContentRef::after_commit(
+        ContentKind::JobIr,
+        1,
+        Sha256Digest::from_bytes([3; 32]),
+        ProtectionId::new("tests").expect("valid protection"),
+    )
+    .expect("valid content");
+    let authorities = match job.job().authority_profile() {
+        JobAuthorityProfile::Standard => {
+            let authority = JobRuntimeAuthority::new(
+                RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+                job.job().run_id(),
+                job.job().job_id(),
+                lease.attempt_id(),
+                lease.fencing_token(),
+                RuntimeAuthorityEndpoint::new("https://results.example.test/")
+                    .expect("authority endpoint"),
+                RuntimeAuthorityCredential::new("test-runtime-token").expect("authority token"),
+                UnixMillis::new(1),
+                UnixMillis::new(1_000_000),
+            )
+            .expect("valid authority");
+            JobRuntimeAuthorities::new(vec![authority], &job, &lease)
+                .expect("valid standard authority bundle")
+        }
+        JobAuthorityProfile::CredentialFree => JobRuntimeAuthorities::new(Vec::new(), &job, &lease)
+            .expect("valid credential-free authority bundle"),
+    };
+    ExecutionRequest::new(
+        RunnerSessionId::new(),
+        RunnerSlotOrdinal::new(1).expect("valid slot"),
+        lease,
+        job,
+        authorities,
+        content,
+        environment,
+        JobLifecycle::Preparing,
+        None,
+    )
 }
 
 pub fn run_job(command: &str) -> JobIrEnvelope {
@@ -641,7 +782,30 @@ fn envelope_with_all_settings_and_profile(
     outputs: Vec<JobOutputDefinition>,
     authority_profile: JobAuthorityProfile,
 ) -> JobIrEnvelope {
-    let requirements = RunnerRequirements::default().with_environment_profile(profile());
+    envelope_with_all_settings_and_environment_profile(
+        steps,
+        environment,
+        services,
+        working_directory,
+        runtime_context,
+        outputs,
+        authority_profile,
+        profile(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn envelope_with_all_settings_and_environment_profile(
+    steps: Vec<StepIr>,
+    environment: BTreeMap<String, ValueSource>,
+    services: BTreeMap<String, ContainerSpec>,
+    working_directory: Option<ValueTemplate>,
+    runtime_context: JobContentReference,
+    outputs: Vec<JobOutputDefinition>,
+    authority_profile: JobAuthorityProfile,
+    environment_profile: EnvironmentProfile,
+) -> JobIrEnvelope {
+    let requirements = RunnerRequirements::default().with_environment_profile(environment_profile);
     let mut job = JobIr::new(
         JobId::new(),
         RunId::new(),
@@ -809,6 +973,42 @@ pub fn profile() -> EnvironmentProfile {
     )
 }
 
+pub fn windows_profile() -> EnvironmentProfile {
+    EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.test/windows-2025").expect("valid profile"),
+        Sha256Digest::from_bytes([8; 32]),
+    )
+}
+
+pub fn windows_envelope(steps: Vec<StepIr>) -> JobIrEnvelope {
+    envelope_with_all_settings_and_environment_profile(
+        steps,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        None,
+        default_runtime_context_reference(),
+        Vec::new(),
+        JobAuthorityProfile::Standard,
+        windows_profile(),
+    )
+}
+
+pub fn windows_envelope_with_output_definitions(
+    steps: Vec<StepIr>,
+    outputs: Vec<JobOutputDefinition>,
+) -> JobIrEnvelope {
+    envelope_with_all_settings_and_environment_profile(
+        steps,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        None,
+        default_runtime_context_reference(),
+        outputs,
+        JobAuthorityProfile::Standard,
+        windows_profile(),
+    )
+}
+
 fn sandbox_environment(default_environment: ExecutionEnvironment) -> SandboxEnvironment {
     SandboxEnvironment::new(
         profile(),
@@ -823,6 +1023,15 @@ fn sandbox_environment(default_environment: ExecutionEnvironment) -> SandboxEnvi
         default_environment,
     )
     .expect("valid environment")
+}
+
+fn windows_sandbox_environment(default_environment: ExecutionEnvironment) -> SandboxEnvironment {
+    SandboxEnvironment::native(
+        windows_profile(),
+        windows_target(r"D:\a"),
+        default_environment,
+    )
+    .expect("valid native Windows environment")
 }
 
 fn event_reference() -> JobContentReference {
@@ -897,6 +1106,10 @@ impl JobContentPort for FakeJobContent {
 
 pub fn target(value: &str) -> TargetPath {
     TargetPath::posix(value).expect("valid target")
+}
+
+pub fn windows_target(value: &str) -> TargetPath {
+    TargetPath::windows(value).expect("valid Windows target")
 }
 
 #[derive(Clone)]
@@ -1023,6 +1236,16 @@ impl ExecutionEndpoint for FakeEndpoint {
             return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
+        if program.eq_ignore_ascii_case(r"C:\Program Files\PowerShell\7\pwsh.exe")
+            && request
+                .argv()
+                .arguments()
+                .iter()
+                .any(|argument| argument.contains("[System.IO.Directory]::CreateDirectory"))
+        {
+            return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
+                .map_err(|_| execution_error(ExecutionStage::Exec));
+        }
         if program == "/usr/bin/sh"
             && request
                 .argv()
@@ -1124,7 +1347,7 @@ impl ExecutionEndpoint for FakeEndpoint {
             .extension()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|extension| {
-                ["sh", "py", "ps1"]
+                ["sh", "py", "ps1", "cmd"]
                     .into_iter()
                     .any(|candidate| extension.eq_ignore_ascii_case(candidate))
             })
@@ -1259,6 +1482,16 @@ impl FakeProvider {
     ) -> Self {
         let id = ProviderId::new("fake").expect("valid provider");
         let handle = SandboxHandle::new(id.clone(), "sandbox-1").expect("valid handle");
+        let (network, filesystem) = match environment.workspace().platform() {
+            TargetPlatform::Posix => (
+                SandboxCapability::PrivateEgress,
+                SandboxCapability::WritableRootFilesystem,
+            ),
+            TargetPlatform::Windows => (
+                SandboxCapability::HostNetwork,
+                SandboxCapability::HostFilesystem,
+            ),
+        };
         let mut capabilities = vec![
             SandboxCapability::WholeJob,
             SandboxCapability::Attach,
@@ -1267,12 +1500,15 @@ impl FakeProvider {
             SandboxCapability::CopyTo,
             SandboxCapability::CopyFrom,
             SandboxCapability::EnvironmentInjection,
-            SandboxCapability::PrivateEgress,
-            SandboxCapability::WritableRootFilesystem,
+            network,
+            filesystem,
             SandboxCapability::ResourceLimits,
             SandboxCapability::Administrator,
         ];
-        if service_containers {
+        if environment.workspace().platform() == TargetPlatform::Windows {
+            capabilities.push(SandboxCapability::HostIdentity);
+        }
+        if service_containers && environment.workspace().platform() == TargetPlatform::Posix {
             capabilities.push(SandboxCapability::ServiceContainers);
         }
         let capabilities = ProviderCapabilities::new(capabilities).expect("valid capabilities");
@@ -1507,23 +1743,34 @@ impl SecretPort for FakeSecrets {
 #[derive(Debug)]
 struct FakeContexts {
     readable_secret: bool,
+    platform: TargetPlatform,
 }
 
 impl FakeContexts {
     const fn readable_secret() -> Self {
         Self {
             readable_secret: true,
+            platform: TargetPlatform::Posix,
         }
     }
 
     const fn secretless() -> Self {
         Self {
             readable_secret: false,
+            platform: TargetPlatform::Posix,
+        }
+    }
+
+    const fn windows_secretless() -> Self {
+        Self {
+            readable_secret: false,
+            platform: TargetPlatform::Windows,
         }
     }
 }
 
 impl FakeContexts {
+    #[allow(clippy::too_many_lines)]
     fn snapshot_with_evaluation_cancellation(
         &self,
         request: GithubContextRequest<'_>,
@@ -1606,15 +1853,22 @@ impl FakeContexts {
                 trigger: cancellation.trigger,
             }),
         };
-        let snapshot = GithubContextSnapshot::new(
-            expression,
-            vec![
+        let environment = match self.platform {
+            TargetPlatform::Posix => vec![
                 ContextEnvironmentVariable::plain("PATH", "/usr/bin:/bin"),
                 ContextEnvironmentVariable::plain("HOME", "/home/runner"),
                 ContextEnvironmentVariable::plain("GITHUB_WORKSPACE", "/__w/automata/automata"),
                 ContextEnvironmentVariable::plain("GITHUB_SERVER_URL", "https://github.com"),
             ],
-        );
+            TargetPlatform::Windows => vec![
+                ContextEnvironmentVariable::plain("PATH", r"C:\Windows\System32"),
+                ContextEnvironmentVariable::plain("HOME", r"D:\a\_home"),
+                ContextEnvironmentVariable::plain("GITHUB_WORKSPACE", r"D:\a\automata\automata"),
+                ContextEnvironmentVariable::plain("RUNNER_OS", "Windows"),
+                ContextEnvironmentVariable::plain("GITHUB_SERVER_URL", "https://github.com"),
+            ],
+        };
+        let snapshot = GithubContextSnapshot::new(expression, environment);
         if self.readable_secret {
             Ok(snapshot.with_secret_masks(vec![Arc::new(
                 SecretString::new(CONTEXT_SECRET)

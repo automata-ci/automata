@@ -850,10 +850,12 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
 
     /// Copies bounded content to a target path.
     ///
-    /// The target is relative to the sandbox security boundary despite being
-    /// represented as an absolute target path. Implementations must never
-    /// reinterpret it as a host path. Content may contain secrets and must use
-    /// an anonymous bounded transport rather than durable host-side staging.
+    /// The target is absolute in the provider's target namespace. Isolated
+    /// providers resolve it inside the guest filesystem. A trusted native
+    /// provider serving a `HostFilesystem` capability may map it to host
+    /// syntax only after proving that it remains within the sandbox-owned
+    /// workspace or scratch root. Content may contain secrets and must use an
+    /// anonymous bounded transport rather than durable host-side staging.
     ///
     /// # Errors
     ///
@@ -867,9 +869,11 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// Copies bounded content from a target path.
     ///
     /// Implementations must reject or truncate before returning more than
-    /// [`CopyFromRequest::byte_limit`] and must never resolve the target path
-    /// against the host filesystem. Returned bytes may contain secrets and
-    /// must not pass through durable host-side staging.
+    /// [`CopyFromRequest::byte_limit`]. A trusted native provider serving a
+    /// `HostFilesystem` capability may resolve the target against the host
+    /// only after proving that it remains within the sandbox-owned workspace
+    /// or scratch root. Returned bytes may contain secrets and must not pass
+    /// through durable host-side staging.
     ///
     /// # Errors
     ///

@@ -65,16 +65,19 @@ impl fmt::Debug for ImmutableSandboxEnvironmentCatalog {
     }
 }
 
-/// Immutable target paths for a Linux GitHub runner profile.
+/// Immutable target paths for one platform-specific GitHub runner profile.
 #[derive(Clone)]
 pub struct StaticGithubToolchain {
-    bash: TargetPath,
-    sh: TargetPath,
+    platform: TargetPlatform,
+    bash: Option<TargetPath>,
+    sh: Option<TargetPath>,
     python: Option<TargetPath>,
     pwsh: Option<TargetPath>,
-    install: TargetPath,
-    tar: TargetPath,
-    sha256sum: TargetPath,
+    powershell: Option<TargetPath>,
+    cmd: Option<TargetPath>,
+    install: Option<TargetPath>,
+    tar: Option<TargetPath>,
+    sha256sum: Option<TargetPath>,
     nodes: Vec<(JavascriptRuntime, TargetPath)>,
 }
 
@@ -93,18 +96,52 @@ impl StaticGithubToolchain {
     ) -> Result<Self, PortError> {
         if [&bash, &sh, &install, &tar, &sha256sum]
             .into_iter()
-            .any(|path| !valid_tool(path))
+            .any(|path| !valid_tool(path, TargetPlatform::Posix))
         {
             return Err(PortError::new(PortErrorKind::InvalidData));
         }
         Ok(Self {
-            bash,
-            sh,
+            platform: TargetPlatform::Posix,
+            bash: Some(bash),
+            sh: Some(sh),
             python: None,
             pwsh: None,
-            install,
-            tar,
-            sha256sum,
+            powershell: None,
+            cmd: None,
+            install: Some(install),
+            tar: Some(tar),
+            sha256sum: Some(sha256sum),
+            nodes: Vec::new(),
+        })
+    }
+
+    /// Creates the required shell paths for a native Windows runner profile.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Windows or drive-root executable paths.
+    pub fn windows(
+        pwsh: TargetPath,
+        powershell: TargetPath,
+        cmd: TargetPath,
+    ) -> Result<Self, PortError> {
+        if [&pwsh, &powershell, &cmd]
+            .into_iter()
+            .any(|path| !valid_tool(path, TargetPlatform::Windows))
+        {
+            return Err(PortError::new(PortErrorKind::InvalidData));
+        }
+        Ok(Self {
+            platform: TargetPlatform::Windows,
+            bash: None,
+            sh: None,
+            python: None,
+            pwsh: Some(pwsh),
+            powershell: Some(powershell),
+            cmd: Some(cmd),
+            install: None,
+            tar: None,
+            sha256sum: None,
             nodes: Vec::new(),
         })
     }
@@ -113,9 +150,9 @@ impl StaticGithubToolchain {
     ///
     /// # Errors
     ///
-    /// Rejects a duplicate configuration or a non-POSIX/root path.
+    /// Rejects a duplicate configuration or a path for another platform.
     pub fn with_python(mut self, path: TargetPath) -> Result<Self, PortError> {
-        if self.python.is_some() || !valid_tool(&path) {
+        if self.python.is_some() || !valid_tool(&path, self.platform) {
             return Err(PortError::new(PortErrorKind::InvalidData));
         }
         self.python = Some(path);
@@ -126,9 +163,9 @@ impl StaticGithubToolchain {
     ///
     /// # Errors
     ///
-    /// Rejects a duplicate configuration or a non-POSIX/root path.
+    /// Rejects a duplicate configuration or a path for another platform.
     pub fn with_pwsh(mut self, path: TargetPath) -> Result<Self, PortError> {
-        if self.pwsh.is_some() || !valid_tool(&path) {
+        if self.pwsh.is_some() || !valid_tool(&path, self.platform) {
             return Err(PortError::new(PortErrorKind::InvalidData));
         }
         self.pwsh = Some(path);
@@ -145,7 +182,7 @@ impl StaticGithubToolchain {
         runtime: JavascriptRuntime,
         path: TargetPath,
     ) -> Result<Self, PortError> {
-        if !valid_tool(&path)
+        if !valid_tool(&path, self.platform)
             || self
                 .nodes
                 .iter()
@@ -159,12 +196,16 @@ impl StaticGithubToolchain {
 }
 
 impl GithubToolchain for StaticGithubToolchain {
-    fn bash(&self) -> &TargetPath {
-        &self.bash
+    fn platform(&self) -> TargetPlatform {
+        self.platform
     }
 
-    fn sh(&self) -> &TargetPath {
-        &self.sh
+    fn bash(&self) -> Option<&TargetPath> {
+        self.bash.as_ref()
+    }
+
+    fn sh(&self) -> Option<&TargetPath> {
+        self.sh.as_ref()
     }
 
     fn python(&self) -> Option<&TargetPath> {
@@ -175,16 +216,24 @@ impl GithubToolchain for StaticGithubToolchain {
         self.pwsh.as_ref()
     }
 
-    fn install(&self) -> &TargetPath {
-        &self.install
+    fn powershell(&self) -> Option<&TargetPath> {
+        self.powershell.as_ref()
     }
 
-    fn tar(&self) -> &TargetPath {
-        &self.tar
+    fn cmd(&self) -> Option<&TargetPath> {
+        self.cmd.as_ref()
     }
 
-    fn sha256sum(&self) -> &TargetPath {
-        &self.sha256sum
+    fn install(&self) -> Option<&TargetPath> {
+        self.install.as_ref()
+    }
+
+    fn tar(&self) -> Option<&TargetPath> {
+        self.tar.as_ref()
+    }
+
+    fn sha256sum(&self) -> Option<&TargetPath> {
+        self.sha256sum.as_ref()
     }
 
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath> {
@@ -199,10 +248,13 @@ impl fmt::Debug for StaticGithubToolchain {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StaticGithubToolchain")
+            .field("platform", &self.platform)
             .field("bash", &self.bash)
             .field("sh", &self.sh)
             .field("python", &self.python)
             .field("pwsh", &self.pwsh)
+            .field("powershell", &self.powershell)
+            .field("cmd", &self.cmd)
             .field("install", &self.install)
             .field("tar", &self.tar)
             .field("sha256sum", &self.sha256sum)
@@ -218,6 +270,10 @@ impl fmt::Debug for StaticGithubToolchain {
     }
 }
 
-fn valid_tool(path: &TargetPath) -> bool {
-    path.platform() == TargetPlatform::Posix && path.as_str() != "/"
+fn valid_tool(path: &TargetPath, platform: TargetPlatform) -> bool {
+    path.platform() == platform
+        && match platform {
+            TargetPlatform::Posix => path.as_str() != "/",
+            TargetPlatform::Windows => path.as_str().len() > 3,
+        }
 }

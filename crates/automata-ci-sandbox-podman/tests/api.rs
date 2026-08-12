@@ -1,19 +1,25 @@
+#[cfg(target_os = "linux")]
 mod support;
 
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use automata_ci_execution::{SandboxCapability, SandboxProvider};
+#[cfg(target_os = "linux")]
+use automata_ci_sandbox_podman::JobContainerEngine;
 use automata_ci_sandbox_podman::{
-    JobContainerEngine, PodmanCommandExecutor, PodmanConfigurationError, PodmanHostGatewayAlias,
-    RootlessPodmanProvider,
+    PodmanCommandExecutor, PodmanConfigurationError, PodmanHostGatewayAlias, RootlessPodmanProvider,
 };
 use static_assertions::{assert_impl_all, assert_obj_safe};
 
+#[cfg(target_os = "linux")]
 use support::{FakePodman, ScratchRoot, options};
 
 assert_impl_all!(RootlessPodmanProvider: Send, Sync);
 assert_obj_safe!(PodmanCommandExecutor);
 
+#[cfg(target_os = "linux")]
 #[test]
 fn docker_api_capability_is_advertised_only_when_explicitly_enabled() {
     let disabled = support::Fixture::new("docker-capability-disabled");

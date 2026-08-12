@@ -21,21 +21,30 @@ GitHub events          Browser / CLI
                  |
             fenced JobIR lease over mTLS
                  |
-          automata-runner on Linux
+     automata-runner on Linux or Windows
                  |
-        rootless Podman job sandbox
+          configured SandboxProvider
+                 |                |
+        rootless Podman     Windows native
 ```
 
 The workspace builds many libraries but distributes two product commands:
 
 - `automata` starts the complete control plane and provides administration
   commands. It has no per-role server selector yet.
-- `automata-runner` supervises rootless Linux execution, host admission, lease
-  renewal, logging, cancellation, and cleanup.
+- `automata-runner` supervises rootless Linux or trusted native Windows
+  execution, host admission, lease renewal, logging, cancellation, and cleanup.
 
 The browser preview is a smaller mode of `automata`; it does not start the
 durable services or runner listener. Production dependencies never fall back
 to preview behavior.
+
+The Windows native provider creates fresh job directories and uses a Job
+Object for process-tree lifetime and resource limits. It advertises
+`HostIdentity`: children retain the dedicated runner service account's token
+unchanged, along with host filesystem and network access. This trusted-workflow
+provider is not container, VM, or restricted-token isolation; disposable
+Hyper-V VMs remain the planned strong Windows tier.
 
 ## Workflow boundary
 
@@ -168,9 +177,9 @@ data or live log transport.
 
 Later gates add independent control-plane roles, multiple replicas,
 Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
-KubeVirt, Windows native and Hyper-V execution, and macOS native and
+KubeVirt, broader Windows behavior and Hyper-V execution, and macOS native and
 Virtualization.framework execution.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their
-acceptance gates are listed in the [implementation plan](implementation-plan.md#planned-provider-scope).
+acceptance gates are listed in the [implementation plan](implementation-plan.md#provider-scope).

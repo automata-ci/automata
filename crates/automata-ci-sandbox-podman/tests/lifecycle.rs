@@ -72,6 +72,31 @@ fn provider_use_quarantines_before_dynamic_state_or_podman_work() {
 }
 
 #[test]
+fn create_rejects_native_scratch_before_podman_or_filesystem_work() {
+    let fixture = Fixture::new("native-scratch");
+    let spec = sample_spec(OperationId::new())
+        .with_scratch(TargetPath::posix("/__automata/scratch/job").expect("scratch path"));
+
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("Podman must reject native-provider scratch material");
+    assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+    assert_eq!(
+        error.stage(),
+        automata_ci_execution::ProviderStage::Validate
+    );
+    assert!(fixture.fake.commands().is_empty());
+    assert!(
+        std::fs::read_dir(fixture.scratch.path().join("workspaces"))
+            .expect("workspace root")
+            .next()
+            .is_none(),
+        "validation must run before dynamic workspace creation"
+    );
+}
+
+#[test]
 fn whole_job_create_replay_exec_and_destroy_are_exact() {
     let fixture = Fixture::new("whole-job");
     let operation_id = OperationId::new();

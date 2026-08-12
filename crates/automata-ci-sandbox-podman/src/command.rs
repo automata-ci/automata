@@ -7,16 +7,18 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::Receiver,
     },
     thread,
     time::{Duration, Instant},
 };
 
-use automata_ci_execution::{
-    Cancellation, ExecutionOutputRecord, ExecutionOutputStream, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
-    MAX_EXECUTION_OUTPUT_RECORDS,
-};
+#[cfg(any(unix, test))]
+use std::sync::mpsc;
+
+use automata_ci_execution::{Cancellation, ExecutionOutputRecord, ExecutionOutputStream};
+#[cfg(any(unix, test))]
+use automata_ci_execution::{MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS};
 
 use crate::{
     PodmanConfigurationError, PodmanLaunchTrustHandle, config, endpoint::EnvironmentDocument,
@@ -34,10 +36,15 @@ const AUTH_FILE_NAME: &str = "auth.json";
 const EMPTY_HOOKS_DIRECTORY_NAME: &str = "empty-hooks";
 const EMPTY_CDI_DIRECTORY_NAME: &str = "empty-cdi";
 const PROCESS_TRANSIENT_DIRECTORY_NAME: &str = "process-transient";
+#[cfg(unix)]
 const STORAGE_CONF_CONTENTS: &[u8] = b"[storage]\ndriver = \"vfs\"\ntransient_store = false\n";
+#[cfg(unix)]
 const REGISTRIES_CONF_CONTENTS: &[u8] = b"unqualified-search-registries = []\nshort-name-mode = \"disabled\"\ncredential-helpers = [\"containers-auth.json\"]\n";
+#[cfg(unix)]
 const POLICY_CONTENTS: &[u8] = b"{\"default\":[{\"type\":\"insecureAcceptAnything\"}]}\n";
+#[cfg(unix)]
 const MOUNTS_CONF_CONTENTS: &[u8] = b"";
+#[cfg(unix)]
 const AUTH_FILE_CONTENTS: &[u8] = b"{\"auths\":{}}";
 
 /// Explicit allowlisted environment for local rootless Podman processes.
@@ -62,6 +69,7 @@ pub struct PodmanProcessEnvironment {
     empty_cdi_directory: PathBuf,
     process_transient_directory: PathBuf,
     dbus_session_bus_address: OsString,
+    #[cfg(unix)]
     containers_conf_contents: Vec<u8>,
     launch_trust: Option<PodmanLaunchTrustHandle>,
 }
@@ -134,6 +142,8 @@ impl PodmanProcessEnvironment {
             &empty_hooks_directory,
             &empty_cdi_directory,
         )?;
+        #[cfg(not(unix))]
+        let _ = containers_conf_contents;
         let mut dbus_session_bus_address = OsString::from("unix:path=");
         dbus_session_bus_address.push(runtime_directory.join("no-systemd-bus"));
 
@@ -157,6 +167,7 @@ impl PodmanProcessEnvironment {
             empty_cdi_directory,
             process_transient_directory,
             dbus_session_bus_address,
+            #[cfg(unix)]
             containers_conf_contents,
             launch_trust: None,
         })
@@ -276,30 +287,36 @@ impl PodmanProcessEnvironment {
         &self.dbus_session_bus_address
     }
 
+    #[cfg(unix)]
     pub(crate) fn containers_conf_contents(&self) -> &[u8] {
         &self.containers_conf_contents
     }
 
+    #[cfg(unix)]
     #[allow(clippy::unused_self)]
     pub(crate) const fn storage_conf_contents(&self) -> &[u8] {
         STORAGE_CONF_CONTENTS
     }
 
+    #[cfg(unix)]
     #[allow(clippy::unused_self)]
     pub(crate) const fn registries_conf_contents(&self) -> &[u8] {
         REGISTRIES_CONF_CONTENTS
     }
 
+    #[cfg(unix)]
     #[allow(clippy::unused_self)]
     pub(crate) const fn policy_contents(&self) -> &[u8] {
         POLICY_CONTENTS
     }
 
+    #[cfg(unix)]
     #[allow(clippy::unused_self)]
     pub(crate) const fn mounts_conf_contents(&self) -> &[u8] {
         MOUNTS_CONF_CONTENTS
     }
 
+    #[cfg(unix)]
     #[allow(clippy::unused_self)]
     pub(crate) const fn auth_file_contents(&self) -> &[u8] {
         AUTH_FILE_CONTENTS
@@ -1222,11 +1239,13 @@ mod cgroup_tests {
 }
 
 /// Long-running, local Podman subprocess owned by one adapter operation.
+#[cfg(unix)]
 pub(crate) struct PersistentPodmanProcess {
     child: Child,
     active: bool,
 }
 
+#[cfg(unix)]
 impl fmt::Debug for PersistentPodmanProcess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1236,6 +1255,7 @@ impl fmt::Debug for PersistentPodmanProcess {
     }
 }
 
+#[cfg(unix)]
 impl PersistentPodmanProcess {
     pub(crate) fn spawn(
         program: &Path,
@@ -1283,6 +1303,7 @@ impl PersistentPodmanProcess {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PersistentPodmanProcess {
     fn drop(&mut self) {
         self.stop();
@@ -1522,6 +1543,7 @@ impl<'scope> InputWriter<'scope> {
         Err(())
     }
 
+    #[cfg(any(unix, test))]
     fn spawn_interruptible<W>(
         scope: &'scope thread::Scope<'scope, '_>,
         writer: W,
@@ -1568,6 +1590,7 @@ impl Drop for InputWriter<'_> {
     }
 }
 
+#[cfg(any(unix, test))]
 fn write_input_interruptible<W>(mut writer: W, input: &CommandInput<'_>, stop: &AtomicBool) -> bool
 where
     W: std::io::Write,
@@ -2069,6 +2092,7 @@ impl OutputReader {
         Ok(Self::spawn_interruptible(reader, stream, state, stop))
     }
 
+    #[cfg(unix)]
     fn spawn_interruptible<R>(
         reader: R,
         stream: ExecutionOutputStream,
@@ -2113,6 +2137,7 @@ struct OutputCaptureState {
 }
 
 impl OutputCaptureState {
+    #[cfg(any(unix, test))]
     const fn new(output_limit: usize) -> Self {
         Self {
             remaining: output_limit,
@@ -2125,6 +2150,7 @@ impl OutputCaptureState {
         }
     }
 
+    #[cfg(any(unix, test))]
     fn observe_data(&mut self, stream: ExecutionOutputStream, source: &[u8]) {
         if self.stream_ended(stream) {
             self.incomplete = true;
@@ -2171,6 +2197,7 @@ impl OutputCaptureState {
         }
     }
 
+    #[cfg(any(unix, test))]
     fn observe_end(&mut self, stream: ExecutionOutputStream) {
         if self.stream_ended(stream) || self.records.len() >= MAX_EXECUTION_OUTPUT_RECORDS {
             self.incomplete = true;
@@ -2183,6 +2210,7 @@ impl OutputCaptureState {
         self.records.push(CapturedRecord::End(stream));
     }
 
+    #[cfg(any(unix, test))]
     fn stream_ended(&self, stream: ExecutionOutputStream) -> bool {
         match stream {
             ExecutionOutputStream::Stdout => self.stdout_ended,
@@ -2227,18 +2255,22 @@ impl fmt::Debug for OutputCaptureState {
 }
 
 enum CapturedRecord {
+    #[cfg(any(unix, test))]
     Data {
         stream: ExecutionOutputStream,
         bytes: Vec<u8>,
     },
+    #[cfg(any(unix, test))]
     End(ExecutionOutputStream),
 }
 
 impl CapturedRecord {
     fn into_execution_record(self) -> ExecutionOutputRecord {
         match self {
+            #[cfg(any(unix, test))]
             Self::Data { stream, bytes } => ExecutionOutputRecord::data(stream, bytes)
                 .expect("captured record bytes are non-empty and bounded"),
+            #[cfg(any(unix, test))]
             Self::End(stream) => ExecutionOutputRecord::end_of_stream(stream),
         }
     }
@@ -2259,6 +2291,7 @@ fn capture_state(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(any(unix, test))]
 fn read_ordered<R>(
     mut reader: R,
     stream: ExecutionOutputStream,

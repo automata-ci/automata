@@ -1,8 +1,14 @@
 # Local runner bootstrap
 
-This guide prepares the checked-in Linux integration runner. The example uses
-the locked Ubuntu 24.04 profile and the rootless Podman provider. Its digest is
-a development input, not evidence of a public promoted profile; follow the
+This directory contains two checked-in integration configurations for
+`automata-runner`. [`runner.local.example.json`](runner.local.example.json)
+selects the locked bootstrap Ubuntu 24.04 profile and rootless Podman on Linux.
+[`runner.windows.example.json`](runner.windows.example.json) selects the
+trusted native provider on Windows. Exactly one of the `podman` and
+`windows_native` provider objects may be configured.
+
+The Linux example's local bootstrap digest is not an official promoted profile;
+follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
@@ -13,10 +19,43 @@ before trusting a protected-main candidate.
 
 Start with the
 [control-plane setup](https://github.com/automata-ci/automata/blob/main/docs/deployment.md),
-then provision the runner host with the
+then provision a Linux runner host with the
 [Arch Linux guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md).
 
-## What the example assumes
+## Windows native example
+
+The Windows example is an experimental source-build path for trusted workflows.
+It advertises PowerShell and `cmd.exe` shell steps, with optional support for an
+absolute standalone Python interpreter, and uses fresh job directories plus Job
+Object process containment; it is not container or VM isolation. Run
+it under a dedicated non-administrative service account: children retain that
+account's token because restricted-token launch is not implemented. The Job
+Object controls process lifetime and resource use, not privilege. The example's
+`host` privilege policy explicitly acknowledges that unchanged identity; it is
+not an unprivileged sandbox policy. Pre-provision restrictive ACLs on every
+configured state and execution root, and supply its
+private key, spool key, and object-store credentials only through the service
+supervisor's private environment. Only workflow `run:` steps are supported;
+every `uses:` action, including JavaScript, composite, local, repository, and
+container actions, fails closed. Job containers, service containers,
+administrator profiles, and active Podman doctor checks remain unsupported.
+Every configured interpreter is exercised through a copied script during
+startup admission before the runner advertises the profile.
+
+The current safe Windows adapter rejects reparse traversal but cannot attest
+DACL ownership or hard-link counts. ACLs protect these roots from other host
+users; they do not isolate runner state from a trusted job that inherits the
+same account and host-filesystem access. Such workflows must not touch the
+configured runner state paths.
+
+Copy [`runner.windows.example.json`](runner.windows.example.json) to an ignored
+host-specific path and follow the
+[Windows source-build boundary](../../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
+before starting `automata-runner run --config C:\path\to\runner.windows.json`.
+
+The remainder of this guide describes the rootless-Podman Linux example.
+
+## What the Linux example assumes
 
 `runner.local.example.json` assumes:
 

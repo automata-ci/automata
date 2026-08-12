@@ -1,9 +1,14 @@
 # `automata-runner`
 
 The `automata-ci-runner` package builds the `automata-runner` command for Linux
-execution hosts. It validates the host, opens an mTLS session to the control
-plane, accepts fenced leases, runs jobs through the configured sandbox
-provider, streams logs, and removes interrupted work.
+and Windows execution hosts. It validates the host, opens an mTLS session to
+the control plane, accepts fenced leases, runs jobs through the configured
+sandbox provider, streams logs, and removes interrupted work.
+
+`automata-runner run` selects exactly one host-compatible provider from its
+configuration: rootless Podman on Linux or the experimental native provider
+on Windows. The checked-in [Linux](config/runner.local.example.json) and
+[Windows](config/runner.windows.example.json) examples show each selection.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -14,10 +19,12 @@ automata-runner --version
 automata-runner doctor --json
 ```
 
-An ordinary Cargo build may be dynamically linked. It is not a valid
-production probe payload, which must be a static executable that can run from a
-one-file root filesystem. Do not start a production runner until an exact
-reviewed static archive is available.
+That Cargo build is suitable for configuration inspection, host diagnostics,
+and development of the trusted native Windows path. On Linux, an ordinary
+dynamically linked build is not a valid production probe payload, which must
+be a static executable that can run from a one-file root filesystem. Do not
+start a production Linux runner until an exact reviewed static archive is
+available.
 
 ## Startup admission
 
@@ -45,10 +52,11 @@ This proves that the configured provider can complete its local lifecycle. It
 does not attest image supply chain, prove resource enforcement, or establish
 GitHub Actions compatibility.
 
-`automata-runner doctor --active` performs a similar ambient diagnostic using
-the caller's `PATH` and scratch settings. Its success does not replace startup
-admission, and its raw Podman output should stay inside the operator trust
-domain.
+`automata-runner doctor --active` performs a similar ambient Linux diagnostic
+using the caller's `PATH` and scratch settings. Its success does not replace
+startup admission, and its raw Podman output should stay inside the operator
+trust domain. The active Podman diagnostic is unavailable on Windows; Windows
+provider admission happens on `automata-runner run`.
 
 ## Environment profiles
 
@@ -58,25 +66,51 @@ generation, and running state must match the configuration, and cleanup must
 finish. Scheduling sees the intersection of this live inventory and the
 server's static registration ceiling.
 
-Service containers are opt-in. `podman.service_proxy_image` must contain one
-registry-qualified immutable reference of the form
+Service containers are opt-in on Linux. `podman.service_proxy_image` must
+contain one registry-qualified immutable reference of the form
 `repository@sha256:<64 lowercase hex>` that is already in the runner's local
 Podman store. Configuration adds the feature to the registration ceiling;
 successful image inspection adds it to the live inventory. A missing value
 disables the feature, and an invalid or unavailable configured image stops
 startup. Mutable tags are rejected.
 
+The Windows profile supports PowerShell and `cmd.exe` `run:` steps, plus an
+optional explicitly configured standalone Python interpreter. Startup probes
+each configured interpreter through a copied script before advertising the
+profile. Every `uses:` action, including JavaScript, composite, local,
+repository, and container actions, fails closed. Job containers, service
+containers, administrator profiles, and parallel native jobs are unsupported.
+
+The Windows CI gate exercises the production composition through the shipped
+`automata-runner run` process against ephemeral mTLS control-plane and loopback
+S3 fixtures. It verifies session establishment, a credential-free lease,
+runtime-context hydration, native shell execution, log and result publication,
+sandbox cleanup, and a subsequent released-slot poll.
+
 ## Job boundary
 
-Workload environment values are sent to Podman through a bounded anonymous
-standard-input document. They never enter the Podman host process environment.
-Jobs do not receive runner state paths, the host Podman socket, control-plane
-credentials, or provider-control credentials.
+On Linux, workload environment values are sent to Podman through a bounded
+anonymous standard-input document. They never enter the Podman host process
+environment. Jobs do not receive runner state paths, the host Podman socket,
+control-plane credentials, or provider-control credentials.
 
-The current isolation provider is rootless Podman with a shared Linux kernel.
-It is not a hostile multi-tenant boundary. Stronger providers remain planned
-and are listed in the
-[implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#planned-provider-scope).
+The Windows native provider is for trusted workflows only. It creates fresh
+workspace and scratch directories and uses a Windows Job Object for process,
+memory, and CPU limits and whole-tree termination. It retains host filesystem
+and network access and the runner service account's unchanged token; it is not
+a container, VM, or restricted-token boundary. Run it only as a dedicated
+non-administrative service account with administrator-provisioned restrictive
+ACLs. The safe state adapter rejects reparse traversal but cannot currently
+attest DACL ownership or hard-link counts. Those ACLs protect state from other
+host users, not from a trusted job running as the same account, so workflows
+must not access runner state paths. See the
+[Windows source-build boundary](../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
+before supplying environment-backed credentials.
+
+Rootless Podman is a shared-kernel Linux boundary, and Windows native execution
+is a trusted-host boundary. Neither is hostile multi-tenant isolation. Stronger
+providers remain planned and are listed in the
+[implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#provider-scope).
 
 ## Configure a host
 

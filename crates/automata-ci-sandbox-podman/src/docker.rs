@@ -57,33 +57,12 @@ const JOB_LOCAL_LOG_DRIVER: &str = "json-file";
 // review and coverage in the opt-in distribution command-surface test.
 const DISTRIBUTION_BUILD_QUERY_PARAMETERS: [&str; 4] = ["dockerfile", "q", "t", "version"];
 
-pub(crate) const DOCKER_SOCKET_DIRECTORY_TARGET: &str = "/run/automata-engine";
+pub(crate) use crate::docker_contract::DOCKER_SOCKET_DIRECTORY_TARGET;
 
 #[derive(Debug)]
 pub(crate) struct JobDockerListener(UnixListener);
 
-pub(crate) struct JobDockerLaunch<'a> {
-    sandbox: &'a SandboxHandle,
-    outer_process_id: u32,
-    outer_cgroup: String,
-    resources: ResourceLimits,
-}
-
-impl<'a> JobDockerLaunch<'a> {
-    pub(crate) const fn new(
-        sandbox: &'a SandboxHandle,
-        outer_process_id: u32,
-        outer_cgroup: String,
-        resources: ResourceLimits,
-    ) -> Self {
-        Self {
-            sandbox,
-            outer_process_id,
-            outer_cgroup,
-            resources,
-        }
-    }
-}
+pub(crate) use crate::docker_contract::JobDockerLaunch;
 
 #[derive(Debug)]
 pub(crate) struct JobDockerService {
@@ -1882,7 +1861,7 @@ mod observer_tests {
         },
     };
 
-    use automata_ci_execution::{ProviderId, ResourceLimits};
+    use automata_ci_execution::ProviderId;
 
     use super::*;
 
