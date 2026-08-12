@@ -10,7 +10,7 @@ const REPOSITORY_CI: &str = include_str!("fixtures/repository-ci.yml");
 #[test]
 fn packaged_ci_fixture_matches_the_repository_workflow() {
     let repository_ci =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.ci/workflows/ci.yml");
     if repository_ci.is_file() {
         let checked_in =
             std::fs::read_to_string(&repository_ci).expect("read repository CI workflow");

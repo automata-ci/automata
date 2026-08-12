@@ -1,6 +1,5 @@
 # Automata
 
-[![CI](https://github.com/automata-ci/automata/actions/workflows/ci.yml/badge.svg)](https://github.com/automata-ci/automata/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f6f68.svg)](LICENSE)
 
 Automata is a self-hosted control plane and runner for GitHub Actions

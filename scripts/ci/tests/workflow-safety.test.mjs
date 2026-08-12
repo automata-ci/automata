@@ -95,7 +95,7 @@ function checkReleaseOrder(
 }
 
 function releaseJobs() {
-  const release = source(".github/workflows/release.yml");
+  const release = source(".ci/workflows/release.yml");
   return {
     crates: section(release, "\n  publish_crates:", "\n  finalize_release:"),
     finalize: release.slice(release.indexOf("\n  finalize_release:")),
@@ -107,7 +107,7 @@ function releaseJobs() {
 }
 
 function serviceProxyJobs() {
-  const workflow = source(".github/workflows/service-proxy-image.yml");
+  const workflow = source(".ci/workflows/service-proxy-image.yml");
   return {
     candidate: section(workflow, "\n  candidate:", "\n  promotion_verify:"),
     candidateBuild: section(
@@ -154,7 +154,7 @@ function assertRegistryAttestationsUsePrivateHome(
 }
 
 test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const store = workflowJob(ci, "postgres_store");
   const integrations = workflowJob(ci, "postgres_integrations");
   const storeShard = source("scripts/ci/run-postgres-store-shard.sh");
@@ -283,7 +283,7 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
 });
 
 test("CI executes documentation and committed script contract suites", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const verify = section(ci, "\n  verify:", "\n  rust_tests:");
   const rustTests = section(ci, "\n  rust_tests:", "\n  rust_coverage:");
   const rustCoverage = section(
@@ -359,7 +359,7 @@ test("CI executes documentation and committed script contract suites", () => {
 });
 
 test("repository CI omits the hosted Windows job and retains fixture parity", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const fixture = source(
     "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
   );
@@ -378,7 +378,7 @@ test("repository CI omits the hosted Windows job and retains fixture parity", ()
 });
 
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const rustCoverage = section(
     ci,
     "\n  rust_coverage:",
@@ -456,7 +456,7 @@ test("Rust CI publishes an ordinary-lane report with a service-aware guard", () 
 });
 
 test("frontend CI retains the production-source coverage gate", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const frontend = section(ci, "\n  frontend:", "\n  renderer:");
 
   assert.match(
@@ -471,7 +471,7 @@ test("frontend CI retains the production-source coverage gate", () => {
 });
 
 test("distribution build overlaps validation while the final gate retains every prerequisite", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const renderer = section(ci, "\n  renderer:", "\n  dist_build:");
   const distBuild = section(ci, "\n  dist_build:", "\n  dist:");
   const dist = ci.slice(ci.indexOf("\n  dist:"));
@@ -512,8 +512,8 @@ test("distribution build overlaps validation while the final gate retains every 
 });
 
 test("Pages and profile publication isolate concurrency and environments", () => {
-  const pages = source(".github/workflows/pages.yml");
-  const profile = source(".github/workflows/profile-image.yml");
+  const pages = source(".ci/workflows/pages.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const promote = profile.slice(profile.indexOf("\n  promote:"));
 
   assert.match(
@@ -536,7 +536,7 @@ test("Pages and profile publication isolate concurrency and environments", () =>
 });
 
 test("registry attestations use the isolated Docker credential home", () => {
-  const profile = source(".github/workflows/profile-image.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const profileCandidate = section(profile, "\n  candidate:", "\n  promote:");
   const { candidate: serviceProxyCandidate } = serviceProxyJobs();
   const { stage } = releaseJobs();
@@ -1038,7 +1038,7 @@ test("final publication reconciles the exact immutable GitHub state", () => {
 });
 
 test("profile promotion rechecks the reviewed default-branch head", () => {
-  const profile = source(".github/workflows/profile-image.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const freshness = section(
     profile,
     "      - name: Scrub checkout credentials and require current default-branch head",
@@ -1052,7 +1052,7 @@ test("profile promotion rechecks the reviewed default-branch head", () => {
 
 test("release documentation requires all publication controls", () => {
   const guide = source("docs/releasing.md");
-  const release = source(".github/workflows/release.yml");
+  const release = source(".ci/workflows/release.yml");
   const productPolicy = source("scripts/ci/verify-product-targets.sh");
   assert.match(guide, /`release`,\n`crates-io`, and `profile-promotion`/);
   assert.match(guide, /`release` as the\nunattended staging boundary/);

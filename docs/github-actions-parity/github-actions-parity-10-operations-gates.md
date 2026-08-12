@@ -476,7 +476,7 @@ chosen source and workflow bytes explicitly.
 Tasks:
 
 - [ ] Pin one Automata commit and the exact bytes of its checked-in
-  `.github/workflows/ci.yml`.
+  `.ci/workflows/ci.yml`.
 - [ ] Deliver the normal signed provider event and execute every job through
   product ingress, compilation, scheduling, shipped runners, Results, and
   Checks.

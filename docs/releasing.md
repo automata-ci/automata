@@ -173,7 +173,7 @@ the workflow.
 ## Publish the runner profile
 
 The Ubuntu runner profile is released independently through
-`.github/workflows/profile-image.yml`. Its two manual operations form a review
+`.ci/workflows/profile-image.yml`. Its two manual operations form a review
 boundary:
 
 1. Dispatch `build-candidate` from the default branch and supply the full source
@@ -277,7 +277,7 @@ Only tag a reviewed release commit. The workflow rejects a tag that does not
 equal `v` plus the workspace version, a mismatched checkout, or a dirty release
 build.
 
-The tag push starts `.github/workflows/release.yml`. Every version shares one
+The tag push starts `.ci/workflows/release.yml`. Every version shares one
 repository-wide publication lock, so crates.io publication and the two global
 `latest` aliases cannot race another release. A different unfinished draft
 blocks the next tag, and a stable version must be newer than every stable GitHub
