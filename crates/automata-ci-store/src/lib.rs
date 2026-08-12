@@ -80,9 +80,10 @@ pub use error::{
 };
 pub use github_checks::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, CompleteGithubCheckProjection,
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateReconciliation,
-    GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
+    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,

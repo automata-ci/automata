@@ -21,18 +21,18 @@ use automata_ci_github_delivery::{
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, CompleteGithubCheckProjection,
-    GithubCheckAppId, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
-    GithubServerServiceAction, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
-    GithubServerServiceRevision, GithubServerServiceWorkerId, ProviderConnectionId,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
+    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckHeadSha,
+    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
+    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectId,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
+    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
     RetryGithubCheckProjection, TenantScope,
 };
@@ -90,6 +90,7 @@ struct FakeOutbox {
     begin_delay_millis: AtomicUsize,
     claim_time_offset: AtomicI64,
     claim_delay_millis: AtomicUsize,
+    credential_rejection_blocks: Mutex<Vec<BlockGithubCheckProjectionForCredentialRejection>>,
     events: Arc<Mutex<Vec<String>>>,
 }
 
@@ -109,6 +110,7 @@ impl FakeOutbox {
             begin_delay_millis: AtomicUsize::new(0),
             claim_time_offset: AtomicI64::new(0),
             claim_delay_millis: AtomicUsize::new(0),
+            credential_rejection_blocks: Mutex::new(Vec::new()),
             events,
         }
     }
@@ -298,6 +300,21 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
         Self::receipt(request.claim().subject_id(), request.observed())
     }
 
+    async fn block_github_check_projection_for_credential_rejection(
+        &self,
+        request: BlockGithubCheckProjectionForCredentialRejection,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        self.event("store:block:credential_rejected");
+        self.credential_rejection_blocks
+            .lock()
+            .expect("credential rejection blocks lock")
+            .push(request);
+        Self::receipt(
+            request.claim().subject_id(),
+            GithubCheckDesiredProjection::Queued,
+        )
+    }
+
     async fn retry_github_check_projection(
         &self,
         request: RetryGithubCheckProjection,
@@ -329,6 +346,7 @@ enum CredentialMode {
     FutureAcquisition,
     TooShort,
     Unavailable,
+    Rejected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -445,6 +463,9 @@ impl GithubChecksCredentialProvider for FakeCredentials {
         }
         if matches!(self.mode, CredentialMode::Unavailable) {
             return Err(GithubChecksCredentialProviderError::Unavailable);
+        }
+        if matches!(self.mode, CredentialMode::Rejected) {
+            return Err(GithubChecksCredentialProviderError::Rejected);
         }
         let identity = request.identity();
         let authority_selector = match self.mode {
@@ -1639,6 +1660,83 @@ async fn rate_and_credential_unavailability_use_bounded_durable_retry() {
     assert!(credential.server.requests().is_empty());
 }
 
+#[tokio::test]
+async fn locally_rejected_credential_blocks_the_exact_claim_without_provider_io() {
+    let harness = Harness::new(
+        [claim(
+            GithubCheckProjectionAction::EnsureSuite,
+            queued(),
+            1,
+            None,
+            None,
+        )],
+        Vec::new(),
+        CredentialMode::Rejected,
+    )
+    .await;
+
+    assert!(matches!(
+        harness.run().await.expect("credential rejection is closed"),
+        GithubChecksPublisherOutcome::Blocked(_)
+    ));
+    assert_eq!(harness.release_calls(), 0);
+    assert!(harness.server.requests().is_empty());
+    let credential_claim = harness
+        .credentials
+        .last_claim
+        .lock()
+        .expect("claim evidence lock")
+        .expect("credential request");
+    let blocks = harness
+        .outbox
+        .credential_rejection_blocks
+        .lock()
+        .expect("credential rejection blocks lock");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].claim(), credential_claim.claim);
+    assert!(
+        blocks[0].blocked_at() >= credential_claim.claimed_at
+            && blocks[0].blocked_at() < credential_claim.expires_at
+    );
+    assert_eq!(
+        harness.events(),
+        [
+            "store:claim".to_owned(),
+            "credential:acquire".to_owned(),
+            "store:block:credential_rejected".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn provider_unauthorized_after_exact_handoff_remains_fatal() {
+    let harness = Harness::new(
+        [claim(
+            GithubCheckProjectionAction::EnsureSuite,
+            queued(),
+            1,
+            None,
+            None,
+        )],
+        vec![ResponseSpec::json(401, "{}")],
+        CredentialMode::Exact,
+    )
+    .await;
+
+    assert!(matches!(
+        harness.run().await,
+        Err(GithubChecksPublisherError::CredentialRejected)
+    ));
+    assert_eq!(harness.release_calls(), 1);
+    assert_eq!(methods(&harness.server.requests()), ["POST"]);
+    assert!(
+        !harness
+            .events()
+            .iter()
+            .any(|event| event == "store:block:credential_rejected")
+    );
+}
+
 fn claim(
     action: GithubCheckProjectionAction,
     desired: GithubCheckDesiredProjection,
@@ -1854,6 +1952,7 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> RecordedRequest {
 
 async fn write_response(stream: &mut tokio::net::TcpStream, response: ResponseSpec) {
     let reason = match response.status {
+        401 => "Unauthorized",
         200 => "OK",
         201 => "Created",
         429 => "Too Many Requests",

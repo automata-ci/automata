@@ -1355,6 +1355,40 @@ impl CompleteGithubCheckProjection {
     }
 }
 
+/// Blocks one live projection whose immutable credential authority is unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockGithubCheckProjectionForCredentialRejection {
+    claim: GithubCheckProjectionClaimFence,
+    blocked_at: UnixMillis,
+}
+
+impl BlockGithubCheckProjectionForCredentialRejection {
+    /// Constructs a closed credential-authority rejection under an exact claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a block time before the Unix epoch.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        blocked_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        validate_timestamp(blocked_at, "GitHub Check credential rejection time")?;
+        Ok(Self { claim, blocked_at })
+    }
+
+    /// Returns the exact live claim being blocked.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+
+    /// Returns the trusted time at which local authority rejected the claim.
+    #[must_use]
+    pub const fn blocked_at(self) -> UnixMillis {
+        self.blocked_at
+    }
+}
+
 /// Releases a live claim for bounded delayed retry without changing external identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryGithubCheckProjection {
@@ -1600,6 +1634,12 @@ pub trait GithubCheckProjectionOutbox: Send + Sync {
     async fn complete_github_check_projection(
         &self,
         request: CompleteGithubCheckProjection,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
+
+    /// Permanently blocks a live claim rejected by its immutable credential authority.
+    async fn block_github_check_projection_for_credential_rejection(
+        &self,
+        request: BlockGithubCheckProjectionForCredentialRejection,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
 
     /// Releases a live claim into bounded retry state without losing uncertainty.

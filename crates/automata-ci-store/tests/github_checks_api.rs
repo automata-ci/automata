@@ -1,8 +1,9 @@
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BeginGithubCheckRunCreate, ClaimGithubCheckProjection, ClaimedGithubCheckProjection,
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateReconciliation,
-    GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    BeginGithubCheckRunCreate, BlockGithubCheckProjectionForCredentialRejection,
+    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, GithubCheckAppId,
+    GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionWorkerId, GithubCheckRunId,
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
     GithubCheckSubjectReceipt, GithubCheckSubjectTarget, GithubCheckSuiteId,
@@ -144,6 +145,26 @@ fn create_release_and_missing_reconciliation_are_temporally_bounded() {
             .retry_at(),
         None
     );
+}
+
+#[test]
+fn credential_rejection_block_retains_its_exact_claim_and_nonnegative_time() {
+    let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
+    let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");
+    let claim = GithubCheckProjectionClaimFence::from_durable_parts(subject, worker, 7)
+        .expect("claim fence");
+
+    let request =
+        BlockGithubCheckProjectionForCredentialRejection::new(claim, UnixMillis::new(1_234))
+            .expect("credential rejection block");
+    assert_eq!(request.claim(), claim);
+    assert_eq!(request.blocked_at(), UnixMillis::new(1_234));
+    assert!(matches!(
+        BlockGithubCheckProjectionForCredentialRejection::new(claim, UnixMillis::new(-1)),
+        Err(GithubCheckValueError::NegativeTimestamp(
+            "GitHub Check credential rejection time"
+        ))
+    ));
 }
 
 fn prepare_projection(

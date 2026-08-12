@@ -423,52 +423,73 @@ async fn historical_revision_resolves_only_through_the_exact_current_live_route(
         .await
         .expect("bootstrap");
     let resolver = ready.credential_request_resolver();
-    let current = &plan.authorities()[0];
-    let historical = historical_authority(
-        current,
-        0x7a1,
-        current.app_configuration_revision().get() - 1,
-        current.policy_revision().get() - 1,
-        current.app_key_spki_sha256(),
-        authority_configuration_fingerprint(historical_broker_fingerprint, current.scope()),
-    );
-
-    let historical_request = resolver
-        .resolve_github_server_service_credential_request(&historical)
-        .await
-        .expect("historical resolution")
-        .expect("same live route remains authorized");
-    assert_eq!(historical_request.identity(), &historical);
-    assert_eq!(
-        historical_request.request(),
-        &github_server_service_credential_request(&historical).expect("canonical request")
-    );
-
-    for mismatch in [
-        historical_authority(
+    for (index, current) in plan.authorities().iter().enumerate() {
+        let other_scope = match current.scope() {
+            GithubServerServiceScope::ChecksWrite => {
+                GithubServerServiceScope::PrivateRepositorySourceRead
+            }
+            GithubServerServiceScope::PrivateRepositorySourceRead => {
+                GithubServerServiceScope::ChecksWrite
+            }
+        };
+        let authority_id = 0x7a1 + u128::try_from(index).expect("authority index");
+        let historical = historical_authority(
             current,
-            0x7a2,
-            current.app_configuration_revision().get() - 1,
-            current.policy_revision().get() - 1,
-            Sha256Digest::from_bytes([0xa2; 32]),
-            current.configuration_fingerprint(),
-        ),
-        historical_authority(
-            current,
-            0x7a3,
+            authority_id,
             current.app_configuration_revision().get() - 1,
             current.policy_revision().get() - 1,
             current.app_key_spki_sha256(),
-            Sha256Digest::from_bytes([0xa3; 32]),
-        ),
-    ] {
-        assert!(
-            resolver
-                .resolve_github_server_service_credential_request(&mismatch)
-                .await
-                .expect("closed mismatch")
-                .is_none()
+            authority_configuration_fingerprint(historical_broker_fingerprint, current.scope()),
         );
+
+        let historical_request = resolver
+            .resolve_github_server_service_credential_request(&historical)
+            .await
+            .expect("historical resolution")
+            .expect("same live route remains authorized");
+        assert_eq!(historical_request.identity(), &historical);
+        assert_eq!(
+            historical_request.request(),
+            &github_server_service_credential_request(&historical).expect("canonical request")
+        );
+
+        for (offset, mismatch) in [
+            historical_authority(
+                current,
+                authority_id + 0x10,
+                current.app_configuration_revision().get() - 1,
+                current.policy_revision().get() - 1,
+                Sha256Digest::from_bytes([0xa2; 32]),
+                current.configuration_fingerprint(),
+            ),
+            historical_authority(
+                current,
+                authority_id + 0x20,
+                current.app_configuration_revision().get() - 1,
+                current.policy_revision().get() - 1,
+                current.app_key_spki_sha256(),
+                Sha256Digest::from_bytes([0xa3; 32]),
+            ),
+            historical_authority(
+                current,
+                authority_id + 0x30,
+                current.app_configuration_revision().get() - 1,
+                current.policy_revision().get() - 1,
+                current.app_key_spki_sha256(),
+                authority_configuration_fingerprint(historical_broker_fingerprint, other_scope),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                resolver
+                    .resolve_github_server_service_credential_request(&mismatch)
+                    .await
+                    .unwrap_or_else(|_| panic!("closed mismatch {index}/{offset}"))
+                    .is_none()
+            );
+        }
     }
 }
 

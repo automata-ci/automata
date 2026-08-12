@@ -470,7 +470,8 @@ impl fmt::Debug for GithubProviderBootstrapReady {
 pub struct GithubProviderCredentialRequestResolver {
     authorities:
         Arc<BTreeMap<GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity>>,
-    compatible_historical_configuration_fingerprints: Arc<BTreeSet<Sha256Digest>>,
+    compatible_historical_configuration_fingerprints:
+        Arc<BTreeSet<(GithubServerServiceScope, Sha256Digest)>>,
 }
 
 impl GithubProviderCredentialRequestResolver {
@@ -494,7 +495,10 @@ impl GithubProviderCredentialRequestResolver {
                 .iter()
                 .flat_map(|broker_fingerprint| {
                     scopes.iter().map(move |scope| {
-                        authority_configuration_fingerprint(*broker_fingerprint, *scope)
+                        (
+                            *scope,
+                            authority_configuration_fingerprint(*broker_fingerprint, *scope),
+                        )
                     })
                 })
                 .collect();
@@ -565,7 +569,10 @@ impl GithubServerServiceCredentialRequestResolver for GithubProviderCredentialRe
 fn authority_uses_configured_live_route(
     identity: &GithubServerServiceAuthorityIdentity,
     configured: &GithubServerServiceAuthorityIdentity,
-    compatible_historical_configuration_fingerprints: &BTreeSet<Sha256Digest>,
+    compatible_historical_configuration_fingerprints: &BTreeSet<(
+        GithubServerServiceScope,
+        Sha256Digest,
+    )>,
 ) -> bool {
     identity.tenant() == configured.tenant()
         && identity.repository_id() == configured.repository_id()
@@ -580,7 +587,7 @@ fn authority_uses_configured_live_route(
         && identity.app_key_spki_sha256() == configured.app_key_spki_sha256()
         && (identity.configuration_fingerprint() == configured.configuration_fingerprint()
             || compatible_historical_configuration_fingerprints
-                .contains(&identity.configuration_fingerprint()))
+                .contains(&(identity.scope(), identity.configuration_fingerprint())))
 }
 
 /// Sanitized provider bootstrap failure.
