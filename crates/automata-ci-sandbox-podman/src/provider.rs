@@ -56,8 +56,7 @@ const SERVICE_PROXY_CONFIG_FORMAT: &str =
 const CONTAINER_POD_FORMAT: &str = "{{.Pod}}";
 const POD_INFRA_CONTAINER_FORMAT: &str = "{{.InfraContainerID}}";
 const JOB_NETWORK_SYSCTL: &str = "net.ipv4.ip_unprivileged_port_start=0";
-const JOB_NETWORK_SYSCTL_FORMAT: &str =
-    "{{ index .HostConfig.Sysctls \"net.ipv4.ip_unprivileged_port_start\" }}";
+const CREATE_COMMAND_FORMAT: &str = "{{json .CreateCommand}}";
 const ENDPOINT_CAPABILITIES: [SandboxCapability; 6] = [
     SandboxCapability::Exec,
     SandboxCapability::Signal,
@@ -1137,12 +1136,22 @@ impl PodmanInner {
             stage,
             None,
         )?;
-        let expected = format!("{}\nunpublished\nalias\n0", entry.image());
         let actual = std::str::from_utf8(output.stdout())
             .ok()
             .map(str::trim_end)
             .ok_or_else(|| provider_error::invalid_state(stage))?;
-        if actual != expected {
+        let mut lines = actual.split('\n');
+        let image = lines.next();
+        let publication = lines.next();
+        let alias = lines.next();
+        let create_command = lines.next();
+        if lines.next().is_some()
+            || image != Some(entry.image())
+            || publication != Some("unpublished")
+            || alias != Some("alias")
+            || create_command
+                .is_none_or(|value| !creation_command_has_exact_network_sysctl(value.as_bytes()))
+        {
             return Err(provider_error::ownership_mismatch(
                 ProviderStage::VerifyOwnership,
             ));
@@ -2518,9 +2527,9 @@ impl PodmanInner {
     ) -> Result<(), ProviderError> {
         let infra_identifier = self.pod_infra_identifier(names, deadline, cancellation)?;
         let mut arguments = self.base_arguments();
-        arguments.extend(os_args(["container", "inspect", "--format"]));
-        arguments.push(JOB_NETWORK_SYSCTL_FORMAT.into());
-        arguments.push(infra_identifier.clone().into());
+        arguments.extend(os_args(["pod", "inspect", "--format"]));
+        arguments.push(CREATE_COMMAND_FORMAT.into());
+        arguments.push(names.pod().into());
         let output = Self::require_success(
             self.run(
                 arguments,
@@ -2531,7 +2540,7 @@ impl PodmanInner {
             ProviderStage::VerifyOwnership,
             None,
         )?;
-        if output.stdout() != b"0\n" && output.stdout() != b"0" {
+        if !creation_command_has_exact_network_sysctl(output.stdout()) {
             return Err(provider_error::ownership_mismatch(
                 ProviderStage::VerifyOwnership,
             ));
@@ -3607,6 +3616,22 @@ mod command_completion_tests {
             PodmanCommandOutcome::InputIncomplete
         );
     }
+
+    #[test]
+    fn persisted_creation_command_requires_one_exact_network_sysctl() {
+        let exact = br#"["/usr/bin/podman","pod","create","--sysctl","net.ipv4.ip_unprivileged_port_start=0"]"#;
+        assert!(creation_command_has_exact_network_sysctl(exact));
+
+        for rejected in [
+            br#"["/usr/bin/podman","pod","create"]"#.as_slice(),
+            br#"["/usr/bin/podman","pod","create","--sysctl","net.ipv4.ip_unprivileged_port_start=1024"]"#.as_slice(),
+            br#"["/usr/bin/podman","pod","create","--sysctl=net.ipv4.ip_unprivileged_port_start=0"]"#.as_slice(),
+            br#"["/usr/bin/podman","pod","create","--sysctl","net.ipv4.ip_unprivileged_port_start=0","--sysctl","net.ipv4.ip_unprivileged_port_start=0"]"#.as_slice(),
+            b"not-json".as_slice(),
+        ] {
+            assert!(!creation_command_has_exact_network_sysctl(rejected));
+        }
+    }
 }
 
 fn finish_create(
@@ -4199,8 +4224,36 @@ fn service_configuration_format(network: &str, alias: &str) -> String {
          {{{{with index .NetworkSettings.Networks \"{network}\"}}}}\
          {{{{range .Aliases}}}}{{{{if eq . \"{alias}\"}}}}alias{{{{end}}}}{{{{end}}}}\
          {{{{else}}}}missing{{{{end}}}}\n\
-         {JOB_NETWORK_SYSCTL_FORMAT}"
+         {CREATE_COMMAND_FORMAT}"
     )
+}
+
+fn creation_command_has_exact_network_sysctl(bytes: &[u8]) -> bool {
+    let Ok(value) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    let Ok(arguments) = serde_json::from_str::<Vec<String>>(value) else {
+        return false;
+    };
+    let mut found = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--sysctl" {
+            if found || arguments.get(index + 1).map(String::as_str) != Some(JOB_NETWORK_SYSCTL) {
+                return false;
+            }
+            found = true;
+            index += 2;
+            continue;
+        }
+        if argument.starts_with("--sysctl=") {
+            return false;
+        }
+        index += 1;
+    }
+    found
 }
 
 fn parse_service_inspection(bytes: &[u8]) -> Option<InspectedServiceContainer> {

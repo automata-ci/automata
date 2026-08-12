@@ -639,19 +639,44 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
             Some(container_resource(state, name).map_or_else(
                 || CommandOutput::failure(1, Vec::new()),
                 |resource| {
+                    let create_command = serde_json::to_string(&[
+                        "/usr/bin/podman",
+                        "create",
+                        "--sysctl",
+                        "net.ipv4.ip_unprivileged_port_start=0",
+                    ])
+                    .expect("fake create-command JSON");
                     CommandOutput::success(
                         format!(
-                            "{}\nunpublished\n{}\n",
+                            "{}\nunpublished\n{}\n{create_command}\n",
                             resource.image_name,
                             if resource.network_address.is_some() {
-                                "alias\n0"
+                                "alias"
                             } else {
-                                "missing\n0"
+                                "missing"
                             }
                         )
                         .into_bytes(),
                     )
                 },
+            ))
+        }
+        [pod, inspect, format, template, name]
+            if pod == "pod"
+                && inspect == "inspect"
+                && format == "--format"
+                && template == "{{json .CreateCommand}}"
+                && resource(state, "pod", name).is_some() =>
+        {
+            Some(CommandOutput::success(
+                serde_json::to_vec(&[
+                    "/usr/bin/podman",
+                    "pod",
+                    "create",
+                    "--sysctl",
+                    "net.ipv4.ip_unprivileged_port_start=0",
+                ])
+                .expect("fake pod create-command JSON"),
             ))
         }
         [pod, inspect, format, template, name]
