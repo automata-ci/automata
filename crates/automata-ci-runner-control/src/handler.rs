@@ -1909,8 +1909,8 @@ impl DurableRunnerControlHandler {
         digest.update(b"automata.runner.revoked-lease-offer-no-work.v1");
         digest.update(offer_operation_id.as_uuid().as_bytes());
         digest.update(request.operation_id().as_uuid().as_bytes());
-        let digest = digest.finalize();
-        let encoded_operation_id = format!("{digest:x}");
+        let digest = Sha256Digest::from_bytes(digest.finalize().into());
+        let encoded_operation_id = digest.to_string();
         let operation_id: OperationId = encoded_operation_id[..32]
             .parse()
             .expect("a SHA-256 prefix is a valid UUID representation");

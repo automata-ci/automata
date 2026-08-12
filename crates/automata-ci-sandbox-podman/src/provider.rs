@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use automata_ci_core::Sha256Digest;
 use automata_ci_execution::{
     Cancellation, ContainerHandle, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionEnvironment, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderCapabilities,
@@ -4390,7 +4391,7 @@ fn spec_fingerprint(
         }
         hash_service_health(&mut hasher, service.health());
     }
-    format!("{:x}", hasher.finalize())
+    Sha256Digest::from_bytes(hasher.finalize().into()).to_string()
 }
 
 fn hash_service_health(hasher: &mut Sha256, health: &ServiceHealthPolicy) {

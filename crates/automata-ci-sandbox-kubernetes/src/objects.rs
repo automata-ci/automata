@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use automata_ci_core::{JobResourceAllocation, ResourceCapacity};
+use automata_ci_core::{JobResourceAllocation, ResourceCapacity, Sha256Digest};
 use automata_ci_execution::{
     ImmutableImage, NetworkPolicy as SandboxNetworkPolicy, RootFilesystemPolicy, SandboxSpec,
 };
@@ -480,7 +480,7 @@ fn fingerprint(
         digest.update(resources.ephemeral_disk_bytes().to_be_bytes());
         digest.update(resources.gpu_count().to_be_bytes());
     }
-    format!("{:x}", digest.finalize())
+    Sha256Digest::from_bytes(digest.finalize().into()).to_string()
 }
 
 fn hash_fingerprint_field(digest: &mut Sha256, value: &[u8]) {
