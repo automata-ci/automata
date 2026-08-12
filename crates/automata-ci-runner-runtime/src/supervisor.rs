@@ -24,8 +24,9 @@ use automata_ci_protocol_protobuf::{
 use automata_ci_runner_journal::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand, JobIrContentRef,
     JournalContentRetainSet, JournalInvariantError, LeaseOfferRecord, LeaseOfferStatus,
-    LeasePollCheckpoint, LogSegmentAcknowledgement, RunnerJournal, RuntimeAuthorityContentRef,
-    SessionBinding as JournalSessionBinding, SlotSnapshot, TerminalResultRecord,
+    LeasePollCheckpoint, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
+    RuntimeAuthorityContentRef, SessionBinding as JournalSessionBinding, SlotSnapshot,
+    TerminalResultRecord,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -2454,12 +2455,13 @@ impl RunnerSessionSupervisor {
         durable: &SlotSnapshot,
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
+        let durable = self.recover_uncertain_create_custody(session, durable)?;
         if durable
             .terminal_result()
             .is_some_and(TerminalResultRecord::is_acknowledged)
         {
             return self
-                .finish_terminal_slot_delivery(session, durable, cancellation)
+                .finish_terminal_slot_delivery(session, &durable, cancellation)
                 .await;
         }
         let watchdog = Arc::new(LeaseWatchdog::new(self.local_lease_deadline(
@@ -2480,16 +2482,51 @@ impl RunnerSessionSupervisor {
         let result = self
             .finish_terminal_slot_maintained(
                 session,
-                durable,
+                &durable,
                 watchdog,
                 lease_expired,
-                Self::recovered_finalization_lifecycle(durable),
+                Self::recovered_finalization_lifecycle(&durable),
                 cancellation,
             )
             .await;
         watchdog_stop.cancel();
         let _ = watchdog_task.await;
         result
+    }
+
+    fn recover_uncertain_create_custody(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+    ) -> Result<SlotSnapshot, RunnerRuntimeError> {
+        let Some(operation) = durable.provider_operations().last().copied() else {
+            return Ok(durable.clone());
+        };
+        if durable.sandbox().is_some()
+            || operation.kind() != ProviderOperationKind::CreateSandbox
+            || !operation.is_pending()
+        {
+            return Ok(durable.clone());
+        }
+        let guard = durable.offer().lease().guard();
+        let sandbox = self
+            .inner
+            .ports
+            .executor
+            .create_recovery_sandbox(operation.operation_id(), guard)
+            .map_err(RunnerRuntimeError::Executor)?
+            .ok_or(RunnerRuntimeError::ExecutorContract)?;
+        let snapshot = self.inner.ports.journal.record_sandbox_created(
+            session.negotiated.session_id(),
+            durable.slot(),
+            guard,
+            operation.operation_id(),
+            sandbox,
+        )?;
+        snapshot
+            .slot(durable.slot())
+            .cloned()
+            .ok_or(RunnerRuntimeError::ExecutorContract)
     }
 
     async fn finish_terminal_slot_maintained(

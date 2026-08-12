@@ -12,12 +12,12 @@ use std::{
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
     ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
+    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext, LeaseGuard,
     MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
-    MAX_STEP_ATTACHMENT_TEXT_BYTES, OutputSensitivity, RuntimeBoolean, RuntimePositiveInteger,
-    RuntimeTimeoutTemplate, SecretBinding, SemanticStep, ShellTemplate, StepAnnotation,
-    StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis, ValueSource,
-    ValueTemplate,
+    MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity, RuntimeBoolean,
+    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, ShellTemplate,
+    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis,
+    ValueSource, ValueTemplate,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -4283,6 +4283,23 @@ impl GithubJobExecutor {
         }
     }
 
+    fn retain_create_failure_custody(
+        events: &Arc<dyn ExecutionEvents>,
+        operation_id: OperationId,
+        error: &ProviderError,
+    ) -> Result<(), ExecutorAdapterError> {
+        if error.outcome() == automata_ci_execution::OperationOutcome::Uncertain
+            && let Some(handle) = error.recovery_handle()
+        {
+            let identity = journal_identity(handle)?;
+            return events
+                .sandbox_created(operation_id, identity)
+                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal));
+        }
+        let _ = events.provider_operation_failed(operation_id, provider_failure_outcome(error));
+        Ok(())
+    }
+
     fn obtain_endpoint(
         &self,
         request: &ExecutionRequest,
@@ -4348,8 +4365,7 @@ impl GithubJobExecutor {
             let record = match self.ports.provider.create(&spec, &cancellation) {
                 Ok(record) => record,
                 Err(error) => {
-                    let _ = events
-                        .provider_operation_failed(operation_id, provider_failure_outcome(&error));
+                    Self::retain_create_failure_custody(events, operation_id, &error)?;
                     return Err(map_provider_error(&error));
                 }
             };
@@ -5188,6 +5204,23 @@ impl fmt::Debug for GithubJobExecutor {
 impl JobExecutor for GithubJobExecutor {
     fn admit(&self, job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
         self.validate_admission(job).map(ExecutionAdmission::new)
+    }
+
+    fn create_recovery_sandbox(
+        &self,
+        operation_id: OperationId,
+        guard: LeaseGuard,
+    ) -> Result<Option<SandboxIdentity>, ExecutorError> {
+        let generation = SandboxGeneration::new(guard.fencing_token().get())
+            .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+        self.ports
+            .provider
+            .create_recovery_handle(operation_id, generation)
+            .map(|handle| {
+                journal_identity(&handle)
+                    .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))
+            })
+            .transpose()
     }
 
     fn execute(

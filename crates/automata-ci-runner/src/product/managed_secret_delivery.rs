@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::{SecretString, SecureRandom};
 use std::collections::BTreeMap;
 
-use automata_ci_core::{RunnerId, SecretBinding};
+use automata_ci_core::{LeaseGuard, OperationId, RunnerId, SecretBinding};
 use automata_ci_job_executor_github::{
     EphemeralJobSecret, EphemeralJobSecrets, GithubJobExecutor, SecretCustodyAcknowledger,
 };
 use automata_ci_protocol::ManagedSecretBindingOverlay;
+use automata_ci_runner_journal::SandboxIdentity;
 use automata_ci_runner_runtime::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
     ExecutionEvents, ExecutionRequest, ExecutorError, ExecutorErrorKind, ExecutorFuture,
@@ -122,6 +123,14 @@ impl JobExecutor for ManagedSecretJobExecutor {
         job: &automata_ci_core::JobIrEnvelope,
     ) -> Result<ExecutionAdmission, AdmissionRejection> {
         self.base.admit(job)
+    }
+
+    fn create_recovery_sandbox(
+        &self,
+        operation_id: OperationId,
+        guard: LeaseGuard,
+    ) -> Result<Option<SandboxIdentity>, ExecutorError> {
+        self.base.create_recovery_sandbox(operation_id, guard)
     }
 
     fn execute(

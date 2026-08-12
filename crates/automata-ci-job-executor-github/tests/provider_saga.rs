@@ -242,27 +242,46 @@ async fn provider_failures_map_to_exact_executor_and_durable_domains() {
                 panic!("one durable create intent for {provider_kind:?} with {outcome:?}");
             };
             assert_eq!(*operation_kind, ProviderOperationKind::CreateSandbox);
-            let expected_failure = match outcome {
-                OperationOutcome::KnownNoEffect => {
-                    ProviderFailureOutcome::KnownNoEffect(failure_kind)
-                }
-                OperationOutcome::Uncertain => ProviderFailureOutcome::Uncertain(failure_kind),
+            let expected_failures = match outcome {
+                OperationOutcome::KnownNoEffect => vec![(
+                    *operation_id,
+                    ProviderFailureOutcome::KnownNoEffect(failure_kind),
+                )],
+                OperationOutcome::Uncertain => Vec::new(),
             };
             assert_eq!(
                 fixture.events.provider_operation_failures(),
-                vec![(*operation_id, expected_failure)],
+                expected_failures,
                 "wrong journal mapping for {provider_kind:?} with {outcome:?}"
             );
             assert_eq!(
                 fixture.events.pending_provider_operation(),
-                (outcome == OperationOutcome::Uncertain)
-                    .then_some((*operation_id, ProviderOperationKind::CreateSandbox)),
+                None,
                 "wrong replay state for {provider_kind:?} with {outcome:?}"
             );
             assert_eq!(fixture.provider.counts(), (1, 0, 0));
-            assert_eq!(fixture.events.sandbox(), None);
+            assert_eq!(
+                fixture.events.sandbox(),
+                (outcome == OperationOutcome::Uncertain).then(journal_identity),
+                "uncertain create retains exact cleanup custody"
+            );
         }
     }
+}
+
+#[test]
+fn deterministic_provider_identity_reconstructs_legacy_create_custody() {
+    let fixture = Fixture::new(Vec::new(), Vec::new());
+    let request = fixture.request(run_job("true\n"));
+    let operation_id = automata_ci_core::OperationId::new();
+
+    let recovered = fixture
+        .executor
+        .create_recovery_sandbox(operation_id, request.lease().guard())
+        .expect("recovery identity construction")
+        .expect("fake provider has deterministic identity");
+
+    assert_eq!(recovered, journal_identity());
 }
 
 #[tokio::test]

@@ -37,6 +37,24 @@ impl PodmanLaunchTrust for ToggleLaunchTrust {
 }
 
 #[test]
+fn deterministic_create_recovery_handle_matches_the_created_sandbox() {
+    let fixture = Fixture::new("create-recovery-handle");
+    let operation_id = OperationId::new();
+    let spec = sample_spec(operation_id);
+    let recovered = fixture
+        .provider
+        .create_recovery_handle(operation_id, spec.generation())
+        .expect("Podman create identities are deterministic");
+
+    let created = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create sandbox");
+
+    assert_eq!(&recovered, created.handle());
+}
+
+#[test]
 fn provider_use_quarantines_before_dynamic_state_or_podman_work() {
     let admitted = Arc::new(AtomicBool::new(true));
     let trust = PodmanLaunchTrustHandle::new(Arc::new(ToggleLaunchTrust(Arc::clone(&admitted))));
