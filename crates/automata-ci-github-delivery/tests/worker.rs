@@ -1280,10 +1280,10 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let workflow_marker = b"private-workflow-marker\n".to_vec();
     let archive = archive(BTreeMap::from([
-        (".github/workflows/ci.yml", workflow_marker.clone()),
-        (".github/workflows/empty.yml", Vec::new()),
-        (".github/workflows/large.yaml", vec![b'x'; 65]),
-        (".github/workflows/a.yml", workflow_marker),
+        (".ci/workflows/ci.yml", workflow_marker.clone()),
+        (".ci/workflows/empty.yml", Vec::new()),
+        (".ci/workflows/large.yaml", vec![b'x'; 65]),
+        (".ci/workflows/a.yml", workflow_marker),
         ("README.md", b"ignored".to_vec()),
     ]));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
@@ -1342,7 +1342,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
         .collect::<Vec<_>>();
     assert_eq!(
         observed_paths,
-        [".github/workflows/ci.yml", ".github/workflows/ci.yml"]
+        [".ci/workflows/ci.yml", ".ci/workflows/ci.yml"]
     );
     assert!(workflow_observations.iter().all(|observation| {
         observation.ref_kind == GithubPushRefKind::Branch
@@ -1363,7 +1363,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             .iter()
             .map(automata_ci_store::ProviderDeliveryWorkflowOutcome::workflow_path)
             .collect::<Vec<_>>(),
-        [".github/workflows/ci.yml"]
+        [".ci/workflows/ci.yml"]
     );
 }
 
@@ -1373,14 +1373,11 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
     let fixture = claimed_fixture(DEFAULT_BRANCH_REF, false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
         BTreeMap::from([
-            (".github/workflows/a.yml", b"on: push\njobs: {}\n".to_vec()),
-            (".github/workflows/b.yaml", b"on: push\njobs: {}\n".to_vec()),
-            (".github/workflows/empty.yml", Vec::new()),
-            (
-                ".github/workflows/nested/ignored.yml",
-                b"ignored\n".to_vec(),
-            ),
-            (".github/workflows/ignored.txt", b"ignored\n".to_vec()),
+            (".ci/workflows/a.yml", b"on: push\njobs: {}\n".to_vec()),
+            (".ci/workflows/b.yaml", b"on: push\njobs: {}\n".to_vec()),
+            (".ci/workflows/empty.yml", Vec::new()),
+            (".ci/workflows/nested/ignored.yml", b"ignored\n".to_vec()),
+            (".ci/workflows/ignored.txt", b"ignored\n".to_vec()),
         ]),
     ))));
     let processor = Arc::new(RecordingProcessor::returning_sequence(vec![
@@ -1443,9 +1440,9 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             .map(|observation| observation.path.as_str())
             .collect::<Vec<_>>(),
         [
-            ".github/workflows/a.yml",
-            ".github/workflows/b.yaml",
-            ".github/workflows/b.yaml",
+            ".ci/workflows/a.yml",
+            ".ci/workflows/b.yaml",
+            ".ci/workflows/b.yaml",
         ]
     );
     assert_eq!(deliveries.retries.lock().expect("retries lock").len(), 1);
@@ -1459,9 +1456,9 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             .map(ProviderDeliveryWorkflowOutcome::workflow_path)
             .collect::<Vec<_>>(),
         [
-            ".github/workflows/a.yml",
-            ".github/workflows/b.yaml",
-            ".github/workflows/empty.yml",
+            ".ci/workflows/a.yml",
+            ".ci/workflows/b.yaml",
+            ".ci/workflows/empty.yml",
         ]
     );
 }
@@ -1470,7 +1467,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
 async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evidence() {
     let fixture = pull_request_claimed_fixture();
     let archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: pull_request\njobs: {}\n".to_vec(),
     )]));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
@@ -1524,7 +1521,7 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
 async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha() {
     let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Private);
     let source_archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: repository_dispatch\njobs: {}\n".to_vec(),
     )]));
     let resolver = Arc::new(RecordingResolver::returning(vec![
@@ -1604,7 +1601,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
 async fn public_repository_dispatch_resolution_is_credential_free() {
     let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Public);
     let source_archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: repository_dispatch\njobs: {}\n".to_vec(),
     )]));
     let resolver = Arc::new(RecordingResolver::returning(vec![repository_snapshot(
@@ -1741,7 +1738,7 @@ async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
     assert_eq!(completions.len(), 1);
     let outcomes = completions[0].outcomes();
     assert_eq!(outcomes.len(), 1);
-    assert_eq!(outcomes[0].workflow_path(), ".github/workflows/ci.yml");
+    assert_eq!(outcomes[0].workflow_path(), ".ci/workflows/ci.yml");
     let ProviderDeliveryWorkflowConclusion::Failed { failure_kind } = outcomes[0].conclusion()
     else {
         panic!("missing configured workflow must fail its Check subject");
@@ -1769,7 +1766,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
         fixture.body.clone(),
     ));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::from([(".github/workflows/ci.yml", b"on: push\n".to_vec())]),
+        BTreeMap::from([(".ci/workflows/ci.yml", b"on: push\n".to_vec())]),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -1817,7 +1814,7 @@ async fn public_live_ref_uses_anonymous_source_request_without_a_credential() {
         ProviderRepositoryVisibility::Public,
     );
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::from([(".github/workflows/ci.yml", b"on: push\n".to_vec())]),
+        BTreeMap::from([(".ci/workflows/ci.yml", b"on: push\n".to_vec())]),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -1851,7 +1848,7 @@ async fn public_live_ref_uses_anonymous_source_request_without_a_credential() {
 async fn historical_manifest_uses_pinned_limits_below_a_wider_local_ceiling() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::from([(".github/workflows/ci.yml", b"on: push\n".to_vec())]),
+        BTreeMap::from([(".ci/workflows/ci.yml", b"on: push\n".to_vec())]),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -1898,7 +1895,7 @@ async fn historical_manifest_uses_pinned_limits_below_a_wider_local_ceiling() {
 async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::from([(".github/workflows/ci.yml", b"on: push\n".to_vec())]),
+        BTreeMap::from([(".ci/workflows/ci.yml", b"on: push\n".to_vec())]),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -1981,7 +1978,7 @@ async fn deleted_pinned_branch_completes_without_source_authority_or_processing(
 async fn non_pinned_git_ref_rejects_before_source_or_workflow_processing() {
     let fixture = claimed_fixture("refs/tags/v1.2.3", false, 1);
     let archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: push\n".to_vec(),
     )]));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
@@ -2194,7 +2191,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
 
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: push\n".to_vec(),
     )]));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
@@ -2232,7 +2229,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
 async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let archive = archive(BTreeMap::from([(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         b"on: push\n".to_vec(),
     )]));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));

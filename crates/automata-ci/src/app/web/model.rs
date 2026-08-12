@@ -4841,7 +4841,7 @@ mod tests {
             workflow: Workflow {
                 id: workflow_id,
                 name: "CI".to_owned(),
-                path: ".github/workflows/ci.yml".to_owned(),
+                path: ".ci/workflows/ci.yml".to_owned(),
             },
             status,
             git_ref: Some("refs/heads/main".to_owned()),

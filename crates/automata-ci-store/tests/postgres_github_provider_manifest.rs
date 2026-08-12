@@ -708,7 +708,7 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
         assert_eq!(sql_digest, desired.digest().as_bytes().as_slice());
         assert_eq!(
             desired.digest().to_string(),
-            "92d2d6a43e9e4e24c87003cd1ab13d9f58c5745451722119c402d2ca6e74de41"
+            "58070630000653b9b3e33dab973ee6975b892425e0b560ed5db65c9f06cb8835"
         );
 
         let forged_repository = sqlx::query(
@@ -904,7 +904,7 @@ fn manifest_with_visibility_and_verifier(
         repository_name,
         visibility,
         GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("workflow path"),
+            GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("workflow path"),
         ),
         GithubProviderGitRef::main(),
     )

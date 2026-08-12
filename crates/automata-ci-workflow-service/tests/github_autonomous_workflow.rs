@@ -71,7 +71,7 @@ use uuid::Uuid;
 
 const REPOSITORY: &str = "synthetic/autonomous";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const WORKFLOW_PATH: &str = ".github/workflows/autonomous.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/autonomous.yml";
 const GIT_REF: &str = "refs/heads/main";
 const FINAL_DRAIN_MILLIS: u64 = 30_000;
 const FINAL_DRAIN_RETRY_MILLIS: u64 = 250;

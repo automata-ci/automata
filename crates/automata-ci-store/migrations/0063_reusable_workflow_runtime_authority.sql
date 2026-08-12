@@ -719,7 +719,10 @@ AS $automata$
               'sha', encode(origin.github_check_head_sha, 'hex'),
               'workflow', run.workflow_name,
               'workflow_ref', origin.github_repository_name || '/' ||
-                  origin.workflow_path || '@' || origin.git_ref,
+                  regexp_replace(
+                      origin.workflow_path,
+                      '^\.ci/workflows/', '.github/workflows/'
+                  ) || '@' || origin.git_ref,
               'workflow_sha', encode(origin.github_check_head_sha, 'hex')
           )
           AND manifest.webhook_verifier_fingerprint_sha256 =

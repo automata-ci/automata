@@ -88,7 +88,7 @@ fn durable_identities_fences_and_archives_reject_invalid_sentinels() {
 fn registry_entry_preserves_definition_and_derives_its_digest() {
     let schedule_entry = entry(
         0,
-        ".github/workflows/nightly.yml",
+        ".ci/workflows/nightly.yml",
         10,
         3,
         "15 4 * * MON-FRI",
@@ -96,10 +96,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
         10_000,
     );
     assert_eq!(schedule_entry.ordinal(), 0);
-    assert_eq!(
-        schedule_entry.workflow_path(),
-        ".github/workflows/nightly.yml"
-    );
+    assert_eq!(schedule_entry.workflow_path(), ".ci/workflows/nightly.yml");
     assert_eq!(schedule_entry.workflow_source_digest(), digest(10));
     assert_eq!(schedule_entry.schedule_ordinal(), 3);
     assert_eq!(schedule_entry.cron_expression(), "15 4 * * MON-FRI");
@@ -108,7 +105,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
     assert_eq!(
         schedule_entry.entry_digest(),
         expected_entry_digest(
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             digest(10),
             3,
             "15 4 * * MON-FRI",
@@ -119,7 +116,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
     for mutation in [
         entry(
             0,
-            ".github/workflows/other.yml",
+            ".ci/workflows/other.yml",
             10,
             3,
             "15 4 * * MON-FRI",
@@ -128,7 +125,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
         ),
         entry(
             0,
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             11,
             3,
             "15 4 * * MON-FRI",
@@ -137,7 +134,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
         ),
         entry(
             0,
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             10,
             4,
             "15 4 * * MON-FRI",
@@ -146,7 +143,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
         ),
         entry(
             0,
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             10,
             3,
             "45 4 * * MON-FRI",
@@ -155,7 +152,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
         ),
         entry(
             0,
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             10,
             3,
             "15 4 * * MON-FRI",
@@ -168,7 +165,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
     assert_eq!(
         entry(
             1,
-            ".github/workflows/nightly.yml",
+            ".ci/workflows/nightly.yml",
             10,
             3,
             "15 4 * * MON-FRI",
@@ -182,7 +179,7 @@ fn registry_entry_preserves_definition_and_derives_its_digest() {
 
     let debug = format!("{schedule_entry:?}");
     assert!(debug.contains("GithubCheckSubjectKey([REDACTED])"));
-    assert!(!debug.contains(".github/workflows/nightly.yml"));
+    assert!(!debug.contains(".ci/workflows/nightly.yml"));
 }
 
 #[test]
@@ -190,7 +187,7 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
     for invalid in [
         GithubScheduleRegistryEntry::new(
             u16::try_from(MAX_GITHUB_REGISTERED_SCHEDULES).expect("bounded"),
-            workflow_path(".github/workflows/nightly.yml"),
+            workflow_path(".ci/workflows/nightly.yml"),
             digest(1),
             0,
             "0/5 * * * *",
@@ -199,7 +196,7 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
         ),
         GithubScheduleRegistryEntry::new(
             0,
-            workflow_path(".github/workflows/nightly.yml"),
+            workflow_path(".ci/workflows/nightly.yml"),
             digest(1),
             64,
             "0/5 * * * *",
@@ -208,7 +205,7 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
         ),
         GithubScheduleRegistryEntry::new(
             0,
-            workflow_path(".github/workflows/nightly.yml"),
+            workflow_path(".ci/workflows/nightly.yml"),
             digest(1),
             0,
             "* * * * *",
@@ -217,7 +214,7 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
         ),
         GithubScheduleRegistryEntry::new(
             0,
-            workflow_path(".github/workflows/nightly.yml"),
+            workflow_path(".ci/workflows/nightly.yml"),
             digest(1),
             0,
             "0/5 * * * *",
@@ -226,7 +223,7 @@ fn registry_entry_rejects_invalid_bounds_and_schedule_fields() {
         ),
         GithubScheduleRegistryEntry::new(
             0,
-            workflow_path(".github/workflows/nightly.yml"),
+            workflow_path(".ci/workflows/nightly.yml"),
             digest(1),
             0,
             "0/5 * * * *",
@@ -459,7 +456,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
         vec![discovered_entry(
             claim.claimed_at(),
             1,
-            ".github/workflows/a.yml",
+            ".ci/workflows/a.yml",
             1,
             0,
             "0/5 * * * *",
@@ -469,7 +466,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 0,
-                ".github/workflows/b.yml",
+                ".ci/workflows/b.yml",
                 2,
                 0,
                 "0/5 * * * *",
@@ -478,7 +475,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 1,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 1,
                 0,
                 "0/5 * * * *",
@@ -489,7 +486,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 0,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 1,
                 0,
                 "0/5 * * * *",
@@ -498,7 +495,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 1,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 1,
                 0,
                 "3/5 * * * *",
@@ -509,7 +506,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 0,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 1,
                 0,
                 "0/5 * * * *",
@@ -518,7 +515,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
             discovered_entry(
                 claim.claimed_at(),
                 1,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 2,
                 1,
                 "3/5 * * * *",
@@ -573,7 +570,7 @@ fn registry_rejects_only_a_tampered_first_fire_cursor() {
     let claim = discovery_claim(51, 52, 1_000, 2_000);
     let tampered_occurrence = vec![entry(
         0,
-        ".github/workflows/a.yml",
+        ".ci/workflows/a.yml",
         1,
         0,
         "0/5 * * * *",
@@ -601,7 +598,7 @@ fn registry_accepts_an_exact_maximum_inventory() {
         maximum.push(discovered_entry(
             maximum_claim.claimed_at(),
             u16::try_from(ordinal).expect("bounded ordinal"),
-            &format!(".github/workflows/{ordinal:03}.yml"),
+            &format!(".ci/workflows/{ordinal:03}.yml"),
             u8::try_from(ordinal % 255 + 1).expect("digest byte"),
             0,
             "0/5 * * * *",
@@ -679,7 +676,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
         vec![discovered_entry(
             baseline_claim.claimed_at(),
             0,
-            ".github/workflows/a.yml",
+            ".ci/workflows/a.yml",
             1,
             0,
             "0/5 * * * *",
@@ -689,7 +686,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
             discovered_entry(
                 baseline_claim.claimed_at(),
                 0,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 9,
                 0,
                 "0/5 * * * *",
@@ -701,7 +698,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
             discovered_entry(
                 baseline_claim.claimed_at(),
                 0,
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 1,
                 0,
                 "3/5 * * * *",
@@ -714,7 +711,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
             discovered_entry(
                 baseline_claim.claimed_at(),
                 1,
-                ".github/workflows/c.yml",
+                ".ci/workflows/c.yml",
                 2,
                 0,
                 "0 3 * * *",
@@ -726,7 +723,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
             discovered_entry(
                 baseline_claim.claimed_at(),
                 1,
-                ".github/workflows/b.yml",
+                ".ci/workflows/b.yml",
                 2,
                 0,
                 "0 3 * * *",
@@ -929,7 +926,7 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
     let archive = archive(8, "github/schedules/claimed.tar.gz", 800);
     let entry = entry(
         0,
-        ".github/workflows/claimed.yml",
+        ".ci/workflows/claimed.yml",
         9,
         0,
         "0/5 * * * *",
@@ -966,7 +963,7 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
     assert_eq!(fire.scheduled_at(), UnixMillis::new(30_000));
     let debug = format!("{fire:?}");
     assert!(debug.contains("GithubCheckSubjectKey([REDACTED])"));
-    assert!(!debug.contains(".github/workflows/claimed.yml"));
+    assert!(!debug.contains(".ci/workflows/claimed.yml"));
 
     let check = RegisterGithubScheduledCheckSubject::new(claim);
     assert_eq!(check.claim(), claim);
@@ -991,7 +988,7 @@ fn baseline_inventory_entries(
         discovered_entry(
             claim.claimed_at(),
             0,
-            ".github/workflows/a.yml",
+            ".ci/workflows/a.yml",
             1,
             0,
             "0/5 * * * *",
@@ -1000,7 +997,7 @@ fn baseline_inventory_entries(
         discovered_entry(
             claim.claimed_at(),
             1,
-            ".github/workflows/b.yml",
+            ".ci/workflows/b.yml",
             2,
             0,
             "0 3 * * *",
@@ -1016,7 +1013,7 @@ fn canonical_registry_entries(
         discovered_entry(
             claim.claimed_at(),
             0,
-            ".github/workflows/a.yml",
+            ".ci/workflows/a.yml",
             1,
             0,
             "0/5 * * * *",
@@ -1025,7 +1022,7 @@ fn canonical_registry_entries(
         discovered_entry(
             claim.claimed_at(),
             1,
-            ".github/workflows/a.yml",
+            ".ci/workflows/a.yml",
             1,
             1,
             "3/5 * * * *",
@@ -1034,7 +1031,7 @@ fn canonical_registry_entries(
         discovered_entry(
             claim.claimed_at(),
             2,
-            ".github/workflows/b.yml",
+            ".ci/workflows/b.yml",
             2,
             0,
             "0 3 * * *",

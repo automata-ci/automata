@@ -1907,7 +1907,7 @@ async fn fixture_with_concurrency(
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -2148,7 +2148,7 @@ async fn planned_reusable_child(
             descriptor_digest, logical_job_count, reusable_call_count,
             created_at_ms
         )
-        SELECT run.id, $2, '.github/workflows/child.yml',
+        SELECT run.id, $2, '.ci/workflows/child.yml',
                encode(run.head_sha, 'hex'), snapshot.source_digest,
                snapshot.source_object_key, snapshot.source_size_bytes,
                snapshot.source_media_type, run.plan_digest,
@@ -2712,7 +2712,7 @@ fn prepared_instance(
             "github",
             "example/project",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         job_execution,

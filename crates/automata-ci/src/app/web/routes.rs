@@ -2789,7 +2789,7 @@ mod tests {
         Workflow {
             id: workflow_id(),
             name: "Pull request checks".to_owned(),
-            path: ".github/workflows/verify.yml".to_owned(),
+            path: ".ci/workflows/verify.yml".to_owned(),
         }
     }
 

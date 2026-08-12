@@ -46,9 +46,9 @@ fn unknown_terminal_causes_are_never_positive() {
 #[test]
 fn provider_facing_values_are_bounded_and_redacted() {
     let name = GithubCheckName::new("Automata / CI").expect("valid Check name");
-    let key = GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("valid workflow key");
+    let key = GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("valid workflow key");
     assert_eq!(name.as_str(), "Automata / CI");
-    assert_eq!(key.as_str(), ".github/workflows/ci.yml");
+    assert_eq!(key.as_str(), ".ci/workflows/ci.yml");
     assert!(!format!("{name:?}").contains("Automata / CI"));
     assert!(!format!("{key:?}").contains("ci.yml"));
 
@@ -73,7 +73,7 @@ fn rerun_subject_identity_has_one_closed_physical_origin() {
         TenantScope::from_authenticated_tenant_id("tenant").expect("tenant"),
         RepositoryId::from_uuid(Uuid::new_v4()),
         rerun_run_id,
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
         ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection"),
         ProviderInstallationId::new(11).expect("installation"),
         ProviderRepositoryId::new(13).expect("provider repository"),
@@ -200,7 +200,7 @@ fn prepare_projection(
         tenant.clone(),
         RepositoryId::from_uuid(Uuid::new_v4()),
         ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery"),
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
         ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection"),
         ProviderInstallationId::new(11).expect("installation"),
         ProviderRepositoryId::new(13).expect("provider repository"),
@@ -266,7 +266,7 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
         TenantScope::from_authenticated_tenant_id("tenant").expect("tenant"),
         RepositoryId::from_uuid(Uuid::new_v4()),
         ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery"),
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
         ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection"),
         ProviderInstallationId::new(11).expect("installation"),
         ProviderRepositoryId::new(13).expect("provider repository"),

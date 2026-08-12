@@ -661,7 +661,7 @@ async fn g1_upgrade_fences_populated_legacy_execution_state_without_fake_metadat
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "INSERT INTO workflow_definitions (id, repository_id, path, created_at_ms, updated_at_ms) VALUES ($1, $2, '.github/workflows/legacy.yml', 1, 1)",
+            "INSERT INTO workflow_definitions (id, repository_id, path, created_at_ms, updated_at_ms) VALUES ($1, $2, '.ci/workflows/legacy.yml', 1, 1)",
         )
         .bind(workflow)
         .bind(repository)
@@ -878,7 +878,7 @@ async fn job_ir_v4_upgrade_fences_v3_then_v5_upgrade_rejects_obsolete_history() 
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "INSERT INTO workflow_definitions (id, repository_id, path, created_at_ms, updated_at_ms) VALUES ($1, $2, '.github/workflows/upgrade.yml', 1, 1)",
+            "INSERT INTO workflow_definitions (id, repository_id, path, created_at_ms, updated_at_ms) VALUES ($1, $2, '.ci/workflows/upgrade.yml', 1, 1)",
         )
         .bind(workflow)
         .bind(repository)
@@ -2727,7 +2727,7 @@ async fn assert_snapshot_matches_workflow(
         INSERT INTO workflow_definitions (
             id, repository_id, path, created_at_ms, updated_at_ms
         )
-        VALUES ($1, $2, '.github/workflows/other.yml', 1, 1)
+        VALUES ($1, $2, '.ci/workflows/other.yml', 1, 1)
         ",
     )
     .bind(second_workflow)
@@ -2815,7 +2815,7 @@ async fn exercise_repository_bound_runs(
         INSERT INTO workflow_definitions (
             id, repository_id, path, created_at_ms, updated_at_ms
         )
-        VALUES ($1, $2, '.github/workflows/test.yml', 1, 1)
+        VALUES ($1, $2, '.ci/workflows/test.yml', 1, 1)
         ",
     )
     .bind(other_workflow)

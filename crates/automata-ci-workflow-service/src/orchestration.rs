@@ -1208,7 +1208,11 @@ pub(crate) fn github_activation_context(
         ),
         (
             "workflow_ref".to_owned(),
-            GithubValue::string(format!("{repository}/{path}@{}", execution.git_ref())),
+            GithubValue::string(format!(
+                "{repository}/{}@{}",
+                crate::github::github_workflow_path(path),
+                execution.git_ref()
+            )),
         ),
         (
             "workflow_sha".to_owned(),
@@ -1390,7 +1394,7 @@ mod source_evidence_tests {
                 PlanSourceOrigin::Repository {
                     repository: "owner/repository".to_owned(),
                     revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                    path: ".github/workflows/reusable.yml".to_owned(),
+                    path: ".ci/workflows/reusable.yml".to_owned(),
                 },
             ),
             WorkflowEventProvenance::new("github", event_name),

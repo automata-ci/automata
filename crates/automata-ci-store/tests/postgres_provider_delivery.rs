@@ -68,7 +68,7 @@ async fn seed_workflow_run(
     )
     .bind(workflow_id)
     .bind(repository_id)
-    .bind(format!(".github/workflows/{suffix}.yml"))
+    .bind(format!(".ci/workflows/{suffix}.yml"))
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -547,14 +547,14 @@ fn completion_for_admitted_run(
         claim,
         vec![
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 ProviderDeliveryWorkflowConclusion::Skipped {
                     reason: failure("event_not_selected"),
                 },
             )
             .expect("outcome"),
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/z.yml",
+                ".ci/workflows/z.yml",
                 ProviderDeliveryWorkflowConclusion::Admitted { run_id },
             )
             .expect("outcome"),
@@ -1950,19 +1950,19 @@ async fn many_completion_is_sorted_idempotent_and_rejects_changed_replay() -> Te
             .expect("many claim");
         let outcomes = vec![
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/z.yml",
+                ".ci/workflows/z.yml",
                 ProviderDeliveryWorkflowConclusion::Failed {
                     failure_kind: failure("workflow_invalid"),
                 },
             )?,
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/a.yml",
+                ".ci/workflows/a.yml",
                 ProviderDeliveryWorkflowConclusion::Admitted {
                     run_id: admitted_run,
                 },
             )?,
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/m.yml",
+                ".ci/workflows/m.yml",
                 ProviderDeliveryWorkflowConclusion::Skipped {
                     reason: failure("event_not_selected"),
                 },
@@ -1976,9 +1976,9 @@ async fn many_completion_is_sorted_idempotent_and_rejects_changed_replay() -> Te
                 .map(ProviderDeliveryWorkflowOutcome::workflow_path)
                 .collect::<Vec<_>>(),
             vec![
-                ".github/workflows/a.yml",
-                ".github/workflows/m.yml",
-                ".github/workflows/z.yml"
+                ".ci/workflows/a.yml",
+                ".ci/workflows/m.yml",
+                ".ci/workflows/z.yml"
             ]
         );
         let many_receipt = database
@@ -1997,9 +1997,9 @@ async fn many_completion_is_sorted_idempotent_and_rejects_changed_replay() -> Te
         assert_eq!(
             durable_paths,
             vec![
-                ".github/workflows/a.yml",
-                ".github/workflows/m.yml",
-                ".github/workflows/z.yml"
+                ".ci/workflows/a.yml",
+                ".ci/workflows/m.yml",
+                ".ci/workflows/z.yml"
             ]
         );
 
@@ -2143,7 +2143,7 @@ async fn duplicate_outcomes_fail_before_io_and_transaction_errors_roll_back_comp
             .expect("claim");
         let duplicate = || {
             ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/ci.yml",
+                ".ci/workflows/ci.yml",
                 ProviderDeliveryWorkflowConclusion::Skipped {
                     reason: failure("not_selected"),
                 },
@@ -2171,7 +2171,7 @@ async fn duplicate_outcomes_fail_before_io_and_transaction_errors_roll_back_comp
                 inbox_id, tenant_id, ordinal, workflow_path, outcome_kind,
                 repository_id, run_id, failure_kind, created_at_ms
             )
-            VALUES ($1, 'delivery-atomic', 0, '.github/workflows/ci.yml',
+            VALUES ($1, 'delivery-atomic', 0, '.ci/workflows/ci.yml',
                     'skipped', NULL, NULL, 'preexisting_collision', 111)
             ",
         )

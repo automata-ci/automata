@@ -760,7 +760,7 @@ async fn build_logical_metrics_fixture(
             format!("metrics-{suffix}"),
         )?,
         WorkflowId::from_uuid(Uuid::new_v4()),
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "Metrics",
         "refs/heads/main",
         WorkflowSnapshotId::from_uuid(Uuid::new_v4()),
@@ -1153,7 +1153,7 @@ async fn insert_metrics_workflow(
         r"
         INSERT INTO workflow_definitions (
             id, repository_id, path, created_at_ms, updated_at_ms
-        ) VALUES ($1, $2, '.github/workflows/metrics.yml', 1, 1)
+        ) VALUES ($1, $2, '.ci/workflows/metrics.yml', 1, 1)
         ",
     )
     .bind(seed.workflow_id)

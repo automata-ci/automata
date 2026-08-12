@@ -332,6 +332,17 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
 }
 
 #[test]
+fn renamed_workflow_paths_match_unchanged_github_path_filters() {
+    let source = "on:\n  push:\n    paths: ['.github/workflows/ci.yml']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let metadata = GithubEventMetadataV1::push_with_changed_files(
+        false,
+        GithubChangedFilesV1::complete([".ci/workflows/ci.yml"]),
+    );
+    let report = compile(source, event("push", "refs/heads/main"), Some(metadata));
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+}
+
+#[test]
 fn tag_pushes_never_require_changed_file_metadata() {
     let source = "on:\n  push:\n    tags: ['v*']\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let report = compile(

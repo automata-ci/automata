@@ -10,9 +10,9 @@ ALTER TABLE github_provider_manifest_revisions
         AND check_subject_key = workflow_path
         AND (
             workflow_selection_kind = 'exact'
-            AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+            AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
             OR workflow_selection_kind = 'all_direct'
-            AND workflow_path = '.github/workflows'
+            AND workflow_path = '.ci/workflows'
         )
         AND workflow_path !~ '[[:cntrl:]\\]'
     );
@@ -149,7 +149,7 @@ CREATE TABLE provider_delivery_workflow_inventory_entries (
         ON DELETE RESTRICT,
     CONSTRAINT provider_delivery_workflow_inventory_entries_shape CHECK (
         ordinal BETWEEN 0 AND 255
-        AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+        AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
         AND workflow_path !~ '[[:cntrl:]\\]'
         AND (
             source_state = 'ready' AND octet_length(source_digest) = 32

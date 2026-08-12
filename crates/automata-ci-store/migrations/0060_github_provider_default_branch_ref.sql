@@ -49,9 +49,9 @@ ALTER TABLE github_provider_manifest_revisions
         AND check_subject_key = workflow_path
         AND (
             workflow_selection_kind = 'exact'
-            AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+            AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
             OR workflow_selection_kind = 'all_direct'
-            AND workflow_path = '.github/workflows'
+            AND workflow_path = '.ci/workflows'
         )
         AND workflow_path !~ '[[:cntrl:]\\]'
     );

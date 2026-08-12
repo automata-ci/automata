@@ -372,7 +372,7 @@ fn fixture_with_authority_profile(
             "github",
             "example/repository",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         job_execution,

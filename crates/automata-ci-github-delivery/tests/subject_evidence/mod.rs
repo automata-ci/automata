@@ -96,7 +96,7 @@ pub fn fixture_subject_evidence_with_head(
         accepted_at,
         seed,
         GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("workflow path"),
+            GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("workflow path"),
         ),
         GithubProviderGitRef::main(),
         check_head_sha,

@@ -574,16 +574,16 @@ fn current_schema_persists_closed_immutable_repository_visibility() {
 #[test]
 fn workflow_outcomes_require_safe_unique_path_candidates() {
     let admitted = ProviderDeliveryWorkflowOutcome::new(
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         ProviderDeliveryWorkflowConclusion::Admitted {
             run_id: RunId::from_uuid(Uuid::new_v4()),
         },
     )
     .expect("admitted outcome");
-    assert_eq!(admitted.workflow_path(), ".github/workflows/ci.yml");
+    assert_eq!(admitted.workflow_path(), ".ci/workflows/ci.yml");
 
     for path in [
-        "/.github/workflows/ci.yml",
+        "/.ci/workflows/ci.yml",
         ".github/../secret",
         ".github//workflows/ci.yml",
         ".github\\workflows\\ci.yml",
@@ -600,7 +600,7 @@ fn workflow_outcomes_require_safe_unique_path_candidates() {
     }
     assert!(matches!(
         ProviderDeliveryWorkflowOutcome::new(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             ProviderDeliveryWorkflowConclusion::Admitted {
                 run_id: RunId::from_uuid(Uuid::nil()),
             },

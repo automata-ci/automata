@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_core::Sha256Digest;
@@ -1080,7 +1080,9 @@ fn derive_authority_policy(
             "workflow_ref".to_owned(),
             format!(
                 "{}/{}@{}",
-                current.github_repository_name, current.workflow_path, current.git_ref
+                current.github_repository_name,
+                github_compatible_workflow_path(&current.workflow_path),
+                current.git_ref
             ),
         ),
         ("workflow_sha".to_owned(), head_sha),
@@ -1111,6 +1113,13 @@ fn derive_authority_policy(
         default_audience,
         additional_claims,
     })
+}
+
+fn github_compatible_workflow_path(path: &str) -> Cow<'_, str> {
+    path.strip_prefix(".ci/workflows/").map_or_else(
+        || Cow::Borrowed(path),
+        |file| Cow::Owned(format!(".github/workflows/{file}")),
+    )
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {

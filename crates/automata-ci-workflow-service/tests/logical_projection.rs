@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 const REPOSITORY: &str = "synthetic/example";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const WORKFLOW_PATH: &str = ".github/workflows/synthetic.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/synthetic.yml";
 const GIT_REF: &str = "refs/heads/main";
 
 fn resource_policy() -> JobResourcePolicy {

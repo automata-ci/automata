@@ -1488,7 +1488,7 @@ fn snapshot_processor_harness_with_config(
         ExactRevision::new(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             b"on: push\n".to_vec(),
         )])),
     );
@@ -1571,7 +1571,7 @@ fn changed_files_renewal_harness(
         ExactRevision::new(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             PATH_FILTER_WORKFLOW.to_vec(),
         )])),
     );
@@ -1799,7 +1799,7 @@ fn repository_source() -> RepositorySource {
         ExactRevision::new(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             b"on: push\n".to_vec(),
         )])),
     )

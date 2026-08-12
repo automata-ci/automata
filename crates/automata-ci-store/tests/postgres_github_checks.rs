@@ -243,7 +243,7 @@ async fn seed_fixture(database: &TestDatabase) -> TestResult<Fixture> {
         r"
         INSERT INTO workflow_definitions (
             id, repository_id, path, created_at_ms, updated_at_ms
-        ) VALUES ($1, $2, '.github/workflows/ci.yml', 1, 1)
+        ) VALUES ($1, $2, '.ci/workflows/ci.yml', 1, 1)
         ",
     )
     .bind(workflow_uuid)
@@ -518,7 +518,7 @@ async fn pre_admission_subject_projects_through_created_run_and_terminal_state()
     run_with_unmigrated_database(|database| async move {
         apply_checks_migrations(&database).await?;
         let fixture = seed_fixture(&database).await?;
-        let request = registration(&fixture, ".github/workflows/ci.yml", "Automata / CI", 100);
+        let request = registration(&fixture, ".ci/workflows/ci.yml", "Automata / CI", 100);
         let registered = database
             .store()
             .register_github_check_subject(request.clone())
@@ -542,7 +542,7 @@ async fn pre_admission_subject_projects_through_created_run_and_terminal_state()
                 .store()
                 .register_github_check_subject(registration(
                     &fixture,
-                    ".github/workflows/ci.yml",
+                    ".ci/workflows/ci.yml",
                     "Changed",
                     100,
                 ))
@@ -588,7 +588,7 @@ async fn terminal_workflow_run_rejects_new_check_link_but_preserves_exact_replay
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/linked.yml",
+                ".ci/workflows/linked.yml",
                 "Automata / Linked",
                 100,
             ))
@@ -597,7 +597,7 @@ async fn terminal_workflow_run_rejects_new_check_link_but_preserves_exact_replay
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/late.yml",
+                ".ci/workflows/late.yml",
                 "Automata / Late",
                 101,
             ))
@@ -685,7 +685,7 @@ async fn subject_without_immutable_authority_evidence_is_not_claimable() -> Test
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/ci.yml",
+                ".ci/workflows/ci.yml",
                 "Automata / CI",
                 100,
             ))
@@ -738,7 +738,7 @@ async fn rerun_origin_claim_decodes_and_reconciles_under_its_exact_authority() -
                 external_id, created_at_ms, desired_updated_at_ms
             ) VALUES (
                 $1, $2, $3, NULL, 'workflow_rerun', NULL, $4,
-                '.github/workflows/ci.yml', $5, $6, $7,
+                '.ci/workflows/ci.yml', $5, $6, $7,
                 'automata-ci/automata', $8, $9, 'Automata / rerun',
                 $10, 100, 100
             )
@@ -975,7 +975,7 @@ async fn ambiguous_create_is_durably_blocked_without_external_identity() -> Test
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/ambiguous.yml",
+                ".ci/workflows/ambiguous.yml",
                 "Automata / Ambiguous",
                 400,
             ))
@@ -1142,7 +1142,7 @@ async fn credential_rejection_blocks_only_the_exact_live_claim_without_losing_ev
         let (receipt, create_fence, suite) = seed_indeterminate_create(
             &database,
             &fixture,
-            ".github/workflows/credential-rejection.yml",
+            ".ci/workflows/credential-rejection.yml",
             "Automata / Credential Rejection",
             500,
             801,
@@ -1227,7 +1227,7 @@ async fn missing_create_retries_only_reconciliation_until_exact_bind() -> TestRe
         let (receipt, fence, suite) = seed_indeterminate_create(
             &database,
             &fixture,
-            ".github/workflows/missing.yml",
+            ".ci/workflows/missing.yml",
             "Automata / Missing",
             600,
             701,
@@ -1311,7 +1311,7 @@ async fn proven_unissued_release_reopens_prepare_under_the_exact_fence_only() ->
         let (receipt, fence, _) = seed_indeterminate_create(
             &database,
             &fixture,
-            ".github/workflows/unissued.yml",
+            ".ci/workflows/unissued.yml",
             "Automata / Unissued",
             800,
             901,
@@ -1392,7 +1392,7 @@ async fn missing_reconciliation_hits_explicit_attempt_limit_without_prepare_auth
         let (receipt, fence, _) = seed_indeterminate_create(
             &database,
             &fixture,
-            ".github/workflows/missing-limit.yml",
+            ".ci/workflows/missing-limit.yml",
             "Automata / Missing Limit",
             1_000,
             1_001,
@@ -1451,7 +1451,7 @@ async fn projection_claims_use_database_time_for_fast_slow_and_forward_callers()
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/database-clock.yml",
+                ".ci/workflows/database-clock.yml",
                 "Automata / Database Clock",
                 100,
             ))
@@ -1521,7 +1521,7 @@ async fn projection_claim_transaction_is_explicitly_read_committed() -> TestResu
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/read-committed.yml",
+                ".ci/workflows/read-committed.yml",
                 "Automata / Read Committed",
                 100,
             ))
@@ -1568,7 +1568,7 @@ async fn delayed_exhaustion_lock_revalidates_the_caller_clock_before_claiming() 
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/delayed-lock.yml",
+                ".ci/workflows/delayed-lock.yml",
                 "Automata / Delayed Lock",
                 100,
             ))
@@ -1660,7 +1660,7 @@ async fn projection_claims_are_single_winner_fenced_and_schema_rejects_positive_
             .store()
             .register_github_check_subject(registration(
                 &fixture,
-                ".github/workflows/fenced.yml",
+                ".ci/workflows/fenced.yml",
                 "Automata / Fenced",
                 100,
             ))

@@ -33,7 +33,7 @@ fn envelope() -> JobIrEnvelope {
             "github",
             "automata-ci/automata",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         automata_ci_core::JobExecutionContext::new(

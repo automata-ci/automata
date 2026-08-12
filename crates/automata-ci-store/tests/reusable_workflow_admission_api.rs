@@ -15,8 +15,8 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-const ROOT_PATH: &str = ".github/workflows/root.yml";
-const CHILD_PATH: &str = ".github/workflows/child.yml";
+const ROOT_PATH: &str = ".ci/workflows/root.yml";
+const CHILD_PATH: &str = ".ci/workflows/child.yml";
 const SOURCE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const SAMPLE_INPUT_VALUE: &str = "sample-caller-value";
 
