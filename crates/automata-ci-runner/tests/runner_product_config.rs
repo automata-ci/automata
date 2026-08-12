@@ -1115,7 +1115,7 @@ fn kubernetes_provider_configuration_is_exact_and_mutually_exclusive() {
     ambiguous["podman"] = podman;
     assert_eq!(
         parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
-        RunnerProductConfigError::InvalidSandboxProvider
+        RunnerProductConfigError::InvalidProvider
     );
 }
 

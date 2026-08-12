@@ -18,10 +18,6 @@ use automata_ci_protocol::ManagedSecretBindingOverlay;
 use automata_ci_runner_control::{
     ControlPortError, ManagedSecretBindingIssuer, RuntimeAuthorityIssueRequest,
 };
-use automata_ci_protocol::ManagedSecretBindingOverlay;
-use automata_ci_runner_control::{
-    ControlPortError, ManagedSecretBindingIssuer, RuntimeAuthorityIssueRequest,
-};
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerEphemeralRequest,
     EphemeralHandlerFuture, MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID,

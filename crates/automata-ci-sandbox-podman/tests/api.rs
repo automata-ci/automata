@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use automata_ci_execution::{SandboxCapability, SandboxProvider};
-use automata_ci_sandbox_podman::{PodmanCommandExecutor, RootlessPodmanProvider};
 #[cfg(target_os = "linux")]
 use automata_ci_sandbox_podman::{
     BuildKitRuntime, CommandOutput, JobContainerEngine, PodmanConfigurationError,
     PodmanHostGatewayAlias,
 };
+use automata_ci_sandbox_podman::{PodmanCommandExecutor, RootlessPodmanProvider};
 use static_assertions::{assert_impl_all, assert_obj_safe};
 
 #[cfg(target_os = "linux")]

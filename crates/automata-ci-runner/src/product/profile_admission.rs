@@ -1326,20 +1326,24 @@ mod tests {
         (attestation, environment)
     }
 
-    fn policy() -> ProfileAdmissionPolicy {
-        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources");
+    fn resource_allocation(resources: ResourceLimits) -> JobResourceAllocation {
         let capacity = automata_ci_core::ResourceCapacity::new(
             resources.cpu_millis(),
             resources.memory_bytes(),
             0,
             0,
         );
+        JobResourceAllocation::new(capacity, capacity).expect("allocation")
+    }
+
+    fn policy() -> ProfileAdmissionPolicy {
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources");
         ProfileAdmissionPolicy::new(
             NetworkPolicy::Disabled,
             RootFilesystemPolicy::Writable,
             SandboxPrivilegePolicy::Administrator,
             resources,
-            JobResourceAllocation::new(capacity, capacity).expect("allocation"),
+            resource_allocation(resources),
         )
     }
 
@@ -1367,11 +1371,13 @@ mod tests {
             ExecutionEnvironment::empty(),
         )
         .expect("native environment");
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources");
         let policy = ProfileAdmissionPolicy::new(
             NetworkPolicy::Host,
             RootFilesystemPolicy::Host,
             SandboxPrivilegePolicy::Host,
-            ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources"),
+            resources,
+            resource_allocation(resources),
         )
         .with_native_windows_shells(
             TargetPath::windows(r"D:\automata\runner").expect("native scratch root"),
@@ -1390,11 +1396,13 @@ mod tests {
 
     #[test]
     fn native_python_probe_is_present_only_when_the_tool_is_configured() {
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources");
         let without_python = ProfileAdmissionPolicy::new(
             NetworkPolicy::Host,
             RootFilesystemPolicy::Host,
             SandboxPrivilegePolicy::Host,
-            ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources"),
+            resources,
+            resource_allocation(resources),
         )
         .with_native_windows_shells(
             TargetPath::windows(r"D:\automata\runner").expect("native scratch root"),
@@ -1518,11 +1526,13 @@ mod tests {
         let cmd = TargetPath::windows(r"C:\Windows\System32\cmd.exe").expect("cmd path");
         let python = TargetPath::windows(r"C:\hostedtoolcache\Python\3.13\x64\python.exe")
             .expect("python path");
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources");
         let policy = ProfileAdmissionPolicy::new(
             NetworkPolicy::Host,
             RootFilesystemPolicy::Host,
             SandboxPrivilegePolicy::Host,
-            ResourceLimits::new(256 * 1024 * 1024, 1_750, 321).expect("resources"),
+            resources,
+            resource_allocation(resources),
         )
         .with_native_windows_shells(
             TargetPath::windows(r"D:\automata\runner").expect("native scratch root"),

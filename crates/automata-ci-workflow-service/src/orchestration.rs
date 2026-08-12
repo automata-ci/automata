@@ -653,10 +653,8 @@ impl GithubLogicalJobOrchestrationService {
         ) else {
             return Ok(activation_payload_failure());
         };
-        let reusable_secret_permission = reusable_secret_permission(
-            permission_ceiling.is_some(),
-            job_references_secret,
-        );
+        let reusable_secret_permission =
+            reusable_secret_permission(permission_ceiling.is_some(), job_references_secret);
         let gate_evidence = ActivationGateEvidence {
             event_trust,
             source_kind,
@@ -1345,10 +1343,10 @@ fn is_dependabot_actor(actor: &str) -> bool {
 mod source_evidence_tests {
     use super::*;
     use automata_ci_core::{
-        CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate,
-        LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate,
-        PlanSourceLocation, PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance,
-        WorkflowSourceProvenance, WorkflowStepKey,
+        CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate, LogicalRunStepTemplate,
+        LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, PlanSourceLocation,
+        PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance, WorkflowSourceProvenance,
+        WorkflowStepKey,
     };
 
     fn repository_plan(event_name: &str) -> WorkflowPlan {
@@ -1376,10 +1374,7 @@ mod source_evidence_tests {
         .build()
         .expect("step");
         let job = LogicalJobTemplate::builder(
-            Located::new(
-                WorkflowJobKey::new("test").expect("job key"),
-                span.clone(),
-            ),
+            Located::new(WorkflowJobKey::new("test").expect("job key"), span.clone()),
             0,
             LogicalJobKind::Steps(StepJobTemplate::new(
                 LogicalRunnerTemplate::new(
@@ -1497,7 +1492,7 @@ mod source_evidence_tests {
                 &event,
                 true,
             )
-                .expect("source evidence"),
+            .expect("source evidence"),
             (JobEventTrust::Trusted, JobSourceKind::SameRepository)
         );
     }
@@ -1518,7 +1513,7 @@ mod source_evidence_tests {
                 &fork,
                 true,
             )
-                .expect("fork evidence"),
+            .expect("fork evidence"),
             (JobEventTrust::Untrusted, JobSourceKind::Fork)
         );
         assert!(matches!(
