@@ -244,9 +244,19 @@ recorded these decisions:
 4. **Certificate Store** — not required in the first release; the mandatory
    secure-file adapter covers TLS identity. Remains a proposed follow-up.
 5. **Safe dependency boundary** — follow the `automata-ci-sandbox-windows`
-   precedent: confine Windows APIs behind one pinned reviewed wrapper (as with
-   `processkit = "=3.2.0"`) inside a dedicated adapter crate, with first-party
-   `forbid(unsafe)` intact.
+   precedent: confine Windows APIs behind pinned reviewed safe-API wrappers
+   inside a dedicated adapter crate, with first-party `forbid(unsafe)` intact.
+   *Selection (2026-08-11):* `cap-primitives` (Bytecode Alliance) provides the
+   handle-anchored component-at-a-time path resolution; `winapi-util` provides
+   safe `BY_HANDLE_FILE_INFORMATION` evidence (link count, attributes, file
+   identity); `windows-permissions` provides safe SID, DACL, and
+   security-descriptor wrappers, subject to confirming handle-based
+   `GetSecurityInfo` coverage before pinning. Open-flag control, stabilized
+   file locking, bounded reads, and flushes come from std (MSRV 1.97).
+   Namespace rejection (drive-relative, ADS, device, ambiguous verbatim, and
+   prohibited UNC forms) is first-party pure path parsing with no dependency.
+   Durable atomic replacement is defined over std primitives during
+   implementation; requiring `ReplaceFileW` would reopen this boundary.
 6. **Environment-backed production inputs** — rejected for production Windows
    services because service environment values are registry strings readable
    by non-administrative users; development and evaluation use only.

@@ -151,7 +151,15 @@ The first audit identified these implementation owners:
 
 ### Secure filesystem adapter
 
-- [ ] Select a reviewed safe Windows API dependency or wrapper.
+- [x] Select a reviewed safe Windows API dependency or wrapper.
+
+  Evidence: design decision 5 in the
+  [control-plane proposal](windows-control-plane-design-proposal.md) records
+  the selected boundary — `cap-primitives` for handle-anchored path
+  resolution, `winapi-util` for by-handle file evidence, and
+  `windows-permissions` for SID/DACL inspection, all confined to a dedicated
+  `forbid(unsafe)` adapter crate with exact version pins at adoption. Handle
+  APIs missing from `windows-permissions` must be confirmed before pinning.
 - [ ] Open files without following reparse points.
 - [ ] Verify every path ancestor from a trusted handle.
 - [ ] Reject drive-relative, device, ambiguous verbatim, ADS, and prohibited UNC
