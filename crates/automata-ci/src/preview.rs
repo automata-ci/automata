@@ -22,14 +22,14 @@ pub async fn serve(args: &PreviewArgs) -> Result<()> {
     let listener = TcpListener::bind(args.listen)
         .await
         .context("failed to bind preview listener")?;
-    serve_listener(listener).await
+    let router = http::router().context("failed to initialize preview application")?;
+    serve_listener(listener, router).await
 }
 
-async fn serve_listener(listener: TcpListener) -> Result<()> {
+async fn serve_listener(listener: TcpListener, router: axum::Router) -> Result<()> {
     let address = listener
         .local_addr()
         .context("failed to inspect preview listener")?;
-    let router = http::router().context("failed to initialize preview application")?;
     let build = BuildInfo::current();
     info!(
         %address,
@@ -61,7 +61,11 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("preview listener address must be available");
-        let task = tokio::spawn(serve_listener(listener));
+        // Renderer initialization can be expensive under coverage. Complete it
+        // before the HTTP client's request deadline starts.
+        let router = http::router().expect("preview application must initialize");
+        let task = tokio::spawn(serve_listener(listener, router));
+        tokio::task::yield_now().await;
 
         let policy =
             StatusHttpPolicy::new(Duration::from_secs(5), Duration::from_mins(1), 64 * 1024)
