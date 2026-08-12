@@ -17,6 +17,48 @@ use support::{
 };
 
 #[tokio::test]
+async fn checkout_materializes_the_github_workflow_directory_view() {
+    let fixture = Fixture::new(
+        vec![prepared_node24_action()],
+        vec![
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+        ],
+    );
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("checkout executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let compatibility = state
+        .commands
+        .iter()
+        .find(|command| {
+            command.argv().program().as_str() == "/usr/bin/sh"
+                && command
+                    .argv()
+                    .arguments()
+                    .get(1)
+                    .is_some_and(|script| script.contains(".ci/workflows"))
+        })
+        .expect("workflow-directory compatibility command");
+    assert_eq!(
+        compatibility.working_directory().as_str(),
+        "/__w/automata/automata"
+    );
+    assert!(
+        compatibility.argv().arguments()[1].contains("cp -R -- .ci/workflows .github/workflows")
+    );
+}
+
+#[tokio::test]
 async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
     let defaults = ExecutionEnvironment::new(
         [
@@ -50,7 +92,7 @@ async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
     let fixture =
         Fixture::with_default_environment(vec![prepared_node24_action()], responses, defaults);
     let setup = run_step("setup", "Setup", "true");
-    let action = action_step("checkout", "actions/checkout").with_environment(BTreeMap::from([
+    let action = action_step("checkout", "actions/example").with_environment(BTreeMap::from([
         (
             "STEP_WINS".to_owned(),
             ValueSource::Literal("step".to_owned()),
@@ -135,7 +177,7 @@ async fn metadata_driven_node24_actions_run_main_then_posts_in_lifo_order() {
         responses,
     );
     let job = envelope(vec![
-        action_step("checkout", "actions/checkout"),
+        action_step("checkout", "actions/example"),
         action_step("cache", "actions/cache"),
     ]);
     let request = fixture.request(job);
@@ -212,7 +254,7 @@ async fn registered_post_does_not_start_when_execution_is_cancelled_before_posts
         vec![prepared_node24_action()],
         vec![PhaseResponse::success().signal(cancellation.clone())],
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -249,7 +291,7 @@ async fn cancellation_after_post_exec_prevents_copy_output_and_later_posts() {
         ],
     );
     let request = fixture.request(envelope(vec![
-        action_step("checkout", "actions/checkout"),
+        action_step("checkout", "actions/example"),
         action_step("cache", "actions/cache"),
     ]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
@@ -301,7 +343,7 @@ async fn cancellation_during_first_post_log_emit_prevents_later_lines() {
         ],
     );
     fixture.events.cancel_on_next_log(cancellation.clone());
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -335,7 +377,7 @@ async fn cancellation_dominates_a_simultaneous_post_context_error() {
         cancellation.clone(),
         PostContextCancellationPoint::BeforeError,
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -369,7 +411,7 @@ async fn cancellation_dominates_a_simultaneous_post_condition_error() {
         cancellation.clone(),
         PostContextCancellationPoint::DuringEvaluation,
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -401,7 +443,7 @@ async fn cancellation_dominates_a_simultaneous_post_environment_error() {
             GithubConditionPhase::Step,
         )
         .expect("valid post-only environment expression");
-    let step = action_step("checkout", "actions/checkout").with_environment(BTreeMap::from([(
+    let step = action_step("checkout", "actions/example").with_environment(BTreeMap::from([(
         "POST_ONLY".to_owned(),
         ValueSource::Expression(post_only_error),
     )]));
@@ -448,7 +490,7 @@ async fn ordinary_action_failure_still_runs_its_registered_post() {
         vec![prepared_node24_action()],
         vec![failed, PhaseResponse::success()],
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -477,7 +519,7 @@ async fn post_cleanup_deadline_maps_success_to_timed_out() {
         ],
         Duration::from_millis(100),
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -501,7 +543,7 @@ async fn post_cleanup_deadline_preserves_an_existing_ordinary_failure() {
         ],
         Duration::from_millis(100),
     );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
+    let request = fixture.request(envelope(vec![action_step("checkout", "actions/example")]));
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture

@@ -2858,13 +2858,13 @@ mod tests {
         let id = WorkflowId::new();
         let workflow = map_workflow(&HumanWorkflow {
             id,
-            path: ".github/workflows/retired.yml".to_owned(),
+            path: ".ci/workflows/retired.yml".to_owned(),
             enabled: false,
             projected_name: None,
         });
 
         assert_eq!(workflow.id, id);
-        assert_eq!(workflow.name, ".github/workflows/retired.yml");
+        assert_eq!(workflow.name, ".ci/workflows/retired.yml");
         assert!(!workflow.enabled);
     }
 
@@ -3353,7 +3353,7 @@ mod tests {
         HumanRun {
             id: run_id,
             workflow_id: WorkflowId::new(),
-            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            workflow_path: ".ci/workflows/ci.yml".to_owned(),
             run_number: 42,
             run_attempt: 1,
             event_name: "push".to_owned(),
@@ -4502,7 +4502,7 @@ mod tests {
         let run = HumanRun {
             id: RunId::new(),
             workflow_id: WorkflowId::new(),
-            workflow_path: ".github/workflows/ci.yml".to_owned(),
+            workflow_path: ".ci/workflows/ci.yml".to_owned(),
             run_number: 1,
             run_attempt: 1,
             event_name: "\u{202e}".to_owned(),

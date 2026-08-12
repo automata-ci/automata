@@ -94,7 +94,7 @@ must no longer be described as an Automata-only extension. See
   - [ ] new variables;
   - [ ] Node runtime changes;
   - [ ] input and workflow limits.
-- [ ] Pass Automata's unchanged `.github/workflows/ci.yml` through the real
+- [ ] Pass Automata's unchanged `.ci/workflows/ci.yml` through the real
   product composition.
 - [ ] Compare the exact same workflow bytes, commit, and event on GitHub and
   Automata.

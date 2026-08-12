@@ -1466,7 +1466,7 @@ mod renewal_tests {
             crate::GithubDeliveryWorkflowProcessorError::InvariantViolation
         );
     }
-    const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+    const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
     const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
     const SUCCESSOR_TOKEN: &str = "successor-changed-files-token";
 

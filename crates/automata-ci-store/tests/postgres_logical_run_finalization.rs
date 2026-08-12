@@ -2632,7 +2632,7 @@ fn fixture_with_options(
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "CI",
         "refs/heads/main",
         snapshot_id,

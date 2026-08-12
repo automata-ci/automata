@@ -938,7 +938,7 @@ struct RawRepository {
 }
 
 fn valid_workflow_path(value: &str) -> bool {
-    let Some(file) = value.strip_prefix(".github/workflows/") else {
+    let Some(file) = value.strip_prefix(".ci/workflows/") else {
         return false;
     };
     let supported_extension = matches!(

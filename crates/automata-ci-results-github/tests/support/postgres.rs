@@ -166,7 +166,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
         INSERT INTO workflow_definitions (
             id, repository_id, path, created_at_ms, updated_at_ms
         )
-        VALUES ($1, $2, '.github/workflows/results.yml', 1, 1)
+        VALUES ($1, $2, '.ci/workflows/results.yml', 1, 1)
         ",
     )
     .bind(workflow_id)

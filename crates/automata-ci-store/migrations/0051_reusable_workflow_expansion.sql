@@ -102,8 +102,8 @@ CREATE TABLE workflow_plan_v2_reusable_workflow_catalog (
         catalog_entry_id <> '00000000-0000-0000-0000-000000000000'::uuid
     ),
     CONSTRAINT workflow_plan_v2_reusable_catalog_path_canonical CHECK (
-        octet_length(workflow_path) BETWEEN 23 AND 1024
-        AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+        octet_length(workflow_path) BETWEEN 19 AND 1024
+        AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
         AND workflow_path !~ '[[:cntrl:]]'
         AND position(E'\\' in workflow_path) = 0
     ),

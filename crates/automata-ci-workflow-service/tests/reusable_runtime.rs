@@ -42,8 +42,8 @@ use uuid::Uuid;
 
 const REPOSITORY: &str = "synthetic/runtime";
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const ROOT_PATH: &str = ".github/workflows/root.yml";
-const CHILD_PATH: &str = ".github/workflows/child.yml";
+const ROOT_PATH: &str = ".ci/workflows/root.yml";
+const CHILD_PATH: &str = ".ci/workflows/child.yml";
 const GIT_REF: &str = "refs/heads/main";
 
 const ROOT: &str = r"name: Root

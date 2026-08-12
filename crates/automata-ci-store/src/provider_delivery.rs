@@ -1602,7 +1602,7 @@ fn validate_workflow_path(value: &str) -> Result<(), ProviderDeliveryValueError>
 
 fn validate_direct_workflow_path(value: &str) -> Result<(), ProviderDeliveryValueError> {
     validate_workflow_path(value)?;
-    let Some(file) = value.strip_prefix(".github/workflows/") else {
+    let Some(file) = value.strip_prefix(".ci/workflows/") else {
         return Err(ProviderDeliveryValueError::InvalidWorkflowPath);
     };
     let supported_extension = matches!(

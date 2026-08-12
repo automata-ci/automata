@@ -78,7 +78,7 @@ const WEBHOOK_SECRET: &[u8] = b"automata-provider-matrix-webhook-secret";
 const SOURCE_TOKEN: &str = "automata-provider-matrix-private-source-token";
 const BEFORE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 
 const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
     SELECT repository.owner, repository.name, job.id AS logical_job_id,

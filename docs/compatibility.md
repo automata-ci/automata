@@ -158,7 +158,7 @@ is not GitHub's issuer.
 ## End-to-end acceptance gate
 
 The acceptance fixture is this repository's normal
-`.github/workflows/ci.yml`, not a reduced smoke workflow. GitHub Actions builds
+`.ci/workflows/ci.yml`, not a reduced smoke workflow. GitHub Actions builds
 generation zero from a reviewed commit. Automata must run the same workflow
 bytes and repository revision to produce generation one. The results are
 compared before promotion, and a generation never replaces the control plane

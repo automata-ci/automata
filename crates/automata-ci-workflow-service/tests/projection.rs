@@ -359,11 +359,11 @@ jobs:
 "
     );
     let provenance = SourceProvenance::new(
-        SourceId::new(".github/workflows/queue.yml"),
+        SourceId::new(".ci/workflows/queue.yml"),
         SourceOrigin::Repository {
             repository: Arc::from(support::REPOSITORY),
             revision: Arc::from(support::REVISION),
-            path: Arc::from(".github/workflows/queue.yml"),
+            path: Arc::from(".ci/workflows/queue.yml"),
         },
     );
     let parsed =
@@ -395,7 +395,7 @@ jobs:
             "automata",
         )
         .expect("repository"),
-        ".github/workflows/queue.yml",
+        ".ci/workflows/queue.yml",
         Bytes::from(source),
         Bytes::from_static(b"{\"deleted\":false}"),
         compiled.into_parts().0.expect("compiled plan"),

@@ -82,7 +82,7 @@ published.
 
 ### G1: durable single-node execution
 
-Run this repository's unchanged `.github/workflows/ci.yml` through the durable
+Run this repository's unchanged `.ci/workflows/ci.yml` through the durable
 control plane and one Linux runner. The run must exercise source admission,
 planning, `run` and required JavaScript actions, local actions, command files,
 services, artifacts, logs, results, cancellation, and cleanup.

@@ -933,7 +933,7 @@ CREATE TABLE github_schedule_registry_entries (
     CONSTRAINT github_schedule_registry_entries_shape CHECK (
         ordinal BETWEEN 0 AND 255
         AND schedule_ordinal BETWEEN 0 AND 63
-        AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+        AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
         AND workflow_path !~ '[[:cntrl:]\\]'
         AND octet_length(workflow_source_digest) = 32
         AND octet_length(entry_digest) = 32
@@ -1986,7 +1986,7 @@ CREATE TABLE github_schedule_workflow_run_subject_evidence (
         AND octet_length(plan_digest) = 32
         AND octet_length(logical_admission_digest) = 32
         AND octet_length(subject_evidence_sha256) = 32
-        AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+        AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
         AND workflow_path !~ '[[:cntrl:]\\]'
     )
 );

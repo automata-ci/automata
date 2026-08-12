@@ -24,10 +24,10 @@ of the supported compatibility surface. Standard workflows should use GitHub's
 ## Updating the repository CI fixture
 
 The repository CI fixture is an exact byte-for-byte mirror. After changing
-`.github/workflows/ci.yml`, copy and verify it with:
+`.ci/workflows/ci.yml`, copy and verify it with:
 
 ```console
-cp .github/workflows/ci.yml crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml
+cp .ci/workflows/ci.yml crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml
 cargo test -p automata-ci-workflow-github --test ci_workflow --locked
 ```
 

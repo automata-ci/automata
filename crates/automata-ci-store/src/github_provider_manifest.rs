@@ -53,12 +53,12 @@ pub const GITHUB_PROVIDER_SOURCE_REVISION: &str = "exact_sha";
 /// Repository discovery consumes a gzip-compressed tar archive.
 pub const GITHUB_PROVIDER_ARCHIVE_FORMAT: &str = "tar_gzip";
 /// Default workflow path used by backward-compatible provider configuration.
-pub const GITHUB_PROVIDER_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+pub const GITHUB_PROVIDER_WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 /// Durable aggregate selector used by repository-wide direct-workflow discovery.
 ///
 /// This is a server-owned policy key, not a workflow filename. Individual
 /// workflow Check subjects continue to use their canonical direct paths.
-pub const GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY: &str = ".github/workflows";
+pub const GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY: &str = ".ci/workflows";
 /// The only provider event admitted by the initial dogfood manifest.
 pub const GITHUB_PROVIDER_EVENT: &str = "push";
 /// Backward-compatible main-branch ref used by legacy manifest constructors.
@@ -286,7 +286,7 @@ pub struct GithubProviderManifestLimits {
 ///
 /// `Exact` preserves the original one-path contract. `AllDirect` selects every
 /// canonical direct `.yml` or `.yaml` file discovered under
-/// `.github/workflows/`; nested files are never selected.
+/// `.ci/workflows/`; nested files are never selected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GithubProviderWorkflowSelection {
     /// Select exactly one canonical direct workflow path.
@@ -302,7 +302,7 @@ impl GithubProviderWorkflowSelection {
         Self::AllDirect
     }
 
-    /// Constructs the legacy precise-path policy.
+    /// Constructs the precise-path policy.
     #[must_use]
     pub const fn exact(path: GithubCheckSubjectKey) -> Self {
         Self::Exact(path)
@@ -1620,9 +1620,13 @@ fn update_part(digest: &mut Sha256, value: &[u8]) {
 }
 
 fn canonical_direct_workflow_path(value: &str) -> bool {
-    let Some(file) = value.strip_prefix(".github/workflows/") else {
+    let Some(file) = value.strip_prefix(".ci/workflows/") else {
         return false;
     };
+    canonical_direct_workflow_file(file)
+}
+
+fn canonical_direct_workflow_file(file: &str) -> bool {
     let supported_extension = matches!(
         file.rsplit_once('.'),
         Some((stem, "yml" | "yaml")) if !stem.is_empty()

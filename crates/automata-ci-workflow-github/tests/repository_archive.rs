@@ -15,25 +15,22 @@ fn discovers_exact_direct_workflows_in_deterministic_path_order() {
     let archive = archive(&[
         directory(ROOT),
         directory(b"repository-deadbeef/.github/"),
-        directory(b"repository-deadbeef/.github/workflows/"),
-        regular(b"repository-deadbeef/.github/workflows/z.yaml", b"z\0exact"),
-        regular(b"repository-deadbeef/.github/workflows/a.yml", b"name: a\n"),
+        directory(b"repository-deadbeef/.ci/workflows/"),
+        regular(b"repository-deadbeef/.ci/workflows/z.yaml", b"z\0exact"),
+        regular(b"repository-deadbeef/.ci/workflows/a.yml", b"name: a\n"),
         regular(
-            b"repository-deadbeef/.github/workflows/nested/ignored.yml",
+            b"repository-deadbeef/.ci/workflows/nested/ignored.yml",
             b"ignored",
         ),
-        regular(
-            b"repository-deadbeef/.github/workflows/ignored.YML",
-            b"ignored",
-        ),
+        regular(b"repository-deadbeef/.ci/workflows/ignored.YML", b"ignored"),
         regular(b"repository-deadbeef/README.md", b"read me"),
     ]);
 
     let discovered = discover_repository_workflows(&archive, limits()).expect("valid archive");
     assert_eq!(discovered.len(), 2);
-    assert_eq!(discovered[0].path(), ".github/workflows/a.yml");
+    assert_eq!(discovered[0].path(), ".ci/workflows/a.yml");
     assert_eq!(discovered[0].result(), Ok(b"name: a\n".as_slice()));
-    assert_eq!(discovered[1].path(), ".github/workflows/z.yaml");
+    assert_eq!(discovered[1].path(), ".ci/workflows/z.yaml");
     assert_eq!(discovered[1].result(), Ok(b"z\0exact".as_slice()));
 }
 
@@ -95,7 +92,7 @@ fn rejects_duplicate_and_trailing_slash_aliased_paths() {
 #[test]
 fn rejects_directories_and_special_entries_at_workflow_paths() {
     for kind in *b"34567" {
-        let workflow = entry(b"repository-deadbeef/.github/workflows/ci.yml", kind, b"");
+        let workflow = entry(b"repository-deadbeef/.ci/workflows/ci.yml", kind, b"");
         let archive = archive(&[directory(ROOT), workflow]);
         assert_eq!(
             discover(&archive),
@@ -109,7 +106,7 @@ fn rejects_every_symlink_and_hard_link_even_outside_workflow_paths() {
     for kind in *b"12" {
         for path in [
             b"repository-deadbeef/safe-looking-link".as_slice(),
-            b"repository-deadbeef/.github/workflows/ci.yml",
+            b"repository-deadbeef/.ci/workflows/ci.yml",
         ] {
             let archive = archive(&[
                 directory(ROOT),
@@ -144,15 +141,12 @@ fn rejects_every_special_entry_even_outside_workflow_paths() {
 fn isolates_empty_and_oversized_workflows_from_valid_siblings() {
     let archive = archive(&[
         directory(ROOT),
+        regular(b"repository-deadbeef/.ci/workflows/z-valid.yaml", b"good"),
         regular(
-            b"repository-deadbeef/.github/workflows/z-valid.yaml",
-            b"good",
-        ),
-        regular(
-            b"repository-deadbeef/.github/workflows/a-oversized.yml",
+            b"repository-deadbeef/.ci/workflows/a-oversized.yml",
             b"12345",
         ),
-        regular(b"repository-deadbeef/.github/workflows/m-empty.yml", b""),
+        regular(b"repository-deadbeef/.ci/workflows/m-empty.yml", b""),
     ]);
     let outcomes =
         discover_repository_workflows(&archive, configured(MIB, MIB, 10, MIB, 4_096, 10, 4))
@@ -164,9 +158,9 @@ fn isolates_empty_and_oversized_workflows_from_valid_siblings() {
             .map(RepositoryWorkflowDiscoveryOutcome::path)
             .collect::<Vec<_>>(),
         vec![
-            ".github/workflows/a-oversized.yml",
-            ".github/workflows/m-empty.yml",
-            ".github/workflows/z-valid.yaml",
+            ".ci/workflows/a-oversized.yml",
+            ".ci/workflows/m-empty.yml",
+            ".ci/workflows/z-valid.yaml",
         ]
     );
     assert_eq!(outcomes[0].result(), Err(DiscoveryFailure::Oversized));
@@ -178,19 +172,16 @@ fn isolates_empty_and_oversized_workflows_from_valid_siblings() {
 fn archive_wide_failures_override_all_path_local_outcomes() {
     let unsafe_sibling = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/empty.yml", b""),
-        regular(b"repository-deadbeef/.github/workflows/valid.yml", b"ok"),
+        regular(b"repository-deadbeef/.ci/workflows/empty.yml", b""),
+        regular(b"repository-deadbeef/.ci/workflows/valid.yml", b"ok"),
         regular(b"repository-deadbeef/../escape", b"unsafe"),
     ]);
     assert_eq!(discover(&unsafe_sibling), Err(DiscoveryError::UnsafePath));
 
     let special_sibling = archive(&[
         directory(ROOT),
-        regular(
-            b"repository-deadbeef/.github/workflows/oversized.yml",
-            b"12345",
-        ),
-        regular(b"repository-deadbeef/.github/workflows/valid.yml", b"ok"),
+        regular(b"repository-deadbeef/.ci/workflows/oversized.yml", b"12345"),
+        regular(b"repository-deadbeef/.ci/workflows/valid.yml", b"ok"),
         entry(b"repository-deadbeef/device", b'3', b""),
     ]);
     assert_eq!(
@@ -203,11 +194,8 @@ fn archive_wide_failures_override_all_path_local_outcomes() {
 
     let entries = [
         directory(ROOT),
-        regular(
-            b"repository-deadbeef/.github/workflows/oversized.yml",
-            b"12345",
-        ),
-        regular(b"repository-deadbeef/.github/workflows/valid.yml", b"ok"),
+        regular(b"repository-deadbeef/.ci/workflows/oversized.yml", b"12345"),
+        regular(b"repository-deadbeef/.ci/workflows/valid.yml", b"ok"),
     ];
     let mut corrupt_padding = tar_bytes(&entries, 2, &[]);
     let oversized_body_offset = 512 + 512;
@@ -225,12 +213,12 @@ fn archive_wide_failures_override_all_path_local_outcomes() {
 fn path_local_failures_are_exactly_bounded_and_redacted() {
     let archive = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/exact.yml", b"1234"),
+        regular(b"repository-deadbeef/.ci/workflows/exact.yml", b"1234"),
         regular(
-            b"repository-deadbeef/.github/workflows/too-large.yml",
+            b"repository-deadbeef/.ci/workflows/too-large.yml",
             b"secret-body",
         ),
-        regular(b"repository-deadbeef/.github/workflows/zero.yml", b""),
+        regular(b"repository-deadbeef/.ci/workflows/zero.yml", b""),
     ]);
     let outcomes =
         discover_repository_workflows(&archive, configured(MIB, MIB, 10, MIB, 4_096, 10, 4))
@@ -251,8 +239,8 @@ fn path_local_failures_are_exactly_bounded_and_redacted() {
 fn workflow_count_and_expanded_byte_limits_remain_archive_wide() {
     let two_workflows = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/empty.yml", b""),
-        regular(b"repository-deadbeef/.github/workflows/valid.yml", b"ok"),
+        regular(b"repository-deadbeef/.ci/workflows/empty.yml", b""),
+        regular(b"repository-deadbeef/.ci/workflows/valid.yml", b"ok"),
     ]);
     assert_eq!(
         discover_repository_workflows(&two_workflows, configured(MIB, MIB, 10, MIB, 4_096, 1, 4),),
@@ -261,10 +249,7 @@ fn workflow_count_and_expanded_byte_limits_remain_archive_wide() {
 
     let oversized = archive(&[
         directory(ROOT),
-        regular(
-            b"repository-deadbeef/.github/workflows/oversized.yml",
-            b"12345",
-        ),
+        regular(b"repository-deadbeef/.ci/workflows/oversized.yml", b"12345"),
     ]);
     assert_eq!(
         discover_repository_workflows(&oversized, configured(MIB, MIB, 10, 4, 4_096, 10, 4),),
@@ -277,7 +262,7 @@ fn workflow_path_bound_matches_the_durable_provider_outcome_contract() {
     assert_eq!(MAX_REPOSITORY_WORKFLOW_PATH_BYTES, 1_024);
     let archive = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/ci.yml", b"ci"),
+        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"ci"),
     ]);
     let outcomes = discover(&archive).expect("bounded workflow path");
     assert!(
@@ -291,7 +276,7 @@ fn workflow_path_bound_matches_the_durable_provider_outcome_contract() {
 fn enforces_each_independent_resource_limit() {
     let one_workflow = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/ci.yml", b"1234"),
+        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"1234"),
     ]);
     let compressed_limit = configured(
         u64::try_from(one_workflow.len()).expect("length") - 1,
@@ -311,7 +296,7 @@ fn enforces_each_independent_resource_limit() {
         tar_bytes(
             &[
                 directory(ROOT),
-                regular(b"repository-deadbeef/.github/workflows/ci.yml", b"1234"),
+                regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"1234"),
             ],
             2,
             &[],
@@ -346,8 +331,8 @@ fn enforces_each_independent_resource_limit() {
 
     let two_workflows = archive(&[
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/a.yml", b"a"),
-        regular(b"repository-deadbeef/.github/workflows/b.yml", b"b"),
+        regular(b"repository-deadbeef/.ci/workflows/a.yml", b"a"),
+        regular(b"repository-deadbeef/.ci/workflows/b.yml", b"b"),
     ]);
     let workflow_count_limit = configured(MIB, MIB, 10, MIB, 4_096, 1, 16);
     assert_eq!(
@@ -406,7 +391,7 @@ fn rejects_malformed_truncated_or_non_tar_gzip_inputs() {
 fn validates_every_entry_and_trailer_after_the_last_workflow() {
     let entries = [
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/ci.yml", b"ci"),
+        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"ci"),
         regular(b"repository-deadbeef/after-workflow", b"later"),
     ];
     let mut damaged_later_header = tar_bytes(&entries, 2, &[]);
@@ -449,10 +434,10 @@ fn accepts_only_bounded_benign_global_pax_metadata() {
     let benign_metadata = archive(&[
         entry(b"pax-global", b'g', b"16 comment=test\n"),
         directory(ROOT),
-        regular(b"repository-deadbeef/.github/workflows/ci.yml", b"ci"),
+        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"ci"),
     ]);
     let discovered = discover(&benign_metadata).expect("benign global metadata");
-    assert_eq!(discovered[0].path(), ".github/workflows/ci.yml");
+    assert_eq!(discovered[0].path(), ".ci/workflows/ci.yml");
 
     let malformed_short_record = archive(&[entry(b"pax-global", b'g', b"1 "), directory(ROOT)]);
     assert_eq!(

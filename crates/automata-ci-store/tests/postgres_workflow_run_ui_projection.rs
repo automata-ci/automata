@@ -161,7 +161,7 @@ async fn admission_persists_human_projection_and_requested_run_attempt() -> Test
                 "automata",
             )?,
             workflow_id,
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "CI",
             "refs/heads/main",
             snapshot_id,

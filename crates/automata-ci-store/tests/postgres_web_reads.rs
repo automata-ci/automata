@@ -1074,7 +1074,7 @@ async fn workflow_authorization_and_rows_share_one_repeatable_read_snapshot() ->
             r"
             INSERT INTO workflow_definitions (
                 id, repository_id, path, created_at_ms, updated_at_ms
-            ) VALUES ($1, $2, '.github/workflows/late.yml', 2, 2)
+            ) VALUES ($1, $2, '.ci/workflows/late.yml', 2, 2)
             ",
         )
         .bind(Uuid::new_v4())

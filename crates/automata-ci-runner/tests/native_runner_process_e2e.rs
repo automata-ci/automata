@@ -335,7 +335,7 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
             "github",
             "automata-ci/automata",
             "0123456789abcdef0123456789abcdef01234567",
-            ".github/workflows/native-process-e2e.yml",
+            ".ci/workflows/native-process-e2e.yml",
             "workflow_dispatch",
         ),
         JobExecutionContext::new(

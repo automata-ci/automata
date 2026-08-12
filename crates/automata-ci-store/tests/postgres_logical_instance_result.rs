@@ -1227,7 +1227,7 @@ fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile
         )
         .expect("repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -1614,7 +1614,7 @@ fn prepared_instance(
             "github",
             "example/project",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         job_execution,

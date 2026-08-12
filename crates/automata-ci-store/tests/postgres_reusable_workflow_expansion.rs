@@ -32,7 +32,7 @@ INSERT INTO workflow_definitions (
 ) VALUES (
     '10000000-0000-0000-0000-000000000002',
     '10000000-0000-0000-0000-000000000001',
-    '.github/workflows/root.yml', 1, 1
+    '.ci/workflows/root.yml', 1, 1
 );
 INSERT INTO workflow_snapshots (
     id, workflow_id, source_digest, source_object_key, frontend_schema,
@@ -177,7 +177,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
 (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000011',
-    '.github/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
+    '.ci/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
     'reusable/root-source.yml', 128, 'application/yaml',
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2,
@@ -186,7 +186,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
 (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000012',
-    '.github/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
+    '.ci/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
     'reusable/child-source.yml', 128, 'application/yaml',
     decode(repeat('13', 32), 'hex'), 'reusable/child-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2,
@@ -204,7 +204,7 @@ INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000005', NULL, NULL,
     '10000000-0000-0000-0000-000000000011', 0,
-    ARRAY['.github/workflows/root.yml'], '.github/workflows/root.yml',
+    ARRAY['.ci/workflows/root.yml'], '.ci/workflows/root.yml',
     decode(repeat('01', 32), 'hex'), decode(repeat('03', 32), 'hex'), NULL,
     decode(repeat('20', 32), 'hex'), decode(repeat('21', 32), 'hex'),
     decode(repeat('22', 32), 'hex'), decode(repeat('23', 32), 'hex'),
@@ -216,8 +216,8 @@ INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
     '10000000-0000-0000-0000-000000000005',
     '10000000-0000-0000-0000-000000000006',
     '10000000-0000-0000-0000-000000000012', 1,
-    ARRAY['.github/workflows/root.yml', '.github/workflows/child.yml'],
-    '.github/workflows/child.yml', decode(repeat('12', 32), 'hex'),
+    ARRAY['.ci/workflows/root.yml', '.ci/workflows/child.yml'],
+    '.ci/workflows/child.yml', decode(repeat('12', 32), 'hex'),
     decode(repeat('13', 32), 'hex'), decode(repeat('25', 32), 'hex'),
     decode(repeat('26', 32), 'hex'), decode(repeat('27', 32), 'hex'),
     decode(repeat('28', 32), 'hex'), decode(repeat('29', 32), 'hex'),
@@ -291,7 +291,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
 (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000011',
-    '.github/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
+    '.ci/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
     'reusable/root-source.yml', 128, 'application/yaml',
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2,
@@ -300,7 +300,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
 (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000012',
-    '.github/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
+    '.ci/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
     'reusable/child-source.yml', 128, 'application/yaml',
     decode(repeat('13', 32), 'hex'), 'reusable/child-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2,
@@ -309,7 +309,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
 (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000013',
-    '.github/workflows/grandchild.yml', repeat('09', 20),
+    '.ci/workflows/grandchild.yml', repeat('09', 20),
     decode(repeat('16', 32), 'hex'), 'reusable/grandchild-source.yml', 128,
     'application/yaml', decode(repeat('17', 32), 'hex'),
     'reusable/grandchild-plan.json', 128,
@@ -327,7 +327,7 @@ INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000005', NULL, NULL,
     '10000000-0000-0000-0000-000000000011', 0,
-    ARRAY['.github/workflows/root.yml'], '.github/workflows/root.yml',
+    ARRAY['.ci/workflows/root.yml'], '.ci/workflows/root.yml',
     decode(repeat('01', 32), 'hex'), decode(repeat('03', 32), 'hex'), NULL,
     decode(repeat('56', 32), 'hex'), decode(repeat('57', 32), 'hex'),
     decode(repeat('58', 32), 'hex'), decode(repeat('59', 32), 'hex'),
@@ -351,18 +351,18 @@ SELECT
     fixture.depth,
     CASE fixture.depth
         WHEN 1 THEN ARRAY[
-            '.github/workflows/root.yml',
-            '.github/workflows/child.yml'
+            '.ci/workflows/root.yml',
+            '.ci/workflows/child.yml'
         ]
         ELSE ARRAY[
-            '.github/workflows/root.yml',
-            '.github/workflows/child.yml',
-            '.github/workflows/grandchild.yml'
+            '.ci/workflows/root.yml',
+            '.ci/workflows/child.yml',
+            '.ci/workflows/grandchild.yml'
         ]
     END,
     CASE fixture.depth
-        WHEN 1 THEN '.github/workflows/child.yml'
-        ELSE '.github/workflows/grandchild.yml'
+        WHEN 1 THEN '.ci/workflows/child.yml'
+        ELSE '.ci/workflows/grandchild.yml'
     END,
     decode(repeat(CASE fixture.depth WHEN 1 THEN '12' ELSE '16' END, 32), 'hex'),
     decode(repeat(CASE fixture.depth WHEN 1 THEN '13' ELSE '17' END, 32), 'hex'),

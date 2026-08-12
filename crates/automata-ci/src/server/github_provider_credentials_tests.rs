@@ -712,7 +712,7 @@ fn checks_identity(drift: ChecksIdentityDrift) -> GithubCheckSubjectIdentity {
             repository_id()
         },
         ProviderDeliveryId::from_uuid(Uuid::from_u128(0x40)).expect("delivery ID"),
-        GithubCheckSubjectKey::new(".github/workflows/ci.yml").expect("subject key"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
         if matches!(drift, ChecksIdentityDrift::Connection) {
             ProviderConnectionId::from_uuid(Uuid::from_u128(0x21)).expect("other connection")
         } else {

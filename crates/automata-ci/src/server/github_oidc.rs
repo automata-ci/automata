@@ -1333,7 +1333,7 @@ norlX3KEHNe7cTke5cP4OA==";
                     provider,
                     "octo-org/example",
                     "0123456789abcdef0123456789abcdef01234567",
-                    ".github/workflows/ci.yml",
+                    ".ci/workflows/ci.yml",
                     event_name,
                 ),
                 execution,

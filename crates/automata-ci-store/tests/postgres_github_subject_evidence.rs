@@ -455,7 +455,7 @@ async fn skipped_pre_admission_completion_terminalizes_check_once() -> TestResul
         let completion = CompleteProviderDelivery::new(
             claim.claim(),
             vec![ProviderDeliveryWorkflowOutcome::new(
-                ".github/workflows/ci.yml",
+                ".ci/workflows/ci.yml",
                 ProviderDeliveryWorkflowConclusion::Skipped {
                     reason: ProviderDeliveryFailureKind::new(
                         "github.workflow.branch_not_selected",
@@ -532,7 +532,7 @@ async fn failed_pre_admission_completion_terminalizes_check_as_failure() -> Test
             .complete_provider_delivery(CompleteProviderDelivery::new(
                 claim.claim(),
                 vec![ProviderDeliveryWorkflowOutcome::new(
-                    ".github/workflows/ci.yml",
+                    ".ci/workflows/ci.yml",
                     ProviderDeliveryWorkflowConclusion::Failed {
                         failure_kind: ProviderDeliveryFailureKind::new(
                             "github.workflow.frontend_rejected",
@@ -726,9 +726,9 @@ async fn admitted_delivery_completion_preserves_linked_check() -> TestResult {
 #[allow(clippy::too_many_lines)]
 async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestResult {
     run_with_database(|database| async move {
-        const BUILD_PATH: &str = ".github/workflows/build.yml";
-        const BROKEN_PATH: &str = ".github/workflows/broken.yaml";
-        const SKIPPED_PATH: &str = ".github/workflows/docs.yml";
+        const BUILD_PATH: &str = ".ci/workflows/build.yml";
+        const BROKEN_PATH: &str = ".ci/workflows/broken.yaml";
+        const SKIPPED_PATH: &str = ".ci/workflows/docs.yml";
         let fixture = bootstrap_all_direct(
             &database,
             "subject-evidence-all-direct",
@@ -907,7 +907,7 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
             SELECT subject_key, workflow_run_id, desired_state, desired_conclusion
             FROM github_check_subjects
             WHERE provider_delivery_id = $1
-              AND subject_key <> '.github/workflows'
+              AND subject_key <> '.ci/workflows'
             ORDER BY subject_key
             ",
         )
@@ -1559,7 +1559,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
                 github_repository_id, github_app_id, head_sha, check_name,
                 external_id, created_at_ms, desired_updated_at_ms
             ) VALUES (
-                $1, $2, $3, $4, '.github/workflows/ci.yml',
+                $1, $2, $3, $4, '.ci/workflows/ci.yml',
                 $5, $6, $7, $8, $9, 'Automata CI',
                 'automata-check:' || $1::TEXT, $10, $10
             )
@@ -1666,7 +1666,7 @@ async fn bootstrap_manifest_only(
         visibility,
         at,
         GithubProviderWorkflowSelection::exact(automata_ci_store::GithubCheckSubjectKey::new(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
         )?),
     )
     .await
@@ -1765,7 +1765,7 @@ fn manifest(
         spki,
         verifier,
         GithubProviderWorkflowSelection::exact(
-            automata_ci_store::GithubCheckSubjectKey::new(".github/workflows/ci.yml")
+            automata_ci_store::GithubCheckSubjectKey::new(".ci/workflows/ci.yml")
                 .expect("workflow path"),
         ),
     )
@@ -2091,7 +2091,7 @@ async fn assert_fanout_evidence_is_sealed_after_completion(
         INSERT INTO provider_delivery_workflow_inventory_entries (
             inbox_id, tenant_id, ordinal, workflow_path, source_state, source_digest
         )
-        SELECT inbox_id, tenant_id, 4, '.github/workflows/late.yml', 'empty', NULL
+        SELECT inbox_id, tenant_id, 4, '.ci/workflows/late.yml', 'empty', NULL
         FROM provider_delivery_workflow_inventories WHERE inbox_id = $1
         ",
     )
@@ -2110,7 +2110,7 @@ async fn assert_fanout_evidence_is_sealed_after_completion(
             inbox_id, tenant_id, workflow_path, inventory_digest,
             outcome_kind, run_id, failure_kind, recorded_at_ms
         )
-        SELECT inbox_id, tenant_id, '.github/workflows/late.yml', inventory_digest,
+        SELECT inbox_id, tenant_id, '.ci/workflows/late.yml', inventory_digest,
                'skipped', NULL, 'github.workflow.not_selected', registered_at_ms
         FROM provider_delivery_workflow_inventories WHERE inbox_id = $1
         ",
@@ -2141,7 +2141,7 @@ async fn complete_admitted_delivery(
     let completion = CompleteProviderDelivery::new(
         claim.claim(),
         vec![ProviderDeliveryWorkflowOutcome::new(
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             ProviderDeliveryWorkflowConclusion::Admitted { run_id },
         )?],
         completed_at,
@@ -2184,7 +2184,7 @@ async fn assert_run_evidence(
     assert_eq!(evidence.request().head_sha().as_bytes(), HEAD_SHA);
     assert_eq!(
         evidence.request().workflow_path().as_str(),
-        ".github/workflows/ci.yml"
+        ".ci/workflows/ci.yml"
     );
     assert_eq!(evidence.request().event_name(), "push");
     assert_eq!(
@@ -2245,7 +2245,7 @@ fn logical_command(
         event_digest_byte,
         namespace,
         admitted_at,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         [0x31; 32],
     )
 }

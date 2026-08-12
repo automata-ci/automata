@@ -312,7 +312,7 @@ fn logical_fixture_with_requirements(
         )
         .expect("test repository"),
         workflow_id,
-        ".github/workflows/ci.yml",
+        ".ci/workflows/ci.yml",
         "Managed secret",
         "refs/heads/main",
         snapshot_id,
@@ -725,7 +725,7 @@ fn prepare_instance(
             "github",
             "example/project",
             "0123456789abcdef",
-            ".github/workflows/ci.yml",
+            ".ci/workflows/ci.yml",
             "push",
         ),
         job_execution,

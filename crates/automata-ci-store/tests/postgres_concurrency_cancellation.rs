@@ -281,7 +281,7 @@ fn admission_case_with_concurrency(
             "store-test",
         )?,
         WorkflowId::from_uuid(seed.workflow_id),
-        ".github/workflows/test.yml",
+        ".ci/workflows/test.yml",
         "Store test",
         "refs/heads/main",
         snapshot_id,

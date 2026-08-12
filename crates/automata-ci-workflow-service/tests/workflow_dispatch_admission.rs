@@ -38,7 +38,7 @@ use uuid::Uuid;
 const TENANT: &str = "tenant-synthetic-dispatch";
 const PRINCIPAL: &str = "550e8400-e29b-41d4-a716-446655440010";
 const SESSION: &str = "550e8400-e29b-41d4-a716-446655440011";
-const WORKFLOW_PATH: &str = ".github/workflows/manual.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/manual.yml";
 const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const GIT_REF: &str = "refs/heads/release";
 const SOURCE: &str = r"name: Synthetic manual dispatch

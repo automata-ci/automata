@@ -212,7 +212,7 @@ before applying the firewall policy.
 
 The server exposes no local bearer workflow ingress. Configure the exact GitHub
 provider registry below to admit supported signed `push` webhooks for
-`.github/workflows/ci.yml` on `refs/heads/main`.
+`.ci/workflows/ci.yml` on `refs/heads/main`.
 
 Admission validates and persists immutable workflow evidence asynchronously.
 Its durable receipt does not mean a job has finished: the mandatory autonomous
@@ -357,7 +357,7 @@ The GitHub App webhook URL is the public Automata origin plus
 `/webhooks/github`. Configure GitHub with the same HMAC secret referenced by the
 manifest, subscribe it to `push` events, and grant `checks:write` for every
 entry plus `contents:read` only for Private source. The current manifest and
-delivery contract admit only `.github/workflows/ci.yml` on
+delivery contract admit only `.ci/workflows/ci.yml` on
 `refs/heads/main` for the `push` event; another workflow, ref, or event is
 rejected rather than silently generalized. Rotations advance the relevant
 configuration, verifier, manifest, policy, and authority revisions rather than

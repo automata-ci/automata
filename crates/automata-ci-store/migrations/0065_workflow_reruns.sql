@@ -322,7 +322,10 @@ AS $automata$
               'sha', encode(origin.github_check_head_sha, 'hex'),
               'workflow', run.workflow_name,
               'workflow_ref', origin.github_repository_name || '/' ||
-                  origin.workflow_path || '@' || origin.git_ref,
+                  regexp_replace(
+                      origin.workflow_path,
+                      '^\.ci/workflows/', '.github/workflows/'
+                  ) || '@' || origin.git_ref,
               'workflow_sha', encode(origin.github_check_head_sha, 'hex')
           )
           AND manifest.webhook_verifier_fingerprint_sha256 =
@@ -3348,7 +3351,7 @@ CREATE TABLE github_workflow_rerun_subject_evidence (
         AND octet_length(logical_admission_digest) = 32
         AND admitted_at_ms >= 0
         AND octet_length(subject_evidence_sha256) = 32
-        AND workflow_path ~ '^\.github/workflows/[^/]+\.ya?ml$'
+        AND workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'
         AND workflow_path !~ '[[:cntrl:]\\]'
     )
 );
