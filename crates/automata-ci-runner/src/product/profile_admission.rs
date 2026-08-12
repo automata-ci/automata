@@ -1888,11 +1888,13 @@ mod tests {
         )
         .expect("native environment");
         let profiles = BTreeMap::from([(attestation.clone(), environment.clone())]);
+        let resources = ResourceLimits::new(512 * 1024 * 1024, 1_000, 16).expect("resources");
         let policy = ProfileAdmissionPolicy::new(
             NetworkPolicy::Host,
             RootFilesystemPolicy::Host,
             SandboxPrivilegePolicy::Host,
-            ResourceLimits::new(512 * 1024 * 1024, 1_000, 16).expect("resources"),
+            resources,
+            resource_allocation(resources),
         )
         .with_native_windows_shells(
             windows_target(&scratch_root),

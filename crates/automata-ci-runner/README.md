@@ -86,11 +86,10 @@ profile. Every `uses:` action, including JavaScript, composite, local,
 repository, and container actions, fails closed. Job containers, service
 containers, administrator profiles, and parallel native jobs are unsupported.
 
-The Windows CI gate exercises the production composition through the shipped
-`automata-runner run` process against ephemeral mTLS control-plane and loopback
-S3 fixtures. It verifies session establishment, a credential-free lease,
-runtime-context hydration, native shell execution, log and result publication,
-sandbox cleanup, and a subsequent released-slot poll.
+Hosted Windows CI is currently disabled because Automata does not yet operate
+Windows runners. The native-provider tests remain in the repository, but they
+are not a release gate; do not deploy this path until its Windows end-to-end CI
+gate is restored.
 
 ## Job boundary
 

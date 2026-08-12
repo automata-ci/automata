@@ -2175,6 +2175,7 @@ async fn recovered_indeterminate_token_is_revocation_only() -> TestResult {
 #[allow(clippy::too_many_lines)]
 async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> TestResult {
     run_with_database(|database| async move {
+        install_database_test_clock(&database, 2_300_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let first = database
             .store()
@@ -2300,7 +2301,7 @@ async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> T
                 .await?
                 .is_none()
         );
-        tokio::time::sleep(Duration::from_millis(5_200)).await;
+        set_database_test_clock(&database, retry_at.get()).await?;
 
         let mut tasks = Vec::new();
         for ordinal in 0..32_u128 {

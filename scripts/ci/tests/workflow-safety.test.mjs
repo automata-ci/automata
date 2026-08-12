@@ -358,33 +358,23 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
-test("Windows PowerShell command groups fail on the first native error", () => {
+test("repository CI omits the hosted Windows job and retains fixture parity", () => {
   const ci = source(".github/workflows/ci.yml");
   const fixture = source(
     "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
   );
-  const windows = workflowJob(ci, "windows");
-  const powershellSteps = windows
-    .split(/^      - name: /m)
-    .filter((step) => step.includes("        shell: pwsh\n"));
 
   assert.equal(
     fixture,
     ci,
     "the compiler fixture must exactly mirror the committed CI workflow",
   );
-  assert.equal(
-    powershellSteps.length,
-    4,
-    "every multiline Windows PowerShell step must be covered by the fail-fast contract",
+  assert.doesNotMatch(
+    ci,
+    /^  windows:[ \t]*\r?$/m,
+    "the hosted Windows CI job is temporarily disabled",
   );
-  for (const step of powershellSteps) {
-    assert.match(
-      step,
-      /        shell: pwsh\n        run: \|\n          \$ErrorActionPreference = 'Stop'\n          \$PSNativeCommandUseErrorActionPreference = \$true\n/,
-      "a failed native command must terminate its Windows PowerShell step",
-    );
-  }
+  assert.doesNotMatch(ci, /^[ \t]+runs-on: windows-/m);
 });
 
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {

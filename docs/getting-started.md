@@ -1,8 +1,8 @@
 # Getting started
 
 This guide builds both Automata commands from a reviewed source checkout,
-starts the local web preview, and describes the currently tested
-Linux and Windows runner boundaries.
+starts the local web preview, and describes the Linux runner boundary and the
+documented experimental Windows boundary.
 
 > [!IMPORTANT]
 > No public release has been published. Install from a reviewed source checkout
@@ -131,14 +131,12 @@ The following runner boundaries fail closed on Windows:
 Linux with rootless Podman remains the container-isolated execution-host path.
 The Windows path is a pre-1.0 trusted native runner and is not production-ready.
 A successful source build or passive doctor report alone is not execution
-evidence. The Windows CI contract launches the shipped `automata-runner run`
-process through the production run composition with ephemeral mTLS/control and
-loopback S3 fixtures. It completes a real handshake and lease exchange,
-hydrates job content, executes a shell step through the native provider,
-reports its logs and successful result, cleans its workspace and scratch
-directory, and polls the released slot again. On Linux, a normal dynamically
-linked Cargo build is still not a valid `scratch` probe payload for a production
-runner session.
+evidence. Hosted Windows CI is currently disabled because Automata does not yet
+operate Windows runners; the native-provider test sources remain in the
+repository, but they are not a release gate. Do not deploy this path until a
+Windows runner and its end-to-end CI gate are restored. On Linux, a normal
+dynamically linked Cargo build is still not a valid `scratch` probe payload for
+a production runner session.
 
 ## Verify the installation
 
@@ -256,5 +254,5 @@ On Linux, use the
 [Arch Linux host guide](platforms/arch-linux.md) and rerun the active probe only
 after the documented kernel, cgroup, and rootless-networking prerequisites are
 in place. The active probe is intentionally unavailable for the native Windows
-provider; use the Windows configuration and CI-tested native job path described
-above instead.
+provider. Do not deploy that path until hosted Windows end-to-end CI is
+restored.

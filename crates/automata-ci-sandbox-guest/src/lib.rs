@@ -415,7 +415,7 @@ pub async fn forward_stdio(socket: &Path) -> Result<(), GuestProtocolError> {
     let response = read_frame(&mut stream).await?;
     let mut output = tokio::io::stdout();
     output.write_all(&response).await?;
-    output.shutdown().await?;
+    output.flush().await?;
     Ok(())
 }
 
