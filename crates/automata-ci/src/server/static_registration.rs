@@ -424,7 +424,7 @@ fn read_bounded_nofollow(
         FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile,
         metadata.st_uid,
         metadata.st_mode,
-        metadata.st_nlink,
+        metadata.st_nlink == 1,
         required_owner,
     ) {
         return Err(StaticRunnerRegistrationError::InsecureFile);
@@ -485,18 +485,18 @@ fn map_path_open_error(error: rustix::io::Errno) -> StaticRunnerRegistrationErro
 const fn privileged_file_attributes(
     is_regular_file: bool,
     owner: u32,
-    mode: u32,
-    link_count: u64,
+    mode: rustix::fs::RawMode,
+    has_single_link: bool,
     required_owner: u32,
 ) -> bool {
-    is_regular_file && owner == required_owner && mode & 0o222 == 0 && link_count == 1
+    is_regular_file && owner == required_owner && mode & 0o222 == 0 && has_single_link
 }
 
 #[cfg(unix)]
 const fn privileged_directory_attributes(
     is_directory: bool,
     owner: u32,
-    mode: u32,
+    mode: rustix::fs::RawMode,
     required_owner: u32,
 ) -> bool {
     is_directory && (owner == 0 || owner == required_owner) && mode & 0o022 == 0
@@ -1154,11 +1154,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn privileged_metadata_requires_root_regular_nonwritable_single_link() {
-        assert!(privileged_file_attributes(true, 0, 0o100_440, 1, 0));
-        assert!(!privileged_file_attributes(true, 1_000, 0o100_440, 1, 0));
-        assert!(!privileged_file_attributes(true, 0, 0o100_640, 1, 0));
-        assert!(!privileged_file_attributes(false, 0, 0o120_440, 1, 0));
-        assert!(!privileged_file_attributes(true, 0, 0o100_440, 2, 0));
+        assert!(privileged_file_attributes(true, 0, 0o100_440, true, 0));
+        assert!(!privileged_file_attributes(true, 1_000, 0o100_440, true, 0));
+        assert!(!privileged_file_attributes(true, 0, 0o100_640, true, 0));
+        assert!(!privileged_file_attributes(false, 0, 0o120_440, true, 0));
+        assert!(!privileged_file_attributes(true, 0, 0o100_440, false, 0));
 
         assert!(privileged_directory_attributes(true, 0, 0o040_755, 0));
         assert!(!privileged_directory_attributes(true, 0, 0o040_775, 0));
