@@ -8,7 +8,6 @@ use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
-use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_job_executor_github::{
     ActionPreparationPort, DeterministicOperationIds, GithubJobExecutor, GithubJobExecutorConfig,
     GithubJobExecutorPorts, ImmutableJobContent, ImmutableSandboxEnvironmentCatalog,
@@ -876,7 +875,7 @@ fn build_action_preparer(
     config: &RunnerProductConfig,
     blobs: Arc<dyn ImmutableBlobStore>,
 ) -> Result<Arc<dyn ActionPreparationPort>, RunnerProductError> {
-    let github_endpoint = GithubHttpEndpoint::github_dot_com(config.github().user_agent())?;
+    let github_endpoint = config.github().http_endpoint()?;
     let scm: Arc<dyn ScmProvider> = Arc::new(github_endpoint);
     // Do not consult the legacy durable reference index here. Older runner
     // builds could populate it through an ambient repository credential, so a

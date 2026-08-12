@@ -129,7 +129,7 @@ fn provider_for(address: SocketAddr) -> GithubRestPushChangedFilesProvider {
         Duration::from_secs(2),
     )
     .expect("fixture limits");
-    let endpoint = GithubHttpEndpoint::new_for_loopback_testing(
+    let endpoint = GithubHttpEndpoint::new_for_loopback_emulator(
         format!("http://{address}/")
             .parse()
             .expect("loopback OAuth origin"),

@@ -108,7 +108,8 @@ fn mixed_document() -> Value {
         .remove("workflow_path");
     public["workflow_selection"] = json!({"mode": "all_direct"});
     json!({
-        "schema": 2,
+        "schema": 3,
+        "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",

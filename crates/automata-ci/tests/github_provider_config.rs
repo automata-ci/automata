@@ -6,8 +6,9 @@ use std::{
 use automata_ci::{
     cli::{Cli, Command},
     server::{
-        GithubProviderConfig, GithubProviderConfigError, MAX_GITHUB_PROVIDER_CONFIG_BYTES,
-        MAX_GITHUB_PROVIDER_REPOSITORIES, SecretSource, ServerConfig,
+        GithubProviderConfig, GithubProviderConfigError, GithubProviderTransport,
+        MAX_GITHUB_PROVIDER_CONFIG_BYTES, MAX_GITHUB_PROVIDER_REPOSITORIES, SecretSource,
+        ServerConfig,
     },
 };
 use automata_ci_core::JobAuthorityProfile;
@@ -141,7 +142,8 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 2,
+        "schema": 3,
+        "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",
@@ -278,6 +280,51 @@ fn checked_in_example_matches_the_current_provider_manifest_contract() {
             .private_source_authority()
             .is_some()
     );
+}
+
+#[test]
+fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() {
+    let production = load_value(
+        "transport-production.json",
+        &manifest(vec![public_repository()]),
+    )
+    .expect("production transport");
+    assert!(matches!(
+        production.transport(),
+        GithubProviderTransport::GithubDotCom
+    ));
+
+    let mut isolated = manifest(vec![public_repository()]);
+    isolated["transport"] = json!({
+        "mode": "loopback_emulator",
+        "api_base": "http://automata-git.localhost:18088/api/v3/"
+    });
+    let isolated = load_value("transport-isolated.json", &isolated).expect("isolated transport");
+    assert_eq!(
+        isolated
+            .transport()
+            .loopback_api_base()
+            .expect("loopback base")
+            .as_str(),
+        "http://automata-git.localhost:18088/api/v3/"
+    );
+
+    for (name, api_base) in [
+        ("external-http", "http://github.example.test/api/v3/"),
+        ("loopback-https", "https://127.0.0.1:18088/api/v3/"),
+        ("credentials", "http://user@127.0.0.1:18088/api/v3/"),
+        ("query", "http://127.0.0.1:18088/api/v3/?secret=x"),
+    ] {
+        let mut invalid = manifest(vec![public_repository()]);
+        invalid["transport"] = json!({
+            "mode": "loopback_emulator",
+            "api_base": api_base
+        });
+        assert_eq!(
+            load_value(&format!("transport-{name}.json"), &invalid),
+            Err(GithubProviderConfigError)
+        );
+    }
 }
 
 #[test]
@@ -659,7 +706,7 @@ fn document_and_repository_bounds_are_exact() {
 fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
     let mut cases = Vec::new();
     let mut value = manifest(vec![private_repository()]);
-    value["schema"] = json!(3);
+    value["schema"] = json!(2);
     cases.push(("schema", value));
     for (case, path) in [
         ("app-id", vec!["app", "id"]),

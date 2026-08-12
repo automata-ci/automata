@@ -152,7 +152,7 @@ impl GithubTrustedOrigins {
         self.limits
     }
 
-    pub(crate) fn loopback_for_testing(
+    pub(crate) fn loopback_emulator(
         oauth_origin: Url,
         api_base: Url,
         user_agent: &str,
@@ -280,7 +280,13 @@ fn valid_endpoint(endpoint: &Url, security: TransportSecurity) -> bool {
 
 fn is_loopback_host(host: &Host<&str>) -> bool {
     match host {
-        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        Host::Domain(domain) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain
+                    .to_ascii_lowercase()
+                    .strip_suffix(".localhost")
+                    .is_some_and(|prefix| !prefix.is_empty())
+        }
         Host::Ipv4(address) => address.is_loopback(),
         Host::Ipv6(address) => address.is_loopback(),
     }

@@ -375,6 +375,14 @@ authenticated source revision; nested files and other extensions are not
 selected. Discovery is bounded by the manifest archive limits, and the sorted
 inventory and each path-local result are durable before the delivery completes.
 
+The required top-level `transport` is a closed deployment policy. Production
+uses `{"mode":"github_dot_com"}`. The isolated integration suite may instead
+use `{"mode":"loopback_emulator","api_base":"http://automata-git.localhost:PORT/api/v3/"}`.
+Emulator mode accepts only credential-free loopback HTTP URLs (including
+nonempty `.localhost` names), applies the same bounded protocol clients, and
+never falls back to GitHub.com. It is an E2E protocol-emulation lane, not
+evidence that GitHub.com networking or installation configuration works.
+
 The optional top-level `schedule` object controls the separate periodic
 workflow scheduler; omitting it uses the documented example defaults. It
 enumerates only current manifests in stable order, resolves the configured

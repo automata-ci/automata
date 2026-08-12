@@ -1082,7 +1082,7 @@ impl RawServer {
     }
 
     fn endpoint(&self, limits: GithubHttpLimits) -> GithubHttpEndpoint {
-        GithubHttpEndpoint::new_for_loopback_testing(
+        GithubHttpEndpoint::new_for_loopback_emulator(
             self.origin.clone(),
             self.origin.join("api/").expect("API base"),
             "automata-check-tests/0.1.0",

@@ -17,6 +17,9 @@ use automata_ci_execution::{
     ImmutableImage, NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
     SandboxPrivilegePolicy, TargetPath, TargetPlatform,
 };
+use automata_ci_github::{
+    GithubHttpConfigurationError, GithubHttpEndpoint, GithubHttpLimits, GithubTrustedOrigins,
+};
 use automata_ci_runner_journal::StateRoot;
 use automata_ci_runner_spool::{ProtectionId, SpoolRoot};
 use http::Uri;
@@ -781,6 +784,23 @@ impl GithubProductConfig {
     #[must_use]
     pub const fn allow_insecure_http(&self) -> bool {
         self.allow_insecure_http
+    }
+
+    pub(crate) fn http_endpoint(&self) -> Result<GithubHttpEndpoint, GithubHttpConfigurationError> {
+        if self.allow_insecure_http {
+            return GithubHttpEndpoint::new_for_loopback_emulator(
+                self.server_url.clone(),
+                self.api_url.clone(),
+                &self.user_agent,
+                GithubHttpLimits::default(),
+            );
+        }
+        GithubHttpEndpoint::new(GithubTrustedOrigins::new(
+            self.server_url.clone(),
+            self.api_url.clone(),
+            &self.user_agent,
+            GithubHttpLimits::default(),
+        )?)
     }
 }
 
@@ -2114,20 +2134,22 @@ impl RawGithubProductConfig {
         {
             return Err(RunnerProductConfigError::InvalidGithub);
         }
-        automata_ci_github::GithubTrustedOrigins::github_dot_com(&self.user_agent)
-            .map_err(|_| RunnerProductConfigError::InvalidGithub)?;
         let server_url =
             validate_github_context_url(&self.server_url, self.allow_insecure_http, true)?;
         let api_url = validate_github_context_url(&self.api_url, self.allow_insecure_http, false)?;
         let graphql_url =
             validate_github_context_url(&self.graphql_url, self.allow_insecure_http, false)?;
-        Ok(GithubProductConfig {
+        let config = GithubProductConfig {
             user_agent: self.user_agent,
             server_url,
             api_url,
             graphql_url,
             allow_insecure_http: self.allow_insecure_http,
-        })
+        };
+        config
+            .http_endpoint()
+            .map_err(|_| RunnerProductConfigError::InvalidGithub)?;
+        Ok(config)
     }
 }
 

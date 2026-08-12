@@ -38,7 +38,7 @@ fn production_configuration_requires_https_and_clean_bases() {
 
 #[test]
 fn loopback_escape_hatch_rejects_non_loopback_http() {
-    let error = GithubHttpEndpoint::new_for_loopback_testing(
+    let error = GithubHttpEndpoint::new_for_loopback_emulator(
         Url::parse("http://example.com/").unwrap(),
         Url::parse("http://example.com/api/").unwrap(),
         "automata-tests/0.1.0",

@@ -22,21 +22,22 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_credential_github::{
-    GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppIssuer, GithubInstallationId,
-    GithubRepositoryRuntimeAuthorityIssuer, GithubRuntimeAuthorityCommitSupervisor,
-    GithubRuntimeAuthorityCoordinatorClock, GithubRuntimeAuthorityLifecycleBroker,
-    GithubRuntimeAuthorityLifecycleBrokerRouter, GithubRuntimeAuthorityLifecycleCoordinator,
-    GithubRuntimeAuthorityLifecycleError, GithubRuntimeAuthorityLifecycleSupervisor,
-    GithubRuntimeAuthorityMintBroker, GithubRuntimeAuthorityMintCoordinator,
-    GithubRuntimeAuthorityRequestResolver, GithubRuntimeAuthorityRevocationOutcome,
-    GithubServerServiceCoordinationOutcome, GithubServerServiceCoordinatorClock,
-    GithubServerServiceCoordinatorError, GithubServerServiceCredentialBroker,
-    GithubServerServiceCredentialCoordinator, GithubServerServiceCredentialIssuer,
-    GithubServerServiceCredentialRepository, GithubServerServiceCredentialRequestResolver,
-    GithubServerServiceInstallationRouter, PendingGithubServerServiceMintCommit,
-    PendingGithubServerServiceRevocationCommit, PinnedGithubRuntimeAuthorityMintBroker,
+    GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits, GithubAppIssuer,
+    GithubInstallationId, GithubRepositoryRuntimeAuthorityIssuer,
+    GithubRuntimeAuthorityCommitSupervisor, GithubRuntimeAuthorityCoordinatorClock,
+    GithubRuntimeAuthorityLifecycleBroker, GithubRuntimeAuthorityLifecycleBrokerRouter,
+    GithubRuntimeAuthorityLifecycleCoordinator, GithubRuntimeAuthorityLifecycleError,
+    GithubRuntimeAuthorityLifecycleSupervisor, GithubRuntimeAuthorityMintBroker,
+    GithubRuntimeAuthorityMintCoordinator, GithubRuntimeAuthorityRequestResolver,
+    GithubRuntimeAuthorityRevocationOutcome, GithubServerServiceCoordinationOutcome,
+    GithubServerServiceCoordinatorClock, GithubServerServiceCoordinatorError,
+    GithubServerServiceCredentialBroker, GithubServerServiceCredentialCoordinator,
+    GithubServerServiceCredentialIssuer, GithubServerServiceCredentialRepository,
+    GithubServerServiceCredentialRequestResolver, GithubServerServiceInstallationRouter,
+    PendingGithubServerServiceMintCommit, PendingGithubServerServiceRevocationCommit,
+    PinnedGithubRuntimeAuthorityMintBroker,
 };
-use automata_ci_github::{GithubHttpEndpoint, GithubWebhookVerifier};
+use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits, GithubWebhookVerifier};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksPublisher, GithubChecksPublisherConfig,
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubDeliveryClock,
@@ -82,7 +83,7 @@ use super::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderConfig,
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,
     GithubProviderCredentialReleaseSupervisor, GithubProviderRepositoryConfig,
-    MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+    GithubProviderTransport, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
     github_job_runtime_authority::{
         GithubJobRuntimeAuthorityIssuer, GithubJobRuntimeAuthorityResolver,
     },
@@ -379,12 +380,8 @@ impl GithubProviderRuntimeBuilder {
         {
             let installation = GithubInstallationId::new(installation_id)
                 .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?;
-            let broker_config = GithubAppCredentialConfig::github_dot_com(
-                issuer.clone(),
-                installation,
-                GITHUB_HTTP_USER_AGENT,
-            )
-            .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)?;
+            let broker_config =
+                provider_credential_config(config.transport(), issuer.clone(), installation)?;
             let broker = Arc::new(
                 GithubAppCredentialBroker::new(broker_config, &app_private_key)
                     .map_err(|_| GithubProviderRuntimeBuildError::InvalidAppKey)?,
@@ -618,8 +615,7 @@ impl GithubProviderRuntimeBuilder {
         )
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
 
-        let endpoint = GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
-            .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)?;
+        let endpoint = provider_http_endpoint(config.transport())?;
         let admission_repository: Arc<dyn LogicalWorkflowAdmissionRepository> = store.clone();
         let mut admission = WorkflowAdmissionService::with_system_ports(
             blobs.clone(),
@@ -757,6 +753,51 @@ impl GithubProviderRuntimeBuilder {
             shape,
         })
     }
+}
+
+fn provider_credential_config(
+    transport: &GithubProviderTransport,
+    issuer: GithubAppIssuer,
+    installation: GithubInstallationId,
+) -> Result<GithubAppCredentialConfig, GithubProviderRuntimeBuildError> {
+    match transport {
+        GithubProviderTransport::GithubDotCom => {
+            GithubAppCredentialConfig::github_dot_com(issuer, installation, GITHUB_HTTP_USER_AGENT)
+        }
+        GithubProviderTransport::LoopbackEmulator { api_base } => {
+            GithubAppCredentialConfig::new_for_loopback_emulator(
+                api_base.clone(),
+                issuer,
+                installation,
+                GITHUB_HTTP_USER_AGENT,
+                GithubAppHttpLimits::default(),
+            )
+        }
+    }
+    .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)
+}
+
+fn provider_http_endpoint(
+    transport: &GithubProviderTransport,
+) -> Result<GithubHttpEndpoint, GithubProviderRuntimeBuildError> {
+    match transport {
+        GithubProviderTransport::GithubDotCom => {
+            GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
+        }
+        GithubProviderTransport::LoopbackEmulator { api_base } => {
+            let mut server_origin = api_base.clone();
+            server_origin.set_path("/");
+            server_origin.set_query(None);
+            server_origin.set_fragment(None);
+            GithubHttpEndpoint::new_for_loopback_emulator(
+                server_origin,
+                api_base.clone(),
+                GITHUB_HTTP_USER_AGENT,
+                GithubHttpLimits::default(),
+            )
+        }
+    }
+    .map_err(|_| GithubProviderRuntimeBuildError::InvalidProviderClient)
 }
 
 impl fmt::Debug for GithubProviderRuntimeBuilder {

@@ -165,14 +165,16 @@ impl GithubAppCredentialConfig {
         )
     }
 
-    /// Explicit test escape hatch. HTTP is accepted only for a loopback origin.
+    /// Creates an isolated GitHub protocol emulator configuration.
+    ///
+    /// HTTP is accepted only for an exact loopback origin. This mode never
+    /// falls back to GitHub.com or another production endpoint.
     ///
     /// # Errors
     ///
     /// Applies the same validation as production in addition to the loopback-only
     /// transport requirement.
-    #[doc(hidden)]
-    pub fn new_for_loopback_testing(
+    pub fn new_for_loopback_emulator(
         api_base: Url,
         issuer: ProviderResourceId,
         installation_id: GithubInstallationId,
@@ -296,7 +298,13 @@ fn valid_endpoint(endpoint: &Url, security: TransportSecurity) -> bool {
 
 fn is_loopback_host(host: &Host<&str>) -> bool {
     match host {
-        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        Host::Domain(domain) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain
+                    .to_ascii_lowercase()
+                    .strip_suffix(".localhost")
+                    .is_some_and(|prefix| !prefix.is_empty())
+        }
         Host::Ipv4(address) => address.is_loopback(),
         Host::Ipv6(address) => address.is_loopback(),
     }

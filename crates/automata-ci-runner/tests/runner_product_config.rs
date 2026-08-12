@@ -69,7 +69,7 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     );
     assert_eq!(
         config.github().server_url().host_str(),
-        Some("automata-git.ghe.com")
+        Some("automata-git.localhost")
     );
     assert_eq!(
         config
@@ -78,7 +78,7 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
             .github_server_host_gateway_alias()
             .expect("local dogfood config must opt into its exact GitHub hostname")
             .as_str(),
-        "automata-git.ghe.com"
+        "automata-git.localhost"
     );
     assert_eq!(
         config

@@ -246,7 +246,7 @@ async fn mint_does_not_replay_a_protocol_nack() {
     let limits =
         GithubAppHttpLimits::new(1_024, Duration::from_millis(100), Duration::from_secs(2))
             .expect("HTTP limits");
-    let config = GithubAppCredentialConfig::new_for_loopback_testing(
+    let config = GithubAppCredentialConfig::new_for_loopback_emulator(
         server.origin.clone(),
         ProviderResourceId::new("Iv1.automata-test").expect("App issuer"),
         GithubInstallationId::new(INSTALLATION_ID).expect("installation ID"),
