@@ -138,6 +138,9 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     let mut spool_keys = std::collections::BTreeSet::new();
     let mut protection_ids = std::collections::BTreeSet::new();
     let mut metrics_listeners = std::collections::BTreeSet::new();
+    let mut github_server_urls = std::collections::BTreeSet::new();
+    let mut github_api_urls = std::collections::BTreeSet::new();
+    let mut github_graphql_urls = std::collections::BTreeSet::new();
     let mut profile_ids = std::collections::BTreeSet::new();
     let mut profile_digests = std::collections::BTreeSet::new();
     let mut profile_images = std::collections::BTreeSet::new();
@@ -175,6 +178,9 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
         assert!(spool_keys.insert(string("/spool/key_hex/path")));
         assert!(protection_ids.insert(string("/spool/protection_id")));
         assert!(metrics_listeners.insert(string("/metrics/listen")));
+        github_server_urls.insert(string("/github/server_url"));
+        github_api_urls.insert(string("/github/api_url"));
+        github_graphql_urls.insert(string("/github/graphql_url"));
         profile_ids.insert(string("/inventory/environment_profiles/0/id"));
         profile_digests.insert(string("/inventory/environment_profiles/0/manifest_sha256"));
         profile_images.insert(string("/inventory/environment_profiles/0/image"));
@@ -208,6 +214,20 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     assert_eq!(profile_ids.len(), 1);
     assert_eq!(profile_digests.len(), 1);
     assert_eq!(profile_images.len(), 1);
+    assert_eq!(
+        github_server_urls,
+        std::collections::BTreeSet::from(["http://automata-git.localhost:8088/".to_owned()])
+    );
+    assert_eq!(
+        github_api_urls,
+        std::collections::BTreeSet::from(["http://automata-git.localhost:8088/api/v3/".to_owned()])
+    );
+    assert_eq!(
+        github_graphql_urls,
+        std::collections::BTreeSet::from([
+            "http://automata-git.localhost:8088/api/graphql".to_owned()
+        ])
+    );
     assert_eq!(aggregate_cpu_millis, 12_000);
     assert_eq!(aggregate_memory_bytes, 3 * 17_179_869_184);
     assert_eq!(aggregate_pids, 12_288);
