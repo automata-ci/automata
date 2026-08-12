@@ -239,6 +239,18 @@ async fn seed_control_plane_with_optional_concurrency(
     )
     .fetch_one(pool)
     .await?;
+    let workflow_run_requirements_column: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'workflow_runs'
+              AND column_name = 'runner_requirements_schema'
+        )
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
 
     // Upgrade fixtures intentionally seed the contract currently installed in
     // their temporary schema.  Older schemas require requirements-v2, while
@@ -320,7 +332,31 @@ async fn seed_control_plane_with_optional_concurrency(
     .bind(vec![7_u8; 32])
     .execute(pool)
     .await?;
-    if let Some((group, queue_policy)) = concurrency {
+    if workflow_run_requirements_column {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runs (
+                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
+                event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+                concurrency_group_key, concurrency_queue_policy,
+                runner_requirements_schema
+            ) VALUES (
+                $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
+                $6, $7, $8
+            )
+            ",
+        )
+        .bind(run_id)
+        .bind(repository_id)
+        .bind(workflow_id)
+        .bind(snapshot_id)
+        .bind(vec![9_u8; 20])
+        .bind(concurrency.map(|(group, _)| group))
+        .bind(concurrency.map(|(_, queue_policy)| queue_policy))
+        .bind(i16::try_from(runner_requirements_schema)?)
+        .execute(pool)
+        .await?;
+    } else if let Some((group, queue_policy)) = concurrency {
         sqlx::query(
             r"
             INSERT INTO workflow_runs (
@@ -394,7 +430,11 @@ async fn seed_control_plane_with_optional_concurrency(
                     RunnerSessionId::new(),
                     *runner_id,
                     RunnerGeneration::new(1)?,
-                    RunnerProtocolVersion::new(4)?,
+                    RunnerProtocolVersion::new(if runner_requirements_schema == 3 {
+                        5
+                    } else {
+                        4
+                    })?,
                     job_ir_version,
                     capabilities,
                     UnixMillis::new(2),
@@ -424,11 +464,16 @@ async fn seed_control_plane_with_optional_concurrency(
                     id, runner_id, protocol_version, job_ir_schema,
                     capability_snapshot, connected_at_ms, heartbeat_at_ms,
                     runner_generation, session_epoch
-                ) VALUES ($1, $2, 4, $3, $4::jsonb, 2, 2, $5, $6)
+                ) VALUES ($1, $2, $3, $4, $5::jsonb, 2, 2, $6, $7)
                 ",
             )
             .bind(session_id.as_uuid())
             .bind(runner_id.as_uuid())
+            .bind(if runner_requirements_schema == 3 {
+                5
+            } else {
+                4
+            })
             .bind(job_ir_schema)
             .bind(capabilities.as_str())
             .bind(i64::try_from(generation.get())?)

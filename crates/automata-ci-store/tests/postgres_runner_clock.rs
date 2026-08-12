@@ -2702,7 +2702,7 @@ fn offer_with_horizon(
             RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
             fixture.request_digest,
         ),
-        RunnerProtocolVersion::new(4)?,
+        RunnerProtocolVersion::new(5)?,
         fixture.slot,
         fixture.lease.clone(),
         fixture.metadata.clone(),

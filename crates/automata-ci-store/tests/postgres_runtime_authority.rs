@@ -746,7 +746,7 @@ async fn seed_execution(database: &TestDatabase) -> TestResult<GithubJobRuntimeA
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,

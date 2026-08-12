@@ -1986,7 +1986,7 @@ async fn open_runner(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             capability_snapshot,
             UnixMillis::new(database_now_ms(database).await?),

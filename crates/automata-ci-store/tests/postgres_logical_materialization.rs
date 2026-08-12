@@ -2485,7 +2485,7 @@ async fn open_v5_runner(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             capability_snapshot,
             UnixMillis::new(observed_at),

@@ -108,7 +108,7 @@ pub enum LeasePollError {
     /// A protocol slot could not be represented by the durable store type.
     #[error("validated protocol slot could not be represented durably")]
     InvalidDurableSlot(#[source] DurabilityValueError),
-    /// A durable chain key contradicted protocol-v4 request invariants.
+    /// A durable chain key contradicted protocol-v5 request invariants.
     #[error("validated lease-request chain could not be represented durably")]
     InvalidLeaseRequestChain(#[source] LeaseRequestKeyError),
     /// A durable capability document was not valid core-domain JSON.

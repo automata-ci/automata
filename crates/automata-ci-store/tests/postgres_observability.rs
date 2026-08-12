@@ -1183,12 +1183,13 @@ async fn insert_metrics_workflow(
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
-            plan_schema, head_sha, status, admission_epoch, created_at_ms, updated_at_ms
+            plan_schema, head_sha, status, admission_epoch, created_at_ms, updated_at_ms,
+            runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, 1, 'push', 'metrics/event', $5, 128,
             'application/json', $6, 'metrics/plan', 128,
             'application/vnd.automata.workflow-plan.protobuf', 2,
-            $7, 'queued', $8, 1, 1
+            $7, 'queued', $8, 1, 1, 3
         )
         ",
     )
@@ -1257,7 +1258,7 @@ async fn insert_metrics_runner(
             id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
             connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch,
             last_command_sequence, acknowledged_command_sequence
-        ) VALUES ($1, $2, 4, $3, $4::jsonb, 2, 2, 1, 1, 0, 0)
+        ) VALUES ($1, $2, 5, $3, $4::jsonb, 2, 2, 1, 1, 0, 0)
         ",
     )
     .bind(session_id.as_uuid())

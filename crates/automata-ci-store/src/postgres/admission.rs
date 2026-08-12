@@ -644,12 +644,12 @@ async fn insert_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema
+            publication_safety_schema, runner_requirements_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
             $11,$12,$13,$14,$15,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,$32,$33
+            $28,$29,$29,$30,$31,$32,$33,$34
         )
         ",
     )
@@ -698,6 +698,7 @@ async fn insert_run(
     .bind(publication.artifacts())
     .bind(PUBLICATION_SAFETY_REASON)
     .bind(PUBLICATION_SAFETY_SCHEMA)
+    .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

@@ -547,7 +547,7 @@ async fn verify_typed_cancel_replay(
     let payload = CancelJobCommandPayload::decode_json(command.request().payload().bytes())?;
     assert_eq!(payload.attempt_id(), attempt_id);
     assert_eq!(payload.guard(), guard);
-    assert_eq!(payload.protocol_version(), 4);
+    assert_eq!(payload.protocol_version(), 5);
     assert_eq!(payload.reason(), CANCELLATION_REASON);
     let intent = database
         .store()
@@ -632,7 +632,7 @@ async fn verify_stale_fence_rejected(
             automata_ci_core::RunnerSessionId::new(),
             old_fence.runner_id(),
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(4)?,
+            RunnerProtocolVersion::new(5)?,
             JobIrVersion::current(),
             capabilities,
             opened_at,

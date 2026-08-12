@@ -6,7 +6,7 @@ use automata_ci_auth::authorization::{
     repository_read_permissions,
 };
 use automata_ci_auth::human::{PrincipalId, TenantId};
-use automata_ci_core::{JobId, LogSequence, LogStreamId, RunId, WorkflowId};
+use automata_ci_core::{JobId, LogSequence, LogStreamId, RunId, RunnerRequirements, WorkflowId};
 use automata_ci_store::{
     HumanArtifactId, HumanArtifactScope, HumanAuthorizationTarget, HumanGitRef, HumanJobScope,
     HumanLogSegmentPageSize, HumanLogSegmentQuery, HumanPageSize, HumanRepositoryListQuery,
@@ -1214,12 +1214,12 @@ async fn seed_public_completed_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema
+            publication_safety_schema, runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, 2, 3, 'push', 'web/event', $5,
             'completed', 10, 21, 'CI', 'refs/heads/main', 'octocat',
             'Typed dashboard reads', 'Preserve immutable descriptors',
-            2, 'public', 'public', 'public', 'public', 'repository_policy', 1
+            2, 'public', 'public', 'public', 'public', 'repository_policy', 1, 3
         )
         ",
     )
@@ -1240,13 +1240,15 @@ async fn seed_public_completed_run(
             job_ir_schema, job_ir_size_bytes, created_at_ms
         ) VALUES (
             $1, $2, 'verify', 'Verify', $3, 'web/job-ir',
-            '{"schema_version":2}'::jsonb, 4, 5, 128, 11
+            $4::jsonb,
+            4, 5, 128, 11
         )
         "#,
     )
     .bind(job_id.as_uuid())
     .bind(run_id.as_uuid())
     .bind(vec![4_u8; 32])
+    .bind(serde_json::to_value(RunnerRequirements::default())?)
     .execute(database.pool())
     .await?;
     let attempt_id = Uuid::new_v4();
@@ -1504,10 +1506,10 @@ async fn insert_queued_run(
             run_number, event_name, event_object_key, head_sha,
             status, created_at_ms, updated_at_ms,
             requested_dashboard_visibility, effective_dashboard_visibility,
-            publication_safety_reason
+            publication_safety_reason, runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, $5, 'push', 'web/keyset-event', $6,
-            'queued', $7, $7, $8, $8, 'repository_policy'
+            'queued', $7, $7, $8, $8, 'repository_policy', 3
         )
         ",
     )

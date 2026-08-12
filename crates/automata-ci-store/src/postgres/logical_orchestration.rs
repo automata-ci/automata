@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use automata_ci_core::{OperationId, RunId, UnixMillis, WorkflowId};
+use automata_ci_core::{
+    OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, UnixMillis, WorkflowId,
+};
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -1212,12 +1214,12 @@ async fn insert_run(
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
-            publication_safety_schema
+            publication_safety_schema, runner_requirements_schema
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
             $11,$12,$13,$14,$15,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,'repository_policy',1
+            $28,$29,$29,$30,$31,'repository_policy',1,$32
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -1266,6 +1268,7 @@ async fn insert_run(
     .bind(publication.dashboard())
     .bind(publication.logs())
     .bind(publication.artifacts())
+    .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1288,8 +1291,9 @@ async fn insert_logical_run_and_invocation(
             run_id, root_invocation_id, orchestration_schema,
             admission_digest, state, revision, admitted_at_ms, updated_at_ms,
             base_context_digest, base_context_object_key,
-            base_context_size_bytes, base_context_media_type, base_context_schema
-        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5,$6,$7,$8,$9,$10)
+            base_context_size_bytes, base_context_media_type, base_context_schema,
+            runner_requirements_schema
+        ) VALUES ($1,$2,$3,$4,'pending',1,$5,$5,$6,$7,$8,$9,$10,$11)
         ",
     )
     .bind(command.run_id().as_uuid())
@@ -1308,6 +1312,7 @@ async fn insert_logical_run_and_invocation(
     .bind(base_context.map(|_| {
         i16::try_from(automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)
     }))
+    .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

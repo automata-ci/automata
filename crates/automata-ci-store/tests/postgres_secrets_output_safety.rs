@@ -2356,13 +2356,14 @@ async fn create_public_run_and_job(pool: &PgPool, seed: &SeedData) -> TestResult
             created_at_ms, updated_at_ms, publication_policy_revision,
             requested_dashboard_visibility, effective_dashboard_visibility,
             requested_log_visibility, requested_artifact_visibility,
-            publication_safety_reason, publication_safety_schema
+            publication_safety_reason, publication_safety_schema,
+            runner_requirements_schema
         )
         SELECT
             $1, repository_id, workflow_id, snapshot_id, run_number + 1,
             event_name, 'test/public-event', head_sha, status,
             2, 2, 2, 'public', 'public', 'public', 'public',
-            'repository_policy', 1
+            'repository_policy', 1, runner_requirements_schema
         FROM workflow_runs
         WHERE id = $2
         ",
