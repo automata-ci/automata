@@ -77,10 +77,42 @@ evaluation, but is not the recommended production topology.
 ### Identities
 
 The release needs separate least-privilege identities for the control plane and
-runner. The design must decide between installer-created virtual service
-accounts, operator-provisioned accounts, and optional group Managed Service
-Accounts. The runner remains non-administrative. A workflow process retains the
-runner service account token and must not be able to read control-plane state.
+runner. Design decision 2 selects installer-created virtual service accounts
+for the first release; group Managed Service Accounts are deferred. The runner
+remains non-administrative. A workflow process retains the runner service
+account token and must not be able to read control-plane state.
+
+#### Service identities and state roots
+
+The first release defines these identities and roots:
+
+| Concern | Control plane | Runner |
+| --- | --- | --- |
+| Service name | `AutomataControl` | `AutomataRunner` |
+| Identity | `NT SERVICE\AutomataControl` | `NT SERVICE\AutomataRunner` |
+| Configuration root | `%ProgramData%\Automata\Control\config` | `%ProgramData%\Automata\Runner\config` |
+| State root | `%ProgramData%\Automata\Control\state` | `%ProgramData%\Automata\Runner\state` |
+| Log root | `%ProgramData%\Automata\Control\logs` | `%ProgramData%\Automata\Runner\logs` |
+| Journal and spool | not applicable | beneath the runner state root |
+
+Each root is created with inheritance disabled and an explicit DACL granting
+full control to `SYSTEM`, the `Administrators` group, and that service's own
+virtual account only. Neither service identity appears in the other's DACLs,
+`Users` and `Authenticated Users` receive no access, and the runner's job
+working directories live outside both state roots. Administrators retain
+access for operational recovery; the threat model treats local administrators
+as trusted.
+
+#### ACL fixtures
+
+Native custody and secure-file tests emulate these layouts without service
+installation: a fixture directory disables inheritance and grants the test
+process owner — plus `SYSTEM` and `Administrators` — full control and nothing
+else, which is the private-input shape the secure-file adapter accepts. Attack
+fixtures then add a broad ACE (`Users` or `Everyone`), replace a component
+with a junction or symlink, add an alternate data stream, or create a second
+hard link, and the adapter must reject each variant. Fixtures live beside the
+adapter tests and never modify ACLs outside their temporary directories.
 
 ### Credential custody
 

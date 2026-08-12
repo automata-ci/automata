@@ -315,6 +315,12 @@ The first audit identified these implementation owners:
 4. [ ] Draft custody and secure-file adapter interfaces.
 5. [ ] Select the safe Windows API boundary for ACL and handle inspection.
 6. [x] Add the fail-closed Windows server composition test fixture.
-7. [ ] Define service identities, directories, and ACL fixtures.
+7. [x] Define service identities, directories, and ACL fixtures.
+
+   Evidence: the control-plane proposal's identity section now defines the
+   `AutomataControl`/`AutomataRunner` virtual service accounts, their
+   separated configuration/state/log roots under `%ProgramData%\Automata`,
+   the explicit owner-plus-SYSTEM-plus-Administrators DACL shape, and the
+   ACL fixture pattern the native adapter tests emulate and attack.
 8. [ ] Implement the secure filesystem adapter before enabling any
    credential-bearing server path.
