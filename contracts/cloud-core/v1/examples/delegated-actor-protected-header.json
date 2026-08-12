@@ -1,0 +1,5 @@
+{
+  "typ": "at+jwt",
+  "alg": "ES256",
+  "kid": "U_jw5H45NnG7fYQ3JlK9jm5H8YVvXyO1L0m7P2aR8sQ"
+}
