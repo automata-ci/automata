@@ -42,6 +42,7 @@ members = [
     "crates/automata-ci-scm",
     "crates/automata-ci-secret",
     "crates/automata-ci-secret-postgres",
+    "crates/automata-ci-secure-file-windows",
     "crates/automata-ci-service-proxy",
     "crates/automata-ci-store",
     "crates/automata-ci-ui-renderer",
@@ -109,6 +110,7 @@ automata-ci-sandbox-windows = { path = "crates/automata-ci-sandbox-windows", ver
 automata-ci-scm = { path = "crates/automata-ci-scm", version = "0.1.0" }
 automata-ci-secret = { path = "crates/automata-ci-secret", version = "0.1.0" }
 automata-ci-secret-postgres = { path = "crates/automata-ci-secret-postgres", version = "0.1.0" }
+automata-ci-secure-file-windows = { path = "crates/automata-ci-secure-file-windows", version = "0.1.0" }
 automata-ci-store = { path = "crates/automata-ci-store", version = "0.1.0" }
 automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "0.1.0" }
 automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
@@ -140,6 +142,8 @@ sha2 = "0.10.9"
 sqlx = { version = "0.9.0", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
 static_assertions = "1.1.0"
 subtle = "2.6.1"
+winapi-util = "=0.1.11"
+windows-permissions = "=0.2.4"
 thiserror = "2.0.16"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 tar = { version = "0.4.46", default-features = false }

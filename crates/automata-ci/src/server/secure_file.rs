@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 /// Sanitized secure private-file read failure.
 #[derive(Debug, Error)]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub(crate) enum SecureFileError {
     /// The path or file did not satisfy the owner-private input policy.
     #[error("file does not satisfy the owner-private input policy")]
@@ -30,7 +30,7 @@ pub(crate) enum SecureFileError {
     #[error("secured file could not be read")]
     Read(#[source] io::Error),
     /// No reviewed platform adapter provides the secure-file contract.
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[error("secure private-file input has no reviewed adapter on this platform")]
     Unavailable,
 }
@@ -124,7 +124,25 @@ pub(crate) fn read_owner_private(
     Ok(bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn read_owner_private(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecureFileError> {
+    automata_ci_secure_file_windows::read_owner_private(path, maximum_bytes).map_err(|error| {
+        match error {
+            automata_ci_secure_file_windows::SecureFileError::Insecure => SecureFileError::Insecure,
+            automata_ci_secure_file_windows::SecureFileError::TooLarge { maximum } => {
+                SecureFileError::TooLarge { maximum }
+            }
+            automata_ci_secure_file_windows::SecureFileError::Read(error) => {
+                SecureFileError::Read(error)
+            }
+        }
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn read_owner_private(
     _path: &Path,
     _maximum_bytes: usize,

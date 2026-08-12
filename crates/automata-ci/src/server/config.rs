@@ -1150,7 +1150,7 @@ fn read_bounded_file(
 ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
     super::secure_file::read_owner_private(path, maximum_bytes).map_err(|error| match error {
         SecureFileError::Insecure => SecretLoadError::FileSecurity,
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         SecureFileError::Unavailable => SecretLoadError::FileSecurity,
         SecureFileError::TooLarge { maximum } => SecretLoadError::TooLarge { maximum },
         SecureFileError::Read(error) => SecretLoadError::File(error),

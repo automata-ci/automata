@@ -75,6 +75,9 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+automata-ci-secure-file-windows.workspace = true
+
 [build-dependencies]
 automata-ci-build-support.workspace = true
 

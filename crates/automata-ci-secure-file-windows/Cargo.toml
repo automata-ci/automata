@@ -1,0 +1,21 @@
+[package]
+name = "automata-ci-secure-file-windows"
+description = "Reviewed Windows secure private-file input adapter for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+thiserror.workspace = true
+winapi-util.workspace = true
+windows-permissions.workspace = true
+zeroize.workspace = true
