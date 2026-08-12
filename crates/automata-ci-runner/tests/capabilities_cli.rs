@@ -12,7 +12,7 @@ use automata_ci_core::OperationId;
 #[test]
 fn capabilities_command_emits_only_the_canonical_validated_inventory() {
     let config_path = format!(
-        "{}/config/runner.local.example.json",
+        "{}/config/runner.local-1.example.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let secret_sentinel = "capabilities-must-not-read-this-secret";
@@ -37,7 +37,7 @@ fn capabilities_command_emits_only_the_canonical_validated_inventory() {
         "the official observed runner inventory must keep OIDC dark"
     );
     let config =
-        RunnerProductConfig::from_json(include_bytes!("../config/runner.local.example.json"))
+        RunnerProductConfig::from_json(include_bytes!("../config/runner.local-1.example.json"))
             .expect("checked-in product configuration must validate");
     let expected = serde_json::to_value(config.inventory()).expect("inventory must serialize");
     assert_eq!(actual, expected);

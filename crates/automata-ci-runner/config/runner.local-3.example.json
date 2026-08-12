@@ -1,0 +1,133 @@
+{
+  "schema_version": 2,
+  "runner_id": "a3e2f8e1-7094-4ca5-a904-82991e0c8df3",
+  "control_endpoint": "https://127.0.0.1:9090/",
+  "state": {
+    "journal": "/var/lib/automata-runner/3/journal",
+    "spool": "/var/lib/automata-runner/3/spool",
+    "podman": "/run/automata-runner-3/automata-ci-podman/state"
+  },
+  "tls": {
+    "server_roots": {
+      "kind": "file",
+      "path": "/etc/automata-runner/instances/3/tls/server-ca.pem"
+    },
+    "certificate_chain": {
+      "kind": "file",
+      "path": "/etc/automata-runner/instances/3/tls/runner.pem"
+    },
+    "private_key": {
+      "kind": "file",
+      "path": "/etc/automata-runner/instances/3/tls/runner-key.pem"
+    }
+  },
+  "spool": {
+    "protection_id": "local-runner-3-key-v1",
+    "key_hex": {
+      "kind": "file",
+      "path": "/etc/automata-runner/instances/3/secrets/spool-key-v1.hex"
+    },
+    "decrypt_only": []
+  },
+  "inventory": {
+    "labels": [
+      "self-hosted",
+      "linux",
+      "x64",
+      "ubuntu-24.04"
+    ],
+    "groups": [
+      "default"
+    ],
+    "max_parallel_jobs": 1,
+    "resources_per_job": {
+      "cpu_millis": 4000,
+      "memory_bytes": 17179869184,
+      "ephemeral_disk_bytes": 0,
+      "pids": 4096
+    },
+    "environment_profiles": [
+      {
+        "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+        "manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4",
+        "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd",
+        "keepalive_program": "/bin/sleep",
+        "keepalive_arguments": [
+          "infinity"
+        ],
+        "workspace": "/__w",
+        "default_environment": {
+          "CARGO_HOME": "/opt/cargo",
+          "RUSTUP_HOME": "/opt/rustup"
+        }
+      }
+    ]
+  },
+  "podman": {
+    "binary": "/usr/bin/podman",
+    "home": "/var/lib/automata-runner/3/home",
+    "runtime_directory": "/run/automata-runner-3",
+    "approved_helper_directory": "/opt/automata/private/usr/sbin",
+    "conmon_path": "/usr/bin/conmon",
+    "oci_runtime_path": "/usr/bin/crun",
+    "init_path": "/usr/bin/catatonit",
+    "seccomp_profile_path": "/usr/share/containers/seccomp.json",
+    "job_container_engine": "attempt_scoped_docker_api",
+    "buildkit_runtime_image": null,
+    "map_github_server_to_host_gateway": true
+  },
+  "executor": {
+    "resources": {
+      "cpu_millis": 4000,
+      "memory_bytes": 17179869184,
+      "ephemeral_disk_bytes": 0,
+      "pids": 4096
+    },
+    "network": "private_egress",
+    "root_filesystem": "writable",
+    "privilege": "administrator",
+    "default_step_timeout_seconds": 3600,
+    "maximum_output_bytes": 16777216,
+    "runner_root": "/__automata",
+    "home": "/root",
+    "path": "/opt/automata/externals/node24/bin:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "temp": "/var/lib/automata-transient",
+    "tool_cache": "/opt/hostedtoolcache",
+    "toolchain": {
+      "bash": "/usr/bin/bash",
+      "sh": "/usr/bin/sh",
+      "python": "/usr/bin/python3",
+      "pwsh": null,
+      "install": "/usr/bin/install",
+      "tar": "/usr/bin/tar",
+      "sha256sum": "/usr/bin/sha256sum",
+      "node24": "/opt/automata/externals/node24/bin/node"
+    }
+  },
+  "object_store": {
+    "endpoint": "http://127.0.0.1:9000/",
+    "region": "us-east-1",
+    "bucket": "automata-dev",
+    "prefix": "automata/v1",
+    "loopback_development": true,
+    "operation_timeout_seconds": 30,
+    "access_key_id": {
+      "kind": "environment",
+      "name": "AUTOMATA_S3_ACCESS_KEY_ID"
+    },
+    "secret_access_key": {
+      "kind": "environment",
+      "name": "AUTOMATA_S3_SECRET_ACCESS_KEY"
+    }
+  },
+  "github": {
+    "user_agent": "automata-runner/0.1.0",
+    "server_url": "http://automata-git.ghe.com:8088/",
+    "api_url": "http://automata-git.ghe.com:8088/api/v3/",
+    "graphql_url": "http://automata-git.ghe.com:8088/api/graphql",
+    "allow_insecure_http": true
+  },
+  "metrics": {
+    "listen": "127.0.0.1:9466"
+  }
+}

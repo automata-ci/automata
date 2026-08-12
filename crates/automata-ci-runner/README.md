@@ -6,9 +6,14 @@ the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman on Linux or the experimental native provider
-on Windows. The checked-in [Linux](config/runner.local.example.json) and
-[Windows](config/runner.windows.example.json) examples show each selection.
+configuration: rootless Podman or Kubernetes on Linux, or the experimental
+native provider on Windows. The checked-in Linux host examples
+([one](config/runner.local-1.example.json),
+[two](config/runner.local-2.example.json), and
+[three](config/runner.local-3.example.json)) select three independent
+single-slot Podman processes; the
+[Windows](config/runner.windows.example.json) example remains one process and
+one slot. The bootstrap guide documents the Kubernetes configuration shape.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:

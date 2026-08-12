@@ -226,7 +226,7 @@ The server has no automated runner enrollment API yet. Operators can supply
 one absolute, privileged fleet document with
 `--static-runner-registration-file`; it is applied after migrations and before
 readiness, and exact replay is idempotent. Use the repository's
-[static runner walkthrough](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-one-static-local-runner)
+[static runner walkthrough](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
 to derive canonical capabilities, issue a client-only certificate, and satisfy
 the root-owned file and coordinated-rotation rules.
 

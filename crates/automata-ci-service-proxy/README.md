@@ -20,6 +20,6 @@ stable operator-facing CLI. It requires Linux `epoll`, assumes the sandbox has
 already established its network and process isolation, and must be distributed
 as the reviewed immutable helper image expected by the runner profile.
 
-- [Static runner deployment](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-one-static-local-runner)
+- [Static runner deployment](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
 - [Platform architecture](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md)
 - [Issues and support](https://github.com/automata-ci/automata/issues)

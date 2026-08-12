@@ -1,13 +1,17 @@
 # Local runner bootstrap
 
-This directory contains two checked-in integration configurations for
-`automata-runner`. [`runner.local.example.json`](runner.local.example.json)
-selects the locked bootstrap Ubuntu 24.04 profile and rootless Podman on Linux.
+This directory contains three checked-in Linux Podman instance configurations
+plus one Windows configuration for `automata-runner`.
+[`runner.local-1.example.json`](runner.local-1.example.json),
+[`runner.local-2.example.json`](runner.local-2.example.json), and
+[`runner.local-3.example.json`](runner.local-3.example.json) select the same
+locked Ubuntu 24.04 profile while keeping every host-local identity, state
+path, credential path, runtime mount, and metrics port distinct.
 [`runner.windows.example.json`](runner.windows.example.json) selects the
-trusted native provider on Windows. Exactly one of the `podman` and
-`windows_native` provider objects may be configured.
+trusted native provider on Windows. Exactly one of the `podman`, `kubernetes`,
+and `windows_native` provider objects may be configured.
 
-The Linux example's local bootstrap digest is not an official promoted profile;
+The Linux examples' local bootstrap digest is not an official promoted profile;
 follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
@@ -118,26 +122,31 @@ host-specific path and follow the
 [Windows source-build boundary](../../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
 before starting `automata-runner run --config C:\path\to\runner.windows.json`.
 
-The remainder of this guide describes the rootless-Podman Linux example.
+The remainder of this guide describes the three-process rootless-Podman Linux
+host. Windows remains one process with one slot.
 
 ## What the Linux example assumes
 
-`runner.local.example.json` assumes:
+The three `runner.local-N.example.json` files assume:
 
-- a dedicated runner account with UID 1000;
+- three dedicated runner accounts with UID/GID pairs 1001 through 1003 and
+  non-overlapping subordinate ID ranges;
 - durable journal and spool state below `/var/lib/automata-runner`;
-- Linux 6.4 or newer with a dedicated, bounded `tmpfs,noswap` mount at
-  `/run/automata-runner` for all Podman state;
-- TLS material below `/etc/automata-runner/tls`;
+- Linux 6.4 or newer with three dedicated, bounded `tmpfs,noswap` mounts at
+  `/run/automata-runner-1` through `/run/automata-runner-3`;
+- distinct TLS leaves/keys and spool keys below each
+  `/etc/automata-runner/instances/N` boundary;
 - a control-plane runner listener reachable at the configured HTTPS URL;
 - the same RustFS bucket and prefix used by the server;
 - the pinned Ubuntu 24.04 OCI image is available by its exact digest; and
 - a firewall-protected smart-Git bridge is available for the local repository
   snapshot.
 
-Copy the example to an ignored, host-specific path. Update, at minimum,
-`runner_id`, `control_endpoint`, account paths, runtime UID, resources, and the
-Git bridge URLs. Do not edit the checked-in example with machine credentials.
+Copy all three examples to ignored, host-specific paths. Update, at minimum,
+the three `runner_id` values, `control_endpoint`, account paths, runtime UID,
+resources, and Git bridge URLs. Do not edit the checked-in examples with
+machine credentials and never reuse an ID, client key, or spool key between
+instances.
 
 `control_endpoint` is also the only managed-secret delivery origin. Values are
 fetched after lease acceptance through its direct mTLS connection, retained
@@ -145,39 +154,42 @@ only in bounded execution-local zeroizing custody, registered with the output
 masker, and acknowledged separately before user work. No runner-wide secret
 cache or durable secret spool is configured.
 
-The checked-in dogfood configuration starts one `automata-runner` process with
-one runner identity and three parallel job slots. It does not create three
-replicas or identities. Each slot can independently consume the complete
-`resources_per_job` ceiling, so full occupancy requires host and cgroup capacity
-for at least 12,000 CPU millicores, 48 GiB of memory, and 12,288 PIDs, plus the
-runner, Podman, and operating-system overhead. Review those aggregate bounds
-before copying the example to a smaller host; reducing available host resources
-without reducing either the slot count or the per-job ceiling is unsupported.
+The checked-in dogfood host starts exactly three `automata-runner` processes,
+each with a distinct identity and `max_parallel_jobs: 1`. Each process can
+consume its complete `resources_per_job` ceiling, so full occupancy requires
+at least 12,000 CPU millicores, 48 GiB of job memory, and 12,288 job PIDs, plus
+runner, Podman, and operating-system overhead. Do not increase a runner's slot
+count. Review the aggregate bounds before adapting the examples to a smaller
+host and change all three configurations plus the systemd cgroup limits
+together.
 
 Both `ephemeral_disk_bytes` fields must remain `0`. The current Podman adapter
 does not provide a proven per-job storage quota, so the runner deliberately
 advertises no ephemeral-disk capacity and rejects a nonzero configured value.
 Jobs that require nonzero ephemeral disk will not match this runner.
 
-The configured `podman.runtime_directory` is the exact mountpoint, not a
-directory on a shared `/run` or `/run/user/<uid>` tmpfs. The checked-in layout
-requires `state.podman` to be exactly
+Each configured `podman.runtime_directory` is its process's exact mountpoint,
+not a directory on a shared `/run` or `/run/user/<uid>` tmpfs. Each checked-in
+layout requires `state.podman` to be exactly
 `podman.runtime_directory/automata-ci-podman/state`; separate `/var/lib`
 Podman state, sibling state, bind mounts, and child mounts fail closed. Mount
-the runtime before starting the runner, give it exact mode 0700 and the runner
+each runtime before starting its runner, give it exact mode 0700 and the runner
 UID/GID, include finite `size=` and `nr_inodes=` operator bounds, and use the
-kernel's exact `noswap` option. For example:
+kernel's exact `noswap` option. The checked-in systemd host shape provisions
+three separate 20 GiB mounts; the equivalent instance-one mount is:
 
 ```console
-sudo install -d -m 0700 -o automata-runner -g automata-runner /run/automata-runner
-sudo mount -t tmpfs automata-runner-runtime /run/automata-runner \
-  -o nodev,nosuid,noswap,size=64G,nr_inodes=1048576,mode=0700,uid=1000,gid=1000
+sudo install -d -m 0700 -o automata-runner-1 -g automata-runner-1 \
+  /run/automata-runner-1
+sudo mount -t tmpfs automata-runner-runtime-1 /run/automata-runner-1 \
+  -o nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=1001,gid=1001
 ```
 
-Make this a boot-managed mount ordered before the runner service; a manual
-mount is only a development example. Do not bind the same tmpfs elsewhere or
-mount anything below it. Linux before 6.4 cannot provide this contract because
-tmpfs did not support `noswap`.
+Use the checked-in [three-process systemd units](../../../deploy/runner-host/README.md)
+so all mounts and services are boot-managed and correctly ordered; the manual
+command is only a development illustration. Do not bind any runtime tmpfs
+elsewhere, share it between processes, or mount anything below it. Linux before
+6.4 cannot provide this contract because tmpfs did not support `noswap`.
 
 ## 1. Check the host
 
@@ -343,17 +355,20 @@ candidate digest.
 
 ## 2. Provision runner inputs
 
-The example expects:
+Each instance `N` expects:
 
-- `/etc/automata-runner/tls/server-ca.pem` — server trust roots;
-- `/etc/automata-runner/tls/runner.pem` — the runner certificate chain;
-- `/etc/automata-runner/tls/runner-key.pem` — the runner private key, owned by
-  the runner account with mode `0600`;
-- `/etc/automata-runner/secrets/spool-key-v1.hex` — exactly 64 hexadecimal
-  characters, owned by the runner account with mode `0600`;
+- `/etc/automata-runner/instances/N/tls/server-ca.pem` — server trust roots;
+- `/etc/automata-runner/instances/N/tls/runner.pem` — that instance's unique
+  runner certificate chain;
+- `/etc/automata-runner/instances/N/tls/runner-key.pem` — that instance's
+  unique private key, owned by the runner account with mode `0600`;
+- `/etc/automata-runner/instances/N/secrets/spool-key-v1.hex` — that instance's
+  unique 64-hexadecimal-character key, owned by the runner account with mode
+  `0600`;
 - `AUTOMATA_S3_ACCESS_KEY_ID` and `AUTOMATA_S3_SECRET_ACCESS_KEY` — credentials
-  for the configured RustFS bucket; and
-- durable journal and spool directories owned by the runner account;
+  for the configured RustFS bucket;
+- instance-specific durable journal and spool directories owned by the runner
+  account;
 - transient Podman state and runtime directories beneath the dedicated tmpfs
   mount, plus home and scratch directories owned by the runner account;
 - absolute trusted toolchain paths including `sha256sum`, which the GitHub
@@ -363,10 +378,11 @@ The example expects:
 - exact root-owned Podman, conmon, crun, catatonit, and seccomp-profile paths
   matching the JSON configuration.
 
-Before starting the runner, follow the control-plane guide's
-[static runner bootstrap](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-one-static-local-runner)
-to render the canonical capabilities, issue the client-only leaf, and bind its
-digest to this exact runner identity. Automated enrollment remains unavailable.
+Before starting the host, follow the control-plane guide's
+[static runner bootstrap](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
+for all three configurations: render three canonical capability documents,
+issue three client-only leaves, and bind each digest to its exact distinct
+runner identity. Automated enrollment remains unavailable.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

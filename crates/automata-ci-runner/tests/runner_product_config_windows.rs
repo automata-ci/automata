@@ -98,7 +98,7 @@ fn windows_configuration_requires_one_provider_and_native_process_invariants() {
     );
 
     let linux = serde_json::from_slice::<serde_json::Value>(include_bytes!(
-        "../config/runner.local.example.json"
+        "../config/runner.local-1.example.json"
     ))
     .expect("checked-in Linux configuration JSON");
     let mut two_providers = baseline();

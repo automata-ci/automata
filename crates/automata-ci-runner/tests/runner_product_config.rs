@@ -29,7 +29,7 @@ const BUILDKIT_RUNTIME_IMAGE: &str = "registry.example.test/buildkit/runtime@sha
 #[test]
 fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     let config =
-        RunnerProductConfig::from_json(include_bytes!("../config/runner.local.example.json"))
+        RunnerProductConfig::from_json(include_bytes!("../config/runner.local-1.example.json"))
             .expect("checked-in local runner configuration must remain valid");
 
     let (profile, environment) = config
@@ -44,8 +44,15 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     );
     assert_eq!(
         config.inventory().max_parallel_jobs(),
-        3,
-        "the one dogfood runner identity must advertise exactly three host slots"
+        1,
+        "each dogfood runner process must advertise exactly one host slot"
+    );
+    assert_eq!(
+        config
+            .metrics()
+            .expect("checked-in metrics listener")
+            .listen(),
+        "127.0.0.1:9464".parse().expect("literal socket address")
     );
     assert_eq!(
         environment_value(environment, "CARGO_HOME"),
@@ -97,6 +104,180 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
             .contains(&RunnerFeature::OIDC_TOKENS),
         "the official configured runner inventory must keep OIDC dark"
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One host contract checks all process-isolation boundaries.
+fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
+    let fixtures = [
+        (
+            1_u64,
+            include_bytes!("../config/runner.local-1.example.json").as_slice(),
+            "127.0.0.1:9464",
+        ),
+        (
+            2_u64,
+            include_bytes!("../config/runner.local-2.example.json").as_slice(),
+            "127.0.0.1:9465",
+        ),
+        (
+            3_u64,
+            include_bytes!("../config/runner.local-3.example.json").as_slice(),
+            "127.0.0.1:9466",
+        ),
+    ];
+    let mut runner_ids = std::collections::BTreeSet::new();
+    let mut journals = std::collections::BTreeSet::new();
+    let mut spools = std::collections::BTreeSet::new();
+    let mut podman_states = std::collections::BTreeSet::new();
+    let mut podman_homes = std::collections::BTreeSet::new();
+    let mut runtime_directories = std::collections::BTreeSet::new();
+    let mut server_roots = std::collections::BTreeSet::new();
+    let mut certificate_chains = std::collections::BTreeSet::new();
+    let mut private_keys = std::collections::BTreeSet::new();
+    let mut spool_keys = std::collections::BTreeSet::new();
+    let mut protection_ids = std::collections::BTreeSet::new();
+    let mut metrics_listeners = std::collections::BTreeSet::new();
+    let mut profile_ids = std::collections::BTreeSet::new();
+    let mut profile_digests = std::collections::BTreeSet::new();
+    let mut profile_images = std::collections::BTreeSet::new();
+    let mut aggregate_cpu_millis = 0_u64;
+    let mut aggregate_memory_bytes = 0_u64;
+    let mut aggregate_pids = 0_u64;
+
+    for (instance, bytes, expected_metrics) in fixtures {
+        let config = RunnerProductConfig::from_json(bytes)
+            .unwrap_or_else(|error| panic!("runner {instance} config is invalid: {error}"));
+        assert_eq!(config.inventory().max_parallel_jobs(), 1);
+        assert_eq!(
+            config.metrics().expect("metrics listener").listen(),
+            expected_metrics.parse().expect("literal metrics socket")
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).expect("checked-in runner JSON");
+        let string = |pointer: &str| {
+            value
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("runner {instance} is missing {pointer}"))
+                .to_owned()
+        };
+        assert!(runner_ids.insert(string("/runner_id")));
+        assert!(journals.insert(string("/state/journal")));
+        assert!(spools.insert(string("/state/spool")));
+        assert!(podman_states.insert(string("/state/podman")));
+        assert!(podman_homes.insert(string("/podman/home")));
+        assert!(runtime_directories.insert(string("/podman/runtime_directory")));
+        assert!(server_roots.insert(string("/tls/server_roots/path")));
+        assert!(certificate_chains.insert(string("/tls/certificate_chain/path")));
+        assert!(private_keys.insert(string("/tls/private_key/path")));
+        assert!(spool_keys.insert(string("/spool/key_hex/path")));
+        assert!(protection_ids.insert(string("/spool/protection_id")));
+        assert!(metrics_listeners.insert(string("/metrics/listen")));
+        profile_ids.insert(string("/inventory/environment_profiles/0/id"));
+        profile_digests.insert(string("/inventory/environment_profiles/0/manifest_sha256"));
+        profile_images.insert(string("/inventory/environment_profiles/0/image"));
+        aggregate_cpu_millis += value["inventory"]["resources_per_job"]["cpu_millis"]
+            .as_u64()
+            .expect("CPU ceiling");
+        aggregate_memory_bytes += value["inventory"]["resources_per_job"]["memory_bytes"]
+            .as_u64()
+            .expect("memory ceiling");
+        aggregate_pids += value["inventory"]["resources_per_job"]["pids"]
+            .as_u64()
+            .expect("PID ceiling");
+    }
+
+    for isolated_values in [
+        &runner_ids,
+        &journals,
+        &spools,
+        &podman_states,
+        &podman_homes,
+        &runtime_directories,
+        &server_roots,
+        &certificate_chains,
+        &private_keys,
+        &spool_keys,
+        &protection_ids,
+        &metrics_listeners,
+    ] {
+        assert_eq!(isolated_values.len(), 3);
+    }
+    assert_eq!(profile_ids.len(), 1);
+    assert_eq!(profile_digests.len(), 1);
+    assert_eq!(profile_images.len(), 1);
+    assert_eq!(aggregate_cpu_millis, 12_000);
+    assert_eq!(aggregate_memory_bytes, 3 * 17_179_869_184);
+    assert_eq!(aggregate_pids, 12_288);
+
+    let target = include_str!("../../../deploy/runner-host/systemd/automata-runner-host.target");
+    for instance in 1..=3 {
+        let required_service = format!("Requires=automata-runner@{instance}.service");
+        assert_eq!(
+            target
+                .lines()
+                .filter(|line| *line == required_service.as_str())
+                .count(),
+            1,
+            "host target must require runner process {instance} exactly once"
+        );
+    }
+    assert_eq!(
+        target
+            .lines()
+            .filter(|line| line.starts_with("Requires=automata-runner@"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        target
+            .lines()
+            .filter(|line| line.starts_with("Requires=run-automata\\x2drunner\\x2d"))
+            .count(),
+        3
+    );
+
+    let service = include_str!("../../../deploy/runner-host/systemd/automata-runner@.service");
+    for required in [
+        "User=automata-runner-%i",
+        "Group=automata-runner-%i",
+        "RequiresMountsFor=/run/automata-runner-%i",
+        "Slice=automata-runner-host.slice",
+        "ExecStart=/usr/bin/automata-runner run --config /etc/automata-runner/instances/%i/runner.json",
+        "Delegate=yes",
+        "DelegateSubgroup=supervisor",
+        "MemorySwapMax=0",
+        "TasksMax=4608",
+    ] {
+        assert!(
+            service.lines().any(|line| line == required),
+            "missing {required}"
+        );
+    }
+
+    let slice = include_str!("../../../deploy/runner-host/systemd/automata-runner-host.slice");
+    for aggregate_limit in ["CPUQuota=1350%", "MemoryMax=54G", "TasksMax=13824"] {
+        assert!(
+            slice.lines().any(|line| line == aggregate_limit),
+            "missing aggregate host limit {aggregate_limit}"
+        );
+    }
+
+    let mounts = [
+        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d1.mount"),
+        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d2.mount"),
+        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d3.mount"),
+    ];
+    for (offset, mount) in mounts.into_iter().enumerate() {
+        let instance = offset + 1;
+        let where_line = format!("Where=/run/automata-runner-{instance}");
+        assert!(mount.lines().any(|line| line == where_line.as_str()));
+        let uid = 1001 + offset;
+        let ownership = format!("uid={uid},gid={uid}");
+        assert!(mount.lines().any(|line| line.contains(ownership.as_str())));
+    }
 }
 
 #[allow(clippy::too_many_lines)] // One canonical JSON fixture keeps cross-field defaults coherent.
@@ -1116,6 +1297,17 @@ fn kubernetes_provider_configuration_is_exact_and_mutually_exclusive() {
     assert_eq!(
         parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
         RunnerProductConfigError::InvalidProvider
+    );
+}
+
+#[test]
+fn checked_in_windows_configuration_uses_the_current_schema() {
+    let document: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../config/runner.windows.example.json"))
+            .expect("checked-in Windows configuration JSON");
+    assert_eq!(
+        document["schema_version"],
+        serde_json::json!(RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION)
     );
 }
 

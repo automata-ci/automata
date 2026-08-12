@@ -82,8 +82,9 @@ rebuilds an image after its digest is reviewed:
    contract.
 4. Put that registry digest in `profile-manifest.json`, recompute the manifest
    and Containerfile hashes in `profile-lock.json`, and update
-   `../../crates/automata-ci-runner/config/runner.local.example.json`. Review
-   and merge that lock commit. The control plane does not yet compose a
+   all three `../../crates/automata-ci-runner/config/runner.local-N.example.json`
+   host configurations. Review and merge that lock commit. The control plane
+   does not yet compose a
    profile-catalog configuration, so promotion publishes the reviewed image
    but does not by itself enable hosted-label scheduling.
 5. Make the GHCR package public, then dispatch `promote-locked` from the default

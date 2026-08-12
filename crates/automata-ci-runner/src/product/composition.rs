@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn registered_helper_ceiling_is_reduced_to_the_verified_provider() {
         let config = RunnerProductConfig::from_json(include_bytes!(
-            "../../config/runner.local.example.json"
+            "../../config/runner.local-1.example.json"
         ))
         .expect("checked-in runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();
