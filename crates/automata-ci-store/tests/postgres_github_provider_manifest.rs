@@ -277,6 +277,62 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn authority_policy_only_rotation_is_a_contiguous_manifest_successor() -> TestResult {
+    run_with_database(|database| async move {
+        let tenant = tenant("manifest-authority-policy-rotation");
+        let connection = connection(0x225);
+        let first = manifest(
+            tenant.clone(),
+            connection,
+            RevisionSet::new(1, 1, 1),
+            [7; 32],
+            "Automata CI",
+        );
+        database
+            .store()
+            .bootstrap_github_provider_repository(request(first.clone(), 100))
+            .await?;
+
+        let rotated = manifest(
+            tenant.clone(),
+            connection,
+            RevisionSet::new(2, 1, 2),
+            [7; 32],
+            "Automata CI",
+        );
+        let receipt = database
+            .store()
+            .bootstrap_github_provider_repository(request(rotated.clone(), 200))
+            .await?;
+        assert!(!receipt.manifest().is_replay());
+        assert_eq!(receipt.manifest().current().manifest(), &rotated);
+
+        let replay = database
+            .store()
+            .bootstrap_github_provider_repository(request(rotated.clone(), 300))
+            .await?;
+        assert!(replay.manifest().is_replay());
+
+        let skipped = manifest(
+            tenant,
+            connection,
+            RevisionSet::new(3, 1, 4),
+            [7; 32],
+            "Automata CI",
+        );
+        assert_drift(
+            database
+                .store()
+                .bootstrap_github_provider_repository(request(skipped, 400))
+                .await,
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn verifier_rotation_and_visibility_transitions_are_independently_revisioned() -> TestResult {
     run_with_database(|database| async move {
         let tenant = tenant("manifest-private-transition");
