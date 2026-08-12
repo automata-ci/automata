@@ -26,6 +26,7 @@ use automata_ci_store::{
 };
 use serde_json::{Value, json};
 
+use super::super::github_provider::authority_configuration_fingerprint;
 use super::*;
 
 static CONFIG_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -170,6 +171,40 @@ fn live_test_broker(
         GithubAppCredentialBroker::new(broker_config, &private_key)
             .expect("published RSA fixture constructs a live broker"),
     )
+}
+
+#[test]
+fn production_broker_v1_compatibility_fingerprints_match_migration_0053() {
+    let config = load_config(&document(&[repository(
+        "tenant-compatible-fingerprint",
+        0x201,
+        202,
+        302,
+        402,
+        "octo/compatible-fingerprint",
+        "private",
+        0x801,
+        Some(0x802),
+    )]));
+    let broker = live_test_broker(&config, 202);
+    let [historical_broker_fingerprint] = broker.compatible_historical_broker_policy_fingerprints();
+
+    assert_eq!(
+        authority_configuration_fingerprint(
+            historical_broker_fingerprint,
+            GithubServerServiceScope::ChecksWrite,
+        )
+        .to_string(),
+        "86db54f098adc51219d176555d5f7b5461a4c45ddd0625393846b1b3a5ae6543"
+    );
+    assert_eq!(
+        authority_configuration_fingerprint(
+            historical_broker_fingerprint,
+            GithubServerServiceScope::PrivateRepositorySourceRead,
+        )
+        .to_string(),
+        "878f4bd01bfe4b04e84d9b9eee32667d31d55feebe78a7b2f59ed715b1145b32"
+    );
 }
 
 fn checks_authority(

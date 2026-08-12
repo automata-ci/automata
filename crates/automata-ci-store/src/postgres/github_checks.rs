@@ -5,20 +5,20 @@ use uuid::Uuid;
 
 use crate::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, CompleteGithubCheckProjection,
-    GithubCheckAppId, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
-    GithubCheckSubjectRepository, GithubCheckSubjectTarget, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubCheckTerminalizationRepository, GithubRepositoryName,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceRevision, LinkGithubCheckWorkflowRun, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, StartGithubCheckProjection,
-    TenantScope, TerminalizeGithubCheck,
+    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
+    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckHeadSha,
+    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
+    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
+    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
+    GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
+    GithubCheckTerminalizationRepository, GithubRepositoryName, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceRevision, LinkGithubCheckWorkflowRun,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, ProviderConnectionId, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, StartGithubCheckProjection, TenantScope, TerminalizeGithubCheck,
 };
 
 use super::PostgresStore;
@@ -868,6 +868,46 @@ impl GithubCheckProjectionOutbox for PostgresStore {
             Some(receipt) => Ok(receipt),
             None => Err(GithubCheckStoreError::ProjectionMismatch),
         }
+    }
+
+    async fn block_github_check_projection_for_credential_rejection(
+        &self,
+        request: BlockGithubCheckProjectionForCredentialRejection,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        let query = format!(
+            r"
+            UPDATE github_check_projection_outbox AS outbox
+            SET state = 'blocked',
+                next_attempt_at_ms = NULL,
+                last_failure_kind = NULL,
+                blocked_reason = 'credential_rejected',
+                claim_owner_id = NULL, claim_action = NULL,
+                claimed_desired_revision = NULL, claimed_desired_state = NULL,
+                claimed_desired_conclusion = NULL,
+                claimed_at_ms = NULL, claim_expires_at_ms = NULL,
+                state_updated_at_ms = $4
+            FROM github_check_subjects AS subject
+            WHERE outbox.subject_id = $1
+              AND subject.id = outbox.subject_id
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claimed_at_ms <= $4
+              AND outbox.claim_expires_at_ms > $4
+            RETURNING {SUBJECT_COLUMNS}
+            "
+        );
+        let row = sqlx::query(AssertSqlSafe(query))
+            .bind(request.claim().subject_id().as_uuid())
+            .bind(request.claim().owner().as_uuid())
+            .bind(request.claim().fence_i64())
+            .bind(request.blocked_at().get())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(operation_error)?;
+        row.map(|row| decode_subject(&row).map(|subject| subject.receipt))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ClaimRejected)
     }
 
     async fn retry_github_check_projection(

@@ -4,19 +4,19 @@ mod common;
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, BeginGithubCheckRunCreate, BindGithubCheckRun,
-    BindGithubCheckSuite, ClaimGithubCheckProjection, ClaimedGithubCheckProjection,
-    CompleteGithubCheckProjection, GithubCheckAppId, GithubCheckDesiredProjection,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
-    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
-    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubCheckSubjectRepository as _,
-    GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
-    GithubCheckTerminalizationRepository as _, GithubRepositoryName, LinkGithubCheckWorkflowRun,
-    ObjectKey, ProviderConnectionId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryVisibility, RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate,
-    RepositoryId, ResolveGithubCheckRunCreate, StartGithubCheckProjection, TenantScope,
-    TerminalizeGithubCheck,
+    BindGithubCheckSuite, BlockGithubCheckProjectionForCredentialRejection,
+    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, CompleteGithubCheckProjection,
+    GithubCheckAppId, GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox as _,
+    GithubCheckProjectionWorkerId, GithubCheckRunBindingFence, GithubCheckRunCreateFence,
+    GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
+    GithubCheckSubjectReceipt, GithubCheckSubjectRepository as _, GithubCheckSubjectTarget,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository as _,
+    GithubRepositoryName, LinkGithubCheckWorkflowRun, ObjectKey, ProviderConnectionId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryVisibility,
+    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, StartGithubCheckProjection, TenantScope, TerminalizeGithubCheck,
 };
 use sqlx::migrate::Migrate as _;
 use uuid::Uuid;
@@ -31,6 +31,60 @@ const GITHUB_APP_ID: u64 = 303;
 const HEAD_SHA: [u8; 20] = [9; 20];
 const CLAIM_MILLIS: i64 = 200;
 
+async fn apply_credential_rejection_migration(connection: &mut sqlx::PgConnection) -> TestResult {
+    // Migration 0053 also retires incompatible authorities against the 0035
+    // manifest tables. This 0029-focused fixture has no manifest candidates;
+    // empty connection-local tables let it execute the exact migration while
+    // retirement lifecycle coverage remains in the dedicated 0053 tests.
+    sqlx::query(
+        r"
+        CREATE TEMPORARY TABLE github_provider_manifest_revisions (
+            tenant_id TEXT NOT NULL,
+            repository_id UUID NOT NULL,
+            provider_connection_id UUID NOT NULL,
+            manifest_revision BIGINT NOT NULL,
+            manifest_digest BYTEA NOT NULL,
+            provider_installation_id BIGINT NOT NULL,
+            github_repository_id BIGINT NOT NULL,
+            github_repository_name TEXT NOT NULL,
+            github_app_id BIGINT NOT NULL,
+            github_app_client_id TEXT NOT NULL,
+            github_app_jwt_issuer_kind TEXT NOT NULL,
+            app_key_spki_sha256 BYTEA NOT NULL,
+            app_configuration_revision BIGINT NOT NULL,
+            policy_revision BIGINT NOT NULL,
+            repository_source_authentication TEXT NOT NULL
+        )
+        ",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        r"
+        CREATE TEMPORARY TABLE github_provider_manifest_current (
+            tenant_id TEXT NOT NULL,
+            repository_id UUID NOT NULL,
+            provider_connection_id UUID NOT NULL,
+            manifest_revision BIGINT NOT NULL,
+            manifest_digest BYTEA NOT NULL
+        )
+        ",
+    )
+    .execute(&mut *connection)
+    .await?;
+    let credential_rejection = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 53)
+        .expect("credential-rejection migration");
+    connection
+        .apply(MIGRATOR.table_name.as_ref(), credential_rejection)
+        .await?;
+    sqlx::query("DROP TABLE github_provider_manifest_current, github_provider_manifest_revisions")
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
 async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
     let mut connection = database.pool().acquire().await?;
     connection
@@ -41,6 +95,7 @@ async fn apply_checks_migrations(database: &TestDatabase) -> TestResult {
             .apply(MIGRATOR.table_name.as_ref(), migration)
             .await?;
     }
+    apply_credential_rejection_migration(&mut connection).await?;
     // These focused 0029 lifecycle tests intentionally stop before the 0035
     // current-only cutover. Model only the later immutable selector projection
     // consumed by the current outbox adapter; full 0037 parity is covered by
@@ -300,6 +355,107 @@ async fn wait_until_database(database: &TestDatabase, target: UnixMillis) -> Tes
     while database_now_ms(database).await? < target.get() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
+    Ok(())
+}
+
+async fn github_check_outbox_snapshot(
+    database: &TestDatabase,
+    subject_id: automata_ci_store::GithubCheckSubjectId,
+) -> TestResult<String> {
+    Ok(sqlx::query_scalar(
+        r"
+        SELECT row_to_json(outbox)::text
+        FROM github_check_projection_outbox AS outbox
+        WHERE outbox.subject_id = $1
+        ",
+    )
+    .bind(subject_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?)
+}
+
+async fn assert_credential_block_rejected_without_mutation(
+    database: &TestDatabase,
+    subject_id: automata_ci_store::GithubCheckSubjectId,
+    request: BlockGithubCheckProjectionForCredentialRejection,
+    before: &str,
+) -> TestResult {
+    assert!(matches!(
+        database
+            .store()
+            .block_github_check_projection_for_credential_rejection(request)
+            .await,
+        Err(GithubCheckStoreError::ClaimRejected)
+    ));
+    assert_eq!(
+        github_check_outbox_snapshot(database, subject_id).await?,
+        before,
+        "a rejected credential block must not mutate durable state"
+    );
+    Ok(())
+}
+
+async fn assert_credential_rejection_blocked_state(
+    database: &TestDatabase,
+    fixture: &Fixture,
+    receipt: &GithubCheckSubjectReceipt,
+    create_fence: GithubCheckRunCreateFence,
+    suite: GithubCheckSuiteId,
+    blocked_at: UnixMillis,
+) -> TestResult {
+    let row: (String, String, bool, bool, bool, i64) = sqlx::query_as(
+        r"
+        SELECT state, blocked_reason,
+               claim_owner_id IS NULL
+                   AND claim_action IS NULL
+                   AND claimed_desired_revision IS NULL
+                   AND claimed_desired_state IS NULL
+                   AND claimed_desired_conclusion IS NULL
+                   AND claimed_at_ms IS NULL
+                   AND claim_expires_at_ms IS NULL AS claim_cleared,
+               next_attempt_at_ms IS NULL
+                   AND last_failure_kind IS NULL AS retry_cleared,
+               COALESCE(
+                   external_suite_id = $2
+                   AND external_run_id IS NULL
+                   AND external_bound_at_ms IS NULL
+                   AND create_owner_id = $3
+                   AND create_fence = $4
+                   AND create_started_at_ms = $5
+                   AND create_issue_expires_at_ms = $6
+                   AND reconcile_not_before_ms = $7
+                   AND next_reconcile_at_ms = $7,
+                   FALSE
+               ) AS external_and_create_evidence_preserved,
+               state_updated_at_ms
+        FROM github_check_projection_outbox
+        WHERE subject_id = $1
+        ",
+    )
+    .bind(receipt.subject_id().as_uuid())
+    .bind(i64::try_from(suite.get()).expect("suite ID fits BIGINT"))
+    .bind(create_fence.claim().owner().as_uuid())
+    .bind(i64::try_from(create_fence.claim().fence()).expect("create fence fits BIGINT"))
+    .bind(create_fence.started_at().get())
+    .bind(create_fence.issue_expires_at().get())
+    .bind(create_fence.reconcile_not_before().get())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "blocked".into(),
+            "credential_rejected".into(),
+            true,
+            true,
+            true,
+            blocked_at.get(),
+        )
+    );
+    assert!(
+        claim_projection(database, fixture).await?.is_none(),
+        "a credential-rejected projection must never be reclaimed"
+    );
     Ok(())
 }
 
@@ -802,6 +958,92 @@ async fn assert_missing_create_schedule(
     .expect_err("next reconciliation requires exact missing evidence");
     assert_constraint(&mutate_next, "github_check_projection_next_reconcile_exact");
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn credential_rejection_blocks_only_the_exact_live_claim_without_losing_evidence()
+-> TestResult {
+    run_with_unmigrated_database(|database| async move {
+        apply_checks_migrations(&database).await?;
+        let fixture = seed_fixture(&database).await?;
+        let (receipt, create_fence, suite) = seed_indeterminate_create(
+            &database,
+            &fixture,
+            ".github/workflows/credential-rejection.yml",
+            "Automata / Credential Rejection",
+            500,
+            801,
+        )
+        .await?;
+        wait_until_database(&database, create_fence.reconcile_not_before()).await?;
+        let claimed = claim_projection(&database, &fixture)
+            .await?
+            .expect("reconciliation claim");
+        assert_eq!(
+            claimed.action(),
+            GithubCheckProjectionAction::ReconcileRunCreate
+        );
+
+        let before = github_check_outbox_snapshot(&database, receipt.subject_id()).await?;
+        let wrong_owner = GithubCheckProjectionClaimFence::from_durable_parts(
+            receipt.subject_id(),
+            worker(),
+            claimed.claim().fence(),
+        )?;
+        let wrong_fence = GithubCheckProjectionClaimFence::from_durable_parts(
+            receipt.subject_id(),
+            claimed.claim().owner(),
+            claimed.claim().fence() + 1,
+        )?;
+        for request in [
+            BlockGithubCheckProjectionForCredentialRejection::new(
+                wrong_owner,
+                live_observation(&claimed),
+            )?,
+            BlockGithubCheckProjectionForCredentialRejection::new(
+                wrong_fence,
+                live_observation(&claimed),
+            )?,
+            BlockGithubCheckProjectionForCredentialRejection::new(
+                claimed.claim(),
+                claimed.expires_at(),
+            )?,
+        ] {
+            assert_credential_block_rejected_without_mutation(
+                &database,
+                receipt.subject_id(),
+                request,
+                &before,
+            )
+            .await?;
+        }
+
+        let blocked_at = live_observation(&claimed);
+        assert_eq!(
+            database
+                .store()
+                .block_github_check_projection_for_credential_rejection(
+                    BlockGithubCheckProjectionForCredentialRejection::new(
+                        claimed.claim(),
+                        blocked_at,
+                    )?,
+                )
+                .await?,
+            receipt
+        );
+        assert_credential_rejection_blocked_state(
+            &database,
+            &fixture,
+            &receipt,
+            create_fence,
+            suite,
+            blocked_at,
+        )
+        .await?;
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

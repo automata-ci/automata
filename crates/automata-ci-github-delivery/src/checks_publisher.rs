@@ -22,19 +22,19 @@ use automata_ci_github::{
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, CompleteGithubCheckProjection,
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckDesiredProjection,
-    GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox,
-    GithubCheckProjectionWorkerId, GithubCheckRunBindingFence, GithubCheckRunCreateFence,
-    GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity, GithubCheckSubjectReceipt,
-    GithubCheckSuiteId, GithubCheckValueError, GithubServerServiceAction,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
-    GithubServerServiceRevision, GithubServerServiceWorkerId, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
-    MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
-    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, TenantScope,
+    BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
+    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    GithubCheckConclusion, GithubCheckDesiredProjection, GithubCheckProjectionAction,
+    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
+    GithubCheckSubjectIdentity, GithubCheckSubjectReceipt, GithubCheckSuiteId,
+    GithubCheckValueError, GithubServerServiceAction, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS,
+    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderInstallationId,
+    ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, TenantScope,
 };
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
@@ -475,7 +475,7 @@ pub enum GithubChecksPublisherOutcome {
     RetryScheduled(GithubCheckSubjectReceipt),
     /// A Check Run create may have succeeded and must be reconciled before another POST.
     ReconciliationRequired(GithubCheckRunCreateFence),
-    /// Multiple exact provider identities were observed and the outbox was blocked.
+    /// Exact durable evidence made this projection permanently unpublishable.
     Blocked(GithubCheckSubjectReceipt),
 }
 
@@ -488,8 +488,8 @@ pub enum GithubChecksPublisherError {
     /// The repository adapter returned a claim inconsistent with the exact request.
     #[error("the GitHub Checks outbox returned an invalid claim")]
     InvalidClaim,
-    /// Current server-service authority rejected the operation.
-    #[error("the GitHub Checks server-service credential was rejected")]
+    /// GitHub rejected a credential after exact local authority handed it off.
+    #[error("GitHub rejected the exact Checks server-service credential")]
     CredentialRejected,
     /// Returned credential binding or lifetime was not exact.
     #[error("the GitHub Checks server-service credential was not exact")]
@@ -579,8 +579,8 @@ impl GithubChecksPublisher {
     ///
     /// # Errors
     ///
-    /// Fails closed on stale durability, credential rejection or mismatch,
-    /// provider identity/state mismatch, and local invariant violations.
+    /// Fails closed on stale durability, handed-off credential rejection or
+    /// mismatch, provider identity/state mismatch, and local invariant violations.
     pub async fn run_once(
         &self,
         connection_id: ProviderConnectionId,
@@ -639,7 +639,7 @@ impl GithubChecksPublisher {
                     .await;
             }
             Ok(Err(GithubChecksCredentialProviderError::Rejected)) => {
-                return Err(GithubChecksPublisherError::CredentialRejected);
+                return self.block_credential_rejection(&claimed, horizon).await;
             }
             Ok(Err(GithubChecksCredentialProviderError::InvariantViolation)) => {
                 return Err(GithubChecksPublisherError::CredentialMismatch);
@@ -682,6 +682,23 @@ impl GithubChecksPublisher {
         };
         release_credential(credential, deadline).await;
         outcome
+    }
+
+    async fn block_credential_rejection(
+        &self,
+        claimed: &ClaimedGithubCheckProjection,
+        horizon: GithubChecksClaimHorizon,
+    ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
+        let request = BlockGithubCheckProjectionForCredentialRejection::new(
+            claimed.claim(),
+            horizon.observed_at()?,
+        )
+        .map_err(invariant)?;
+        let receipt = self
+            .outbox
+            .block_github_check_projection_for_credential_rejection(request)
+            .await?;
+        Ok(GithubChecksPublisherOutcome::Blocked(receipt))
     }
 
     async fn ensure_suite(
