@@ -196,6 +196,11 @@ BEGIN
     IF NOT (
         NEW.requirements @> '{"schema_version": 3}'::jsonb
         AND NEW.requirements ? 'resource_allocation'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM workflow_runs AS run
+        WHERE run.id = NEW.run_id
+          AND run.runner_requirements_schema = 3
     ) THEN
         RAISE EXCEPTION 'new executable rows require runner-requirements schema v3'
             USING ERRCODE = 'check_violation',

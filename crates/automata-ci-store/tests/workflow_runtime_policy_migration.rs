@@ -9,11 +9,11 @@ use uuid::Uuid;
 use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_database};
 
 const ORIGINAL_VERSION: i64 = 43;
-const FORWARD_VERSION: i64 = 65;
+const FORWARD_VERSION: i64 = 66;
 const ORIGINAL_MIGRATION: &str =
     include_str!("../migrations/0043_workflow_runtime_policy_and_selection.sql");
 const FORWARD_MIGRATION: &str =
-    include_str!("../migrations/0065_workflow_runtime_resource_policy.sql");
+    include_str!("../migrations/0066_workflow_runtime_resource_policy.sql");
 const LEGACY_CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}]}"#;
 const POLICY: &[u8] = br#"{
   "workspace":{"derivation":1,"root":"/__w","schema":1},
@@ -54,8 +54,8 @@ fn committed_0043_is_byte_exact_and_resources_are_forward_only() {
     let forward = migrations
         .iter()
         .position(|migration| migration.version == FORWARD_VERSION)
-        .expect("migration 0065 is embedded");
-    assert_eq!(migrations[forward - 1].version, 64);
+        .expect("migration 0066 is embedded");
+    assert_eq!(migrations[forward - 1].version, 65);
     assert_eq!(
         migrations[forward].description.as_ref(),
         "workflow runtime resource policy"
@@ -180,7 +180,7 @@ async fn pre_resource_rows_refuse_ambiguous_backfill_atomically() -> TestResult 
             SELECT
                 (SELECT count(*) FROM workflow_runtime_policy_revisions),
                 (SELECT count(*) FROM _sqlx_migrations
-                 WHERE version = 65 AND success),
+                 WHERE version = 66 AND success),
                 EXISTS (
                     SELECT 1 FROM information_schema.columns
                     WHERE table_schema = current_schema()
@@ -255,7 +255,7 @@ async fn assert_resource_schema(database: &TestDatabase) -> TestResult {
                   AND is_nullable = 'NO'
             ),
             (SELECT count(*) FROM _sqlx_migrations
-             WHERE version IN (43, 65) AND success),
+             WHERE version IN (43, 66) AND success),
             to_regprocedure('automata_workflow_runtime_resource_policy_digest(bytea)')::TEXT
         ",
     )
@@ -297,7 +297,7 @@ async fn insert_pre_resource_policy_revision(database: &TestDatabase) -> TestRes
     let (tenant, repository) = insert_repository(database).await?;
     let digest = legacy_policy_digest();
     let mut transaction = database.pool().begin().await?;
-    // This test needs only the pre-0065 runtime-policy half of the aggregate.
+    // This test needs only the pre-0066 runtime-policy half of the aggregate.
     // Suppress the unrelated provider-manifest pairing event while preserving
     // every runtime-policy lifecycle, catalog, digest, and currentness trigger.
     sqlx::query(

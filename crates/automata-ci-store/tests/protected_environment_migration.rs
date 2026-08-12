@@ -1,4 +1,4 @@
-const MIGRATION: &str = include_str!("../migrations/0062_protected_environment_variables.sql");
+const MIGRATION: &str = include_str!("../migrations/0064_protected_environment_variables.sql");
 const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/protected_environment.rs");
 
 #[test]
@@ -47,11 +47,11 @@ fn migration_proves_current_reviewer_threshold_and_has_no_administrative_bypass(
     }
     assert!(
         !MIGRATION.contains("administrative_approval"),
-        "0062 must not introduce an administrative approval bypass"
+        "0064 must not introduce an administrative approval bypass"
     );
     assert!(
         !MIGRATION.contains("administrative_rejection"),
-        "0062 must not introduce an administrative rejection bypass"
+        "0064 must not introduce an administrative rejection bypass"
     );
 }
 

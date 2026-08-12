@@ -1,19 +1,19 @@
-const MIGRATION: &str = include_str!("../migrations/0052_reusable_workflow_runtime.sql");
+const MIGRATION: &str = include_str!("../migrations/0055_reusable_workflow_runtime.sql");
 const AUTHORITY_MIGRATION: &str =
-    include_str!("../migrations/0061_reusable_workflow_runtime_authority.sql");
+    include_str!("../migrations/0063_reusable_workflow_runtime_authority.sql");
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[test]
-fn migration_0052_is_embedded_after_the_planning_ledger() {
+fn migration_0055_is_embedded_after_the_planning_ledger() {
     let planning = MIGRATOR
         .iter()
         .find(|migration| migration.version == 51)
         .expect("migration 0051 is embedded");
     let runtime = MIGRATOR
         .iter()
-        .find(|migration| migration.version == 52)
-        .expect("migration 0052 is embedded");
+        .find(|migration| migration.version == 55)
+        .expect("migration 0055 is embedded");
     assert_eq!(planning.description.as_ref(), "reusable workflow expansion");
     assert_eq!(runtime.description.as_ref(), "reusable workflow runtime");
 }
@@ -113,11 +113,11 @@ fn reusable_completion_enters_the_existing_needs_and_run_result_model_once() {
 }
 
 #[test]
-fn migration_0061_binds_child_authority_to_publication_and_permission_evidence() {
+fn migration_0063_binds_child_authority_to_publication_and_permission_evidence() {
     let authority = MIGRATOR
         .iter()
-        .find(|migration| migration.version == 61)
-        .expect("migration 0061 is embedded");
+        .find(|migration| migration.version == 63)
+        .expect("migration 0063 is embedded");
     assert_eq!(
         authority.description.as_ref(),
         "reusable workflow runtime authority"
@@ -156,12 +156,12 @@ fn migration_0061_binds_child_authority_to_publication_and_permission_evidence()
     assert!(
         !AUTHORITY_MIGRATION.contains("github_workflow_run_subject_evidence AS")
             && !AUTHORITY_MIGRATION.contains("github_provider_delivery_evidence AS"),
-        "migration 0061 must consume only the closed run-origin projection"
+        "migration 0063 must consume only the closed run-origin projection"
     );
 }
 
 #[test]
-fn migration_0061_idle_reconciliation_uses_the_execution_visibility_predicate() {
+fn migration_0063_idle_reconciliation_uses_the_execution_visibility_predicate() {
     for required in [
         "CREATE OR REPLACE FUNCTION automata_validate_activation_work_selection_transition",
         "CREATE OR REPLACE FUNCTION automata_validate_materialization_work_selection_transition",

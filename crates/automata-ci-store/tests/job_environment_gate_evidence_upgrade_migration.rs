@@ -6,28 +6,99 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_unmigrated_database, seed_control_plane};
 
-const MIGRATION_VERSION: i64 = 66;
+const MIGRATION_VERSION: i64 = 67;
 const REFUSAL_CONSTRAINT: &str = "job_environment_evidence_active_legacy_instances";
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn active_zero_instance_publication_migrates_and_is_retained() -> TestResult {
+    run_with_unmigrated_database(|database| async move {
+        apply_before_0067(&database).await?;
+        let seed = seed_control_plane(database.pool(), 0).await?;
+        insert_zero_instance_activation_publication(&database, seed.run_id.as_uuid()).await?;
+
+        let before: (String, String, String, String, bool, i32, i64) = sqlx::query_as(
+            r"
+            SELECT run.status, marker.state, invocation.state, logical_job.state,
+                   publication.condition_matched, publication.instance_count,
+                   (SELECT count(*) FROM workflow_plan_v2_instances
+                    WHERE run_id = run.id)
+            FROM workflow_runs AS run
+            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+            JOIN workflow_plan_v2_invocations AS invocation
+              ON invocation.run_id = run.id
+            JOIN workflow_plan_v2_jobs AS logical_job
+              ON logical_job.run_id = invocation.run_id
+             AND logical_job.invocation_id = invocation.id
+            JOIN workflow_plan_v2_activation_publications AS publication
+              ON publication.run_id = logical_job.run_id
+             AND publication.invocation_id = logical_job.invocation_id
+             AND publication.logical_job_id = logical_job.id
+            WHERE run.id = $1
+            ",
+        )
+        .bind(seed.run_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(before.0, "queued");
+        assert_eq!(
+            (before.1.as_str(), before.2.as_str(), before.3.as_str()),
+            ("active", "active", "activated")
+        );
+        assert!(before.4);
+        assert_eq!((before.5, before.6), (0, 0));
+
+        let mut connection = database.pool().acquire().await?;
+        connection
+            .apply(MIGRATOR.table_name.as_ref(), migration_0067())
+            .await?;
+        drop(connection);
+
+        let retained: (i64, i64, i32, i64, String, String) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM _sqlx_migrations
+                 WHERE version = 67 AND success),
+                (SELECT count(*)
+                 FROM workflow_plan_v2_activation_publications
+                 WHERE run_id = $1),
+                (SELECT instance_count
+                 FROM workflow_plan_v2_activation_publications
+                 WHERE run_id = $1),
+                (SELECT count(*) FROM workflow_plan_v2_instances
+                 WHERE run_id = $1),
+                (SELECT status FROM workflow_runs WHERE id = $1),
+                (SELECT state FROM workflow_plan_v2_runs WHERE run_id = $1)
+            ",
+        )
+        .bind(seed.run_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(retained, (1, 1, 0, 0, "queued".into(), "active".into()));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrates() -> TestResult {
     run_with_unmigrated_database(|database| async move {
-        apply_before_0066(&database).await?;
+        apply_before_0067(&database).await?;
         let seed = seed_control_plane(database.pool(), 0).await?;
         insert_activation_instance(&database, seed.run_id.as_uuid(), false, false).await?;
 
         let mut connection = database.pool().acquire().await?;
         let error = connection
-            .apply(MIGRATOR.table_name.as_ref(), migration_0066())
+            .apply(MIGRATOR.table_name.as_ref(), migration_0067())
             .await
             .expect_err("active legacy instances have no reconstructible gate evidence");
         assert_migration_refusal(error);
         drop(connection);
 
-        assert_0066_absent(&database).await?;
+        assert_0067_absent(&database).await?;
 
         sqlx::query("ALTER TABLE workflow_runs DISABLE TRIGGER USER")
             .execute(database.pool())
@@ -53,7 +124,7 @@ async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrate
 
         let mut connection = database.pool().acquire().await?;
         connection
-            .apply(MIGRATOR.table_name.as_ref(), migration_0066())
+            .apply(MIGRATOR.table_name.as_ref(), migration_0067())
             .await?;
         drop(connection);
 
@@ -72,7 +143,7 @@ async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrate
             r"
             SELECT
                 (SELECT count(*) FROM _sqlx_migrations
-                 WHERE version = 66 AND success),
+                 WHERE version = 67 AND success),
                 (SELECT count(*) FROM workflow_plan_v2_instances
                  WHERE run_id = $1),
                 (SELECT count(*)
@@ -111,18 +182,18 @@ async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrate
         .await?;
         assert_eq!(applied.0, 1);
         assert_eq!(applied.1, 1, "terminal activation history must be retained");
-        assert_eq!(applied.2, 0, "0066 must not guess historical evidence");
-        assert!(applied.3.is_some(), "0066 evidence validator must exist");
-        assert!(applied.4.is_some(), "0066 identity-chain helper must exist");
+        assert_eq!(applied.2, 0, "0067 must not guess historical evidence");
+        assert!(applied.3.is_some(), "0067 evidence validator must exist");
+        assert!(applied.4.is_some(), "0067 identity-chain helper must exist");
         assert!(
             applied.5.is_some(),
-            "0066 commit-time evidence validator must exist"
+            "0067 commit-time evidence validator must exist"
         );
         assert_eq!(applied.6, 1, "evidence trigger must be deferred");
         assert_eq!(
             (applied.7, applied.8),
             (0, 0),
-            "0066 must not globally constrain retained reusable bindings"
+            "0067 must not globally constrain retained reusable bindings"
         );
         assert_eq!(applied.9, "completed");
 
@@ -130,7 +201,7 @@ async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrate
         let error =
             insert_activation_instance(&database, current_seed.run_id.as_uuid(), true, false)
                 .await
-                .expect_err("a post-0066 instance cannot commit without evidence");
+                .expect_err("a post-0067 instance cannot commit without evidence");
         let database_error = error
             .as_database_error()
             .expect("commit-time refusal is a PostgreSQL error");
@@ -159,7 +230,7 @@ async fn active_legacy_instance_refuses_atomically_then_terminal_history_migrate
     .await
 }
 
-async fn apply_before_0066(database: &TestDatabase) -> TestResult {
+async fn apply_before_0067(database: &TestDatabase) -> TestResult {
     let mut connection = database.pool().acquire().await?;
     connection
         .ensure_migrations_table(MIGRATOR.table_name.as_ref())
@@ -175,11 +246,11 @@ async fn apply_before_0066(database: &TestDatabase) -> TestResult {
     Ok(())
 }
 
-fn migration_0066() -> &'static sqlx::migrate::Migration {
+fn migration_0067() -> &'static sqlx::migrate::Migration {
     MIGRATOR
         .iter()
         .find(|migration| migration.version == MIGRATION_VERSION)
-        .expect("migration 0066 is embedded")
+        .expect("migration 0067 is embedded")
 }
 
 fn assert_migration_refusal(error: sqlx::migrate::MigrateError) {
@@ -195,7 +266,7 @@ fn assert_migration_refusal(error: sqlx::migrate::MigrateError) {
     }
 }
 
-async fn assert_0066_absent(database: &TestDatabase) -> TestResult {
+async fn assert_0067_absent(database: &TestDatabase) -> TestResult {
     let absent: (
         i64,
         Option<String>,
@@ -209,7 +280,7 @@ async fn assert_0066_absent(database: &TestDatabase) -> TestResult {
         r"
         SELECT
             (SELECT count(*) FROM _sqlx_migrations
-             WHERE version = 66 AND success),
+             WHERE version = 67 AND success),
             to_regclass('workflow_plan_v2_job_environment_evidence')::TEXT,
             to_regprocedure(
                 'automata_validate_job_environment_activation_evidence()'
@@ -245,6 +316,31 @@ async fn insert_activation_instance(
     preserve_evidence_trigger: bool,
     insert_evidence: bool,
 ) -> Result<(), sqlx::Error> {
+    insert_activation_publication(
+        database,
+        run_id,
+        preserve_evidence_trigger,
+        true,
+        insert_evidence,
+    )
+    .await
+}
+
+async fn insert_zero_instance_activation_publication(
+    database: &TestDatabase,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    insert_activation_publication(database, run_id, false, false, false).await
+}
+
+async fn insert_activation_publication(
+    database: &TestDatabase,
+    run_id: Uuid,
+    preserve_evidence_trigger: bool,
+    insert_instance: bool,
+    insert_evidence: bool,
+) -> Result<(), sqlx::Error> {
+    debug_assert!(insert_instance || !insert_evidence);
     let invocation_id = Uuid::new_v4();
     let logical_job_id = Uuid::new_v4();
     let instance_id = Uuid::new_v4();
@@ -304,8 +400,8 @@ async fn insert_activation_instance(
             r"
         INSERT INTO workflow_plan_v2_runs (
             run_id, root_invocation_id, admission_digest, state,
-            admitted_at_ms, updated_at_ms
-        ) VALUES ($1,$2,$3,'active',1,1)
+            admitted_at_ms, updated_at_ms, runner_requirements_schema
+        ) VALUES ($1,$2,$3,'active',1,1,3)
         ",
         )
         .bind(run_id)
@@ -319,7 +415,7 @@ async fn insert_activation_instance(
             id, run_id, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, state, created_at_ms, updated_at_ms
         ) VALUES (
-            $1,$2,$3,'migration-0066/plan.json',128,
+            $1,$2,$3,'migration-0067/plan.json',128,
             'application/vnd.automata.workflow-plan+json',2,'active',1,1
         )
         ",
@@ -360,7 +456,7 @@ async fn insert_activation_instance(
             job_ir_version, runtime_context_schema, published_at_ms,
             authority_profile, runtime_policy_revision, runtime_policy_digest
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,1,1,1000,TRUE,1,5,2,2,'standard',1,$7
+            $1,$2,$3,$4,$5,$6,1,1,1000,TRUE,$7,5,2,2,'standard',1,$8
         )
         ",
         )
@@ -370,38 +466,41 @@ async fn insert_activation_instance(
         .bind(activation_input_digest.as_slice())
         .bind([0x81_u8; 32].as_slice())
         .bind(owner_id)
+        .bind(if insert_instance { 1_i32 } else { 0_i32 })
         .bind(runtime_policy_digest.as_slice())
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            r"
-        INSERT INTO workflow_plan_v2_instances (
-            id, run_id, invocation_id, logical_job_id, matrix_index,
-            matrix_total, matrix_digest, workspace, job_ir_digest,
-            job_ir_object_key, job_ir_size_bytes, job_ir_media_type,
-            job_ir_version, runtime_context_digest,
-            runtime_context_object_key, runtime_context_size_bytes,
-            runtime_context_media_type, runtime_context_schema, created_at_ms,
-            runtime_policy_revision, runtime_policy_digest
-        ) VALUES (
-            $1,$2,$3,$4,0,1,$5,'/__w/migration-0066',$6,
-            'migration-0066/job-ir.pb',128,
-            'application/vnd.automata.job-ir.protobuf',5,$7,
-            'migration-0066/runtime-context.pb',128,
-            'application/vnd.automata.job-runtime-context.protobuf',2,2,1,$8
-        )
-        ",
-        )
-        .bind(instance_id)
-        .bind(run_id)
-        .bind(invocation_id)
-        .bind(logical_job_id)
-        .bind([0x91_u8; 32].as_slice())
-        .bind([0xa1_u8; 32].as_slice())
-        .bind([0xb1_u8; 32].as_slice())
-        .bind(runtime_policy_digest.as_slice())
-        .execute(&mut *transaction)
-        .await?;
+        if insert_instance {
+            sqlx::query(
+                r"
+            INSERT INTO workflow_plan_v2_instances (
+                id, run_id, invocation_id, logical_job_id, matrix_index,
+                matrix_total, matrix_digest, workspace, job_ir_digest,
+                job_ir_object_key, job_ir_size_bytes, job_ir_media_type,
+                job_ir_version, runtime_context_digest,
+                runtime_context_object_key, runtime_context_size_bytes,
+                runtime_context_media_type, runtime_context_schema, created_at_ms,
+                runtime_policy_revision, runtime_policy_digest
+            ) VALUES (
+                $1,$2,$3,$4,0,1,$5,'/__w/migration-0067',$6,
+                'migration-0067/job-ir.pb',128,
+                'application/vnd.automata.job-ir.protobuf',5,$7,
+                'migration-0067/runtime-context.pb',128,
+                'application/vnd.automata.job-runtime-context.protobuf',2,2,1,$8
+            )
+            ",
+            )
+            .bind(instance_id)
+            .bind(run_id)
+            .bind(invocation_id)
+            .bind(logical_job_id)
+            .bind([0x91_u8; 32].as_slice())
+            .bind([0xa1_u8; 32].as_slice())
+            .bind([0xb1_u8; 32].as_slice())
+            .bind(runtime_policy_digest.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         if insert_evidence {
             sqlx::query(

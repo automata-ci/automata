@@ -6,17 +6,17 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_unmigrated_database, seed_control_plane};
 
-const MIGRATION_VERSION: i64 = 60;
-const MIGRATION: &str = include_str!("../migrations/0060_managed_secret_delivery.sql");
+const MIGRATION_VERSION: i64 = 62;
+const MIGRATION: &str = include_str!("../migrations/0062_managed_secret_delivery.sql");
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[test]
-fn migration_0060_is_value_free_append_only_and_revision_pinned() {
+fn migration_0062_is_value_free_append_only_and_revision_pinned() {
     let migration = MIGRATOR
         .iter()
         .find(|migration| migration.version == MIGRATION_VERSION)
-        .expect("migration 0060 is embedded");
+        .expect("migration 0062 is embedded");
     assert_eq!(migration.description.as_ref(), "managed secret delivery");
     for required in [
         "protected_environment_approval_revision_backfill_refused",
@@ -58,7 +58,7 @@ fn migration_0060_is_value_free_append_only_and_revision_pinned() {
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn migration_refuses_to_guess_revision_for_existing_approval_evidence() -> TestResult {
     run_with_unmigrated_database(|database| async move {
-        apply_before_0060(&database).await?;
+        apply_before_0062(&database).await?;
         let seed = seed_control_plane(database.pool(), 0).await?;
         let attempt_id = Uuid::new_v4();
         sqlx::query(
@@ -113,7 +113,7 @@ async fn migration_refuses_to_guess_revision_for_existing_approval_evidence() ->
         let migration = MIGRATOR
             .iter()
             .find(|migration| migration.version == MIGRATION_VERSION)
-            .expect("migration 0060");
+            .expect("migration 0062");
         let mut connection = database.pool().acquire().await?;
         let error = connection
             .apply(MIGRATOR.table_name.as_ref(), migration)
@@ -146,13 +146,13 @@ async fn migration_refuses_to_guess_revision_for_existing_approval_evidence() ->
         )
         .fetch_one(database.pool())
         .await?;
-        assert!(!revision_column_exists, "0060 must roll back atomically");
+        assert!(!revision_column_exists, "0062 must roll back atomically");
         Ok(())
     })
     .await
 }
 
-async fn apply_before_0060(database: &TestDatabase) -> TestResult {
+async fn apply_before_0062(database: &TestDatabase) -> TestResult {
     let mut connection = database.pool().acquire().await?;
     connection
         .ensure_migrations_table(MIGRATOR.table_name.as_ref())
