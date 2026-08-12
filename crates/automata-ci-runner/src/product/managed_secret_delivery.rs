@@ -221,7 +221,9 @@ fn sorted_bindings(
 ) -> Result<Vec<ManagedSecretDeliveryBinding>, ExecutorError> {
     let mut bindings = overlay.bindings().iter().collect::<Vec<_>>();
     bindings.sort_unstable_by(|left, right| {
-        left.binding().binding_id().cmp(right.binding().binding_id())
+        left.binding()
+            .binding_id()
+            .cmp(right.binding().binding_id())
     });
     bindings
         .into_iter()
@@ -355,9 +357,7 @@ const fn cancelled() -> ExecutorError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use automata_ci_core::{
         AttemptId, FencingToken, Lease, LeaseId, RunnerId, SecretBinding, UnixMillis,
@@ -451,9 +451,7 @@ mod tests {
             .expect("partial value"),
         ]);
         assert_eq!(
-            install_values(&overlay(), partial)
-                .unwrap_err()
-                .kind(),
+            install_values(&overlay(), partial).unwrap_err().kind(),
             ExecutorErrorKind::InvalidJob
         );
     }
@@ -475,9 +473,7 @@ mod tests {
             .expect("unchanged version"),
         ]);
         assert_eq!(
-            install_values(&overlay(), changed)
-                .unwrap_err()
-                .kind(),
+            install_values(&overlay(), changed).unwrap_err().kind(),
             ExecutorErrorKind::InvalidJob
         );
     }
@@ -499,9 +495,7 @@ mod tests {
             .expect("valid value"),
         ]);
         assert_eq!(
-            install_values(&overlay(), non_utf8)
-                .unwrap_err()
-                .kind(),
+            install_values(&overlay(), non_utf8).unwrap_err().kind(),
             ExecutorErrorKind::InvalidJob
         );
     }

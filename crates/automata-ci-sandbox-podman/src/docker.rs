@@ -609,6 +609,12 @@ impl ProxyPolicy {
         let volume = format!("{name}_state");
         let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
         let object = document.as_object_mut().ok_or(())?;
+        if object
+            .keys()
+            .any(|field| !allowed_buildkit_create_field(field))
+        {
+            return Err(());
+        }
         let image = object.get("Image").and_then(Value::as_str).ok_or(())?;
         if image != BUILDX_DEFAULT_IMAGE {
             return Err(());
@@ -1105,12 +1111,40 @@ impl ProxyPolicy {
     }
 
     fn rewrite_buildkit_image_inspect(&self, body: &[u8]) -> Result<Vec<u8>, ()> {
-        self.buildkit()?;
-        let mut document: Value = serde_json::from_slice(body).map_err(|_| ())?;
-        let object = document.as_object_mut().ok_or(())?;
-        object.remove("Descriptor");
-        object.insert("RepoTags".to_owned(), json!([BUILDX_DEFAULT_IMAGE]));
-        serde_json::to_vec(&document).map_err(|_| ())
+        let buildkit = self.buildkit()?;
+        let document: Value = serde_json::from_slice(body).map_err(|_| ())?;
+        let object = document.as_object().ok_or(())?;
+        let expected_id = buildkit
+            .image
+            .rsplit_once('@')
+            .map(|(_, digest)| digest)
+            .ok_or(())?;
+        let id = object.get("Id").and_then(Value::as_str).ok_or(())?;
+        if id != expected_id {
+            return Err(());
+        }
+        serde_json::to_vec(&json!({
+            "Id": id,
+            "RepoTags": [BUILDX_DEFAULT_IMAGE],
+            "RepoDigests": [],
+        }))
+        .map_err(|_| ())
+    }
+
+    fn rewrite_buildkit_image_inspect_response(
+        &self,
+        response: &mut BufferedResponse,
+    ) -> Result<(), ()> {
+        let status = parse_backend_status(&response.status_line).map_err(|_| ())?;
+        let body = match status {
+            200 => self.rewrite_buildkit_image_inspect(&response.body)?,
+            300..=599 => br#"{"message":"BuildKit image is unavailable"}"#.to_vec(),
+            _ => return Err(()),
+        };
+        response.status_line = format!("HTTP/1.1 {status} BuildKit image response");
+        response.fields = vec![("Content-Type".to_owned(), "application/json".to_owned())];
+        response.body = body;
+        Ok(())
     }
 }
 
@@ -1500,10 +1534,48 @@ fn validate_buildkit_command(value: Option<&Value>) -> Result<(), ()> {
     .ok_or(())
 }
 
+fn allowed_buildkit_create_field(field: &str) -> bool {
+    matches!(
+        field,
+        "Hostname"
+            | "Domainname"
+            | "User"
+            | "AttachStdin"
+            | "AttachStdout"
+            | "AttachStderr"
+            | "ExposedPorts"
+            | "Tty"
+            | "OpenStdin"
+            | "StdinOnce"
+            | "Env"
+            | "Cmd"
+            | "Healthcheck"
+            | "ArgsEscaped"
+            | "Image"
+            | "Volumes"
+            | "WorkingDir"
+            | "Entrypoint"
+            | "NetworkDisabled"
+            | "OnBuild"
+            | "Labels"
+            | "StopSignal"
+            | "StopTimeout"
+            | "Shell"
+            | "HostConfig"
+            | "NetworkingConfig"
+    )
+}
+
 fn validate_buildkit_host_config(
     host: &Map<String, Value>,
     expected_volume: &str,
 ) -> Result<(), ()> {
+    if host
+        .keys()
+        .any(|field| !allowed_buildkit_host_config_field(field))
+    {
+        return Err(());
+    }
     if host.get("Privileged").and_then(Value::as_bool) != Some(true)
         || host.get("Init").and_then(Value::as_bool) != Some(true)
     {
@@ -1558,7 +1630,7 @@ fn validate_buildkit_host_config(
     }
     reject_buildkit_resource_overrides(host)?;
     if let Some(network) = host.get("NetworkMode").and_then(Value::as_str)
-        && !matches!(network, "" | "default" | "bridge")
+        && !network.is_empty()
     {
         return Err(());
     }
@@ -1575,15 +1647,96 @@ fn validate_buildkit_host_config(
             .keys()
             .any(|key| !matches!(key.as_str(), "Name" | "MaximumRetryCount"))
             || !policy.get("MaximumRetryCount").is_none_or(empty_json)
-            || !policy
-                .get("Name")
-                .and_then(Value::as_str)
-                .is_none_or(|name| matches!(name, "" | "no" | "unless-stopped"))
+            || policy.get("Name").and_then(Value::as_str) != Some("unless-stopped")
         {
             return Err(());
         }
     }
+    validate_zero_console_size(host.get("ConsoleSize"))?;
     validate_buildkit_mounts(host.get("Mounts"), expected_volume)
+}
+
+fn allowed_buildkit_host_config_field(field: &str) -> bool {
+    matches!(
+        field,
+        "Binds"
+            | "ContainerIDFile"
+            | "LogConfig"
+            | "NetworkMode"
+            | "PortBindings"
+            | "RestartPolicy"
+            | "AutoRemove"
+            | "VolumeDriver"
+            | "VolumesFrom"
+            | "ConsoleSize"
+            | "Annotations"
+            | "CapAdd"
+            | "CapDrop"
+            | "CgroupnsMode"
+            | "Dns"
+            | "DnsOptions"
+            | "DnsSearch"
+            | "ExtraHosts"
+            | "GroupAdd"
+            | "IpcMode"
+            | "Cgroup"
+            | "Links"
+            | "OomScoreAdj"
+            | "PidMode"
+            | "Privileged"
+            | "PublishAllPorts"
+            | "ReadonlyRootfs"
+            | "SecurityOpt"
+            | "StorageOpt"
+            | "Tmpfs"
+            | "UTSMode"
+            | "UsernsMode"
+            | "ShmSize"
+            | "Sysctls"
+            | "Runtime"
+            | "Isolation"
+            | "CpuShares"
+            | "Memory"
+            | "NanoCpus"
+            | "CgroupParent"
+            | "BlkioWeight"
+            | "BlkioWeightDevice"
+            | "BlkioDeviceReadBps"
+            | "BlkioDeviceWriteBps"
+            | "BlkioDeviceReadIOps"
+            | "BlkioDeviceWriteIOps"
+            | "CpuPeriod"
+            | "CpuQuota"
+            | "CpuRealtimePeriod"
+            | "CpuRealtimeRuntime"
+            | "CpusetCpus"
+            | "CpusetMems"
+            | "Devices"
+            | "DeviceCgroupRules"
+            | "DeviceRequests"
+            | "MemoryReservation"
+            | "MemorySwap"
+            | "MemorySwappiness"
+            | "OomKillDisable"
+            | "PidsLimit"
+            | "Ulimits"
+            | "CpuCount"
+            | "CpuPercent"
+            | "IOMaximumIOps"
+            | "IOMaximumBandwidth"
+            | "Mounts"
+            | "MaskedPaths"
+            | "ReadonlyPaths"
+            | "Init"
+    )
+}
+
+fn validate_zero_console_size(value: Option<&Value>) -> Result<(), ()> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(size)) if size.len() == 2 && size.iter().all(empty_json) => Ok(()),
+        Some(_) => Err(()),
+    }
 }
 
 fn reject_buildkit_resource_overrides(host: &Map<String, Value>) -> Result<(), ()> {
@@ -2058,11 +2211,9 @@ fn handle_connection(
         }
         ResponseTransform::RewriteBuildKitImageInspect => {
             let mut response = read_response(&mut backend, MAX_CONTROL_BODY_BYTES)?;
-            if response.success() {
-                response.body = policy
-                    .rewrite_buildkit_image_inspect(&response.body)
-                    .map_err(|()| io::Error::other("invalid BuildKit image inspect response"))?;
-            }
+            policy
+                .rewrite_buildkit_image_inspect_response(&mut response)
+                .map_err(|()| io::Error::other("invalid BuildKit image inspect response"))?;
             let response_bytes = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
             response.write_to(&mut client)?;
             observation.complete(DockerProxyOutcome::Forwarded, response_bytes);

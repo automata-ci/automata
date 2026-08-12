@@ -1,6 +1,7 @@
 use std::{fmt, time::SystemTime};
 
-use automata_ci_core::{LeaseId, UnixMillis};
+use async_trait::async_trait;
+use automata_ci_core::{AttemptId, LeaseId, UnixMillis};
 use automata_ci_store::{
     RunnableAttemptRepository, RunnerClaimRepository, RunnerRoutingRepository,
     RunnerSlotAvailabilityRepository,
@@ -31,6 +32,30 @@ impl<T> LeasePollRepository for T where
         + Send
         + Sync
 {
+}
+
+/// Closed pre-scheduling disposition for one queued attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnableAttemptGateDisposition {
+    /// The attempt's durable environment and credential gate is ready.
+    Ready,
+    /// The attempt must remain queued and absent from scheduler input.
+    Ineligible,
+}
+
+/// Bounded pre-scheduling gate evaluated against trusted control-plane time.
+///
+/// Implementations may advance durable, value-free environment selection and
+/// credential bindings. They must never lease an attempt, mint a runtime
+/// delivery credential, or return a secret/variable value.
+#[async_trait]
+pub trait RunnableAttemptGate: fmt::Debug + Send + Sync {
+    /// Advances or inspects one exact queued attempt.
+    async fn evaluate(
+        &self,
+        attempt_id: AttemptId,
+        observed_at: UnixMillis,
+    ) -> Result<RunnableAttemptGateDisposition, automata_ci_store::StoreError>;
 }
 
 /// Trusted time source for lease issuance.

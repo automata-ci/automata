@@ -6,7 +6,7 @@ use automata_ci_core::{
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::PostgresStore;
+use super::{PostgresStore, runtime_authority::github_manifest_origin_is_closed};
 use crate::{
     GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_WEB_ORIGIN,
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
@@ -1037,8 +1037,7 @@ fn decode_exact_execution_row(
     digest(&runtime_policy_digest)?;
     let origin_kind: String = field!("origin_kind");
     let origin_id: Uuid = field!("origin_id");
-    if !matches!(origin_kind.as_str(), "provider_delivery" | "scheduled_fire") || origin_id.is_nil()
-    {
+    if !github_manifest_origin_is_closed(&origin_kind) || origin_id.is_nil() {
         return Err(GithubJobRuntimeAuthorityStoreError::CorruptData);
     }
     Ok(ExactExecutionRow {

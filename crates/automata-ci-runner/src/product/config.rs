@@ -413,6 +413,13 @@ impl PodmanProductConfig {
     pub const fn service_proxy_image(&self) -> Option<&ImmutableImage> {
         self.service_proxy_image.as_ref()
     }
+
+    /// Returns the optional immutable `BuildKit` runtime admitted for the
+    /// attempt-scoped Docker-compatible API.
+    #[must_use]
+    pub const fn buildkit_runtime(&self) -> Option<&automata_ci_sandbox_podman::BuildKitRuntime> {
+        self.buildkit_runtime.as_ref()
+    }
 }
 
 /// Resource and target-tool policy for GitHub-compatible execution.
@@ -1445,6 +1452,8 @@ struct RawPodmanProductConfig {
     map_github_server_to_host_gateway: bool,
     #[serde(default)]
     service_proxy_image: Option<String>,
+    #[serde(default)]
+    buildkit_runtime_image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1515,6 +1524,16 @@ impl RawPodmanProductConfig {
             .map(validate_service_proxy_image)
             .transpose()
             .map_err(|()| RunnerProductConfigError::InvalidPodman)?;
+        let buildkit_runtime = self
+            .buildkit_runtime_image
+            .map(validate_buildkit_runtime_image)
+            .transpose()
+            .map_err(|()| RunnerProductConfigError::InvalidPodman)?;
+        if buildkit_runtime.is_some()
+            && matches!(self.job_container_engine, RawJobContainerEngine::Disabled)
+        {
+            return Err(RunnerProductConfigError::InvalidPodman);
+        }
         Ok(PodmanProductConfig {
             paths: Box::new(PodmanProductPaths {
                 binary: self.binary,
@@ -1536,6 +1555,7 @@ impl RawPodmanProductConfig {
             },
             github_server_host_gateway_alias,
             service_proxy_image,
+            buildkit_runtime,
         })
     }
 }
@@ -1645,6 +1665,12 @@ fn validate_service_proxy_image(value: String) -> Result<ImmutableImage, ()> {
         return Err(());
     }
     ImmutableImage::new(value).map_err(|_| ())
+}
+
+fn validate_buildkit_runtime_image(
+    value: String,
+) -> Result<automata_ci_sandbox_podman::BuildKitRuntime, ()> {
+    validate_service_proxy_image(value).map(automata_ci_sandbox_podman::BuildKitRuntime::new)
 }
 
 #[derive(Deserialize)]

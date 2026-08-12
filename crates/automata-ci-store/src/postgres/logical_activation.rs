@@ -1456,6 +1456,29 @@ async fn insert_instance(
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
+    if let Some(evidence) = instance.environment_gate() {
+        sqlx::query(
+            r"
+            INSERT INTO workflow_plan_v2_job_environment_evidence (
+                instance_id, environment_normalized_name, event_trust,
+                source_kind, reusable_secret_permission, created_at_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6)
+            ",
+        )
+        .bind(instance.id().as_uuid())
+        .bind(
+            evidence
+                .environment()
+                .map(crate::DeploymentEnvironmentName::normalized),
+        )
+        .bind(evidence.event_trust().as_str())
+        .bind(evidence.source_kind().as_str())
+        .bind(evidence.reusable_secret_permission().as_str())
+        .bind(request.published_at().get())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+    }
     Ok(())
 }
 
@@ -1552,16 +1575,25 @@ async fn verify_exact_instances(
 ) -> Result<(), LogicalActivationStoreError> {
     let rows = sqlx::query(
         r"
-        SELECT id, matrix_index, matrix_total, matrix_digest, workspace,
+        SELECT instance.id, instance.matrix_index, instance.matrix_total,
+               instance.matrix_digest, instance.workspace,
                runtime_policy_revision, runtime_policy_digest,
                job_ir_digest, job_ir_object_key, job_ir_size_bytes,
                job_ir_media_type, job_ir_version,
                runtime_context_digest, runtime_context_object_key,
                runtime_context_size_bytes, runtime_context_media_type,
-               runtime_context_schema, created_at_ms
-        FROM workflow_plan_v2_instances
-        WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
-        ORDER BY matrix_index
+               runtime_context_schema, instance.created_at_ms,
+               evidence.environment_normalized_name AS gate_environment,
+               evidence.event_trust AS gate_event_trust,
+               evidence.source_kind AS gate_source_kind,
+               evidence.reusable_secret_permission AS gate_reusable_permission,
+               evidence.created_at_ms AS gate_created_at_ms
+        FROM workflow_plan_v2_instances AS instance
+        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+          ON evidence.instance_id = instance.id
+        WHERE instance.run_id = $1 AND instance.invocation_id = $2
+          AND instance.logical_job_id = $3
+        ORDER BY instance.matrix_index
         ",
     )
     .bind(request.claim().run_id().as_uuid())
@@ -1577,8 +1609,23 @@ async fn verify_exact_instances(
         .into());
     }
     for (row, expected) in rows.iter().zip(request.instances()) {
-        let exact = row.try_get::<Uuid, _>("id").map_err(operation_error)?
-            == expected.id().as_uuid()
+        if !exact_instance_row(row, expected, request)? {
+            return Err(StoreError::corrupt_data(
+                "logical activation instance disagrees with its output digest",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn exact_instance_row(
+    row: &PgRow,
+    expected: &crate::ActivatedLogicalInstanceDescriptor,
+    request: &PublishLogicalJobActivation,
+) -> Result<bool, LogicalActivationStoreError> {
+    Ok(
+        row.try_get::<Uuid, _>("id").map_err(operation_error)? == expected.id().as_uuid()
             && row
                 .try_get::<i32, _>("matrix_index")
                 .map_err(operation_error)?
@@ -1598,52 +1645,98 @@ async fn verify_exact_instances(
                 .try_get::<String, _>("workspace")
                 .map_err(operation_error)?
                 == expected.workspace()
-            && decode_digest(row, "job_ir_digest")? == expected.job_ir().digest()
-            && row
-                .try_get::<String, _>("job_ir_object_key")
-                .map_err(operation_error)?
-                == expected.job_ir().object_key().as_str()
-            && row
-                .try_get::<i64, _>("job_ir_size_bytes")
-                .map_err(operation_error)?
-                == object_size_i64(expected.job_ir().encoded_size())?
-            && row
-                .try_get::<String, _>("job_ir_media_type")
-                .map_err(operation_error)?
-                == LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE
-            && row
-                .try_get::<i16, _>("job_ir_version")
-                .map_err(operation_error)?
-                == i16::try_from(JOB_IR_SCHEMA_VERSION).unwrap_or(i16::MAX)
-            && decode_digest(row, "runtime_context_digest")? == expected.runtime_context().digest()
-            && row
-                .try_get::<String, _>("runtime_context_object_key")
-                .map_err(operation_error)?
-                == expected.runtime_context().object_key().as_str()
-            && row
-                .try_get::<i64, _>("runtime_context_size_bytes")
-                .map_err(operation_error)?
-                == object_size_i64(expected.runtime_context().encoded_size())?
-            && row
-                .try_get::<String, _>("runtime_context_media_type")
-                .map_err(operation_error)?
-                == LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE
-            && row
-                .try_get::<i16, _>("runtime_context_schema")
-                .map_err(operation_error)?
-                == i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)
+            && exact_content_reference(
+                row,
+                "job_ir",
+                expected.job_ir(),
+                LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
+                JOB_IR_SCHEMA_VERSION,
+            )?
+            && exact_content_reference(
+                row,
+                "runtime_context",
+                expected.runtime_context(),
+                LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+                JOB_RUNTIME_CONTEXT_SCHEMA_VERSION,
+            )?
             && row
                 .try_get::<i64, _>("created_at_ms")
                 .map_err(operation_error)?
-                == request.published_at().get();
-        if !exact {
-            return Err(StoreError::corrupt_data(
-                "logical activation instance disagrees with its output digest",
-            )
-            .into());
+                == request.published_at().get()
+            && exact_environment_gate_evidence(row, expected, request.published_at())?,
+    )
+}
+
+fn exact_content_reference(
+    row: &PgRow,
+    column_prefix: &str,
+    expected: &crate::LogicalActivationObject,
+    expected_media_type: &str,
+    expected_schema: u16,
+) -> Result<bool, LogicalActivationStoreError> {
+    let digest_column = format!("{column_prefix}_digest");
+    let object_key_column = format!("{column_prefix}_object_key");
+    let size_column = format!("{column_prefix}_size_bytes");
+    let media_type_column = format!("{column_prefix}_media_type");
+    let schema_column = if column_prefix == "job_ir" {
+        "job_ir_version"
+    } else {
+        "runtime_context_schema"
+    };
+    Ok(
+        decode_digest(row, digest_column.as_str())? == expected.digest()
+            && row
+                .try_get::<String, _>(object_key_column.as_str())
+                .map_err(operation_error)?
+                == expected.object_key().as_str()
+            && row
+                .try_get::<i64, _>(size_column.as_str())
+                .map_err(operation_error)?
+                == object_size_i64(expected.encoded_size())?
+            && row
+                .try_get::<String, _>(media_type_column.as_str())
+                .map_err(operation_error)?
+                == expected_media_type
+            && row
+                .try_get::<i16, _>(schema_column)
+                .map_err(operation_error)?
+                == i16::try_from(expected_schema).unwrap_or(i16::MAX),
+    )
+}
+
+fn exact_environment_gate_evidence(
+    row: &PgRow,
+    expected: &crate::ActivatedLogicalInstanceDescriptor,
+    published_at: automata_ci_core::UnixMillis,
+) -> Result<bool, LogicalActivationStoreError> {
+    let environment: Option<String> = row.try_get("gate_environment").map_err(operation_error)?;
+    let event_trust: Option<String> = row.try_get("gate_event_trust").map_err(operation_error)?;
+    let source_kind: Option<String> = row.try_get("gate_source_kind").map_err(operation_error)?;
+    let reusable_permission: Option<String> = row
+        .try_get("gate_reusable_permission")
+        .map_err(operation_error)?;
+    let created_at: Option<i64> = row.try_get("gate_created_at_ms").map_err(operation_error)?;
+    let exact = match expected.environment_gate() {
+        Some(evidence) => {
+            environment.as_deref()
+                == evidence
+                    .environment()
+                    .map(crate::DeploymentEnvironmentName::normalized)
+                && event_trust.as_deref() == Some(evidence.event_trust().as_str())
+                && source_kind.as_deref() == Some(evidence.source_kind().as_str())
+                && reusable_permission.as_deref()
+                    == Some(evidence.reusable_secret_permission().as_str())
+                && created_at == Some(published_at.get())
         }
-    }
-    Ok(())
+        None => {
+            environment.is_none()
+                && event_trust.is_none()
+                && source_kind.is_none()
+                && reusable_permission.is_none()
+                && created_at.is_none()
+        }
+    };
+    Ok(exact)
 }
 
 fn decode_admission_object(

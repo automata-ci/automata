@@ -18,8 +18,8 @@ use automata_ci_core::{
     JobPermissionRequest, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
     LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId,
     RunValueTemplates, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    SecretBinding, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode, JobRuntimeAuthorities,
@@ -908,15 +908,7 @@ async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape
         let command = if schema == 2 {
             test_offer_command(fence, operation_id, sequence, slot, &job, &lease)
         } else {
-            test_offer_command_v3(
-                fence,
-                operation_id,
-                sequence,
-                slot,
-                &job,
-                &lease,
-                &overlay,
-            )
+            test_offer_command_v3(fence, operation_id, sequence, slot, &job, &lease, &overlay)
         };
         harness
             .commands
@@ -1141,14 +1133,16 @@ async fn post_kms_offer_revocation_commits_no_work_before_admitting_successor() 
         .expect("publication result lock") = Some(Ok(LeaseOfferPublishOutcome::Published(
         PublishedCommand::new(offer_operation_id, offer_sequence, false),
     )));
+    let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command(
+        LeaseOfferReplayResolution::Published(test_offer_command_v3(
             fence,
             offer_operation_id,
             offer_sequence,
             slot,
             &job,
             &lease,
+            &empty_overlay,
         )),
     ));
     harness
@@ -1532,14 +1526,16 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
         .expect("publication result lock") = Some(Ok(LeaseOfferPublishOutcome::Published(
         PublishedCommand::new(published_operation_id, published_sequence, false),
     )));
+    let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command(
+        LeaseOfferReplayResolution::Published(test_offer_command_v3(
             fence,
             published_operation_id,
             published_sequence,
             slot,
             &job,
             &lease,
+            &empty_overlay,
         )),
     ));
     let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
@@ -1645,7 +1641,16 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
             .expect("authority result lock") = Some(Ok(claimed_runtime_authorities(&job, &lease)));
         let operation_id = OperationId::new();
         let sequence = CommandSequence::new(1).expect("sequence");
-        let command = test_offer_command(fence, operation_id, sequence, slot, &job, &lease);
+        let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
+        let command = test_offer_command_v3(
+            fence,
+            operation_id,
+            sequence,
+            slot,
+            &job,
+            &lease,
+            &empty_overlay,
+        );
         match scenario {
             ObservedOfferScenario::Published => {
                 *harness

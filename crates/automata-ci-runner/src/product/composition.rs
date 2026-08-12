@@ -355,6 +355,7 @@ fn compose_with_provider(
     metrics: Option<RunnerMetrics>,
     cancellation: &crate::podman_probe::ProbeCancellation,
     service_proxy_configured: bool,
+    buildkit_configured: bool,
     revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
 ) -> Result<Option<RunnerComposition>, RunnerProductError> {
     let protocol_limits = ProtocolLimits::default();
@@ -465,6 +466,7 @@ fn build_admitted_runtime_inventory(
     provider: &dyn automata_ci_execution::SandboxProvider,
     cancellation: &crate::podman_probe::ProbeCancellation,
     service_proxy_configured: bool,
+    buildkit_configured: bool,
     revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
 ) -> Result<Option<RunnerCapabilities>, RunnerProductError> {
     let admission = admit_configured_environment_profiles(config, provider, cancellation);
@@ -644,18 +646,26 @@ fn build_podman_options(config: &RunnerProductConfig) -> Result<PodmanOptions, R
     if let Some(image) = podman.service_proxy_image() {
         podman_options = podman_options.with_service_proxy_image(image.clone());
     }
+    if let Some(runtime) = podman.buildkit_runtime() {
+        podman_options = podman_options.with_buildkit_runtime(runtime.clone());
+    }
     Ok(podman_options)
 }
 
 fn inventory_for_verified_provider(
     configured: &RunnerCapabilities,
     service_proxy_configured: bool,
+    buildkit_configured: bool,
     provider: &ProviderCapabilities,
 ) -> RunnerCapabilities {
     let mut container_features = configured.containers().features().clone();
     container_features.remove(&ContainerFeature::SERVICE_CONTAINERS);
+    container_features.remove(&ContainerFeature::BUILDKIT);
     if service_proxy_configured && provider.supports(SandboxCapability::ServiceContainers) {
         container_features.insert(ContainerFeature::SERVICE_CONTAINERS);
+    }
+    if buildkit_configured && provider.supports(SandboxCapability::BuildKit) {
+        container_features.insert(ContainerFeature::BUILDKIT);
     }
     configured
         .clone()
@@ -1327,48 +1337,70 @@ mod tests {
     }
 
     #[test]
-    fn registered_service_ceiling_is_reduced_to_the_verified_provider() {
+    fn registered_helper_ceiling_is_reduced_to_the_verified_provider() {
         let config = RunnerProductConfig::from_json(include_bytes!(
             "../../config/runner.local.example.json"
         ))
         .expect("checked-in runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();
-        registered_features.insert(ContainerFeature::SERVICE_CONTAINERS);
+        registered_features.extend([
+            ContainerFeature::SERVICE_CONTAINERS,
+            ContainerFeature::BUILDKIT,
+        ]);
         let registered = config
             .inventory()
             .clone()
             .with_containers(ContainerCapabilities::new(registered_features));
-        let without_service = ProviderCapabilities::new([SandboxCapability::WholeJob])
+        let without_helpers = ProviderCapabilities::new([SandboxCapability::WholeJob])
             .expect("provider capabilities");
-        let with_service = ProviderCapabilities::new([
+        let with_helpers = ProviderCapabilities::new([
             SandboxCapability::WholeJob,
             SandboxCapability::ServiceContainers,
+            SandboxCapability::BuildKit,
         ])
         .expect("provider capabilities");
 
         assert!(
-            !inventory_for_verified_provider(config.inventory(), false, &without_service)
+            !inventory_for_verified_provider(config.inventory(), false, false, &without_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            !inventory_for_verified_provider(config.inventory(), false, &with_service)
+            !inventory_for_verified_provider(config.inventory(), false, false, &with_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            !inventory_for_verified_provider(&registered, true, &without_service)
+            !inventory_for_verified_provider(&registered, true, true, &without_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            inventory_for_verified_provider(&registered, true, &with_service)
+            inventory_for_verified_provider(&registered, true, true, &with_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
+        );
+        assert!(
+            !inventory_for_verified_provider(&registered, true, false, &with_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
+        );
+        assert!(
+            !inventory_for_verified_provider(&registered, true, true, &without_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
+        );
+        assert!(
+            inventory_for_verified_provider(&registered, true, true, &with_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
         );
     }
 

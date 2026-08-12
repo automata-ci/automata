@@ -14,6 +14,7 @@ const ORIGINAL_MIGRATION: &str =
     include_str!("../migrations/0043_workflow_runtime_policy_and_selection.sql");
 const FORWARD_MIGRATION: &str =
     include_str!("../migrations/0065_workflow_runtime_resource_policy.sql");
+const LEGACY_CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}]}"#;
 const POLICY: &[u8] = br#"{
   "workspace":{"derivation":1,"root":"/__w","schema":1},
   "mappings":[{
@@ -151,7 +152,7 @@ async fn pre_resource_schema_upgrades_cleanly_and_matches_a_fresh_install() -> T
 async fn pre_resource_rows_refuse_ambiguous_backfill_atomically() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         apply_before(&database, FORWARD_VERSION).await?;
-        insert_pre_resource_staging_revision(&database).await?;
+        insert_pre_resource_policy_revision(&database).await?;
 
         let mut connection = database.pool().acquire().await?;
         let migration = migration(FORWARD_VERSION);
@@ -292,8 +293,19 @@ async fn insert_repository(database: &TestDatabase) -> TestResult<(String, Uuid)
     Ok((tenant, repository))
 }
 
-async fn insert_pre_resource_staging_revision(database: &TestDatabase) -> TestResult {
+async fn insert_pre_resource_policy_revision(database: &TestDatabase) -> TestResult {
     let (tenant, repository) = insert_repository(database).await?;
+    let digest = legacy_policy_digest();
+    let mut transaction = database.pool().begin().await?;
+    // This test needs only the pre-0065 runtime-policy half of the aggregate.
+    // Suppress the unrelated provider-manifest pairing event while preserving
+    // every runtime-policy lifecycle, catalog, digest, and currentness trigger.
+    sqlx::query(
+        "ALTER TABLE workflow_runtime_policy_current DISABLE TRIGGER \
+         workflow_runtime_policy_current_requires_manifest",
+    )
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query(
         r"
         INSERT INTO workflow_runtime_policy_revisions (
@@ -304,13 +316,97 @@ async fn insert_pre_resource_staging_revision(database: &TestDatabase) -> TestRe
         ) VALUES ($1,$2,1,$3,$4,1,'/__w',1,1,'staging',1,NULL)
         ",
     )
-    .bind(tenant)
+    .bind(&tenant)
     .bind(repository)
-    .bind([0_u8; 32].as_slice())
-    .bind([0_u8].as_slice())
-    .execute(database.pool())
+    .bind(digest.as_slice())
+    .bind(LEGACY_CANONICAL_POLICY)
+    .execute(&mut *transaction)
     .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_mappings (
+            tenant_id, repository_id, policy_revision, selector,
+            environment_profile_id, environment_profile_digest,
+            operating_system, architecture, feature_count
+        ) VALUES (
+            $1,$2,1,'ubuntu-24.04','automata.example/ubuntu-24-04',$3,
+            'linux','x86_64',1
+        )
+        ",
+    )
+    .bind(&tenant)
+    .bind(repository)
+    .bind([0x11_u8; 32].as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_features (
+            tenant_id, repository_id, policy_revision, selector, feature
+        ) VALUES ($1,$2,1,'ubuntu-24.04','automata.core/job-containers@v1')
+        ",
+    )
+    .bind(&tenant)
+    .bind(repository)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE workflow_runtime_policy_revisions
+        SET state = 'sealed', sealed_at_ms = registered_at_ms
+        WHERE tenant_id = $1 AND repository_id = $2 AND policy_revision = 1
+        ",
+    )
+    .bind(&tenant)
+    .bind(repository)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_current (
+            tenant_id, repository_id, policy_revision,
+            policy_digest, activated_at_ms
+        ) VALUES ($1,$2,1,$3,1)
+        ",
+    )
+    .bind(&tenant)
+    .bind(repository)
+    .bind(digest.as_slice())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE workflow_runtime_policy_current ENABLE TRIGGER \
+         workflow_runtime_policy_current_requires_manifest",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(())
+}
+
+fn legacy_policy_digest() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.store.workflow-runtime-policy.v1\0");
+    hasher.update(1_u16.to_be_bytes());
+    hasher.update(1_u16.to_be_bytes());
+    hash_legacy_text(&mut hasher, "/__w");
+    hasher.update(1_u64.to_be_bytes());
+    hash_legacy_text(&mut hasher, "ubuntu-24.04");
+    hash_legacy_text(&mut hasher, "automata.example/ubuntu-24-04");
+    hasher.update([0x11_u8; 32]);
+    hasher.update([1, 1]);
+    hasher.update(1_u64.to_be_bytes());
+    hash_legacy_text(&mut hasher, "automata.core/job-containers@v1");
+    hasher.finalize().into()
+}
+
+fn hash_legacy_text(hasher: &mut Sha256, value: &str) {
+    hasher.update(
+        u64::try_from(value.len())
+            .expect("fixture text length fits u64")
+            .to_be_bytes(),
+    );
+    hasher.update(value.as_bytes());
 }
 
 #[allow(
@@ -380,7 +476,19 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     .bind(repository)
     .execute(&mut *transaction)
     .await?;
-    transaction.commit().await?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runtime_policy_current (
+            tenant_id, repository_id, policy_revision,
+            policy_digest, activated_at_ms
+        ) VALUES ($1,$2,1,$3,1)
+        ",
+    )
+    .bind(&tenant)
+    .bind(repository)
+    .bind(policy.digest().as_bytes().as_slice())
+    .execute(&mut *transaction)
+    .await?;
 
     let exact: (Vec<u8>, Vec<u8>, Vec<u8>) = sqlx::query_as(
         r"
@@ -394,7 +502,7 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     )
     .bind(&tenant)
     .bind(repository)
-    .fetch_one(database.pool())
+    .fetch_one(&mut *transaction)
     .await?;
     assert_eq!(exact.0.as_slice(), policy.digest().as_bytes().as_slice());
     assert_eq!(exact.1, canonical);
@@ -404,7 +512,7 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     let rejected: bool =
         sqlx::query_scalar("SELECT automata_workflow_runtime_resource_policy_digest($1) IS NULL")
             .bind(noncanonical)
-            .fetch_one(database.pool())
+            .fetch_one(&mut *transaction)
             .await?;
     assert!(rejected);
 
@@ -418,7 +526,7 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
     .bind(&tenant)
     .bind(repository)
     .bind(b"{}".as_slice())
-    .execute(database.pool())
+    .execute(&mut *transaction)
     .await
     .expect_err("sealed resource policy evidence is immutable");
     let database_error = error
@@ -429,5 +537,6 @@ async fn exercise_resource_policy(database: &TestDatabase) -> TestResult {
         database_error.constraint(),
         Some("workflow_runtime_policy_revision_immutable")
     );
+    transaction.rollback().await?;
     Ok(())
 }

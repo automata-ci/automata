@@ -8,6 +8,7 @@ mod auth;
 mod commands;
 #[cfg(unix)]
 mod credential_store;
+mod environment_review;
 mod execution;
 mod output;
 #[cfg(unix)]
@@ -17,11 +18,12 @@ mod secret;
 mod secret;
 mod values;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 
 pub use commands::{
     AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport, OperatorArgs,
-    PreviewArgs, SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
+    EnvironmentReviewArgs, EnvironmentReviewDecision, PreviewArgs, RerunArgs, RerunSelection,
+    SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
     SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
 pub use output::OutputFormat;
@@ -39,9 +41,58 @@ pub use execution::{
     long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AUTOMATA_BUILD_GIT_SHA"), ")"),
     about = "CI control-plane services and administration"
 )]
-/// Parsed top-level command-line request.
-pub struct Cli {
+struct ParsedCli {
     /// Service role or operator operation to execute.
     #[command(subcommand)]
+    command: Command,
+}
+
+/// Parsed and cross-field-validated top-level command-line request.
+#[derive(Debug)]
+pub struct Cli {
+    /// Service role or operator operation to execute.
     pub command: Command,
+}
+
+impl CommandFactory for Cli {
+    fn command() -> clap::Command {
+        ParsedCli::command()
+    }
+
+    fn command_for_update() -> clap::Command {
+        ParsedCli::command_for_update()
+    }
+}
+
+impl FromArgMatches for Cli {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let parsed = ParsedCli::from_arg_matches(matches)?;
+        validate_command(&parsed.command)?;
+        Ok(Self {
+            command: parsed.command,
+        })
+    }
+
+    fn update_from_arg_matches(
+        &mut self,
+        matches: &clap::ArgMatches,
+    ) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Parser for Cli {}
+
+fn validate_command(command: &Command) -> Result<(), clap::Error> {
+    if let Command::Rerun(args) = command
+        && args.selection != RerunSelection::JobAndDependents
+        && args.job_id.is_some()
+    {
+        return Err(clap::Error::raw(
+            ErrorKind::ArgumentConflict,
+            "--job-id is valid only with --selection job-and-dependents",
+        ));
+    }
+    Ok(())
 }

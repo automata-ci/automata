@@ -878,19 +878,15 @@ fn lease_offer(
         .managed_secret_bindings
         .map(|overlay| managed_secret_binding_overlay(overlay, &lease, limits))
         .transpose()?;
-    let offer = protocol::LeaseOffer::new(
-        header,
-        slot,
-        lease,
-        job,
-        authorities,
-    );
+    let offer = protocol::LeaseOffer::new(header, slot, lease, job, authorities);
     match managed_secret_bindings {
-        Some(overlay) => offer
-            .with_managed_secret_bindings(overlay)
-            .map_err(|_| DecodeError::InvalidValue {
-                field: "lease_offer.managed_secret_bindings",
-            }),
+        Some(overlay) => {
+            offer
+                .with_managed_secret_bindings(overlay)
+                .map_err(|_| DecodeError::InvalidValue {
+                    field: "lease_offer.managed_secret_bindings",
+                })
+        }
         None => Ok(offer),
     }
 }

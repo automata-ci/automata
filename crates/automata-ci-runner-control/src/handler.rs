@@ -15,11 +15,10 @@ use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
     LeaseRenewal, LogAckMessage, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession,
-    NoWork, OperationAck,
-    OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerToServer,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
-    SessionDisposition, SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer,
-    negotiate_job_ir, negotiate_protocol,
+    NoWork, OperationAck, OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello,
+    RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
+    ServerToRunner, SessionDisposition, SessionOrphanAuthorization, SessionResume,
+    ValidatedRunnerToServer, negotiate_job_ir, negotiate_protocol,
 };
 use automata_ci_protocol_protobuf::{
     decode_server_frame as decode_server_protobuf, encode_server_frame,

@@ -13,9 +13,9 @@ use automata_ci_core::{
     ResourceCapacity, RunId, RunValueTemplates, RunnerCapabilities, RunnerFeature, RunnerGroup,
     RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
     RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxCapabilities, SandboxFeature,
-    SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation,
-    StepAnnotationLevel, StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol,
-    UnixMillis, ValueSource, ValueTemplate, VolumeMount, WorkflowId,
+    SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel,
+    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, UnixMillis, ValueSource,
+    ValueTemplate, VolumeMount, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,

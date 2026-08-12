@@ -8,7 +8,7 @@ use automata_ci_blob::{
 use automata_ci_control::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
     LeasePollObserver, LeasePollOutcome, LeasePollRepository, LeasePollService,
-    NoopLeasePollObserver,
+    NoopLeasePollObserver, RunnableAttemptGate,
 };
 use automata_ci_control_plane::SchedulerPolicy;
 use automata_ci_core::{
@@ -17,7 +17,7 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CancelJob, CommandSequence, JobRuntimeAuthorities, LeaseOffer, LeaseRequest,
-    ManagedSecretBindingOverlay, MAX_CONFIGURABLE_FRAME_BYTES, ProtocolLimits, ProtocolVersion,
+    MAX_CONFIGURABLE_FRAME_BYTES, ManagedSecretBindingOverlay, ProtocolLimits, ProtocolVersion,
     RunnerSlotOrdinal, ServerCommandHeader, ServerToRunner,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
@@ -983,10 +983,7 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
     if command.session() != published.request().session() {
         return false;
     }
-    match (
-        command.kind().as_str(),
-        command.payload().schema().get(),
-    ) {
+    match (command.kind().as_str(), command.payload().schema().get()) {
         (LEASE_OFFER_COMMAND_KIND, LEASE_OFFER_COMMAND_SCHEMA) => {
             let Ok(payload) = serde_json::from_slice::<DurableLeaseOfferCommandPayload>(
                 command.payload().bytes(),
@@ -1071,10 +1068,9 @@ fn durable_payload_matches(
     schema: u16,
     slot: u16,
 ) -> bool {
-    let expected_schema = managed_secret_bindings.map_or(
-        LEGACY_LEASE_OFFER_COMMAND_SCHEMA,
-        |_| LEASE_OFFER_COMMAND_SCHEMA,
-    );
+    let expected_schema = managed_secret_bindings.map_or(LEGACY_LEASE_OFFER_COMMAND_SCHEMA, |_| {
+        LEASE_OFFER_COMMAND_SCHEMA
+    });
     if schema != expected_schema
         || protocol_version != published.protocol_version().get()
         || slot != published.slot().get()
@@ -1083,21 +1079,14 @@ fn durable_payload_matches(
         return false;
     }
     let empty;
-    let overlay = match managed_secret_bindings {
-        Some(overlay) => overlay,
-        None => {
-            empty = ManagedSecretBindingOverlay::empty(lease);
-            &empty
-        }
+    let overlay = if let Some(overlay) = managed_secret_bindings {
+        overlay
+    } else {
+        empty = ManagedSecretBindingOverlay::empty(lease);
+        &empty
     };
-    if validate_lease_offer_payload(
-        job,
-        lease,
-        runtime_authorities,
-        overlay,
-        published.job_ir(),
-    )
-    .is_err()
+    if validate_lease_offer_payload(job, lease, runtime_authorities, overlay, published.job_ir())
+        .is_err()
     {
         return false;
     }
@@ -1427,6 +1416,7 @@ pub struct LeasePollAdapter {
     scheduler: Arc<dyn SchedulerPolicy>,
     clock: Arc<dyn LeaseClock>,
     lease_ids: Arc<dyn LeaseIdGenerator>,
+    attempt_gate: Option<Arc<dyn RunnableAttemptGate>>,
     observer: Arc<dyn LeasePollObserver>,
     config: LeasePollConfig,
 }
@@ -1435,6 +1425,7 @@ impl fmt::Debug for LeasePollAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LeasePollAdapter")
             .field("config", &self.config)
+            .field("attempt_gate", &self.attempt_gate)
             .finish_non_exhaustive()
     }
 }
@@ -1454,6 +1445,7 @@ impl LeasePollAdapter {
             scheduler,
             clock,
             lease_ids,
+            attempt_gate: None,
             observer: Arc::new(NoopLeasePollObserver),
             config,
         }
@@ -1465,6 +1457,13 @@ impl LeasePollAdapter {
         self.observer = observer;
         self
     }
+
+    /// Installs the value-free pre-scheduling attempt gate.
+    #[must_use]
+    pub fn with_attempt_gate(mut self, gate: Arc<dyn RunnableAttemptGate>) -> Self {
+        self.attempt_gate = Some(gate);
+        self
+    }
 }
 
 #[async_trait]
@@ -1474,16 +1473,19 @@ impl LeasePoller for LeasePollAdapter {
         authenticated: AuthenticatedRunnerSession,
         request: &LeaseRequest,
     ) -> Result<LeasePollOutcome, LeasePollError> {
-        LeasePollService::new(
+        let service = LeasePollService::new(
             self.repository.as_ref(),
             self.scheduler.as_ref(),
             self.clock.as_ref(),
             self.lease_ids.as_ref(),
             self.config,
         )
-        .with_observer(self.observer.as_ref())
-        .poll(authenticated, request)
-        .await
+        .with_observer(self.observer.as_ref());
+        let service = match self.attempt_gate.as_deref() {
+            Some(gate) => service.with_attempt_gate(gate),
+            None => service,
+        };
+        service.poll(authenticated, request).await
     }
 }
 

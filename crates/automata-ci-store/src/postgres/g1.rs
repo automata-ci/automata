@@ -4130,9 +4130,7 @@ async fn load_generic_receipt(
             StoreError::corrupt_data("lease-request receipt lost its offer publication")
         })?;
         if publication.request() != request
-            || !is_lease_offer_command_kind(
-                publication.command().request().kind().as_str(),
-            )
+            || !is_lease_offer_command_kind(publication.command().request().kind().as_str())
             || matches!(expectation,
                 ReceiptOfferExpectation::Exact(Some(expected))
                 if expected.session() != publication.command().request().session()
@@ -4195,9 +4193,7 @@ async fn insert_generic_receipt(
     let lease_offer_completion = match (lease_offer_publication, lease_offer_fallback) {
         (Some(publication), Some(fallback)) => {
             if publication.request() != &request
-                || !is_lease_offer_command_kind(
-                    publication.command().request().kind().as_str(),
-                )
+                || !is_lease_offer_command_kind(publication.command().request().kind().as_str())
             {
                 return Err(StoreError::corrupt_data(
                     "lease-request response has a mismatched offer publication",

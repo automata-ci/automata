@@ -661,6 +661,11 @@ impl ActivatedDeploymentEnvironment {
         Some(Self(value))
     }
 
+    /// Returns the activation-resolved provider-facing environment name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Debug for ActivatedDeploymentEnvironment {
@@ -908,6 +913,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_lines)] // One pass preserves matrix ordering and exact per-instance context.
     fn activate_instances<S>(
         request: ActivateLogicalJobRequest<'_>,
         resolved: ResolvedActivationStrategy,

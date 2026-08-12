@@ -430,6 +430,15 @@ def main() -> None:
         )
         assert selected.returncode == 0, selected.stderr
         assert selected.stdout == "2\n"
+        duplicate_names_across_binaries = subprocess.run(
+            ["python3", str(CHECK_IGNORED)],
+            input="same_name: test\nsame_name: test\n",
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert duplicate_names_across_binaries.returncode == 0
+        assert duplicate_names_across_binaries.stdout == "2\n"
         empty = subprocess.run(
             ["python3", str(CHECK_IGNORED)],
             input="suite::benchmark: benchmark\n0 tests, 1 benchmark\n",
@@ -515,6 +524,17 @@ mod outside_filter {
         )
         assert exact_selection.returncode == 0, exact_selection.stderr
         assert exact_selection.stdout == "2\n"
+        duplicate_exact_selection = subprocess.run(
+            exact_arguments,
+            input="".join(
+                f"{name}: test\n" for name in [*exact_tests, exact_tests[0]]
+            ),
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert duplicate_exact_selection.returncode == 2
+        assert "listed a test more than once" in duplicate_exact_selection.stderr
 
         fingerprint_repository = scratch / "fingerprint-repository"
         fingerprint_repository.mkdir()
@@ -967,6 +987,77 @@ raise SystemExit(1)
         )
         assert not list(missing_kms_output.glob(".rust-coverage-stage.*"))
 
+        podman_environment = dict(os.environ)
+        podman_environment.update(
+            {
+                name: "/unused/coverage-contract"
+                for name in [
+                    "HOME",
+                    "XDG_RUNTIME_DIR",
+                    "AUTOMATA_PODMAN_APPROVED_HELPERS",
+                    "AUTOMATA_PODMAN_TEST_IMAGE",
+                    "AUTOMATA_PODMAN_TEST_SERVICE_IMAGE",
+                    "AUTOMATA_PODMAN_TEST_SERVICE_PROXY_IMAGE",
+                    "AUTOMATA_TEST_STATIC_RUNNER",
+                    "AUTOMATA_TEST_PODMAN_BINARY",
+                    "AUTOMATA_TEST_PODMAN_STATE_ROOT",
+                    "AUTOMATA_TEST_PODMAN_HOME",
+                    "AUTOMATA_TEST_PODMAN_RUNTIME",
+                    "AUTOMATA_TEST_PODMAN_APPROVED_HELPERS",
+                    "AUTOMATA_TEST_CONMON",
+                    "AUTOMATA_TEST_OCI_RUNTIME",
+                    "AUTOMATA_TEST_CATATONIT",
+                    "AUTOMATA_TEST_SECCOMP_PROFILE",
+                ]
+            }
+        )
+        podman_environment["AUTOMATA_LIVE_ROOTLESS_PODMAN"] = "1"
+        podman_environment["AUTOMATA_LIVE_ROOTLESS_BUILDX"] = "1"
+        podman_environment.pop("AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE", None)
+        missing_buildkit_output = scratch / "missing-podman-buildkit-output"
+        missing_buildkit_probe = subprocess.run(
+            [str(RUN), str(missing_buildkit_output), "podman"],
+            cwd=ROOT.parent,
+            env=podman_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert missing_buildkit_probe.returncode == 2
+        assert (
+            "requires AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"
+            in missing_buildkit_probe.stderr
+        )
+        assert not any(
+            (missing_buildkit_output / name).exists()
+            for name in ["summary.json", "coverage.lcov", "manifest.json"]
+        )
+        assert not list(missing_buildkit_output.glob(".rust-coverage-stage.*"))
+
+        podman_environment["AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"] = (
+            "unused.invalid/buildkit@sha256:" + "0" * 64
+        )
+        podman_environment["AUTOMATA_LIVE_ROOTLESS_BUILDX"] = "0"
+        disabled_buildx_output = scratch / "disabled-podman-buildx-output"
+        disabled_buildx_probe = subprocess.run(
+            [str(RUN), str(disabled_buildx_output), "podman"],
+            cwd=ROOT.parent,
+            env=podman_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert disabled_buildx_probe.returncode == 2
+        assert (
+            "requires AUTOMATA_LIVE_ROOTLESS_BUILDX=1"
+            in disabled_buildx_probe.stderr
+        )
+        assert not any(
+            (disabled_buildx_output / name).exists()
+            for name in ["summary.json", "coverage.lcov", "manifest.json"]
+        )
+        assert not list(disabled_buildx_output.glob(".rust-coverage-stage.*"))
+
         fake_bin = scratch / "fake-bin"
         fake_bin.mkdir()
         target_capture = scratch / "coverage-target.txt"
@@ -1086,6 +1177,18 @@ exit 99
             (ROOT / "ci" / "rust-coverage-policy.json").read_text(encoding="utf-8")
         )
         assert list(committed_policy["lanes"]) == bundles
+        podman_requirements = "\n".join(
+            committed_policy["lanes"]["podman"]["service_requirements"]
+        )
+        development_guide = (ROOT.parent / "docs" / "development.md").read_text(
+            encoding="utf-8"
+        )
+        for buildkit_requirement in [
+            "AUTOMATA_LIVE_ROOTLESS_BUILDX",
+            "AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE",
+        ]:
+            assert buildkit_requirement in podman_requirements
+            assert buildkit_requirement in development_guide
         lane_declaration = re.search(r"known_lanes=\(([^)]*)\)", runner_source)
         assert lane_declaration is not None
         assert lane_declaration.group(1).split() == bundles

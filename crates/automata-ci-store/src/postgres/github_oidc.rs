@@ -12,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::PostgresStore;
+use super::{PostgresStore, runtime_authority::github_manifest_origin_is_closed};
 use crate::github_oidc::github_oidc_claim_evidence_digest;
 use crate::{
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
@@ -823,7 +823,7 @@ async fn lock_current_execution(
               origin.origin_kind = 'provider_delivery'
               AND origin.admission_idempotency_kind = 'provider_delivery'
               AND origin.github_repository_owner_id > 0
-              OR origin.origin_kind = 'scheduled_fire'
+              OR origin.origin_kind IN ('scheduled_fire', 'workflow_rerun')
               AND origin.admission_idempotency_kind = 'operation'
               AND origin.github_repository_owner_id IS NOT NULL
               AND origin.github_repository_owner_id > 0
@@ -943,8 +943,7 @@ fn decode_current_execution(
     }
     let origin_kind: String = field!("origin_kind");
     let origin_id: Uuid = field!("origin_id");
-    if !matches!(origin_kind.as_str(), "provider_delivery" | "scheduled_fire") || origin_id.is_nil()
-    {
+    if !github_manifest_origin_is_closed(&origin_kind) || origin_id.is_nil() {
         return Err(GithubOidcStoreError::CorruptData);
     }
     Ok(CurrentExecutionRow {

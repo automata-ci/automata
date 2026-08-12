@@ -12,15 +12,36 @@ use automata_ci_store::{
     PostgresStore, RepositoryId, RerunWorkflow, WorkflowRerunRepository as _,
     WorkflowRerunSelection, WorkflowRerunStoreError,
 };
-use sqlx::PgPool;
+use sha2::{Digest as _, Sha256};
+use sqlx::{PgPool, migrate::Migrate as _};
 use uuid::Uuid;
 
-use common::{TestResult, run_with_database};
+use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_database};
 
 const MIGRATION_VERSION: i64 = 64;
 const MIGRATION: &str = include_str!("../migrations/0064_workflow_reruns.sql");
+const RELEASED_0061: &str =
+    include_str!("../migrations/0061_reusable_workflow_runtime_authority.sql");
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+#[test]
+fn released_0061_is_byte_exact_and_rerun_authority_is_forward_only() {
+    let digest: [u8; 32] = Sha256::digest(RELEASED_0061.as_bytes()).into();
+    assert_eq!(
+        digest,
+        [
+            0xe3, 0x18, 0x3a, 0x74, 0x6f, 0x8e, 0x60, 0x00, 0x12, 0x90, 0x9e, 0x41, 0x15, 0xe0,
+            0x6b, 0xae, 0x5d, 0x0b, 0xce, 0xd3, 0xbd, 0x68, 0x73, 0x7c, 0x88, 0xf3, 0xe5, 0x03,
+            0x6a, 0xae, 0xbd, 0x19,
+        ],
+        "released migration 0061 changed bytes"
+    );
+    assert!(
+        !RELEASED_0061.contains("workflow_rerun"),
+        "0061 contains forward-only rerun authority"
+    );
+}
 
 #[test]
 fn migration_0064_seals_public_identity_authority_and_source_lineage() {
@@ -32,19 +53,59 @@ fn migration_0064_seals_public_identity_authority_and_source_lineage() {
     for required in [
         "CREATE UNIQUE INDEX workflow_runs_public_id_attempt",
         "workflow_rerun_attempts_run_source_unique",
+        "attempt BETWEEN 2 AND 51",
         "workflow_rerun_requests_revision_positive CHECK (authorization_revision > 0)",
         "workflow_rerun_requests_actor_membership_fk",
         "workflow_rerun_requests_actor_session_fk",
+        "workflow_rerun_requests_tenant_run_unique",
+        "workflow_rerun_requests_operation_run_unique",
         "workflow_rerun_attempt_jobs_source_run_fk",
         "workflow_rerun_attempt_jobs_source_job_fk",
         "workflow_rerun_carried_job_results_source_run_fk",
+        "workflow_rerun_carried_job_results_mapping_fk",
         "REFERENCES workflow_plan_v2_run_result_jobs(run_id, logical_job_id)",
         "workflow_rerun_carried_job_results_no_update_delete",
+        "workflow_rerun_carried_job_results_validate_source",
+        "workflow_rerun_carried_job_source_exact",
+        "workflow_rerun_carried_job_outputs_validate_source",
+        "workflow_rerun_carried_results_validate_classification",
+        "workflow_rerun_executed_results_validate_classification",
+        "workflow_rerun_graph_exact",
+        "workflow_rerun_attempts_validate_graph",
+        "workflow_rerun_requests_validate_graph",
+        "workflow_rerun_attempt_jobs_validate_graph",
+        "workflow_rerun_check_evidence_exact",
+        "workflow_rerun_check_evidence_manifest",
+        "provider_manifest_revision, provider_manifest_digest",
+        "authority.state = 'active'",
+        "authority.state_updated_at_ms <= NEW.recorded_at_ms",
+        "FOR SHARE OF attempt, request, receipt, run, manifest, authority",
+        "github_workflow_rerun_subject_evidence",
+        "automata_github_workflow_rerun_subject_evidence_digest",
+        "github_workflow_rerun_subject_evidence_exact",
+        "github_check_subjects_require_rerun_link_evidence",
+        "workflow_rerun_check_link_evidence_required",
+        "github_check_subjects_require_atomic_rerun_evidence",
+        "workflow_rerun_check_atomic_evidence_required",
+        "workflow_rerun_attempts_validate_lineage",
+        "source_marker.admission_digest = NEW.source_admission_digest",
+        "source_run.plan_digest = NEW.source_plan_digest",
+        "source_run.event_digest = NEW.source_event_digest",
+        "run.created_at_ms = NEW.created_at_ms",
+        "workflow_rerun_requests_no_update_delete",
+        "workflow_rerun_requests_attempt_source_fk",
         "automata_required_github_subject_evidence_committed",
         "FROM github_workflow_run_subject_evidence AS evidence",
         "FROM github_schedule_workflow_run_subject_evidence AS evidence",
-        "origin.origin_kind = 'workflow_rerun'",
+        "FROM github_workflow_rerun_subject_evidence AS evidence",
+        "'workflow_rerun'::TEXT AS origin_kind",
         "automata_require_open_workflow_admission_graph",
+        "automata_github_oidc_authority_is_current",
+        "automata_validate_github_runtime_authority_v3_identity",
+        "'scheduled_fire', 'workflow_rerun'",
+        "automata_require_preparation_runner_policy_provenance",
+        "automata_validate_logical_activation_preparation_claim",
+        "LEFT JOIN workflow_plan_v2_effective_job_results AS result",
     ] {
         assert!(
             MIGRATION.contains(required),
@@ -55,6 +116,90 @@ fn migration_0064_seals_public_identity_authority_and_source_lineage() {
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn pre_rerun_schema_upgrades_forward_only_and_matches_current_authority() -> TestResult {
+    run_with_unmigrated_database(|database| async move {
+        apply_before(&database, MIGRATION_VERSION).await?;
+        let seed = seed_actor(database.pool()).await?;
+        let run_id = Uuid::new_v4();
+        insert_pre_rerun_source_run(
+            database.pool(),
+            seed.repository_id,
+            seed.workflow_id,
+            seed.snapshot_id,
+            run_id,
+        )
+        .await?;
+        let legacy_alias: i64 =
+            sqlx::query_scalar("SELECT run_id_alias FROM workflow_runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(database.pool())
+                .await?;
+
+        apply_version(&database, MIGRATION_VERSION).await?;
+
+        let upgraded: (i64, i64, i32) = sqlx::query_as(
+            "SELECT run_id_alias, public_run_id_alias, run_attempt FROM workflow_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(upgraded, (legacy_alias, legacy_alias, 1));
+
+        let post_upgrade_attempt = Uuid::new_v4();
+        insert_source_run(
+            database.pool(),
+            seed.repository_id,
+            seed.workflow_id,
+            seed.snapshot_id,
+            post_upgrade_attempt,
+            7,
+            None,
+            7,
+        )
+        .await?;
+        let own_alias: (i64, i64, i32) = sqlx::query_as(
+            "SELECT run_id_alias, public_run_id_alias, run_attempt FROM workflow_runs WHERE id = $1",
+        )
+        .bind(post_upgrade_attempt)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(own_alias.0, own_alias.1);
+        assert_eq!(own_alias.2, 7);
+
+        let rerun_aware_functions: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)::BIGINT
+            FROM pg_proc
+            WHERE pronamespace = current_schema()::regnamespace
+              AND proname = ANY($1)
+              AND position('workflow_rerun' IN pg_get_functiondef(oid)) > 0
+            ",
+        )
+        .bind(vec![
+            "automata_github_oidc_authority_is_current",
+            "automata_require_standard_github_oidc_profile",
+            "automata_lock_github_oidc_authority_dependencies",
+            "automata_github_runtime_authority_v2_base_is_current",
+            "automata_github_runtime_authority_has_v3_provenance",
+        ])
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(rerun_aware_functions, 5);
+
+        let migration_applied: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 64 AND success)",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert!(migration_applied);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One table-driven transaction checks every authority fault.
 async fn rerun_request_authority_requires_a_live_positive_session_revision() -> TestResult {
     run_with_database(|database| async move {
         let seed = seed_actor(database.pool()).await?;
@@ -71,7 +216,7 @@ async fn rerun_request_authority_requires_a_live_positive_session_revision() -> 
             snapshot_id,
             source_run_id,
             1,
-            1,
+            Some(1),
             1,
         )
         .await?;
@@ -131,6 +276,38 @@ async fn rerun_request_authority_requires_a_live_positive_session_revision() -> 
                 .and_then(sqlx::error::DatabaseError::constraint),
             Some("workflow_rerun_requests_actor_session_fk"),
         );
+
+        let mut incomplete = database.pool().begin().await?;
+        sqlx::query(
+            r"
+            INSERT INTO workflow_rerun_requests (
+                tenant_id, operation_id, request_digest, repository_id, source_run_id,
+                selection_kind, selected_source_job_id, actor_principal_id,
+                actor_session_id, authorization_revision, rerun_run_id, committed_at_ms
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'entire_workflow', NULL, $6, $7, 1, NULL, NULL
+            )
+            ",
+        )
+        .bind(tenant_id)
+        .bind(Uuid::new_v4())
+        .bind([0x33_u8; 32].as_slice())
+        .bind(repository_id)
+        .bind(source_run_id)
+        .bind(seed.principal_id)
+        .bind(seed.session_id)
+        .execute(&mut *incomplete)
+        .await?;
+        let incomplete_error = incomplete
+            .commit()
+            .await
+            .expect_err("an incomplete rerun request must not squat an operation ID");
+        assert_eq!(
+            incomplete_error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("workflow_rerun_requests_completion_exact"),
+        );
         Ok(())
     })
     .await
@@ -152,7 +329,7 @@ async fn rerun_schema_enforces_unique_visible_attempt_identity_and_source_lineag
             snapshot_id,
             Uuid::new_v4(),
             1,
-            1,
+            Some(1),
             1,
         )
         .await?;
@@ -163,7 +340,7 @@ async fn rerun_schema_enforces_unique_visible_attempt_identity_and_source_lineag
             snapshot_id,
             Uuid::new_v4(),
             2,
-            1,
+            Some(1),
             1,
         )
         .await
@@ -201,6 +378,19 @@ async fn rerun_schema_enforces_unique_visible_attempt_identity_and_source_lineag
                 "workflow_rerun_carried_job_results_source_run_fk",
             ],
         );
+        let source_seal: (bool, bool) = sqlx::query_as(
+            r"
+            SELECT trigger.tgdeferrable, trigger.tginitdeferred
+            FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid =
+                      'workflow_rerun_carried_job_results'::regclass
+              AND trigger.tgname =
+                      'workflow_rerun_carried_job_results_validate_source'
+            ",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(source_seal, (true, true));
         Ok(())
     })
     .await
@@ -208,7 +398,7 @@ async fn rerun_schema_enforces_unique_visible_attempt_identity_and_source_lineag
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn postgres_rerun_adapter_is_explicitly_unsupported_and_writes_no_state() -> TestResult {
+async fn unauthorized_rerun_is_rejected_without_writes() -> TestResult {
     run_with_database(|database| async move {
         let store = PostgresStore::from_postgres_pool(database.pool().clone());
         let actor = ManagementActor::new(
@@ -250,7 +440,7 @@ async fn postgres_rerun_adapter_is_explicitly_unsupported_and_writes_no_state() 
             )?;
             assert!(matches!(
                 store.rerun_workflow(request).await,
-                Err(WorkflowRerunStoreError::Unsupported)
+                Err(WorkflowRerunStoreError::AuthorityRejected)
             ));
         }
 
@@ -268,7 +458,7 @@ async fn postgres_rerun_adapter_is_explicitly_unsupported_and_writes_no_state() 
         .await?;
         assert_eq!(
             after, before,
-            "unsupported reruns must not write rerun, workflow, or audit state"
+            "unauthorized reruns must not write rerun, workflow, or audit state"
         );
         Ok(())
     })
@@ -425,7 +615,7 @@ async fn insert_source_run(
     snapshot_id: Uuid,
     run_id: Uuid,
     run_number: i64,
-    public_run_id_alias: i64,
+    public_run_id_alias: Option<i64>,
     run_attempt: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -457,5 +647,69 @@ async fn insert_source_run(
     .bind(public_run_id_alias)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn insert_pre_rerun_source_run(
+    pool: &PgPool,
+    repository_id: Uuid,
+    workflow_id: Uuid,
+    snapshot_id: Uuid,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runs (
+            id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
+            event_name, event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            concurrency_group_key, admission_epoch, event_digest, event_size_bytes,
+            event_media_type, plan_digest, plan_object_key, plan_size_bytes,
+            plan_media_type, plan_schema, workflow_name, git_ref, actor,
+            display_title, commit_subject
+        ) VALUES (
+            $1, $2, $3, $4, 1, 1, 'push', 'event.json', $5, 'completed', 1, 2,
+            NULL, 4, $6, 128, 'application/json', $7, 'plan.pb', 128,
+            'application/vnd.automata.workflow-plan+json', 2, 'workflow', 'refs/heads/main',
+            'github-actions[bot]', 'Workflow', 'Initial commit'
+        )
+        ",
+    )
+    .bind(run_id)
+    .bind(repository_id)
+    .bind(workflow_id)
+    .bind(snapshot_id)
+    .bind([0x77_u8; 32].as_slice())
+    .bind([0x78_u8; 32].as_slice())
+    .bind([0x79_u8; 32].as_slice())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn apply_before(database: &TestDatabase, version: i64) -> TestResult {
+    let mut connection = database.pool().acquire().await?;
+    connection
+        .ensure_migrations_table(MIGRATOR.table_name.as_ref())
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version < version)
+    {
+        connection
+            .apply(MIGRATOR.table_name.as_ref(), migration)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn apply_version(database: &TestDatabase, version: i64) -> TestResult {
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == version)
+        .expect("migration is embedded");
+    let mut connection = database.pool().acquire().await?;
+    connection
+        .apply(MIGRATOR.table_name.as_ref(), migration)
+        .await?;
     Ok(())
 }

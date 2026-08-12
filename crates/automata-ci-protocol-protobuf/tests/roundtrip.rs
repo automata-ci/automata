@@ -70,7 +70,10 @@ fn resource_allocation_round_trips_with_exact_requests_and_limits() {
         panic!("decoded lease offer");
     };
 
-    assert_eq!(offer.job().job().requirements().minimum_resources(), requests);
+    assert_eq!(
+        offer.job().job().requirements().minimum_resources(),
+        requests
+    );
     assert_eq!(
         offer.job().job().requirements().resource_allocation(),
         Some(allocation)

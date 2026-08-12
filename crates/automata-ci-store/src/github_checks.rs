@@ -222,6 +222,8 @@ pub enum GithubCheckSubjectOrigin {
     ProviderDelivery(ProviderDeliveryId),
     /// A fenced invocation from an immutable schedule registry revision.
     ScheduledFire(GithubScheduleFireId),
+    /// A fresh physical attempt derived from one exact terminal workflow run.
+    WorkflowRerun(RunId),
 }
 
 /// Exact immutable routing and provider identity of a pre-admission Check subject.
@@ -315,6 +317,46 @@ impl GithubCheckSubjectIdentity {
         })
     }
 
+    /// Constructs the provider identity of a fresh workflow-rerun Check.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a nil Automata repository or rerun UUID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_rerun(
+        tenant: TenantScope,
+        repository_id: RepositoryId,
+        rerun_run_id: RunId,
+        subject_key: GithubCheckSubjectKey,
+        connection_id: ProviderConnectionId,
+        installation_id: ProviderInstallationId,
+        github_repository_id: ProviderRepositoryId,
+        github_repository_name: GithubRepositoryName,
+        app_id: GithubCheckAppId,
+        head_sha: GithubCheckHeadSha,
+        name: GithubCheckName,
+    ) -> Result<Self, GithubCheckValueError> {
+        if repository_id.as_uuid().is_nil() {
+            return Err(GithubCheckValueError::NilUuid("GitHub Check repository ID"));
+        }
+        if rerun_run_id.as_uuid().is_nil() {
+            return Err(GithubCheckValueError::NilUuid("GitHub Check rerun run ID"));
+        }
+        Ok(Self {
+            tenant,
+            repository_id,
+            origin: GithubCheckSubjectOrigin::WorkflowRerun(rerun_run_id),
+            subject_key,
+            connection_id,
+            installation_id,
+            github_repository_id,
+            github_repository_name,
+            app_id,
+            head_sha,
+            name,
+        })
+    }
+
     /// Returns the authenticated tenant scope.
     #[must_use]
     pub const fn tenant(&self) -> &TenantScope {
@@ -335,15 +377,26 @@ impl GithubCheckSubjectIdentity {
     pub const fn delivery_id(&self) -> Option<ProviderDeliveryId> {
         match self.origin {
             GithubCheckSubjectOrigin::ProviderDelivery(delivery_id) => Some(delivery_id),
-            GithubCheckSubjectOrigin::ScheduledFire(_) => None,
+            GithubCheckSubjectOrigin::ScheduledFire(_)
+            | GithubCheckSubjectOrigin::WorkflowRerun(_) => None,
         }
     }
     /// Returns the scheduled fire identity, when schedule-originated.
     #[must_use]
     pub const fn schedule_fire_id(&self) -> Option<GithubScheduleFireId> {
         match self.origin {
-            GithubCheckSubjectOrigin::ProviderDelivery(_) => None,
+            GithubCheckSubjectOrigin::ProviderDelivery(_)
+            | GithubCheckSubjectOrigin::WorkflowRerun(_) => None,
             GithubCheckSubjectOrigin::ScheduledFire(fire_id) => Some(fire_id),
+        }
+    }
+    /// Returns the physical rerun identity, when rerun-originated.
+    #[must_use]
+    pub const fn rerun_run_id(&self) -> Option<RunId> {
+        match self.origin {
+            GithubCheckSubjectOrigin::ProviderDelivery(_)
+            | GithubCheckSubjectOrigin::ScheduledFire(_) => None,
+            GithubCheckSubjectOrigin::WorkflowRerun(run_id) => Some(run_id),
         }
     }
     /// Returns the delivery-local subject key.

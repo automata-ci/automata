@@ -1978,6 +1978,7 @@ async fn workload_grants_require_scope_access_and_protected_environment_approval
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One transaction preserves the full grantor-revision proof.
 async fn protected_environment_approval_rechecks_reviewer_grantor_authorization_revision()
 -> TestResult {
     run_with_database(|database| async move {

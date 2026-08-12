@@ -1370,6 +1370,10 @@ async fn load_instances(
                instance.runtime_context_size_bytes,
                instance.runtime_context_media_type,
                instance.runtime_context_schema,
+               evidence.environment_normalized_name AS gate_environment,
+               evidence.event_trust AS gate_event_trust,
+               evidence.source_kind AS gate_source_kind,
+               evidence.reusable_secret_permission AS gate_reusable_permission,
                result.terminal_ordinal, result.descriptor_digest,
                result.outputs_digest, result.commit_digest,
                result.raw_conclusion, result.effective_conclusion,
@@ -1392,6 +1396,8 @@ async fn load_instances(
          AND result.logical_job_id = instance.logical_job_id
         LEFT JOIN workflow_plan_v2_instance_result_claims AS claim
           ON claim.instance_id = result.instance_id
+        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+          ON evidence.instance_id = instance.id
         WHERE instance.run_id = $1 AND instance.invocation_id = $2
           AND instance.logical_job_id = $3
         ORDER BY instance.matrix_index
@@ -1650,6 +1656,7 @@ fn decode_activation_instance(
         row.try_get("workspace").map_err(operation_error)?,
         job_ir,
         runtime_context,
+        super::protected_environment::decode_job_environment_activation_evidence(row)?,
     )
     .map_err(corrupt_value)
 }
@@ -1856,7 +1863,8 @@ fn decode_prerequisite(
         outputs_digest,
         finalized_at,
     );
-    if expected_commit != stored_commit {
+    let carried = row.try_get::<bool, _>("carried").map_err(operation_error)?;
+    if !carried && expected_commit != stored_commit {
         return Err(StoreError::corrupt_data(
             "prerequisite commit digest disagrees with immutable root evidence",
         )

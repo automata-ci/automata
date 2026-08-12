@@ -67,17 +67,23 @@ fn migration_uses_nonkeyword_workload_authority_aliases() {
 #[test]
 fn adapter_keeps_gate_workflow_value_free_and_lease_fenced() {
     for required in [
-        "runtime_context_digest",
+        "concrete.runtime_context_digest",
         "attempt.lifecycle = 'queued'",
-        "load_prepare_replay(&mut transaction, &gate, request.tenant())",
-        "verify_prepare_replay(&stored, &request)?",
+        "FOR UPDATE OF gate, attempt",
+        "verify_runtime_context(&gate, request.activation_context_digest().as_bytes())?;",
+        "load_prepare_replay(&mut transaction, &gate, request.tenant()).await?;",
+        "verify_prepare_replay(&stored, &request)?;",
         ".bind(gate.attempt_id)",
         "automata_job_variable_binding_digest",
         "automata_job_secret_selection_digest",
-        "automata_job_secret_binding_digest",
-        "fencing_token",
-        "lease_id",
-        "authority_digest_key_id",
+        "automata_secret_is_available_to_gate",
+        "state.as_deref() != Some(\"ready\")",
+        "selected_names.iter().collect::<BTreeSet<_>>() != supplied_names.iter().collect()",
+        "authority_digest = $3 AND authority_digest_key_id = $4",
+        "issued_at_ms = $5 AND expires_at_ms = $6",
+        "automata_job_secret_binding_digest($1,$2,$3,$4,$5,$6)",
+        ".bind(request.lease_id().as_uuid())",
+        "request.fencing_token().get()",
     ] {
         assert!(
             POSTGRES_ADAPTER.contains(required),
@@ -96,15 +102,39 @@ fn adapter_keeps_gate_workflow_value_free_and_lease_fenced() {
 fn adapter_issues_only_server_derived_name_only_lease_bindings() {
     for required in [
         "IssueLeasedJobSecretGrants",
+        "InspectLeasedJobSecretBindings",
         "IssuedLeasedJobSecretBinding",
+        "if state != \"ready\"",
         "lifecycle != \"leased\"",
+        "lease_id != Some(request.lease_id().as_uuid())",
+        "stored_fence != fence",
+        "lease_issued_at != Some(request.issued_at().get())",
+        "lease_expires_at.is_none_or(|expiry| request.expires_at().get() > expiry)",
         "automata_protected_environment_approval_is_current",
-        "automata_secret_is_available_to_gate",
-        "built_in_ciphertext",
-        "job_secret_bindings",
+        "secret_selection_permission_allows_issue",
+        "selection.binding_digest IS NOT DISTINCT FROM",
+        "automata_secret_is_available_to_gate(secret, policy, current_gate)",
+        "version.storage_kind = 'built_in_ciphertext'",
+        "let grant_id = deterministic_grant_id(",
+        "let authority_digest = deterministic_grant_authority_digest(",
+        "environment_approval_request_id",
+        "authority_digest_key_id",
         "leased-job-secret-grant-v1",
-        "deterministic_grant_id",
-        "SecretBinding::new",
+        "let binding_exact: bool",
+        "grant_id = $4 AND lease_id = $5 AND fencing_token = $6",
+        "binding_digest IS NOT DISTINCT FROM",
+        "SecretBinding::new(grant_id.hyphenated().to_string())",
+        "with_version_id(version_id.hyphenated().to_string())",
+        "!matches!(lifecycle.as_str(), \"leased\" | \"preparing\" | \"running\")",
+        "runner_id != Some(lease.runner_id().as_uuid())",
+        "binding.lease_id = $3",
+        "binding.fencing_token = $4",
+        "grant.lease_id = $3",
+        "grant.fencing_token = $4",
+        "grant.issued_at_ms = $5",
+        "grant.expires_at_ms = $6",
+        "grant.status = 'active'",
+        "issued != expected || rows.len() != expected",
     ] {
         assert!(
             POSTGRES_ADAPTER.contains(required),
@@ -114,7 +144,7 @@ fn adapter_issues_only_server_derived_name_only_lease_bindings() {
     for prohibited in ["secret_value", "credential_value"] {
         assert!(
             !POSTGRES_ADAPTER.contains(prohibited),
-            "issuer must not accept or persist {prohibited}"
+            "issuer must not accept, persist, or project {prohibited}"
         );
     }
 }

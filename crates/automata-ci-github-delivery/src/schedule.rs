@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobStoreError, ImmutableBlobStore, MediaType};
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, OperationId, Sha256Digest, UnixMillis, WorkflowEventProvenance,
+    ContextValue, JobRuntimeContext, OperationId, Sha256Digest, UnixMillis,
+    WorkflowEventProvenance, WorkflowPlan,
 };
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmError,
@@ -74,6 +75,10 @@ const ARCHIVE_KEY_PREFIX: &str = "github/schedule-archives/v1";
 /// Time source used to bound scheduler-owned work outside database calls.
 pub trait GithubScheduleClock: fmt::Debug + Send + Sync {
     /// Returns a trusted current wall-clock instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized failure when no valid trusted instant is available.
     fn now(&self) -> Result<UnixMillis, GithubScheduleServiceError>;
 }
 
@@ -403,6 +408,7 @@ impl fmt::Debug for GithubScheduleSourceCredential {
             .field("consumer", &self.consumer)
             .field("required_through", &self.required_through)
             .field("token", &"[redacted]")
+            .field("release", &"[credential release]")
             .finish()
     }
 }
@@ -507,6 +513,10 @@ impl GithubScheduleService {
     ///
     /// A private manifest is never fetched by this constructor; it remains
     /// undiscovered until product composition provides its typed authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an SCM provider that is not the GitHub provider.
     #[allow(clippy::too_many_arguments)]
     pub fn new_public_only<R>(
         objects: Arc<dyn ImmutableBlobStore>,
@@ -534,6 +544,10 @@ impl GithubScheduleService {
     }
 
     /// Creates a scheduler with explicit private `contents:read` discovery authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an SCM provider that is not the GitHub provider.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_private_source_credentials<R>(
         objects: Arc<dyn ImmutableBlobStore>,
@@ -570,23 +584,37 @@ impl GithubScheduleService {
     ///
     /// Claims already started in a pass are never intentionally abandoned; a
     /// shutdown merely prevents the next pass from beginning.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized repository, source, blob, admission, or trusted-time
+    /// failure from a scheduler pass.
     pub async fn run(
         self: Arc<Self>,
         shutdown: CancellationToken,
     ) -> Result<(), GithubScheduleServiceError> {
+        let poll = Duration::from_millis(
+            u64::try_from(self.config.poll_millis())
+                .map_err(|_| GithubScheduleServiceError::Configuration)?,
+        );
         loop {
             if shutdown.is_cancelled() {
                 return Ok(());
             }
-            self.run_once().await?;
+            Box::pin(self.run_once()).await?;
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(()),
-                () = sleep(Duration::from_millis(u64::try_from(self.config.poll_millis()).expect("validated positive poll"))) => {}
+                () = sleep(poll) => {}
             }
         }
     }
 
     /// Performs one bounded manifest discovery scan and due-fire scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized repository, source, blob, admission, or trusted-time
+    /// failure encountered during the pass.
     pub async fn run_once(&self) -> Result<GithubScheduleServicePass, GithubScheduleServiceError> {
         let mut pass = GithubScheduleServicePass::default();
         let manifests = self
@@ -613,7 +641,7 @@ impl GithubScheduleService {
                 break;
             };
             pass.due_fires = pass.due_fires.saturating_add(1);
-            self.process_due_fire(claimed).await?;
+            Box::pin(self.process_due_fire(claimed)).await?;
         }
         Ok(pass)
     }
@@ -677,15 +705,14 @@ impl GithubScheduleService {
             ) => return Ok(false),
             Err(error) => return Err(error),
         };
-        let entries = match registry_entries(
+        let Ok(entries) = registry_entries(
             &manifest,
             claim,
             &discovered.revision,
             &discovered.bytes,
             discovered.digest,
-        ) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(false),
+        ) else {
+            return Ok(false);
         };
         let archive =
             GithubScheduleArchive::new(discovered.digest, discovered.object_key, discovered.size)
@@ -832,11 +859,11 @@ impl GithubScheduleService {
     ) -> Result<(), GithubScheduleServiceError> {
         let claim = claimed.claim();
         let now = self.clock.now()?;
-        let cron =
-            match automata_ci_schedule::CronExpression::parse(claimed.entry().cron_expression()) {
-                Ok(cron) => cron,
-                Err(_) => return self.complete_invalid_registry(claim).await,
-            };
+        let Ok(cron) =
+            automata_ci_schedule::CronExpression::parse(claimed.entry().cron_expression())
+        else {
+            return self.complete_invalid_registry(claim).await;
+        };
         let lateness = now.get().saturating_sub(claimed.scheduled_at().get());
         if lateness > self.config.staleness_millis() {
             let next = cron
@@ -878,7 +905,7 @@ impl GithubScheduleService {
             }
             Err(error) => return Err(error.into()),
         };
-        let conclusion = match self.admit_claimed_fire(&claimed, claim).await {
+        let conclusion = match Box::pin(self.admit_claimed_fire(&claimed, claim)).await {
             Ok(run_id) => GithubScheduleFireConclusion::Admitted(run_id),
             Err(FireFailure::Skipped(kind)) => {
                 GithubScheduleFireConclusion::Skipped(kind.to_owned())
@@ -901,111 +928,8 @@ impl GithubScheduleService {
         claimed: &ClaimedGithubScheduleFire,
         claim: GithubScheduleFireClaim,
     ) -> Result<automata_ci_core::RunId, FireFailure> {
-        let manifest = self
-            .manifests
-            .load_current_github_provider_manifest(claimed.tenant(), claimed.connection_id())
-            .await
-            .map_err(|_| FireFailure::Lost)?;
-        let manifest = manifest.manifest();
-        if manifest.repository_id() != claimed.repository_id()
-            || manifest.git_ref() != claimed.default_branch_ref()
-            || !manifest.selects_workflow_path(claimed.entry().workflow_path())
-        {
-            return Err(FireFailure::Lost);
-        }
-        let descriptor =
-            archive_descriptor(claimed.archive()).map_err(|_| FireFailure::InvalidRegistry)?;
-        let archive = self
-            .objects
-            .get_verified(&descriptor, claimed.archive().encoded_size())
-            .await
-            .map_err(|error| match error.kind() {
-                automata_ci_blob::BlobStoreErrorKind::Unavailable
-                | automata_ci_blob::BlobStoreErrorKind::Unauthorized => {
-                    FireFailure::Retry("github.schedule.archive_unavailable")
-                }
-                _ => FireFailure::InvalidRegistry,
-            })?
-            .into_bytes();
-        let workflows = discover_repository_workflows(
-            &archive,
-            discovery_limits(manifest).map_err(|_| FireFailure::InvalidRegistry)?,
-        )
-        .map_err(|_| FireFailure::InvalidRegistry)?;
-        let mut available = Vec::new();
-        let mut selected = None;
-        for workflow in workflows {
-            let (path, source) = workflow.into_parts();
-            let Ok(source) = source else {
-                continue;
-            };
-            let bytes = Bytes::from(source);
-            if path == claimed.entry().workflow_path() {
-                selected = Some(bytes.clone());
-            }
-            available.push(RepositoryWorkflowSource::new(path, bytes));
-        }
-        let Some(source) = selected else {
-            return Err(FireFailure::InvalidRegistry);
-        };
-        if Sha256Digest::from_bytes(Sha256::digest(&source).into())
-            != claimed.entry().workflow_source_digest()
-        {
-            return Err(FireFailure::InvalidRegistry);
-        }
-        let source_text = std::str::from_utf8(&source)
-            .map_err(|_| FireFailure::Failed("github.schedule.workflow_invalid_encoding"))?;
-        let provenance = SourceProvenance::new(
-            SourceId::new(claimed.entry().workflow_path()),
-            SourceOrigin::Repository {
-                repository: Arc::from(format!(
-                    "{}/{}",
-                    claimed.repository_owner(),
-                    claimed.repository_name()
-                )),
-                revision: Arc::from(claimed.source_revision()),
-                path: Arc::from(claimed.entry().workflow_path()),
-            },
-        );
-        let parsed = GithubWorkflowFrontend::default()
-            .parse(ParseWorkflowRequest::new(provenance, source_text));
-        if !parsed.is_accepted() {
-            return Err(FireFailure::Failed(
-                "github.schedule.workflow_frontend_rejected",
-            ));
-        }
-        let Some(source_plan) = parsed.plan() else {
-            return Err(FireFailure::InvalidRegistry);
-        };
-        let event = WorkflowEventProvenance::new(GITHUB_PROVIDER, "schedule")
-            .with_commit_sha(claimed.source_revision())
-            .with_git_ref(claimed.default_branch_ref());
-        let report = GithubWorkflowCompiler::new().compile(
-            CompileWorkflowRequest::new(source_plan, event).with_event_metadata_v1(
-                GithubEventMetadataV1::schedule(claimed.entry().cron_expression()),
-            ),
-        );
-        let plan = match report.disposition() {
-            CompilationDisposition::Accepted => {
-                report.into_parts().0.ok_or(FireFailure::InvalidRegistry)?
-            }
-            CompilationDisposition::NotSelected(_) => {
-                return Err(FireFailure::Skipped(
-                    "github.schedule.workflow_not_selected",
-                ));
-            }
-            CompilationDisposition::Rejected => {
-                return Err(FireFailure::Failed(
-                    "github.schedule.workflow_compilation_rejected",
-                ));
-            }
-            CompilationDisposition::RequiresChangedFiles => {
-                return Err(FireFailure::Failed(
-                    "github.schedule.workflow_invalid_selection",
-                ));
-            }
-            _ => return Err(FireFailure::Failed("github.schedule.workflow_unsupported")),
-        };
+        let (source, available) = self.load_claimed_workflow_sources(claimed).await?;
+        let plan = compile_claimed_workflow(claimed, &source)?;
         let evidence = GithubScheduleEvidenceV1::new(
             claimed.entry().cron_expression(),
             claimed.scheduled_at(),
@@ -1058,7 +982,64 @@ impl GithubScheduleService {
             .admit_scheduled_github_workflow(request, claim)
             .await
             .map(|result| result.receipt().run_id())
-            .map_err(map_admission_error)
+            .map_err(|error| map_admission_error(&error))
+    }
+
+    async fn load_claimed_workflow_sources(
+        &self,
+        claimed: &ClaimedGithubScheduleFire,
+    ) -> Result<(Bytes, Vec<RepositoryWorkflowSource>), FireFailure> {
+        let manifest = self
+            .manifests
+            .load_current_github_provider_manifest(claimed.tenant(), claimed.connection_id())
+            .await
+            .map_err(|_| FireFailure::Lost)?;
+        let manifest = manifest.manifest();
+        if manifest.repository_id() != claimed.repository_id()
+            || manifest.git_ref() != claimed.default_branch_ref()
+            || !manifest.selects_workflow_path(claimed.entry().workflow_path())
+        {
+            return Err(FireFailure::Lost);
+        }
+        let descriptor =
+            archive_descriptor(claimed.archive()).map_err(|()| FireFailure::InvalidRegistry)?;
+        let archive = self
+            .objects
+            .get_verified(&descriptor, claimed.archive().encoded_size())
+            .await
+            .map_err(|error| match error.kind() {
+                automata_ci_blob::BlobStoreErrorKind::Unavailable
+                | automata_ci_blob::BlobStoreErrorKind::Unauthorized => {
+                    FireFailure::Retry("github.schedule.archive_unavailable")
+                }
+                _ => FireFailure::InvalidRegistry,
+            })?
+            .into_bytes();
+        let workflows = discover_repository_workflows(
+            &archive,
+            discovery_limits(manifest).map_err(|()| FireFailure::InvalidRegistry)?,
+        )
+        .map_err(|_| FireFailure::InvalidRegistry)?;
+        let mut available = Vec::new();
+        let mut selected = None;
+        for workflow in workflows {
+            let (path, source) = workflow.into_parts();
+            let Ok(source) = source else {
+                continue;
+            };
+            let bytes = Bytes::from(source);
+            if path == claimed.entry().workflow_path() {
+                selected = Some(bytes.clone());
+            }
+            available.push(RepositoryWorkflowSource::new(path, bytes));
+        }
+        let source = selected.ok_or(FireFailure::InvalidRegistry)?;
+        if Sha256Digest::from_bytes(Sha256::digest(&source).into())
+            != claimed.entry().workflow_source_digest()
+        {
+            return Err(FireFailure::InvalidRegistry);
+        }
+        Ok((source, available))
     }
 
     async fn complete_invalid_registry(
@@ -1124,6 +1105,59 @@ impl GithubScheduleService {
     }
 }
 
+fn compile_claimed_workflow(
+    claimed: &ClaimedGithubScheduleFire,
+    source: &Bytes,
+) -> Result<WorkflowPlan, FireFailure> {
+    let source_text = std::str::from_utf8(source)
+        .map_err(|_| FireFailure::Failed("github.schedule.workflow_invalid_encoding"))?;
+    let provenance = SourceProvenance::new(
+        SourceId::new(claimed.entry().workflow_path()),
+        SourceOrigin::Repository {
+            repository: Arc::from(format!(
+                "{}/{}",
+                claimed.repository_owner(),
+                claimed.repository_name()
+            )),
+            revision: Arc::from(claimed.source_revision()),
+            path: Arc::from(claimed.entry().workflow_path()),
+        },
+    );
+    let parsed =
+        GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, source_text));
+    if !parsed.is_accepted() {
+        return Err(FireFailure::Failed(
+            "github.schedule.workflow_frontend_rejected",
+        ));
+    }
+    let Some(source_plan) = parsed.plan() else {
+        return Err(FireFailure::InvalidRegistry);
+    };
+    let event = WorkflowEventProvenance::new(GITHUB_PROVIDER, "schedule")
+        .with_commit_sha(claimed.source_revision())
+        .with_git_ref(claimed.default_branch_ref());
+    let report = GithubWorkflowCompiler::new().compile(
+        CompileWorkflowRequest::new(source_plan, event).with_event_metadata_v1(
+            GithubEventMetadataV1::schedule(claimed.entry().cron_expression()),
+        ),
+    );
+    match report.disposition() {
+        CompilationDisposition::Accepted => {
+            report.into_parts().0.ok_or(FireFailure::InvalidRegistry)
+        }
+        CompilationDisposition::NotSelected(_) => Err(FireFailure::Skipped(
+            "github.schedule.workflow_not_selected",
+        )),
+        CompilationDisposition::Rejected => Err(FireFailure::Failed(
+            "github.schedule.workflow_compilation_rejected",
+        )),
+        CompilationDisposition::RequiresChangedFiles => Err(FireFailure::Failed(
+            "github.schedule.workflow_invalid_selection",
+        )),
+        _ => Err(FireFailure::Failed("github.schedule.workflow_unsupported")),
+    }
+}
+
 impl fmt::Debug for GithubScheduleService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1141,6 +1175,7 @@ impl fmt::Debug for GithubScheduleService {
                 "private_credentials",
                 &self.credentials.as_ref().map(|_| "[configured]"),
             )
+            .field("clock", &"[trusted clock]")
             .field("worker_id", &self.worker_id)
             .field("config", &self.config)
             .finish()
@@ -1325,7 +1360,7 @@ const fn map_admission_request_error(error: WorkflowAdmissionRequestError) -> Fi
     }
 }
 
-fn map_admission_error(error: WorkflowAdmissionError) -> FireFailure {
+fn map_admission_error(error: &WorkflowAdmissionError) -> FireFailure {
     match error {
         WorkflowAdmissionError::Store(
             automata_ci_store::LogicalWorkflowAdmissionStoreError::RunNumberExhausted,

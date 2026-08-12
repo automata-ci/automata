@@ -12,9 +12,10 @@ mod github_webhook;
 pub(crate) mod human_auth;
 pub(crate) mod installation_setup;
 mod maintenance;
-#[allow(dead_code)] // Wired only when encrypted secret custody is operational.
 mod managed_secret_delivery;
 pub(crate) mod metrics;
+mod protected_environment_gate;
+mod protected_environment_review;
 mod readiness;
 mod secret_cleanup;
 mod secret_custody;
@@ -23,6 +24,7 @@ mod secret_mutation_recovery;
 mod state_metrics;
 mod static_registration;
 mod workflow_dispatch;
+mod workflow_rerun;
 
 use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
 

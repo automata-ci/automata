@@ -12,11 +12,12 @@ use std::{
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
     ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext, SecretBinding,
+    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
     MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
     MAX_STEP_ATTACHMENT_TEXT_BYTES, OutputSensitivity, RuntimeBoolean, RuntimePositiveInteger,
-    RuntimeTimeoutTemplate, SemanticStep, ShellTemplate, StepAnnotation, StepAnnotationLevel,
-    StepAnnotationProperty, StepResult, UnixMillis, ValueSource, ValueTemplate,
+    RuntimeTimeoutTemplate, SecretBinding, SemanticStep, ShellTemplate, StepAnnotation,
+    StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis, ValueSource,
+    ValueTemplate,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -5128,6 +5129,10 @@ impl fmt::Debug for GithubJobExecutor {
             .field(
                 "custody_acknowledger",
                 &self.custody_acknowledger.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "managed_secret_bindings",
+                &self.managed_secret_bindings.as_ref().map(BTreeMap::len),
             )
             .finish()
     }
