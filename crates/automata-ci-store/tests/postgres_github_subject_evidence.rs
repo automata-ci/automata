@@ -110,6 +110,10 @@ async fn atomic_acceptance_pins_owner_manifest_authority_check_and_exact_replay(
         assert_eq!(accepted.repository_owner_id().get(), OWNER_ID);
         assert_eq!(accepted.manifest_revision().get(), 1);
         assert_eq!(accepted.manifest_digest(), fixture.manifest.digest());
+        assert_eq!(
+            accepted.evidence().manifest().github_repository_owner_id(),
+            Some(ProviderRepositoryOwnerId::new(OWNER_ID)?)
+        );
         assert_eq!(accepted.accepted_at(), accepted_at);
         assert_eq!(accepted.evidence().manifest(), &fixture.manifest);
         assert_eq!(
@@ -1802,6 +1806,7 @@ fn manifest_with_selection(
         GithubProviderManifestLimits::github_dot_com_ci(),
         GithubProviderManifestRevision::new(revisions.manifest).expect("manifest revision"),
     )
+    .with_repository_owner_id(ProviderRepositoryOwnerId::new(OWNER_ID).expect("repository owner"))
 }
 
 fn authority(

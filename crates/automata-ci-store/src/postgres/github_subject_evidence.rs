@@ -2305,6 +2305,14 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
             .map_err(operation_error)?,
     )?)
     .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let github_repository_owner_id = row
+        .try_get::<Option<i64>, _>("github_repository_owner_id")
+        .map_err(operation_error)?
+        .map(positive_u64)
+        .transpose()?
+        .map(ProviderRepositoryOwnerId::new)
+        .transpose()
+        .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
     let github_repository_name = GithubRepositoryName::new(
         row.try_get::<String, _>("github_repository_name")
             .map_err(operation_error)?,
@@ -2470,7 +2478,7 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
         crate::GITHUB_PROVIDER_ARCHIVE_FORMAT,
     )?;
 
-    let manifest = GithubProviderManifest::new_with_workflow_selection_and_git_ref(
+    let mut manifest = GithubProviderManifest::new_with_workflow_selection_and_git_ref(
         tenant,
         connection_id,
         installation_id,
@@ -2496,6 +2504,9 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
         limits,
         revision,
     );
+    if let Some(owner_id) = github_repository_owner_id {
+        manifest = manifest.with_repository_owner_id(owner_id);
+    }
     GithubProviderManifest::from_durable_parts(
         manifest,
         repository_id,
@@ -2547,7 +2558,8 @@ const CURRENT_MANIFEST_SELECT: &str = r"
         revision.tenant_id, revision.repository_id,
         revision.provider_connection_id, revision.manifest_revision,
         revision.manifest_digest, revision.provider_installation_id,
-        revision.github_repository_id, revision.github_repository_name,
+        revision.github_repository_id, revision.github_repository_owner_id,
+        revision.github_repository_name,
         revision.repository_visibility, revision.github_app_id,
         revision.github_app_client_id, revision.github_app_jwt_issuer_kind,
         revision.app_key_spki_sha256, revision.app_configuration_revision,
