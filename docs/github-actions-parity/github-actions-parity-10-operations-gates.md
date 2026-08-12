@@ -22,6 +22,7 @@ current support; unchecked tasks in this file are planned work.
 - [Triggers, dispatch, schedules, and event families](github-actions-parity-07-events.md)
 - [Results, Checks, artifacts, cache, and product UI](github-actions-parity-08-results.md)
 - [Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity-09-platforms.md)
+- [Cross-repository integration tests](github-actions-parity-11-integration-tests.md)
 
 Execution follows package dependencies rather than document order. Open the
 parent plan for staffing waves, shared ownership locks, and the common
@@ -268,13 +269,33 @@ Acceptance:
   for another.
 - [ ] Operators can explain each rejection from policy and observed usage.
 
+## External integration-suite gate policy
+
+The
+[cross-repository integration-test workstream](github-actions-parity-11-integration-tests.md)
+provides shared deployment, provider, evidence, comparison, and graduation
+machinery. It does not redefine the gates below.
+
+| Gate | Required companion evidence |
+| --- | --- |
+| GATE-01 | IT-01/IT-02 intake and admission, IT-03 differential machinery, the first IT-04 live graduation, and feature-owned Linux scenarios |
+| GATE-02 | IT-09 Windows adapter plus Windows feature scenarios; hosted Windows evidence remains independent of Linux GATE-06 |
+| GATE-03 | IT-03 protected live target, IT-06-style credential/effect controls, and feature-owned authority canaries |
+| GATE-04 | IT-02 admission coverage, IT-03 provider observation, and event-owner positive/negative scenarios |
+| GATE-05 | IT-12 multi-replica/fault adapter plus FND-02 restart controls and feature-owned fault/overload scenarios |
+| GATE-06 | IT-01 exact bundle, IT-02 coverage, IT-03 live comparison, IT-08 continuous operation, and the exact unchanged Automata workflow |
+
+An emulator result can satisfy deterministic protocol coverage but cannot
+satisfy a live GitHub requirement. A candidate, quarantined, skipped, expired,
+or incompletely observed scenario cannot satisfy any gate.
+
 ### GATE-01 — Unchanged mainstream Linux conformance workflow
 
 **Owner:** X as integration owner; all lanes fix their failures. **Size:** XL.
 **Dependencies:** FND-01, FND-02, WF-03, WF-05, WF-06, MAT-01, MAT-02,
 MAT-03, DEP-01, SCH-01, RUN-01, RUN-02, RUN-03, ACT-01, LOG-03, LOG-04,
 CAN-01, CAN-02, AUTH-03, RES-01, RES-02, ART-01, CHECK-01, PROV-01,
-CACHE-02, PLAT-01.
+CACHE-02, PLAT-01, IT-04.
 
 This is the first compatibility gate. The workflow fixture must remain normal
 GitHub Actions YAML rather than an Automata-specific test protocol.
@@ -321,7 +342,7 @@ Acceptance:
 ### GATE-02 — Unchanged Windows run-and-actions workflow
 
 **Owner:** X with R and P. **Size:** L. **Dependencies:** WIN-03, CACHE-03,
-ART-01, CAN-02, GATE-01.
+ART-01, CAN-02, GATE-01, IT-09.
 
 Hosted Windows CI is intentionally absent from the audited main branch because
 Automata does not currently operate a Windows runner. This gate independently
@@ -356,7 +377,8 @@ Acceptance:
 ### GATE-03 — Credentials, trust, environments, and OIDC
 
 **Owner:** X with C. **Size:** XL. **Dependencies:** AUTH-03, CFG-02, ENV-02,
-OIDC-02, SEC-01, SEC-02, REU-04, EVT-02, EVT-03, EVT-05, EVT-08.
+OIDC-02, SEC-01, SEC-02, REU-04, EVT-02, EVT-03, EVT-05, EVT-08,
+IT-03.
 
 Tasks:
 
@@ -389,7 +411,7 @@ Acceptance:
 ### GATE-04 — Broader event and trigger differential suite
 
 **Owner:** X with C and W. **Size:** XL. **Dependencies:** EVT-02, EVT-03,
-EVT-04, EVT-05, EVT-06, EVT-07, EVT-08, WF-01, WF-02.
+EVT-04, EVT-05, EVT-06, EVT-07, EVT-08, WF-01, WF-02, IT-02, IT-03.
 
 Tasks:
 
@@ -419,7 +441,7 @@ Acceptance:
 
 **Owner:** X with S, P, and C. **Size:** XL. **Dependencies:** MAT-02, MAT-03,
 SCH-02, CAN-02, ENV-02, LIM-01, OPS-01, FLT-03, FLT-04, ART-02,
-CACHE-01.
+CACHE-01, IT-12.
 
 Tasks:
 
@@ -456,22 +478,23 @@ Acceptance:
 ### GATE-06 — Automata repository CI unchanged
 
 **Owner:** X as integration owner; all lanes fix their failures. **Size:** XL.
-**Dependencies:** GATE-01, DCK-01.
+**Dependencies:** GATE-01, DCK-01, IT-01, IT-02, IT-03, IT-08.
 
 This is the backlog's full unchanged-CI requirement. It follows rather than
 replaces the smaller Linux and container/daemon diagnostic gates. `GATE-02`
 restores hosted Windows independently because the checked-in repository CI no
 longer declares a Windows job.
 
-At the audited `8dd4e5a589aa531ed1424a460a0dcef1e918ab4e` baseline, the
+At the audited `4aa42c00e2651b5dd17f7a81931f57f5bb36a44a` baseline, the
 checked-in `.github/workflows/ci.yml` Git blob is
-`0611162e3b7dc74f3fe835708e971f71e8e09a42`: 19,197 canonical bytes with
-SHA-256 `b7de10a8163229b25e0c5a756b26f8641cab07b3a68cc0631789767cd9e854c1`.
+`285b6f2ae0bf54b7a0f8766b892514c1c3928061`: 19,197 canonical bytes with
+SHA-256 `afc1d3ac6ce075c163c8820f9f97ee490ce907160f3ca361c02cabd0e94a677a`.
 It declares ten Ubuntu jobs (`verify`, `rust_tests`, `rust_coverage`,
 `renderer_tests`, `postgres_store`, `postgres_integrations`, `frontend`,
-`renderer`, `dist_build`, and `dist`) and no Windows job. This is audit
-evidence, not the future frozen gate fixture; the gate must still pin its
-chosen source and workflow bytes explicitly.
+`renderer`, `dist_build`, and `dist`), uses `actions/checkout` v7.0.1 and
+`actions/setup-node` v7.0.0, and has no Windows job. This is audit evidence, not
+the future frozen gate fixture; the gate must still pin its chosen source and
+workflow bytes explicitly.
 
 Tasks:
 
@@ -567,8 +590,12 @@ holding one integration branch for weeks:
    contract.
 4. [ ] **Composition PR:** configuration, startup admission, capability
    publication, metrics, and fail-closed behavior.
-5. [ ] **Acceptance PR:** real process/adapters, frozen fixtures, documentation,
-   and compatibility-state transition.
+5. [ ] **Companion integration PR:** add or graduate the corresponding scenario
+   in `automata-integration-tests`, pin the merged Automata revision, and retain
+   the required evidence classes.
+6. [ ] **Acceptance PR:** real process/adapters, frozen fixtures, retained
+   cross-repository evidence, documentation, and compatibility-state
+   transition.
 
 Handoff checklist:
 
@@ -580,6 +607,13 @@ Handoff checklist:
 - [ ] Scheduler policy remains outside runner JobIR unless it is required for
   execution semantics.
 - [ ] Final integrator runs merge-base tests plus affected OS/provider gates.
+- [ ] Companion suite PR cites the same product and IT package IDs and pins one
+  verified release bundle rather than a mutable branch.
+- [ ] Evidence handoff records suite/product commits, executable and image
+  digests, source/workflow/action locks, schemas, topology, native records,
+  canonical diff, attempts, and cleanup.
+- [ ] Lane C approves protected live-provider or side-effect execution; lane P
+  approves disposable runner/provider infrastructure.
 
 ## Initial issue-creation checklist
 
@@ -613,4 +647,4 @@ product support.
 
 ---
 
-[Previous: Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity-09-platforms.md) · [Parent execution plan](../github-actions-parity-execution-plan.md)
+[Previous: Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity-09-platforms.md) · [Next: Cross-repository integration tests](github-actions-parity-11-integration-tests.md) · [Parent execution plan](../github-actions-parity-execution-plan.md)

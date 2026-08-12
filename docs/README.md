@@ -44,6 +44,9 @@ It does not connect to repositories or execute workflows.
 - [GitHub Actions parity execution plan](github-actions-parity-execution-plan.md)
   turns that audit into dependency-aware work packages for a team of four to
   six developers.
+- [GitHub Actions parity integration-test plan](github-actions-parity/github-actions-parity-11-integration-tests.md)
+  coordinates the companion conformance repository, live GitHub differential
+  lanes, corpus graduation, and evidence handoff for those work packages.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
