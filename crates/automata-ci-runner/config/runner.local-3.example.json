@@ -49,8 +49,8 @@
     "environment_profiles": [
       {
         "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
-        "manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4",
-        "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd",
+        "manifest_sha256": "d34437d037410cd10564d232df12591a40e132735fbe415420f605faf3f5d648",
+        "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194",
         "keepalive_program": "/bin/sleep",
         "keepalive_arguments": [
           "infinity"
