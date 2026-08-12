@@ -20,6 +20,9 @@ rustix = { workspace = true, features = ["param"] }
 thiserror.workspace = true
 tokio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+processkit = { workspace = true, features = ["process-control"] }
+
 [dev-dependencies]
 http-body-util.workspace = true
 tower.workspace = true

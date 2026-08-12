@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_core::{
-    ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, PermissionLevel, RunnerId,
-    SemanticStep, StrategyContext, ValueSource,
+    Architecture, ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, OperatingSystem,
+    PermissionLevel, RunnerId, RunnerPlatform, SemanticStep, StrategyContext, ValueSource,
 };
 use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_expression_github::{
@@ -36,6 +36,7 @@ pub struct StandardGithubContext {
     runner_id: RunnerId,
     workspaces: BTreeMap<automata_ci_core::EnvironmentProfile, TargetPath>,
     platform: TargetPlatform,
+    runner_platform: RunnerPlatform,
     runner_root: String,
     home: String,
     path: String,
@@ -53,6 +54,7 @@ impl StandardGithubContext {
     /// Rejects an empty environment catalog.
     pub fn new(
         runner_id: RunnerId,
+        runner_platform: RunnerPlatform,
         environments: &BTreeMap<
             automata_ci_core::EnvironmentProfile,
             automata_ci_execution::SandboxEnvironment,
@@ -82,10 +84,19 @@ impl StandardGithubContext {
         {
             return Err(invalid_data());
         }
+        let expected_target_platform = match runner_platform.operating_system() {
+            OperatingSystem::Linux | OperatingSystem::Macos => TargetPlatform::Posix,
+            OperatingSystem::Windows => TargetPlatform::Windows,
+            OperatingSystem::Other(_) => return Err(invalid_data()),
+        };
+        if platform != expected_target_platform {
+            return Err(invalid_data());
+        }
         Ok(Self {
             runner_id,
             workspaces,
             platform,
+            runner_platform,
             runner_root: executor.runner_root().as_str().to_owned(),
             home: executor.home().as_str().to_owned(),
             path: executor.path().to_owned(),
@@ -104,8 +115,8 @@ impl StandardGithubContext {
             .ok_or_else(invalid_data)?;
         let root = self.workspaces.get(profile).ok_or_else(invalid_data)?;
         let workspace = request.job().execution().workspace();
-        match self.platform {
-            TargetPlatform::Posix => {
+        match (self.runner_platform.operating_system(), self.platform) {
+            (OperatingSystem::Linux, TargetPlatform::Posix) => {
                 TargetPath::posix(workspace).map_err(|_| invalid_data())?;
                 let prefix = format!("{}/", root.as_str().trim_end_matches('/'));
                 if workspace == root.as_str() || !workspace.starts_with(&prefix) {
@@ -113,7 +124,14 @@ impl StandardGithubContext {
                 }
                 Ok(workspace.to_owned())
             }
-            TargetPlatform::Windows => {
+            (OperatingSystem::Macos, TargetPlatform::Posix) => {
+                TargetPath::posix(workspace).map_err(|_| invalid_data())?;
+                let suffix = workspace.strip_prefix("/__w/").ok_or_else(invalid_data)?;
+                let mapped = format!("{}/{suffix}", root.as_str().trim_end_matches('/'));
+                TargetPath::posix(mapped.clone()).map_err(|_| invalid_data())?;
+                Ok(mapped)
+            }
+            (OperatingSystem::Windows, TargetPlatform::Windows) => {
                 TargetPath::posix(workspace).map_err(|_| invalid_data())?;
                 let suffix = workspace.strip_prefix("/__w/").ok_or_else(invalid_data)?;
                 let mut mapped = root.as_str().trim_end_matches('\\').to_owned();
@@ -122,6 +140,7 @@ impl StandardGithubContext {
                 TargetPath::windows(mapped.clone()).map_err(|_| invalid_data())?;
                 Ok(mapped)
             }
+            _ => Err(invalid_data()),
         }
     }
 
@@ -222,7 +241,10 @@ impl StandardGithubContext {
         object(vec![
             string_entry("name", self.runner_id.to_string()),
             string_entry("os", self.runner_os()),
-            string_entry("arch", github_architecture()),
+            string_entry(
+                "arch",
+                github_architecture(self.runner_platform.architecture()),
+            ),
             string_entry("environment", "self-hosted"),
             string_entry("temp", &self.temp),
             string_entry("tool_cache", &self.tool_cache),
@@ -266,7 +288,10 @@ impl StandardGithubContext {
             plain("GITHUB_WORKSPACE", workspace),
             plain("HOME", &self.home),
             plain("PATH", &self.path),
-            plain("RUNNER_ARCH", github_architecture()),
+            plain(
+                "RUNNER_ARCH",
+                github_architecture(self.runner_platform.architecture()),
+            ),
             plain("RUNNER_ENVIRONMENT", "self-hosted"),
             plain("RUNNER_NAME", self.runner_id.to_string()),
             plain("RUNNER_OS", self.runner_os()),
@@ -325,9 +350,11 @@ impl StandardGithubContext {
     }
 
     const fn runner_os(&self) -> &'static str {
-        match self.platform {
-            TargetPlatform::Posix => "Linux",
-            TargetPlatform::Windows => "Windows",
+        match self.runner_platform.operating_system() {
+            OperatingSystem::Linux => "Linux",
+            OperatingSystem::Windows => "Windows",
+            OperatingSystem::Macos => "macOS",
+            OperatingSystem::Other(_) => "Unknown",
         }
     }
 }
@@ -377,6 +404,7 @@ impl fmt::Debug for StandardGithubContext {
             .debug_struct("StandardGithubContext")
             .field("runner_id", &self.runner_id)
             .field("environment_count", &self.workspaces.len())
+            .field("runner_platform", &self.runner_platform)
             .field("runner_root", &self.runner_root)
             .field("github", &self.github)
             .field("context_values", &"[REDACTED]")
@@ -699,10 +727,10 @@ const fn conclusion_text(conclusion: JobConclusion) -> &'static str {
     }
 }
 
-fn github_architecture() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "X64",
-        "aarch64" => "ARM64",
-        _ => "Unknown",
+const fn github_architecture(architecture: &Architecture) -> &'static str {
+    match architecture {
+        Architecture::X86_64 => "X64",
+        Architecture::Aarch64 => "ARM64",
+        Architecture::Other(_) => "Unknown",
     }
 }

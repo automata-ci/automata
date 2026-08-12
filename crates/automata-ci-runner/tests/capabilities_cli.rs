@@ -9,12 +9,16 @@ use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 #[cfg(unix)]
 use automata_ci_core::OperationId;
 
+#[cfg(target_os = "macos")]
+const EXAMPLE_CONFIG: &str = "runner.macos.example.json";
+#[cfg(target_os = "windows")]
+const EXAMPLE_CONFIG: &str = "runner.windows.example.json";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const EXAMPLE_CONFIG: &str = "runner.local-1.example.json";
+
 #[test]
 fn capabilities_command_emits_only_the_canonical_validated_inventory() {
-    let config_path = format!(
-        "{}/config/runner.local-1.example.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let config_path = format!("{}/config/{EXAMPLE_CONFIG}", env!("CARGO_MANIFEST_DIR"));
     let secret_sentinel = "capabilities-must-not-read-this-secret";
     let output = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
         .args(["capabilities", "--config", &config_path])
@@ -36,9 +40,9 @@ fn capabilities_command_emits_only_the_canonical_validated_inventory() {
         !observed.features().contains(&RunnerFeature::OIDC_TOKENS),
         "the official observed runner inventory must keep OIDC dark"
     );
-    let config =
-        RunnerProductConfig::from_json(include_bytes!("../config/runner.local-1.example.json"))
-            .expect("checked-in product configuration must validate");
+    let config_bytes = std::fs::read(&config_path).expect("read checked-in product configuration");
+    let config = RunnerProductConfig::from_json(&config_bytes)
+        .expect("checked-in product configuration must validate");
     let expected = serde_json::to_value(config.inventory()).expect("inventory must serialize");
     assert_eq!(actual, expected);
 

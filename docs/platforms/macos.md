@@ -1,8 +1,8 @@
 # macOS runner implementation plan
 
 This page records the accepted implementation order for macOS runner support.
-Support remains planned until the native and virtual-machine acceptance gates
-below pass through the production runner composition.
+The trusted-native slice described in stages 1 and 2 is experimental. The
+Virtualization.framework isolation boundary in stage 3 remains planned.
 
 The first supported host is Apple Silicon running macOS 15 or newer. Workflow
 syntax does not change: the first slice executes GitHub-compatible `run:` steps
@@ -18,11 +18,12 @@ host networking, a writable host filesystem, and the unchanged host identity.
 This is not a hostile-workload boundary.
 
 macOS cannot enforce Automata's whole-job CPU, memory, and process limits for a
-native process tree. The execution contract will therefore distinguish
-enforced limits from an explicit host-shared resource policy. Native macOS
-advertises zero quantitative capacity and accepts only jobs with zero minimum
-resource requirements. Podman and Windows continue to require and enforce
-their existing hard limits.
+native process tree. The execution contract therefore distinguishes enforced
+limits from an explicit host-shared resource policy. Native macOS advertises
+one operator-configured scheduling capacity and one execution slot, but those
+CPU, memory, and PID values are admission metadata rather than hard per-job
+ceilings. Ephemeral-disk and GPU capacity remain zero. Podman and Windows
+continue to require and enforce their existing hard limits.
 
 Each command is owned by a same-binary supervisor over a private bounded
 control channel. The supervisor owns the POSIX process group and terminates it
@@ -86,8 +87,9 @@ scoped self-hosted Apple Silicon runner.
 - Existing Linux and Windows provider, executor, configuration, and workflow
   tests remain unchanged and green.
 - Native configuration rejects the wrong OS/architecture, macOS below 15,
-  nonzero resource claims, parallel slots, overlapping roots, unsupported
-  network/filesystem/privilege policies, and unsupported workflow features.
+  parallel slots, overlapping roots, nonzero ephemeral-disk or GPU capacity,
+  unsupported network/filesystem/privilege policies, and unsupported workflow
+  features. Configured CPU, memory, and PID capacity is explicitly advisory.
 - Native provider tests cover path attacks, bounded copies and output, WAL
   replay and corruption, stale generations, timeout, cancellation, process
   cleanup, supervisor loss, and restart recovery.

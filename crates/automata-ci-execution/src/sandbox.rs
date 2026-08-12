@@ -20,9 +20,29 @@ pub struct SandboxSpec {
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
-    resources: ResourceLimits,
+    resource_policy: SandboxResourcePolicy,
     resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
+}
+
+/// Resource enforcement selected for one whole-job sandbox.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxResourcePolicy {
+    /// CPU, memory, and process ceilings are hard provider-enforced limits.
+    Enforced(ResourceLimits),
+    /// A trusted native job shares host resources without per-job hard limits.
+    HostShared,
+}
+
+impl SandboxResourcePolicy {
+    /// Returns hard limits when this policy requires provider enforcement.
+    #[must_use]
+    pub const fn enforced(self) -> Option<ResourceLimits> {
+        match self {
+            Self::Enforced(resources) => Some(resources),
+            Self::HostShared => None,
+        }
+    }
 }
 
 impl SandboxSpec {
@@ -51,7 +71,35 @@ impl SandboxSpec {
             network,
             root_filesystem,
             privilege: SandboxPrivilegePolicy::Unprivileged,
-            resources,
+            resource_policy: SandboxResourcePolicy::Enforced(resources),
+            resource_allocation: None,
+            services: ServiceContainerSpecs::empty(),
+        }
+    }
+
+    /// Creates a trusted native request that explicitly shares host resources.
+    ///
+    /// This policy is not a resource-isolation boundary. Providers accepting
+    /// it must advertise [`crate::SandboxCapability::HostResources`].
+    #[must_use]
+    pub const fn host_shared(
+        operation_id: OperationId,
+        generation: SandboxGeneration,
+        profile: SandboxEnvironment,
+        workspace: TargetPath,
+        network: NetworkPolicy,
+        root_filesystem: RootFilesystemPolicy,
+    ) -> Self {
+        Self {
+            operation_id,
+            generation,
+            profile,
+            workspace,
+            scratch: None,
+            network,
+            root_filesystem,
+            privilege: SandboxPrivilegePolicy::Unprivileged,
+            resource_policy: SandboxResourcePolicy::HostShared,
             resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
         }
@@ -129,10 +177,16 @@ impl SandboxSpec {
         self.privilege
     }
 
-    /// Returns the hard whole-job resource limits.
+    /// Returns the exact resource-enforcement policy.
     #[must_use]
-    pub const fn resources(&self) -> ResourceLimits {
-        self.resources
+    pub const fn resource_policy(&self) -> SandboxResourcePolicy {
+        self.resource_policy
+    }
+
+    /// Returns hard whole-job resource limits when enforcement was selected.
+    #[must_use]
+    pub const fn resources(&self) -> Option<ResourceLimits> {
+        self.resource_policy.enforced()
     }
 
     /// Attaches the complete placement-request and enforcement-limit contract.
@@ -161,8 +215,11 @@ impl SandboxSpec {
         let Some(allocation) = self.resource_allocation else {
             return true;
         };
-        allocation.limits().cpu_millis() == self.resources.cpu_millis()
-            && allocation.limits().memory_bytes() == self.resources.memory_bytes()
+        let Some(resources) = self.resources() else {
+            return true;
+        };
+        allocation.limits().cpu_millis() == resources.cpu_millis()
+            && allocation.limits().memory_bytes() == resources.memory_bytes()
     }
 
     /// Adds services which the provider must create, make healthy, and own as

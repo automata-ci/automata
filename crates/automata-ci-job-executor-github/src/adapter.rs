@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt};
 
 use automata_ci_action_github::JavascriptRuntime;
 use automata_ci_core::EnvironmentProfile;
-use automata_ci_execution::{SandboxEnvironment, TargetPath, TargetPlatform};
+use automata_ci_execution::{ExecutionArgv, SandboxEnvironment, TargetPath, TargetPlatform};
 
 use crate::{GithubToolchain, PortError, SandboxEnvironmentCatalog, error::PortErrorKind};
 
@@ -77,7 +77,7 @@ pub struct StaticGithubToolchain {
     cmd: Option<TargetPath>,
     install: Option<TargetPath>,
     tar: Option<TargetPath>,
-    sha256sum: Option<TargetPath>,
+    sha256: Option<ExecutionArgv>,
     nodes: Vec<(JavascriptRuntime, TargetPath)>,
 }
 
@@ -110,7 +110,10 @@ impl StaticGithubToolchain {
             cmd: None,
             install: Some(install),
             tar: Some(tar),
-            sha256sum: Some(sha256sum),
+            sha256: Some(
+                ExecutionArgv::new(sha256sum, Vec::<String>::new())
+                    .map_err(|_| PortError::new(PortErrorKind::InvalidData))?,
+            ),
             nodes: Vec::new(),
         })
     }
@@ -141,7 +144,43 @@ impl StaticGithubToolchain {
             cmd: Some(cmd),
             install: None,
             tar: None,
-            sha256sum: None,
+            sha256: None,
+            nodes: Vec::new(),
+        })
+    }
+
+    /// Creates the required system tool paths for an ARM64 macOS runner profile.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-POSIX or root executable paths.
+    pub fn macos(
+        bash: TargetPath,
+        sh: TargetPath,
+        install: TargetPath,
+        tar: TargetPath,
+        shasum: TargetPath,
+    ) -> Result<Self, PortError> {
+        if [&bash, &sh, &install, &tar, &shasum]
+            .into_iter()
+            .any(|path| !valid_tool(path, TargetPlatform::Posix))
+        {
+            return Err(PortError::new(PortErrorKind::InvalidData));
+        }
+        Ok(Self {
+            platform: TargetPlatform::Posix,
+            bash: Some(bash),
+            sh: Some(sh),
+            python: None,
+            pwsh: None,
+            powershell: None,
+            cmd: None,
+            install: Some(install),
+            tar: Some(tar),
+            sha256: Some(
+                ExecutionArgv::new(shasum, vec!["-a".to_owned(), "256".to_owned()])
+                    .map_err(|_| PortError::new(PortErrorKind::InvalidData))?,
+            ),
             nodes: Vec::new(),
         })
     }
@@ -232,8 +271,8 @@ impl GithubToolchain for StaticGithubToolchain {
         self.tar.as_ref()
     }
 
-    fn sha256sum(&self) -> Option<&TargetPath> {
-        self.sha256sum.as_ref()
+    fn sha256(&self) -> Option<&ExecutionArgv> {
+        self.sha256.as_ref()
     }
 
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath> {
@@ -257,7 +296,7 @@ impl fmt::Debug for StaticGithubToolchain {
             .field("cmd", &self.cmd)
             .field("install", &self.install)
             .field("tar", &self.tar)
-            .field("sha256sum", &self.sha256sum)
+            .field("sha256", &self.sha256)
             .field(
                 "node_runtimes",
                 &self

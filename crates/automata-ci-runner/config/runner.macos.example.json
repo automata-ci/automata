@@ -1,0 +1,113 @@
+{
+  "schema_version": 2,
+  "runner_id": "75934d27-b027-45df-94c4-97e5a91f4011",
+  "control_endpoint": "https://127.0.0.1:9090/",
+  "state": {
+    "journal": "/Users/automata-runner/Library/Application Support/Automata/state/journal",
+    "spool": "/Users/automata-runner/Library/Application Support/Automata/state/spool",
+    "macos_native": "/Users/automata-runner/Library/Application Support/Automata/native"
+  },
+  "tls": {
+    "server_roots": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "server-roots-pem"
+    },
+    "certificate_chain": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "certificate-chain-pem"
+    },
+    "private_key": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "private-key-pem"
+    }
+  },
+  "spool": {
+    "protection_id": "macos-runner-key-v1",
+    "key_hex": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "spool-key-hex"
+    },
+    "decrypt_only": []
+  },
+  "inventory": {
+    "labels": ["self-hosted", "macos", "arm64", "macos-15"],
+    "groups": ["default"],
+    "max_parallel_jobs": 1,
+    "resources_per_job": {
+      "cpu_millis": 4000,
+      "memory_bytes": 8589934592,
+      "ephemeral_disk_bytes": 0,
+      "pids": 512
+    },
+    "environment_profiles": [
+      {
+        "id": "automata.dev/macos-15-arm64-native-v1",
+        "manifest_sha256": "55177392ec9af57b967ecf016c7f12ab27c8e1e570caaae4cc39b17790e81ba3",
+        "workspace": "/Users/automata-runner/Library/Application Support/Automata/native/workspaces",
+        "default_environment": {}
+      }
+    ]
+  },
+  "macos_native": {},
+  "executor": {
+    "resources": {
+      "cpu_millis": 4000,
+      "memory_bytes": 8589934592,
+      "ephemeral_disk_bytes": 0,
+      "pids": 512
+    },
+    "network": "host",
+    "root_filesystem": "host",
+    "privilege": "host",
+    "default_step_timeout_seconds": 3600,
+    "maximum_output_bytes": 16777216,
+    "runner_root": "/Users/automata-runner/Library/Application Support/Automata/native/runner",
+    "home": "/Users/automata-runner",
+    "path": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    "temp": "/Users/automata-runner/Library/Caches/Automata/tmp",
+    "tool_cache": "/Users/automata-runner/Library/Caches/Automata/tool-cache",
+    "toolchain": {
+      "bash": "/bin/bash",
+      "sh": "/bin/sh",
+      "python": null,
+      "pwsh": null,
+      "powershell": null,
+      "cmd": null,
+      "install": "/usr/bin/install",
+      "tar": "/usr/bin/tar",
+      "sha256sum": "/usr/bin/shasum",
+      "node12": null,
+      "node16": null,
+      "node20": null,
+      "node24": null
+    }
+  },
+  "object_store": {
+    "endpoint": "https://s3.amazonaws.com/",
+    "region": "us-east-1",
+    "bucket": "automata-runner",
+    "prefix": "automata/v1",
+    "loopback_development": false,
+    "operation_timeout_seconds": 30,
+    "access_key_id": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "s3-access-key-id"
+    },
+    "secret_access_key": {
+      "kind": "macos_keychain",
+      "service": "dev.automata.runner",
+      "account": "s3-secret-access-key"
+    }
+  },
+  "github": {
+    "user_agent": "automata-runner/0.1.0",
+    "server_url": "https://github.com/",
+    "api_url": "https://api.github.com/",
+    "graphql_url": "https://api.github.com/graphql"
+  }
+}

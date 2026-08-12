@@ -28,11 +28,15 @@ use automata_ci_runner_transport::{
     HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
     RunnerEphemeralClient, TransportLimits,
 };
+use automata_ci_sandbox_macos::{MacosSandboxProvider, MacosSandboxProviderOptions};
 #[cfg(not(target_os = "linux"))]
 use automata_ci_sandbox_podman::PodmanLaunchTrust;
 use automata_ci_sandbox_podman::{
-    PodmanBinary, PodmanCommandExecutor, PodmanLaunchTrustHandle, PodmanOptions,
-    PodmanProcessEnvironment, PodmanStateRoot, RootlessPodmanProvider, SystemCommandExecutor,
+    PodmanBinary, PodmanLaunchTrustHandle, PodmanOptions, PodmanProcessEnvironment, PodmanStateRoot,
+};
+#[cfg(target_os = "linux")]
+use automata_ci_sandbox_podman::{
+    PodmanCommandExecutor, RootlessPodmanProvider, SystemCommandExecutor,
 };
 use automata_ci_sandbox_windows::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
 use automata_ci_scm::ScmProvider;
@@ -130,6 +134,7 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
         RunnerProviderConfig::Podman(_) => run_podman(&config, shutdown).await,
         RunnerProviderConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
         RunnerProviderConfig::WindowsNative(_) => run_windows_native(&config, shutdown).await,
+        RunnerProviderConfig::MacosNative(_) => run_macos_native(&config, shutdown).await,
     }
 }
 
@@ -226,6 +231,35 @@ async fn run_windows_native(
     }
     let metrics = build_metrics(config, None)?;
     let provider = build_windows_provider(config, metrics.as_ref())?;
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition = compose_with_provider(
+        config,
+        provider,
+        metrics,
+        &shutdown.probe,
+        false,
+        false,
+        || Ok(()),
+    )?
+    .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(());
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+async fn run_macos_native(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<(), RunnerProductError> {
+    if shutdown.is_requested() {
+        return Ok(());
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider = build_macos_provider(config, metrics.as_ref())?;
     let metrics_listener = match config.metrics() {
         Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
         None => None,
@@ -400,15 +434,13 @@ fn mark_admitted_composition_ready(config: &RunnerProductConfig, composition: &R
     }
 }
 
+#[cfg(target_os = "linux")]
 fn compose_podman(
     config: &RunnerProductConfig,
     podman_options: &PodmanOptions,
     cancellation: &crate::podman_probe::ProbeCancellation,
     _admission: CapabilityAdmission,
 ) -> Result<Option<RunnerComposition>, RunnerProductError> {
-    #[cfg(not(target_os = "linux"))]
-    return Err(RunnerProductError::UnsupportedPlatform);
-
     let runner_cgroup = config
         .metrics()
         .and_then(|_| PodmanCommandExecutor::delegated_no_swap_cgroup(&SystemCommandExecutor));
@@ -427,6 +459,16 @@ fn compose_podman(
         podman.buildkit_runtime().is_some(),
         || revalidate_podman_launch_trust(podman_options),
     )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn compose_podman(
+    _config: &RunnerProductConfig,
+    _podman_options: &PodmanOptions,
+    _cancellation: &crate::podman_probe::ProbeCancellation,
+    _admission: CapabilityAdmission,
+) -> Result<Option<RunnerComposition>, RunnerProductError> {
+    Err(RunnerProductError::UnsupportedPlatform)
 }
 
 fn build_metrics(
@@ -586,16 +628,25 @@ fn admit_configured_environment_profiles(
     let capacity = config.executor().resource_capacity();
     let allocation = automata_ci_core::JobResourceAllocation::new(capacity, capacity)
         .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
-    let policy = ProfileAdmissionPolicy::new(
-        config.executor().network(),
-        config.executor().root_filesystem(),
-        config.executor().privilege(),
-        config.executor().resources(),
-        allocation,
-    );
-    let policy = if config.windows_native().is_some() {
-        let toolchain = config.executor().toolchain();
-        policy
+    let policy = if config.macos_native().is_some() {
+        ProfileAdmissionPolicy::host_shared(
+            config.executor().network(),
+            config.executor().root_filesystem(),
+            config.executor().privilege(),
+            allocation,
+        )
+    } else {
+        ProfileAdmissionPolicy::new(
+            config.executor().network(),
+            config.executor().root_filesystem(),
+            config.executor().privilege(),
+            config.executor().resources(),
+            allocation,
+        )
+    };
+    let toolchain = config.executor().toolchain();
+    let policy = match config.provider() {
+        RunnerProviderConfig::WindowsNative(_) => policy
             .with_native_windows_shells(
                 config.executor().runner_root().clone(),
                 toolchain
@@ -612,9 +663,23 @@ fn admit_configured_environment_profiles(
                     .clone(),
                 toolchain.python().cloned(),
             )
-            .map_err(|_| RunnerProductError::ProviderConfiguration)?
-    } else {
-        policy
+            .map_err(|_| RunnerProductError::ProviderConfiguration)?,
+        RunnerProviderConfig::MacosNative(_) => policy
+            .with_native_macos_shells(
+                config.executor().runner_root().clone(),
+                toolchain
+                    .bash()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .sh()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain.python().cloned(),
+                toolchain.pwsh().cloned(),
+            )
+            .map_err(|_| RunnerProductError::ProviderConfiguration)?,
+        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => policy,
     };
     let result = admit_environment_profiles(provider, config.environments(), policy, cancellation);
     match result {
@@ -793,6 +858,7 @@ async fn verify_configured_capabilities(
     Err(RunnerProductError::CapabilityAdmission)
 }
 
+#[cfg(target_os = "linux")]
 fn build_podman_provider(
     podman_options: PodmanOptions,
     metrics: Option<&RunnerMetrics>,
@@ -830,6 +896,28 @@ fn build_windows_provider(
     }
 }
 
+fn build_macos_provider(
+    config: &RunnerProductConfig,
+    metrics: Option<&RunnerMetrics>,
+) -> Result<Arc<dyn automata_ci_execution::SandboxProvider>, RunnerProductError> {
+    if config.macos_native().is_none() {
+        return Err(RunnerProductError::ProviderConfiguration);
+    }
+    let state_root = config
+        .state()
+        .macos_native()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let executable =
+        std::env::current_exe().map_err(|_| RunnerProductError::ProviderConfiguration)?;
+    let options = MacosSandboxProviderOptions::new(state_root.to_path_buf(), executable)?;
+    let provider: Arc<dyn automata_ci_execution::SandboxProvider> =
+        Arc::new(MacosSandboxProvider::open(options)?);
+    match metrics {
+        Some(metrics) => Ok(metrics.instrument_sandbox_provider(provider)),
+        None => Ok(provider),
+    }
+}
+
 fn build_executor(
     config: &RunnerProductConfig,
     provider: Arc<dyn automata_ci_execution::SandboxProvider>,
@@ -847,19 +935,31 @@ fn build_executor(
     let toolchain = Arc::new(build_toolchain(config)?);
     let contexts = Arc::new(StandardGithubContext::new(
         config.runner_id(),
+        config.inventory().platform().clone(),
         config.environments(),
         config.executor(),
         config.github().clone(),
     )?);
-    let executor_config = GithubJobExecutorConfig::new(
-        config.executor().resources(),
-        config.executor().network(),
-        config.executor().root_filesystem(),
-        config.executor().privilege(),
-        config.executor().default_step_timeout(),
-        config.executor().maximum_output_bytes(),
-        config.executor().runner_root().clone(),
-    )?;
+    let executor_config = if matches!(config.provider(), RunnerProviderConfig::MacosNative(_)) {
+        GithubJobExecutorConfig::host_shared(
+            config.executor().network(),
+            config.executor().root_filesystem(),
+            config.executor().privilege(),
+            config.executor().default_step_timeout(),
+            config.executor().maximum_output_bytes(),
+            config.executor().runner_root().clone(),
+        )?
+    } else {
+        GithubJobExecutorConfig::new(
+            config.executor().resources(),
+            config.executor().network(),
+            config.executor().root_filesystem(),
+            config.executor().privilege(),
+            config.executor().default_step_timeout(),
+            config.executor().maximum_output_bytes(),
+            config.executor().runner_root().clone(),
+        )?
+    };
     let executor = Arc::new(GithubJobExecutor::new(
         executor_config,
         GithubJobExecutorPorts::new(
@@ -984,13 +1084,37 @@ fn build_toolchain(
                 .ok_or(RunnerProductError::ProviderConfiguration)?
                 .clone(),
         )?,
+        RunnerProviderConfig::MacosNative(_) => StaticGithubToolchain::macos(
+            configured
+                .bash()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sh()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .install()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .tar()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sha256sum()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+        )?,
     };
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;
     }
     if matches!(
         config.provider(),
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_)
+        RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::MacosNative(_)
     ) && let Some(path) = configured.pwsh()
     {
         toolchain = toolchain.with_pwsh(path.clone())?;
@@ -1140,18 +1264,18 @@ pub enum RunnerProductError {
     /// The provider-specific product configuration was internally inconsistent.
     #[error("runner provider configuration is inconsistent")]
     ProviderConfiguration,
-    /// Native Windows provider initialization failed.
-    #[error("runner native Windows provider initialization failed")]
-    WindowsProvider(#[from] automata_ci_execution::ProviderError),
-    /// Product configuration and the selected provider path disagreed.
-    #[error("runner sandbox provider composition invariant failed")]
-    SandboxProviderInvariant,
     /// Ambient Kubernetes client discovery or authentication failed.
     #[error("runner Kubernetes client initialization failed")]
     KubernetesClient(#[source] kube::Error),
     /// Kubernetes sandbox adapter configuration failed.
     #[error("runner Kubernetes provider configuration failed")]
     KubernetesConfiguration(#[from] automata_ci_sandbox_kubernetes::KubernetesConfigurationError),
+    /// Native host provider initialization failed.
+    #[error("runner native host provider initialization failed")]
+    NativeProvider(#[from] automata_ci_execution::ProviderError),
+    /// Product configuration and the selected provider path disagreed.
+    #[error("runner sandbox provider composition invariant failed")]
+    SandboxProviderInvariant,
     /// The configured Podman network admission boundary did not produce usable evidence.
     #[error("runner capability admission failed")]
     CapabilityAdmission,
@@ -1429,10 +1553,14 @@ mod tests {
 
     #[test]
     fn registered_helper_ceiling_is_reduced_to_the_verified_provider() {
-        let config = RunnerProductConfig::from_json(include_bytes!(
-            "../../config/runner.local-1.example.json"
-        ))
-        .expect("checked-in runner configuration");
+        #[cfg(target_os = "linux")]
+        let configuration = include_bytes!("../../config/runner.local-1.example.json").as_slice();
+        #[cfg(target_os = "macos")]
+        let configuration = include_bytes!("../../config/runner.macos.example.json").as_slice();
+        #[cfg(target_os = "windows")]
+        let configuration = include_bytes!("../../config/runner.windows.example.json").as_slice();
+        let config = RunnerProductConfig::from_json(configuration)
+            .expect("checked-in host runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();
         registered_features.extend([
             ContainerFeature::SERVICE_CONTAINERS,

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use automata_ci_execution::{
     MAX_EXECUTION_OUTPUT_BYTES, NetworkPolicy, ResourceLimits, RootFilesystemPolicy,
-    SandboxPrivilegePolicy, TargetPath, TargetPlatform, ValueError,
+    SandboxPrivilegePolicy, SandboxResourcePolicy, TargetPath, TargetPlatform, ValueError,
 };
 use thiserror::Error;
 
@@ -11,7 +11,7 @@ const MAX_POST_JOB_CLEANUP_TIMEOUT: Duration = Duration::from_mins(5);
 /// Validated policy for one GitHub job executor instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubJobExecutorConfig {
-    resources: ResourceLimits,
+    resource_policy: SandboxResourcePolicy,
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
@@ -29,6 +29,51 @@ impl GithubJobExecutorConfig {
     /// bounds, and root or separator-terminated runner scratch paths.
     pub fn new(
         resources: ResourceLimits,
+        network: NetworkPolicy,
+        root_filesystem: RootFilesystemPolicy,
+        privilege: SandboxPrivilegePolicy,
+        default_step_timeout: Duration,
+        maximum_output_bytes: usize,
+        runner_root: TargetPath,
+    ) -> Result<Self, GithubJobExecutorConfigError> {
+        Self::with_resource_policy(
+            SandboxResourcePolicy::Enforced(resources),
+            network,
+            root_filesystem,
+            privilege,
+            default_step_timeout,
+            maximum_output_bytes,
+            runner_root,
+        )
+    }
+
+    /// Creates trusted-native policy without per-job hard resource limits.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same timeout, output, and runner-root validation as
+    /// [`Self::new`].
+    pub fn host_shared(
+        network: NetworkPolicy,
+        root_filesystem: RootFilesystemPolicy,
+        privilege: SandboxPrivilegePolicy,
+        default_step_timeout: Duration,
+        maximum_output_bytes: usize,
+        runner_root: TargetPath,
+    ) -> Result<Self, GithubJobExecutorConfigError> {
+        Self::with_resource_policy(
+            SandboxResourcePolicy::HostShared,
+            network,
+            root_filesystem,
+            privilege,
+            default_step_timeout,
+            maximum_output_bytes,
+            runner_root,
+        )
+    }
+
+    fn with_resource_policy(
+        resource_policy: SandboxResourcePolicy,
         network: NetworkPolicy,
         root_filesystem: RootFilesystemPolicy,
         privilege: SandboxPrivilegePolicy,
@@ -54,7 +99,7 @@ impl GithubJobExecutorConfig {
             return Err(GithubJobExecutorConfigError::InvalidRunnerRoot);
         }
         Ok(Self {
-            resources,
+            resource_policy,
             network,
             root_filesystem,
             privilege,
@@ -64,10 +109,16 @@ impl GithubJobExecutorConfig {
         })
     }
 
-    /// Returns whole-job hard resource limits.
+    /// Returns the exact resource-enforcement policy.
     #[must_use]
-    pub const fn resources(&self) -> ResourceLimits {
-        self.resources
+    pub const fn resource_policy(&self) -> SandboxResourcePolicy {
+        self.resource_policy
+    }
+
+    /// Returns whole-job hard resource limits when selected.
+    #[must_use]
+    pub const fn resources(&self) -> Option<ResourceLimits> {
+        self.resource_policy.enforced()
     }
 
     /// Returns whole-job network policy.

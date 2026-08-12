@@ -22,11 +22,11 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
-    ImmutableImage, NetworkPolicy, ProviderError, ProviderErrorKind, ResourceLimits,
-    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle, SandboxProvider,
-    SandboxSpec, SandboxState, ServiceContainerBindings, ServiceContainerSpec,
-    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
-    ServiceTransportProtocol, TargetPath, TargetPlatform,
+    ImmutableImage, NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
+    SandboxLaunch, SandboxProvider, SandboxResourcePolicy, SandboxSpec, SandboxState,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
+    ServiceHealthPolicy, ServicePort, ServiceTransportProtocol, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
@@ -80,7 +80,7 @@ const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
-const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\nif [ ! -f \"$1\" ]; then exit 44; fi\nvalue=$(\"$0\" < \"$1\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
+const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\npath=$1\nshift\nif [ ! -f \"$path\" ]; then exit 44; fi\nvalue=$(\"$0\" \"$@\" < \"$path\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
 const WINDOWS_ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\n$ErrorActionPreference = 'Stop'\n$path = $env:AUTOMATA_INTERNAL_ARTIFACT_PATH\nif (-not [System.IO.File]::Exists($path)) { exit 44 }\n$stream = $null\n$hasher = $null\ntry {\n  $stream = [System.IO.File]::OpenRead($path)\n  $hasher = [System.Security.Cryptography.SHA256]::Create()\n  $bytes = $hasher.ComputeHash($stream)\n  $digest = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()\n  [Console]::Out.Write($digest)\n} finally {\n  if ($null -ne $stream) { $stream.Dispose() }\n  if ($null -ne $hasher) { $hasher.Dispose() }\n}";
 const WINDOWS_ARTIFACT_PATH_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_ARTIFACT_PATH";
 const ARTIFACT_HASH_OUTPUT_BYTES: usize = 128;
@@ -502,13 +502,12 @@ impl GithubJobExecutor {
             SandboxCapability::CopyTo,
             SandboxCapability::CopyFrom,
             SandboxCapability::EnvironmentInjection,
-            SandboxCapability::ResourceLimits,
-            SandboxCapability::ProcessLimits,
         ] {
             if !capabilities.supports(required) {
                 return Err(AdmissionRejection::CapabilityChanged);
             }
         }
+        validate_resource_admission(job, self.config.resource_policy(), capabilities)?;
         let network = match self.config.network() {
             NetworkPolicy::Disabled => SandboxCapability::NetworkDisabled,
             NetworkPolicy::PrivateEgress => SandboxCapability::PrivateEgress,
@@ -4341,27 +4340,14 @@ impl GithubJobExecutor {
             let operation_id = events
                 .begin_provider_operation(ProviderOperationKind::CreateSandbox)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let allocation = request
-                .job()
-                .job()
-                .requirements()
-                .resource_allocation()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-            let mut spec = SandboxSpec::new(
+            let spec = self.sandbox_spec(
+                request,
                 operation_id,
                 generation,
-                request.environment().clone(),
-                workspace.clone(),
-                self.config.network(),
-                self.config.root_filesystem(),
-                self.sandbox_resources(request)?,
-            )
-            .with_privilege(self.config.privilege())
-            .with_services(service_specs.clone())
-            .with_resource_allocation(allocation);
-            if workspace.platform() == TargetPlatform::Windows {
-                spec = spec.with_scratch(scratch.clone());
-            }
+                workspace,
+                scratch,
+                service_specs,
+            )?;
             let record = match self.ports.provider.create(&spec, &cancellation) {
                 Ok(record) => record,
                 Err(error) => {
@@ -4401,10 +4387,57 @@ impl GithubJobExecutor {
         Ok(ObtainedSandbox { endpoint, services })
     }
 
-    fn sandbox_resources(
+    fn sandbox_spec(
         &self,
         request: &ExecutionRequest,
-    ) -> Result<ResourceLimits, ExecutorAdapterError> {
+        operation_id: OperationId,
+        generation: SandboxGeneration,
+        workspace: &TargetPath,
+        scratch: &TargetPath,
+        service_specs: &ServiceContainerSpecs,
+    ) -> Result<SandboxSpec, ExecutorAdapterError> {
+        let mut spec = match self.sandbox_resource_policy(request)? {
+            SandboxResourcePolicy::Enforced(resources) => SandboxSpec::new(
+                operation_id,
+                generation,
+                request.environment().clone(),
+                workspace.clone(),
+                self.config.network(),
+                self.config.root_filesystem(),
+                resources,
+            ),
+            SandboxResourcePolicy::HostShared => SandboxSpec::host_shared(
+                operation_id,
+                generation,
+                request.environment().clone(),
+                workspace.clone(),
+                self.config.network(),
+                self.config.root_filesystem(),
+            ),
+        }
+        .with_privilege(self.config.privilege())
+        .with_services(service_specs.clone())
+        .with_resource_allocation(
+            request
+                .job()
+                .job()
+                .requirements()
+                .resource_allocation()
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
+        );
+        if matches!(request.environment().launch(), SandboxLaunch::Native) {
+            spec = spec.with_scratch(scratch.clone());
+        }
+        Ok(spec)
+    }
+
+    fn sandbox_resource_policy(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<SandboxResourcePolicy, ExecutorAdapterError> {
+        if self.config.resource_policy() == SandboxResourcePolicy::HostShared {
+            return Ok(SandboxResourcePolicy::HostShared);
+        }
         let allocation = request
             .job()
             .job()
@@ -4415,8 +4448,12 @@ impl GithubJobExecutor {
         ResourceLimits::new(
             limits.memory_bytes(),
             limits.cpu_millis(),
-            self.config.resources().pids(),
+            self.config
+                .resources()
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?
+                .pids(),
         )
+        .map(SandboxResourcePolicy::Enforced)
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
 
@@ -6750,6 +6787,42 @@ fn validate_action_step_admission(
     Ok(())
 }
 
+fn validate_resource_admission(
+    job: &JobIrEnvelope,
+    resource_policy: SandboxResourcePolicy,
+    capabilities: &ProviderCapabilities,
+) -> Result<(), AdmissionRejection> {
+    let allocation = job
+        .job()
+        .requirements()
+        .resource_allocation()
+        .ok_or(AdmissionRejection::InvalidJob)?;
+    match resource_policy {
+        SandboxResourcePolicy::Enforced(_) => {
+            if !capabilities.supports(SandboxCapability::ResourceLimits)
+                || !capabilities.supports(SandboxCapability::ProcessLimits)
+            {
+                return Err(AdmissionRejection::CapabilityChanged);
+            }
+            let limits = allocation.limits();
+            if limits.ephemeral_disk_bytes() > 0
+                && !capabilities.supports(SandboxCapability::EphemeralStorageLimits)
+            {
+                return Err(AdmissionRejection::CapabilityChanged);
+            }
+            if limits.gpu_count() > 0 && !capabilities.supports(SandboxCapability::DeviceLimits) {
+                return Err(AdmissionRejection::CapabilityChanged);
+            }
+        }
+        SandboxResourcePolicy::HostShared => {
+            if !capabilities.supports(SandboxCapability::HostResources) {
+                return Err(AdmissionRejection::CapabilityChanged);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_service_admission(
     job: &JobIrEnvelope,
     capabilities: &automata_ci_execution::ProviderCapabilities,
@@ -6983,7 +7056,7 @@ fn valid_toolchain(toolchain: &dyn GithubToolchain) -> bool {
         toolchain.cmd(),
         toolchain.install(),
         toolchain.tar(),
-        toolchain.sha256sum(),
+        toolchain.sha256().map(ExecutionArgv::program),
     ]
     .into_iter()
     .flatten()
@@ -6995,7 +7068,7 @@ fn valid_toolchain(toolchain: &dyn GithubToolchain) -> bool {
                     && toolchain.sh().is_some()
                     && toolchain.install().is_some()
                     && toolchain.tar().is_some()
-                    && toolchain.sha256sum().is_some()
+                    && toolchain.sha256().is_some()
                     && toolchain.powershell().is_none()
                     && toolchain.cmd().is_none()
             }
@@ -7007,7 +7080,7 @@ fn valid_toolchain(toolchain: &dyn GithubToolchain) -> bool {
                     && toolchain.cmd().is_some()
                     && toolchain.install().is_none()
                     && toolchain.tar().is_none()
-                    && toolchain.sha256sum().is_none()
+                    && toolchain.sha256().is_none()
             }
         }
 }
@@ -7026,17 +7099,18 @@ fn artifact_hash_invocation(
     match platform {
         TargetPlatform::Posix => {
             let sh = required_tool(toolchain.sh())?;
-            let sha256sum = required_tool(toolchain.sha256sum())?;
-            let argv = ExecutionArgv::new(
-                sh,
-                vec![
-                    "-c".to_owned(),
-                    ARTIFACT_HASH_SCRIPT.to_owned(),
-                    sha256sum.as_str().to_owned(),
-                    declared_path.to_owned(),
-                ],
-            )
-            .map_err(|_| invalid_job())?;
+            let sha256 = toolchain
+                .sha256()
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported))?;
+            let mut arguments = Vec::with_capacity(4 + sha256.arguments().len());
+            arguments.extend([
+                "-c".to_owned(),
+                ARTIFACT_HASH_SCRIPT.to_owned(),
+                sha256.program().as_str().to_owned(),
+                declared_path.to_owned(),
+            ]);
+            arguments.extend(sha256.arguments().iter().cloned());
+            let argv = ExecutionArgv::new(sh, arguments).map_err(|_| invalid_job())?;
             Ok((argv, automata_ci_execution::ExecutionEnvironment::empty()))
         }
         TargetPlatform::Windows => {
@@ -7236,8 +7310,8 @@ fn job_workspace(
     const LOGICAL_WORKSPACE_ROOT: &str = "/__w";
     let logical_workspace = TargetPath::posix(job.execution().workspace())
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-    match environment.workspace().platform() {
-        TargetPlatform::Posix => {
+    match (environment.workspace().platform(), environment.launch()) {
+        (TargetPlatform::Posix, SandboxLaunch::Container { .. }) => {
             let root = environment.workspace().as_str().trim_end_matches('/');
             let prefix = format!("{root}/");
             if logical_workspace.as_str() == root
@@ -7247,7 +7321,7 @@ fn job_workspace(
             }
             Ok(logical_workspace)
         }
-        TargetPlatform::Windows => {
+        (TargetPlatform::Posix | TargetPlatform::Windows, SandboxLaunch::Native) => {
             let relative = logical_workspace
                 .as_str()
                 .strip_prefix(LOGICAL_WORKSPACE_ROOT)
@@ -7255,6 +7329,7 @@ fn job_workspace(
                 .ok_or_else(invalid_job)?;
             child(environment.workspace(), relative)
         }
+        (TargetPlatform::Windows, SandboxLaunch::Container { .. }) => Err(invalid_job()),
     }
 }
 

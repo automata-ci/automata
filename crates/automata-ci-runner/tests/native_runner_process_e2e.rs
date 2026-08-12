@@ -1,4 +1,4 @@
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "macos"))]
 #![deny(warnings)]
 
 use std::{
@@ -22,11 +22,14 @@ use automata_ci_auth::{
 use automata_ci_core::{
     AttemptId, ContextValue, EnvironmentProfile, EnvironmentProfileId, FencingToken,
     JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
-    JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobRuntimeContext, JobSource,
-    Lease, LeaseId, LogAck, OperatingSystem, OperationId, RunId, RunValueTemplates, RunnerId,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, StrategyContext, UnixMillis, ValueTemplate, WorkflowId,
+    JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobResourceAllocation,
+    JobRuntimeContext, JobSource, Lease, LeaseId, LogAck, OperatingSystem, OperationId,
+    ResourceCapacity, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
+    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext,
+    UnixMillis, ValueTemplate, WorkflowId,
 };
+#[cfg(target_os = "macos")]
+use automata_ci_core::{ExpressionProgram, ValueSource};
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
     LeaseDisposition, LeaseOffer, LeaseRenewal, LeaseRequest, LogAckMessage, LogBatch,
@@ -35,11 +38,14 @@ use automata_ci_protocol::{
     ServerToRunner, SessionDisposition,
 };
 use automata_ci_protocol_protobuf::encode_job_runtime_context;
+#[cfg(windows)]
 use automata_ci_runner::product::RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION;
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
     RunnerControlHandler, RunnerControlServer, ServerTlsConfig, TransportLimits,
 };
+#[cfg(target_os = "macos")]
+use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -57,24 +63,42 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt as _;
+
 const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     "application/vnd.automata.job-runtime-context.protobuf";
+#[cfg(windows)]
 const PROFILE_ID: &str = "automata.test/windows-process-e2e";
+#[cfg(target_os = "macos")]
+const PROFILE_ID: &str = "automata.test/macos-process-e2e";
 const S3_BUCKET: &str = "automata-process-e2e";
 const S3_PREFIX: &str = "process-e2e";
+#[cfg(windows)]
 const SENTINEL: &str = "AUTOMATA_WINDOWS_RUNNER_PROCESS_E2E";
+#[cfg(target_os = "macos")]
+const SENTINEL: &str = "AUTOMATA_MACOS_RUNNER_PROCESS_E2E";
+#[cfg(target_os = "macos")]
+const DIFFERENTIAL_REFERENCE_ENV: &str = "AUTOMATA_MACOS_DIFFERENTIAL_REFERENCE";
+#[cfg(target_os = "macos")]
+const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=native-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
+#[cfg(windows)]
 const REQUIRE_STANDALONE_PWSH_ENV: &str = "AUTOMATA_RUNNER_WINDOWS_E2E_REQUIRE_STANDALONE_PWSH";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
-async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
+async fn shipped_runner_process_executes_a_claimed_native_shell_job() {
     let root = TemporaryRoot::new();
     let runner_id = RunnerId::new();
     let session_id = RunnerSessionId::new();
     let pki = TestPki::new();
     let (job, event, runtime_context) = process_job();
-    let expected_s3_paths = [event.fixture_path(), runtime_context.fixture_path()];
+    let expected_s3_paths = [
+        event.fixture_path(),
+        runtime_context.fixture_path(),
+        runtime_context.fixture_path(),
+    ];
     let lease = Lease::new(
         LeaseId::new(),
         AttemptId::new(),
@@ -120,18 +144,30 @@ async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
         .kill_on_drop(true)
         .spawn()
         .expect("launch shipped automata-runner binary");
-    let stdout_task = tokio::spawn(drain_output(
+    let mut stdout_task = Some(tokio::spawn(drain_output(
         child.stdout.take().expect("runner stdout pipe"),
-    ));
-    let stderr_task = tokio::spawn(drain_output(
+    )));
+    let mut stderr_task = Some(tokio::spawn(drain_output(
         child.stderr.take().expect("runner stderr pipe"),
-    ));
+    )));
 
-    wait_for_terminal_result(&handler, &mut child, Duration::from_secs(90)).await;
+    wait_for_terminal_result(
+        &handler,
+        &mut child,
+        &mut stdout_task,
+        &mut stderr_task,
+        Duration::from_secs(90),
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(10), handler.wait_for_completed_poll())
         .await
         .expect("runner finalizes the completed job and polls its released slot");
-    let workspace = root.path().join(r"native\workspaces\automata\automata");
+    let workspace = root
+        .path()
+        .join("native")
+        .join("workspaces")
+        .join("automata")
+        .join("automata");
     let scratch = root
         .path()
         .join("native")
@@ -148,8 +184,8 @@ async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
     );
 
     stop_runner(&mut child).await;
-    let stdout = collect_output(stdout_task, "stdout").await;
-    let stderr = collect_output(stderr_task, "stderr").await;
+    let stdout = collect_output(stdout_task.take().expect("stdout task"), "stdout").await;
+    let stderr = collect_output(stderr_task.take().expect("stderr task"), "stderr").await;
     let s3_requests = s3.requests();
     control.stop().await;
     s3.stop().await;
@@ -158,7 +194,7 @@ async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
     assert_eq!(observation.hello_runner_id, Some(runner_id));
     assert_eq!(
         observation.hello_operating_system,
-        Some(OperatingSystem::Windows)
+        Some(native_operating_system())
     );
     assert!(
         observation.accepted,
@@ -173,10 +209,12 @@ async fn shipped_runner_process_executes_a_claimed_windows_shell_job() {
     let logs = String::from_utf8_lossy(&observation.logs);
     assert!(
         logs.contains(SENTINEL),
-        "real cmd.exe output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
+        "real native-shell output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr),
     );
+    #[cfg(target_os = "macos")]
+    assert_macos_differential_fixture(&logs);
     assert!(
         observation.completed_poll,
         "runner reported the result but did not finalize the slot and poll again; stdout={:?}; stderr={:?}",
@@ -220,6 +258,8 @@ async fn collect_output(task: JoinHandle<io::Result<Vec<u8>>>, stream: &'static 
 async fn wait_for_terminal_result(
     handler: &ProcessFlowHandler,
     child: &mut tokio::process::Child,
+    stdout_task: &mut Option<JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_task: &mut Option<JoinHandle<io::Result<Vec<u8>>>>,
     limit: Duration,
 ) {
     let deadline = tokio::time::Instant::now() + limit;
@@ -228,7 +268,14 @@ async fn wait_for_terminal_result(
             return;
         }
         if let Some(status) = child.try_wait().expect("query runner process") {
-            panic!("automata-runner exited before reporting a job result: {status}");
+            let stdout = collect_output(stdout_task.take().expect("stdout task"), "stdout").await;
+            let stderr = collect_output(stderr_task.take().expect("stderr task"), "stderr").await;
+            panic!(
+                "automata-runner exited before reporting a job result: {status}; observation={:?}; stdout={:?}; stderr={:?}",
+                handler.observation(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -263,19 +310,13 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
         EnvironmentProfileId::new(PROFILE_ID).expect("profile ID"),
         Sha256Digest::from_bytes([0x08; 32]),
     );
-    let requirements = RunnerRequirements::default().with_environment_profile(profile);
-    let step = StepIr::new(
-        StepId::new("process-e2e").expect("step ID"),
-        ValueTemplate::literal("Run cmd.exe through the shipped runner").expect("step name"),
-        RuntimeBoolean::literal(false),
-        SemanticStep::run(RunValueTemplates::new(
-            ValueTemplate::literal(format!(
-                "@echo {SENTINEL}\r\n@echo process-level-execution>runner-process-e2e.txt"
-            ))
-            .expect("cmd command"),
-            ShellTemplate::named(ValueTemplate::literal("cmd").expect("cmd shell")),
-        )),
-    );
+    let capacity = ResourceCapacity::new(1_000, 1_073_741_824, 0, 0);
+    let allocation =
+        JobResourceAllocation::new(capacity, capacity).expect("native process allocation");
+    let requirements = RunnerRequirements::default()
+        .with_environment_profile(profile)
+        .with_resource_allocation(allocation);
+    let steps = native_steps();
     let job = JobIr::new(
         JobId::new(),
         RunId::new(),
@@ -284,7 +325,7 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
         JobInstanceIdentity::new("process-e2e", 0, 1, Sha256Digest::from_bytes([0x44; 32]))
             .expect("job instance"),
         false,
-        vec![step],
+        steps,
     )
     .with_authority_profile(JobAuthorityProfile::CredentialFree)
     .with_permission_request(JobPermissionRequest::Mapping(Vec::new()));
@@ -294,12 +335,12 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
             "github",
             "automata-ci/automata",
             "0123456789abcdef0123456789abcdef01234567",
-            ".github/workflows/windows-process-e2e.yml",
+            ".github/workflows/native-process-e2e.yml",
             "workflow_dispatch",
         ),
         JobExecutionContext::new(
             "CI",
-            "refs/heads/windows-process-e2e",
+            "refs/heads/native-process-e2e",
             "/__w/automata/automata",
             event_reference.clone(),
             runtime_reference.clone(),
@@ -311,6 +352,96 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
         S3Object::new(&event_reference, event_bytes),
         S3Object::new(&runtime_reference, runtime_bytes),
     )
+}
+
+#[cfg(windows)]
+fn native_steps() -> Vec<StepIr> {
+    vec![StepIr::new(
+        StepId::new("process-e2e").expect("step ID"),
+        ValueTemplate::literal(native_step_name()).expect("step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal(native_step_script()).expect("native command"),
+            ShellTemplate::named(
+                ValueTemplate::literal(native_shell_name()).expect("native shell"),
+            ),
+        )),
+    )]
+}
+
+#[cfg(target_os = "macos")]
+fn native_steps() -> Vec<StepIr> {
+    let producer = StepIr::new(
+        StepId::new("macos-bash-reference").expect("producer step ID"),
+        ValueTemplate::literal("Run Bash differential fixture").expect("producer step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal(
+                "set -eu\nprintf 'differential.bash=ok\\n'\nprintf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\\n' >> \"$GITHUB_ENV\"\nprintf 'fixture=native-output\\n' >> \"$GITHUB_OUTPUT\"\nprintf '%s\\n' native-workspace > differential-artifact.txt",
+            )
+            .expect("producer command"),
+            ShellTemplate::named(ValueTemplate::literal("bash").expect("Bash shell")),
+        )),
+    );
+    let consumer = StepIr::new(
+        StepId::new("macos-sh-reference").expect("consumer step ID"),
+        ValueTemplate::literal("Run sh differential fixture").expect("consumer step name"),
+        RuntimeBoolean::literal(false),
+        SemanticStep::run(RunValueTemplates::new(
+            ValueTemplate::literal(format!(
+                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$FROM_OUTPUT\" = native-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = native-workspace\nprintf 'differential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
+            ))
+            .expect("consumer command"),
+            ShellTemplate::named(ValueTemplate::literal("sh").expect("sh shell")),
+        )),
+    )
+    .with_environment(BTreeMap::from([(
+        "FROM_OUTPUT".to_owned(),
+        ValueSource::Expression(output_expression(
+            "${{ steps.macos-bash-reference.outputs.fixture }}",
+        )),
+    )]));
+    vec![producer, consumer]
+}
+
+#[cfg(target_os = "macos")]
+fn output_expression(source: &str) -> ExpressionProgram {
+    GithubConditionCompiler::default()
+        .compile_value_expression(source, GithubConditionPhase::Step)
+        .expect("valid step-output expression")
+}
+
+#[cfg(target_os = "macos")]
+fn assert_macos_differential_fixture(logs: &str) {
+    let reference = std::env::var_os(DIFFERENTIAL_REFERENCE_ENV).map_or_else(
+        || DIFFERENTIAL_REFERENCE.to_owned(),
+        |path| fs::read_to_string(path).expect("read GitHub-hosted macOS shell reference"),
+    );
+    assert_eq!(
+        reference, DIFFERENTIAL_REFERENCE,
+        "GitHub-hosted Bash/sh reference changed"
+    );
+    for expected in DIFFERENTIAL_REFERENCE.lines() {
+        assert!(
+            logs.lines().any(|line| line == expected),
+            "Automata native shell fixture omitted {expected:?}; logs={logs:?}"
+        );
+    }
+}
+
+#[cfg(windows)]
+const fn native_step_name() -> &'static str {
+    "Run cmd.exe through the shipped runner"
+}
+
+#[cfg(windows)]
+fn native_step_script() -> String {
+    format!("@echo {SENTINEL}\r\n@echo process-level-execution>runner-process-e2e.txt")
+}
+
+#[cfg(windows)]
+const fn native_shell_name() -> &'static str {
+    "cmd"
 }
 
 fn content_reference(key: &str, media_type: &str, bytes: &[u8]) -> JobContentReference {
@@ -470,7 +601,7 @@ async fn serve_s3_request(
     write_all(&stream, &object.bytes).await
 }
 
-fn assert_s3_requests(requests: &[S3RequestObservation], expected_paths: &[String; 2]) {
+fn assert_s3_requests(requests: &[S3RequestObservation], expected_paths: &[String]) {
     let expected = expected_paths
         .iter()
         .cloned()
@@ -486,7 +617,7 @@ fn assert_s3_requests(requests: &[S3RequestObservation], expected_paths: &[Strin
     expected.sort_by(|left, right| left.path.cmp(&right.path));
     assert_eq!(
         observed, expected,
-        "runner must issue exactly one signed GET for each referenced job-content object"
+        "runner signed GETs must match the exact immutable job-content reads"
     );
 }
 
@@ -621,7 +752,7 @@ impl ProcessFlowHandler {
         state.observation.hello_operating_system =
             Some(hello.runner().platform().operating_system().clone());
         if hello.runner().runner_id() != self.runner_id
-            || hello.runner().platform().operating_system() != &OperatingSystem::Windows
+            || hello.runner().platform().operating_system() != &native_operating_system()
         {
             return Err(internal_application_error());
         }
@@ -763,6 +894,16 @@ impl ProcessFlowHandler {
             reply_header(ack.header()),
         )))
     }
+}
+
+#[cfg(windows)]
+const fn native_operating_system() -> OperatingSystem {
+    OperatingSystem::Windows
+}
+
+#[cfg(target_os = "macos")]
+const fn native_operating_system() -> OperatingSystem {
+    OperatingSystem::Macos
 }
 
 impl RunnerControlHandler for ProcessFlowHandler {
@@ -970,6 +1111,7 @@ fn pem(label: &str, der: &[u8]) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg(windows)]
 fn write_runner_config(
     root: &Path,
     runner_id: RunnerId,
@@ -1115,6 +1257,124 @@ fn write_runner_config(
     config_path
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_lines)]
+fn write_runner_config(
+    root: &Path,
+    runner_id: RunnerId,
+    control_address: SocketAddr,
+    s3_address: SocketAddr,
+) -> PathBuf {
+    let journal = root.join("journal");
+    let spool = root.join("spool");
+    let native = root.join("native");
+    let workspaces = native.join("workspaces");
+    let runner = native.join("runner");
+    let temp = root.join("temp");
+    let home = root.join("home");
+    let tool_cache = root.join("tool-cache");
+    for path in [&temp, &home, &tool_cache] {
+        fs::create_dir_all(path).expect("create runner support directory");
+    }
+    let config = json!({
+        "schema_version": 2,
+        "runner_id": runner_id.to_string(),
+        "control_endpoint": format!("https://{control_address}/"),
+        "state": {
+            "journal": journal,
+            "spool": spool,
+            "macos_native": native,
+        },
+        "tls": {
+            "server_roots": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM"},
+            "certificate_chain": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM"},
+            "private_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM"},
+        },
+        "spool": {
+            "protection_id": "macos-process-e2e-key-v1",
+            "key_hex": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX"},
+            "decrypt_only": [],
+        },
+        "inventory": {
+            "labels": ["self-hosted", "macos", "arm64"],
+            "groups": ["default"],
+            "max_parallel_jobs": 1,
+            "resources_per_job": {
+                "cpu_millis": 1000,
+                "memory_bytes": 1_073_741_824_u64,
+                "ephemeral_disk_bytes": 0,
+                "pids": 128,
+            },
+            "environment_profiles": [{
+                "id": PROFILE_ID,
+                "manifest_sha256": "08".repeat(32),
+                "workspace": workspaces,
+                "default_environment": {},
+            }],
+        },
+        "macos_native": {},
+        "executor": {
+            "resources": {
+                "cpu_millis": 1000,
+                "memory_bytes": 1_073_741_824_u64,
+                "ephemeral_disk_bytes": 0,
+                "pids": 128,
+            },
+            "network": "host",
+            "root_filesystem": "host",
+            "privilege": "host",
+            "default_step_timeout_seconds": 60,
+            "maximum_output_bytes": 1_048_576,
+            "runner_root": runner,
+            "home": home,
+            "path": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "temp": temp,
+            "tool_cache": tool_cache,
+            "toolchain": {
+                "bash": "/bin/bash",
+                "sh": "/bin/sh",
+                "python": null,
+                "pwsh": null,
+                "powershell": null,
+                "cmd": null,
+                "install": "/usr/bin/install",
+                "tar": "/usr/bin/tar",
+                "sha256sum": "/usr/bin/shasum",
+                "node12": null,
+                "node16": null,
+                "node20": null,
+                "node24": null,
+            },
+        },
+        "object_store": {
+            "endpoint": format!("http://{s3_address}/"),
+            "region": "us-east-1",
+            "bucket": S3_BUCKET,
+            "prefix": S3_PREFIX,
+            "loopback_development": true,
+            "operation_timeout_seconds": 5,
+            "access_key_id": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY"},
+            "secret_access_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_SECRET_KEY"},
+        },
+        "github": {
+            "user_agent": "automata-runner-process-e2e/0.1.0",
+            "server_url": "https://github.com/",
+            "api_url": "https://api.github.com/",
+            "graphql_url": "https://api.github.com/graphql",
+        },
+    });
+    let config_path = root.join("runner.macos.process-e2e.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("encode runner config"),
+    )
+    .expect("write runner config");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .expect("restrict runner config");
+    config_path
+}
+
+#[cfg(windows)]
 fn require_standalone_pwsh() -> bool {
     match std::env::var_os(REQUIRE_STANDALONE_PWSH_ENV) {
         None => false,
@@ -1134,7 +1394,10 @@ struct TemporaryRoot {
 
 impl TemporaryRoot {
     fn new() -> Self {
+        #[cfg(windows)]
         let parent = std::env::temp_dir();
+        #[cfg(target_os = "macos")]
+        let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical macOS temp root");
         let path = parent.join(format!(
             "automata-runner-process-e2e-{}",
             RunnerSessionId::new()

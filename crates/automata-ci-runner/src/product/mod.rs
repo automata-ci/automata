@@ -17,7 +17,7 @@ pub use composition::{
 };
 pub use config::{
     ClientTlsSources, ExecutorProductConfig, GithubProductConfig, KubernetesProductConfig,
-    MetricsProductConfig, ObjectStoreProductConfig, PodmanProductConfig,
+    MacosNativeProductConfig, MetricsProductConfig, ObjectStoreProductConfig, PodmanProductConfig,
     RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
     RunnerProviderConfig, SpoolProtectionConfig, StateRoots, ToolchainConfig,
     WindowsNativeProductConfig,
