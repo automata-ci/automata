@@ -252,9 +252,11 @@ fn clean_absolute_file_path(path: &Path) -> bool {
         && path
             .components()
             .any(|component| matches!(component, Component::Normal(_)))
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+        && path.components().all(|component| match component {
+            Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            Component::RootDir | Component::Normal(_) => true,
+            Component::CurDir | Component::ParentDir => false,
+        })
 }
 
 fn parse_leaf_certificate(
@@ -612,6 +614,15 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    const CLIENT_CERTIFICATE_SOURCE: &str = "file:/run/automata/client.pem";
+    #[cfg(not(unix))]
+    const CLIENT_CERTIFICATE_SOURCE: &str = "file:C:\\run\\automata\\client.pem";
+    #[cfg(unix)]
+    const ROTATION_CERTIFICATE_SOURCE: &str = "file:/run/automata/client-next.pem";
+    #[cfg(not(unix))]
+    const ROTATION_CERTIFICATE_SOURCE: &str = "file:C:\\run\\automata\\client-next.pem";
+
     fn valid_document(id: RunnerId, expiry: i64) -> Vec<u8> {
         let label = RunnerLabel::new("linux").expect("label");
         let group = RunnerGroup::new("g1").expect("group");
@@ -635,7 +646,7 @@ mod tests {
                 "capabilities": capabilities,
                 "slots": 2,
                 "active_client_certificates": [{
-                    "source": "file:/run/automata/client.pem",
+                    "source": CLIENT_CERTIFICATE_SOURCE,
                     "expires_at_seconds": expiry
                 }]
             }]
@@ -669,25 +680,34 @@ mod tests {
             serde_json::from_slice(&valid_document(id, first.expiry)).expect("JSON");
         document["runners"][0]["active_client_certificates"] = json!([
             {
-                "source": "file:/run/automata/client.pem",
+                "source": CLIENT_CERTIFICATE_SOURCE,
                 "expires_at_seconds": first.expiry
             },
             {
-                "source": "file:/run/automata/client-next.pem",
+                "source": ROTATION_CERTIFICATE_SOURCE,
                 "expires_at_seconds": second.expiry
             }
         ]);
-        let fleet =
-            parse_document(
-                &serde_json::to_vec(&document).expect("JSON"),
-                NOW,
-                |path| match path.to_str() {
-                    Some("/run/automata/client.pem") => Ok(first.pem.clone()),
-                    Some("/run/automata/client-next.pem") => Ok(second.pem.clone()),
-                    _ => Err(StaticRunnerRegistrationError::UnreadableFile),
-                },
-            )
-            .expect("overlap fleet");
+        let first_path = PathBuf::from(
+            CLIENT_CERTIFICATE_SOURCE
+                .strip_prefix("file:")
+                .expect("source prefix"),
+        );
+        let second_path = PathBuf::from(
+            ROTATION_CERTIFICATE_SOURCE
+                .strip_prefix("file:")
+                .expect("source prefix"),
+        );
+        let fleet = parse_document(&serde_json::to_vec(&document).expect("JSON"), NOW, |path| {
+            if path == first_path {
+                Ok(first.pem.clone())
+            } else if path == second_path {
+                Ok(second.pem.clone())
+            } else {
+                Err(StaticRunnerRegistrationError::UnreadableFile)
+            }
+        })
+        .expect("overlap fleet");
         assert_eq!(fleet.runners()[0].active_certificates().len(), 2);
 
         document["runners"][0]["active_client_certificates"] = json!([
