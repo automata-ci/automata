@@ -327,6 +327,22 @@ impl RunnerControlClient for HyperRunnerControlClient {
         cancellation: CancellationToken,
     ) -> ClientFuture<'a> {
         Box::pin(async move {
+            // Long polls may consume the negotiated request budget, but active lease traffic
+            // must fail early enough for an exact retry before the lease can expire.
+            let request_timeout = match request.message() {
+                RunnerToServer::Hello(_) | RunnerToServer::LeaseRequest(_) => {
+                    self.transport_limits.total_request_timeout()
+                }
+                RunnerToServer::LeaseResponse(_)
+                | RunnerToServer::Heartbeat(_)
+                | RunnerToServer::JobState(_)
+                | RunnerToServer::JobResult(_)
+                | RunnerToServer::LogBatch(_)
+                | RunnerToServer::CommandAck(_) => self
+                    .transport_limits
+                    .total_request_timeout()
+                    .min(self.transport_limits.response_body_timeout()),
+            };
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => Err(ClientError::new(
@@ -334,7 +350,7 @@ impl RunnerControlClient for HyperRunnerControlClient {
                     RetryClass::Never,
                 )),
                 result = timeout(
-                    self.transport_limits.total_request_timeout(),
+                    request_timeout,
                     self.exchange_bounded(request),
                 ) => result.unwrap_or_else(|_| Err(ClientError::new(
                     ClientErrorKind::Timeout,
