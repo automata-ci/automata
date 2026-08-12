@@ -1345,6 +1345,7 @@ LANGUAGE plpgsql
 AS $automata$
 DECLARE
     authority RECORD;
+    workflow_authorized BOOLEAN := FALSE;
 BEGIN
     IF NEW.origin_kind = 'scheduled_fire' THEN
         RETURN NEW;
@@ -1357,9 +1358,12 @@ BEGIN
            evidence_source.github_check_subject_id,
            evidence_source.github_check_head_sha,
            inbox_source.accepted_at_ms,
+           inbox_source.state AS inbox_state,
+           manifest_source.workflow_selection_kind,
            manifest_source.check_subject_key,
            manifest_source.github_app_id,
-           manifest_source.check_name
+           manifest_source.check_name,
+           manifest_source.manifest_digest
       INTO authority
     FROM github_provider_delivery_evidence AS evidence_source
     JOIN provider_delivery_inbox AS inbox_source
@@ -1375,19 +1379,53 @@ BEGIN
       AND evidence_source.tenant_id = NEW.tenant_id
     FOR SHARE OF evidence_source, inbox_source, manifest_source;
 
-    IF NOT FOUND
+    IF FOUND
+       AND authority.workflow_selection_kind = 'all_direct'
+       AND NEW.id <> authority.github_check_subject_id
+    THEN
+        SELECT TRUE INTO workflow_authorized
+        FROM provider_delivery_workflow_inventories AS inventory
+        JOIN provider_delivery_workflow_inventory_entries AS entry
+          ON entry.inbox_id = inventory.inbox_id
+         AND entry.tenant_id = inventory.tenant_id
+        WHERE inventory.inbox_id = NEW.provider_delivery_id
+          AND inventory.tenant_id = NEW.tenant_id
+          AND inventory.manifest_digest = authority.manifest_digest
+          AND entry.workflow_path = NEW.subject_key
+          AND (
+              entry.source_state = 'ready'
+              OR EXISTS (
+                  SELECT 1
+                  FROM provider_delivery_workflow_progress AS progress
+                  WHERE progress.inbox_id = inventory.inbox_id
+                    AND progress.tenant_id = inventory.tenant_id
+                    AND progress.inventory_digest = inventory.inventory_digest
+                    AND progress.workflow_path = entry.workflow_path
+                    AND progress.outcome_kind = 'failed'
+              )
+          )
+        FOR SHARE OF inventory, entry;
+    END IF;
+
+    IF authority.repository_id IS NULL
         OR NEW.origin_kind <> 'provider_delivery'
-        OR NEW.id <> authority.github_check_subject_id
         OR NEW.repository_id <> authority.repository_id
         OR NEW.provider_connection_id <> authority.provider_connection_id
         OR NEW.provider_installation_id <> authority.provider_installation_id
         OR NEW.github_repository_id <> authority.github_repository_id
         OR NEW.github_repository_name <> authority.github_repository_name
-        OR NEW.subject_key <> authority.check_subject_key
         OR NEW.github_app_id <> authority.github_app_id
         OR NEW.head_sha <> authority.github_check_head_sha
         OR NEW.check_name <> authority.check_name
         OR NEW.created_at_ms <> authority.accepted_at_ms
+        OR NOT (
+            NEW.id = authority.github_check_subject_id
+            AND NEW.subject_key = authority.check_subject_key
+            OR authority.workflow_selection_kind = 'all_direct'
+            AND authority.inbox_state = 'claimed'
+            AND NEW.id <> authority.github_check_subject_id
+            AND workflow_authorized
+        )
     THEN
         RAISE EXCEPTION 'GitHub Check subject does not match its signed delivery evidence'
             USING ERRCODE = 'integrity_constraint_violation',
