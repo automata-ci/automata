@@ -7,15 +7,16 @@ use std::sync::{
 use std::time::Duration;
 
 use automata_ci_core::{
-    JobConclusion, JobLifecycle, JobSecretExposure, LogChannel, RunnerId, RunnerSessionId,
-    UnixMillis,
+    JobConclusion, JobLifecycle, JobSecretExposure, LogChannel, OperationId, RunnerId,
+    RunnerSessionId, UnixMillis,
 };
 use automata_ci_protocol::{
     MessageHeader, NegotiatedSession, OperationAck, RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
     ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_journal::{
-    CommandDisposition, CommandIgnoredReason, RunnerJournal, SessionBinding,
+    CommandDisposition, CommandIgnoredReason, ProviderFailureKind, ProviderFailureOutcome,
+    ProviderOperation, ProviderOperationKind, RunnerJournal, SessionBinding,
 };
 use automata_ci_runner_runtime::{
     ExecutionCancellationReason, MonotonicMillis, RetryPolicy, RunnerRuntimeControlClient,
@@ -1229,6 +1230,90 @@ async fn executor_failure_is_terminalized_per_slot_while_sibling_and_supervisor_
         .expect("runner shutdown")
         .expect("runtime task")
         .expect("clean shutdown after isolated failure");
+}
+
+#[tokio::test]
+async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_release() {
+    let scratch = support::Scratch::new("legacy-uncertain-create-recovery");
+    let runner_id = RunnerId::new();
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
+    let guard = fixture.lease.guard();
+    journal
+        .transition_lifecycle(
+            fixture.session_id,
+            fixture.slot,
+            guard,
+            JobLifecycle::Preparing,
+        )
+        .expect("begin legacy preparation");
+    let create = OperationId::new();
+    journal
+        .record_provider_intent(
+            fixture.session_id,
+            fixture.slot,
+            guard,
+            ProviderOperation::intent(create, ProviderOperationKind::CreateSandbox),
+        )
+        .expect("record legacy create intent");
+    journal
+        .fail_provider_operation(
+            fixture.session_id,
+            fixture.slot,
+            guard,
+            create,
+            ProviderFailureOutcome::Uncertain(ProviderFailureKind::Internal),
+        )
+        .expect("retain uncertain legacy create");
+    support::seed_failed_terminal_without_logs(journal.as_ref(), spool.as_ref(), &fixture);
+    let terminal_operation = journal
+        .snapshot()
+        .expect("terminal snapshot")
+        .slot(fixture.slot)
+        .and_then(|slot| slot.terminal_result())
+        .expect("terminal result")
+        .operation_id();
+    journal
+        .acknowledge_terminal_result(fixture.session_id, fixture.slot, guard, terminal_operation)
+        .expect("acknowledge legacy terminal result");
+
+    let shutdown = CancellationToken::new();
+    let client = Arc::new(support::FailureIsolationClient::new(fixture.session_id));
+    let executor = Arc::new(support::LegacyUncertainCreateExecutor::default());
+    let runtime = RunnerSessionSupervisor::new(
+        support::config(runner_id),
+        RunnerRuntimePorts::new(
+            client.clone(),
+            journal.clone(),
+            spool,
+            executor.clone(),
+            Arc::new(support::FixedClock::new(10_000, 50)),
+            Arc::new(support::ImmediateSleeper),
+            Arc::new(SystemRuntimeIds),
+        ),
+    );
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
+
+    tokio::time::timeout(Duration::from_secs(5), client.wait_for_released_slot_poll())
+        .await
+        .expect("legacy create custody is destroyed and slot released");
+    assert_eq!(executor.recovery_calls(), vec![(create, guard)]);
+    assert_eq!(executor.cleanup_calls(), 1);
+    assert!(
+        journal
+            .snapshot()
+            .expect("released snapshot")
+            .slots()
+            .is_empty()
+    );
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("runner shutdown")
+        .expect("runtime task")
+        .expect("clean shutdown after legacy recovery");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

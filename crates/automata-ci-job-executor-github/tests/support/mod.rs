@@ -1634,6 +1634,14 @@ impl SandboxProvider for FakeProvider {
         &self.capabilities
     }
 
+    fn create_recovery_handle(
+        &self,
+        _operation_id: OperationId,
+        _generation: automata_ci_execution::SandboxGeneration,
+    ) -> Option<SandboxHandle> {
+        Some(self.handle.clone())
+    }
+
     fn create(
         &self,
         spec: &SandboxSpec,

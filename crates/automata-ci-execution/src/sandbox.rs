@@ -359,6 +359,21 @@ pub trait SandboxProvider: fmt::Debug + Send + Sync {
     /// Returns the provider's fixed, explicit capability declaration.
     fn capabilities(&self) -> &ProviderCapabilities;
 
+    /// Reconstructs the exact opaque identity reserved by a create operation.
+    ///
+    /// Providers with deterministic create identities should return the same
+    /// handle that an uncertain [`Self::create`] failure carries. The runtime
+    /// uses this only to recover legacy durable intents that predate custody of
+    /// that handle; returning `None` keeps the unresolved operation fenced.
+    #[must_use]
+    fn create_recovery_handle(
+        &self,
+        _operation_id: OperationId,
+        _generation: SandboxGeneration,
+    ) -> Option<SandboxHandle> {
+        None
+    }
+
     /// Creates or exactly replays one sandbox operation.
     ///
     /// Reusing an operation identifier with different request material must
