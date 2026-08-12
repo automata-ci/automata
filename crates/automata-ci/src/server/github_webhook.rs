@@ -117,7 +117,20 @@ async fn accept_github_webhook(
             .await
             .map(|_| ()),
     }
-    .map_err(GithubWebhookHttpOutcome::from_ingress)?;
+    .map_err(|error| {
+        let outcome = GithubWebhookHttpOutcome::from_ingress(error);
+        if matches!(
+            outcome,
+            GithubWebhookHttpOutcome::Internal | GithubWebhookHttpOutcome::Unavailable
+        ) {
+            tracing::warn!(
+                error = %error,
+                status = outcome.status().as_u16(),
+                "GitHub webhook ingress failed"
+            );
+        }
+        outcome
+    })?;
     ensure_before_deadline(deadline)?;
     Ok(())
 }
