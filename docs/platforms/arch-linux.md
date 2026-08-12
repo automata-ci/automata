@@ -379,7 +379,7 @@ file, then creates and removes only its uniquely named network:
 (
   set -e
   git_probe_network="automata-git-path-probe-${UID}"
-  git_probe_image='ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd'
+  git_probe_image='ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194'
   git_probe_auth="$PWD/target/runner-local/git-probe-anonymous-auth.json"
   install -d -m 0700 -- "$(dirname -- "${git_probe_auth}")"
   install -m 0600 /dev/null "${git_probe_auth}"
@@ -505,7 +505,7 @@ network:
 (
   set -e
   results_probe_network="automata-results-path-probe-${UID}"
-  results_probe_image='ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd'
+  results_probe_image='ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194'
   results_probe_auth="$PWD/target/runner-local/results-probe-anonymous-auth.json"
   install -d -m 0700 -- "$(dirname -- "${results_probe_auth}")"
   install -m 0600 /dev/null "${results_probe_auth}"
