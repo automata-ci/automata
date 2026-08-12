@@ -772,7 +772,10 @@ where
         provider
             .run_with_fatal_notification(provider_cancellation, fatal_notification)
             .await
-            .map_err(|_| ManagedServiceError::GithubProvider)
+            .map_err(|error| {
+                tracing::error!(%error, "GitHub provider runtime failed");
+                ManagedServiceError::GithubProvider
+            })
     };
     supervise_services_with_metrics_and_provider(
         (
