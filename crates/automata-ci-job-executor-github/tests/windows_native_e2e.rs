@@ -11,8 +11,8 @@ use std::{
 };
 
 use automata_ci_core::{
-    ExpressionProgram, JobConclusion, JobOutputDefinition, OutputSensitivity, ValueSource,
-    ValueTemplate,
+    ExpressionProgram, JobConclusion, JobOutputDefinition, OutputSensitivity, Sha256Digest,
+    ValueSource, ValueTemplate,
 };
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment, TargetPath,
@@ -243,7 +243,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path (Get-Location) 'tools') | O
     );
     let artifact_bytes = fs::read(workspace.join("powershell-artifact.txt"))
         .expect("read declared PowerShell artifact");
-    let artifact_digest = format!("{:x}", Sha256::digest(&artifact_bytes));
+    let artifact_digest =
+        Sha256Digest::from_bytes(Sha256::digest(&artifact_bytes).into()).to_string();
     let artifact_list: serde_json::Value = serde_json::from_slice(
         &fs::read(workspace.join("artifact-list.json")).expect("copied artifact subject list"),
     )

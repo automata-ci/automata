@@ -1,3 +1,4 @@
+use automata_ci_core::Sha256Digest;
 use automata_ci_ui_renderer::{AssetContentType, client_assets, find_asset};
 use sha2::{Digest, Sha256};
 
@@ -28,5 +29,5 @@ fn exposes_only_exact_immutable_client_assets() {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256Digest::from_bytes(Sha256::digest(bytes).into()).to_string()
 }

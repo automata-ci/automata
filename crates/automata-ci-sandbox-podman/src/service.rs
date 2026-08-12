@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use automata_ci_core::Sha256Digest;
 use automata_ci_execution::ServiceHealthPolicy;
 use automata_ci_execution::{
     ImmutableImage, ServiceContainerSpecs, ServicePort, ServiceTransportProtocol,
@@ -732,7 +733,10 @@ fn health_configuration_digest(
             hash_health_field(&mut hasher, field, &value.to_be_bytes());
         }
     }
-    (mask, format!("{:x}", hasher.finalize()))
+    (
+        mask,
+        Sha256Digest::from_bytes(hasher.finalize().into()).to_string(),
+    )
 }
 
 fn hash_health_field(hasher: &mut Sha256, field: u8, value: &[u8]) {

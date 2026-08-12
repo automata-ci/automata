@@ -598,7 +598,7 @@ fn revoked_test_completion(
     digest.update(b"automata.runner.revoked-lease-offer-no-work.v1");
     digest.update(offer_operation_id.as_uuid().as_bytes());
     digest.update(request.operation_id().as_uuid().as_bytes());
-    let encoded_operation_id = format!("{:x}", digest.finalize());
+    let encoded_operation_id = Sha256Digest::from_bytes(digest.finalize().into()).to_string();
     let response_operation_id: OperationId = encoded_operation_id[..32]
         .parse()
         .expect("digest prefix operation ID");

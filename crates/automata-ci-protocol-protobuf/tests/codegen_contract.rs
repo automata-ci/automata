@@ -5,6 +5,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use automata_ci_core::Sha256Digest;
 use sha2::{Digest, Sha256};
 
 fn crate_root() -> PathBuf {
@@ -16,7 +17,7 @@ fn read(root: &Path, relative: &str) -> String {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256Digest::from_bytes(Sha256::digest(bytes).into()).to_string()
 }
 
 fn provenance(contents: &str) -> BTreeMap<&str, &str> {
