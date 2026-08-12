@@ -1143,7 +1143,7 @@ fn mutable_images_and_overlapping_state_roots_fail_closed() {
 }
 
 #[test]
-fn unenforced_ephemeral_disk_capacity_fails_closed() {
+fn unenforced_extended_resource_capacity_fails_closed() {
     let mut value: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     value["inventory"]["resources_per_job"]["ephemeral_disk_bytes"] =
@@ -1159,6 +1159,22 @@ fn unenforced_ephemeral_disk_capacity_fails_closed() {
         serde_json::json!(20_u64 * 1024 * 1024 * 1024);
     assert_eq!(
         parse_value(&value).expect_err("unenforced executor disk limit must fail"),
+        RunnerProductConfigError::InvalidExecutor
+    );
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    value["inventory"]["resources_per_job"]["gpu_count"] = serde_json::json!(1);
+    assert_eq!(
+        parse_value(&value).expect_err("unenforced advertised GPU capacity must fail"),
+        RunnerProductConfigError::InvalidInventory
+    );
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    value["executor"]["resources"]["gpu_count"] = serde_json::json!(1);
+    assert_eq!(
+        parse_value(&value).expect_err("unenforced executor GPU limit must fail"),
         RunnerProductConfigError::InvalidExecutor
     );
 }

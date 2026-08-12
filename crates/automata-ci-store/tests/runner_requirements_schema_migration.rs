@@ -60,6 +60,7 @@ fn migration_0054_drains_v2_and_requires_v3_for_new_work() {
         "SET runner_requirements_schema = 3",
         "requirements @> '{\"schema_version\": 3}'::jsonb",
         "requirements ? 'resource_allocation'",
+        "run.runner_requirements_schema = 3",
         "jobs_00_require_runner_requirements_v3",
         "workflow_plan_v2_concrete_jobs_00_require_runner_requirements_v3",
         "job_attempts_00_require_runner_requirements_v3",
