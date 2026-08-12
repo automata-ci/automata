@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/delegated-actor-claims.schema.json",
+  "title": "Automata delegated actor JWT claims v1",
+  "description": "Claims validated only after signature and algorithm verification. Roles and permissions are deliberately absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ver",
+    "iss",
+    "sub",
+    "aud",
+    "workspace_id",
+    "session_id",
+    "auth_time",
+    "iat",
+    "exp",
+    "jti"
+  ],
+  "properties": {
+    "ver": {
+      "$ref": "common.schema.json#/definitions/protocolVersion"
+    },
+    "iss": {
+      "$ref": "common.schema.json#/definitions/absoluteHttpsUri"
+    },
+    "sub": {
+      "$ref": "common.schema.json#/definitions/canonicalUuid"
+    },
+    "aud": {
+      "$ref": "common.schema.json#/definitions/shardId"
+    },
+    "workspace_id": {
+      "$ref": "common.schema.json#/definitions/workspaceId"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/definitions/canonicalUuid"
+    },
+    "auth_time": {
+      "$ref": "common.schema.json#/definitions/jwtNumericDate"
+    },
+    "iat": {
+      "$ref": "common.schema.json#/definitions/jwtNumericDate"
+    },
+    "exp": {
+      "$ref": "common.schema.json#/definitions/jwtNumericDate"
+    },
+    "jti": {
+      "$ref": "common.schema.json#/definitions/canonicalUuid"
+    }
+  }
+}

@@ -1,0 +1,221 @@
+openapi: 3.0.3
+info:
+  title: Automata Core Cloud boundary
+  version: 1.0.0-draft
+  description: >-
+    Initial internal control-plane and public live-log data-plane contracts.
+    Internal endpoints also require workload authentication at the transport
+    boundary; bearer security on actor endpoints represents the delegated human.
+servers:
+  - url: https://core.internal.example
+    description: Shard-internal load-balanced endpoint
+tags:
+  - name: discovery
+  - name: provisioning
+  - name: entitlements
+  - name: live-logs
+paths:
+  /internal/v1/capabilities:
+    get:
+      operationId: getShardCapabilitiesV1
+      tags: [discovery]
+      summary: Describe the shard release and supported protocol versions
+      responses:
+        "200":
+          description: Current shard capabilities
+          content:
+            application/json:
+              schema:
+                $ref: ./schemas/shard-capabilities.schema.json
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /internal/v1/workspaces/{workspace_id}:
+    put:
+      operationId: provisionTenantV1
+      tags: [provisioning]
+      summary: Idempotently provision a Core tenant for a Cloud workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ./schemas/tenant-provisioning.schema.json#/definitions/request
+      responses:
+        "200":
+          description: Tenant created, or the exact prior provisioning replayed
+          content:
+            application/json:
+              schema:
+                $ref: ./schemas/tenant-provisioning.schema.json#/definitions/response
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /internal/v1/workspaces/{workspace_id}/entitlements:
+    put:
+      operationId: applyEntitlementSnapshotV1
+      tags: [entitlements]
+      summary: Apply a monotonic generic entitlement snapshot
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ./schemas/entitlement-snapshot.schema.json
+      responses:
+        "200":
+          description: Snapshot applied or exact replay accepted
+          content:
+            application/json:
+              schema:
+                $ref: ./schemas/entitlement-snapshot.schema.json#/definitions/acknowledgement
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /internal/v1/workspaces/{workspace_id}/attempts/{attempt_id}/live-log-authorizations:
+    post:
+      operationId: authorizeLiveLogV1
+      tags: [live-logs]
+      summary: Authorize one direct browser connection to an attempt log
+      description: >-
+        Core maps the delegated actor to current membership/RBAC, checks logs:read
+        for this attempt, and returns a short-lived, stream-scoped bearer. The
+        token is not valid on internal control-plane endpoints.
+      security:
+        - delegatedActor: []
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/AttemptId"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: A short-lived capability for the public data-plane origin
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: ./schemas/live-log.schema.json#/definitions/authorizationResponse
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /data/v1/log-streams/{stream_id}:
+    get:
+      operationId: streamLiveLogV1
+      tags: [live-logs]
+      summary: Stream ordered log frames directly from the Core data plane
+      description: >-
+        The bearer is checked when establishing the connection. The client
+        reconnects with after_sequence set to its last accepted sequence and a
+        freshly authorized capability. SSE event `log` data conforms to logFrame;
+        event `terminal` data conforms to terminalFrame. Heartbeats are SSE
+        comments and carry no application data.
+      security:
+        - liveLogCapability: []
+      parameters:
+        - $ref: "#/components/parameters/StreamId"
+        - name: after_sequence
+          in: query
+          required: false
+          description: Last sequence already accepted; the next frame follows it.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 20
+            pattern: "^(0|[1-9][0-9]{0,19})$"
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Server-sent event stream
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                event: log
+                id: 42
+                data: {"protocol_version":1,"stream_id":"55555555-5555-4555-8555-555555555555","sequence":"42","timestamp_ms":1786500060123,"channel":"stdout","text":"Compiling automata-ci-core v0.1.0"}
+
+        default:
+          $ref: "#/components/responses/Problem"
+
+components:
+  securitySchemes:
+    delegatedActor:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Cloud-issued short-lived actor assertion for this shard.
+    liveLogCapability:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Core-issued short-lived capability for exactly one log stream.
+  parameters:
+    WorkspaceId:
+      name: workspace_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    AttemptId:
+      name: attempt_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    StreamId:
+      name: stream_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Canonical UUID identifying the exact mutation attempt.
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Optional tracing identity; it grants no authority or idempotency.
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  responses:
+    Problem:
+      description: Bounded RFC 9457 problem response
+      content:
+        application/problem+json:
+          schema:
+            $ref: ./schemas/problem.schema.json

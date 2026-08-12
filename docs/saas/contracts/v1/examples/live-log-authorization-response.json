@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "stream_id": "55555555-5555-4555-8555-555555555555",
+  "stream_url": "https://logs.us-east-1.automata.example/data/v1/log-streams/55555555-5555-4555-8555-555555555555",
+  "bearer_token": "example.header.signature-not-a-real-token",
+  "expires_at_ms": 1786500120000,
+  "resume_after_sequence": "41"
+}

@@ -1,0 +1,201 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/usage-events.schema.json",
+  "title": "Automata neutral managed-allocation events v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "source_shard_id", "batch_id", "events"],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/definitions/protocolVersion"
+    },
+    "source_shard_id": {
+      "$ref": "common.schema.json#/definitions/shardId"
+    },
+    "batch_id": {
+      "$ref": "common.schema.json#/definitions/canonicalUuid"
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/allocationStarted" },
+          { "$ref": "#/definitions/allocationClosed" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "resourceAllocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_millis", "memory_mib", "ephemeral_disk_mib"],
+      "properties": {
+        "cpu_millis": {
+          "description": "1000 cpu_millis is one virtual CPU.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024000
+        },
+        "memory_mib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "ephemeral_disk_mib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        }
+      }
+    },
+    "allocationStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "event_type",
+        "event_id",
+        "occurred_at_ms",
+        "workspace_id",
+        "allocation_id",
+        "attempt_id",
+        "environment_profile",
+        "resources",
+        "allocated_at_ms"
+      ],
+      "properties": {
+        "schema_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "event_type": {
+          "type": "string",
+          "enum": ["managed_allocation.started"]
+        },
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "occurred_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "workspace_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "allocation_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "environment_profile": {
+          "$ref": "common.schema.json#/definitions/environmentProfile"
+        },
+        "resources": {
+          "$ref": "#/definitions/resourceAllocation"
+        },
+        "allocated_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        }
+      }
+    },
+    "allocationClosed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "event_type",
+        "event_id",
+        "occurred_at_ms",
+        "workspace_id",
+        "allocation_id",
+        "attempt_id",
+        "environment_profile",
+        "resources",
+        "allocated_at_ms",
+        "released_at_ms",
+        "disposition"
+      ],
+      "properties": {
+        "schema_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "event_type": {
+          "type": "string",
+          "enum": ["managed_allocation.closed"]
+        },
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "occurred_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "workspace_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "allocation_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "environment_profile": {
+          "$ref": "common.schema.json#/definitions/environmentProfile"
+        },
+        "resources": {
+          "$ref": "#/definitions/resourceAllocation"
+        },
+        "allocated_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "released_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "success",
+            "user_failure",
+            "canceled",
+            "platform_failure",
+            "abandoned"
+          ]
+        }
+      }
+    },
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "batch_id",
+        "status",
+        "accepted_count",
+        "duplicate_count"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "batch_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["accepted"]
+        },
+        "accepted_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "duplicate_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  }
+}

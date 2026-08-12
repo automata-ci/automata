@@ -1,0 +1,26 @@
+{
+  "protocol_version": 1,
+  "workspace_id": "22222222-2222-4222-8222-222222222222",
+  "revision": "1",
+  "issued_at_ms": 1786500060000,
+  "effective_at_ms": 1786500060000,
+  "expires_at_ms": 1787104860000,
+  "managed_execution": {
+    "state": "enabled",
+    "allowed_profiles": [
+      {
+        "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+        "manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4"
+      }
+    ],
+    "max_concurrency": 1,
+    "max_job_seconds": 3600,
+    "compute_allowance": {
+      "allowance_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "total_seconds": 6000,
+      "starts_at_ms": 1786500060000,
+      "ends_at_ms": 1787104860000,
+      "exhaustion_behavior": "block_new"
+    }
+  }
+}

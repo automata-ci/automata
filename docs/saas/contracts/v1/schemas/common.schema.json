@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/common.schema.json",
+  "title": "Automata Cloud/Core common values v1",
+  "definitions": {
+    "protocolVersion": {
+      "type": "integer",
+      "enum": [1]
+    },
+    "canonicalUuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "workspaceId": {
+      "$ref": "#/definitions/canonicalUuid"
+    },
+    "principalId": {
+      "$ref": "#/definitions/canonicalUuid"
+    },
+    "shardId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    "resourceProfileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)*/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "environmentProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "manifest_sha256"],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/resourceProfileId"
+        },
+        "manifest_sha256": {
+          "$ref": "#/definitions/sha256Digest"
+        }
+      }
+    },
+    "unixMillis": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "jwtNumericDate": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "decimalCounter": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "positiveRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "providerLogin": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "absoluteHttpsUri": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 9,
+      "maxLength": 2048,
+      "pattern": "^https://"
+    },
+    "sameOriginPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^/(?!/)[^#\\u0000-\\u001f\\u007f]*$"
+    },
+    "opaqueToken": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 8192,
+      "pattern": "^[^\\s]+$",
+      "writeOnly": true
+    }
+  }
+}

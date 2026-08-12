@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/tenant-provisioning.schema.json",
+  "title": "Automata tenant provisioning messages v1",
+  "definitions": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "workspace_id",
+        "display_name",
+        "initial_owner"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "workspace_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "display_name": {
+          "$ref": "common.schema.json#/definitions/displayName"
+        },
+        "initial_owner": {
+          "$ref": "#/definitions/externalIdentity"
+        }
+      }
+    },
+    "externalIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "subject", "login"],
+      "properties": {
+        "issuer": {
+          "$ref": "common.schema.json#/definitions/absoluteHttpsUri"
+        },
+        "subject": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "login": {
+          "$ref": "common.schema.json#/definitions/providerLogin"
+        },
+        "display_name": {
+          "$ref": "common.schema.json#/definitions/displayName"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "workspace_id",
+        "tenant_id",
+        "state",
+        "result",
+        "authorization_revision"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "workspace_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "tenant_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["active"]
+        },
+        "result": {
+          "type": "string",
+          "enum": ["created", "existing"]
+        },
+        "authorization_revision": {
+          "$ref": "common.schema.json#/definitions/positiveRevision"
+        }
+      }
+    }
+  }
+}

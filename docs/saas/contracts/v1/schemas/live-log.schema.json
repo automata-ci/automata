@@ -1,0 +1,154 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/live-log.schema.json",
+  "title": "Automata live-log messages v1",
+  "definitions": {
+    "authorizationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "stream_id",
+        "stream_url",
+        "bearer_token",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "stream_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "stream_url": {
+          "$ref": "common.schema.json#/definitions/absoluteHttpsUri"
+        },
+        "bearer_token": {
+          "$ref": "common.schema.json#/definitions/opaqueToken"
+        },
+        "expires_at_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "resume_after_sequence": {
+          "$ref": "common.schema.json#/definitions/decimalCounter"
+        }
+      }
+    },
+    "capabilityClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ver",
+        "iss",
+        "sub",
+        "aud",
+        "workspace_id",
+        "attempt_id",
+        "stream_id",
+        "permission",
+        "iat",
+        "exp",
+        "jti"
+      ],
+      "properties": {
+        "ver": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "iss": {
+          "$ref": "common.schema.json#/definitions/absoluteHttpsUri"
+        },
+        "sub": {
+          "$ref": "common.schema.json#/definitions/principalId"
+        },
+        "aud": {
+          "type": "string",
+          "enum": ["automata-live-logs"]
+        },
+        "workspace_id": {
+          "$ref": "common.schema.json#/definitions/workspaceId"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "stream_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "permission": {
+          "type": "string",
+          "enum": ["logs:read"]
+        },
+        "iat": {
+          "$ref": "common.schema.json#/definitions/jwtNumericDate"
+        },
+        "exp": {
+          "$ref": "common.schema.json#/definitions/jwtNumericDate"
+        },
+        "jti": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        }
+      }
+    },
+    "logFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "stream_id",
+        "sequence",
+        "timestamp_ms",
+        "channel",
+        "text"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "stream_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "sequence": {
+          "$ref": "common.schema.json#/definitions/decimalCounter"
+        },
+        "timestamp_ms": {
+          "$ref": "common.schema.json#/definitions/unixMillis"
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["stdout", "stderr", "system"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      }
+    },
+    "terminalFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "stream_id",
+        "reason",
+        "finalized_object_ready"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/definitions/protocolVersion"
+        },
+        "stream_id": {
+          "$ref": "common.schema.json#/definitions/canonicalUuid"
+        },
+        "through_sequence": {
+          "$ref": "common.schema.json#/definitions/decimalCounter"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["completed", "canceled", "failed", "abandoned"]
+        },
+        "finalized_object_ready": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

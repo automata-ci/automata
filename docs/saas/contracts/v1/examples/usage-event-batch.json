@@ -1,0 +1,47 @@
+{
+  "protocol_version": 1,
+  "source_shard_id": "us-east-1-shared-1",
+  "batch_id": "66666666-6666-4666-8666-666666666666",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_type": "managed_allocation.started",
+      "event_id": "77777777-7777-4777-8777-777777777777",
+      "occurred_at_ms": 1786500060000,
+      "workspace_id": "22222222-2222-4222-8222-222222222222",
+      "allocation_id": "88888888-8888-4888-8888-888888888888",
+      "attempt_id": "99999999-9999-4999-8999-999999999999",
+      "environment_profile": {
+        "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+        "manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4"
+      },
+      "resources": {
+        "cpu_millis": 2000,
+        "memory_mib": 4096,
+        "ephemeral_disk_mib": 20480
+      },
+      "allocated_at_ms": 1786500060000
+    },
+    {
+      "schema_version": 1,
+      "event_type": "managed_allocation.closed",
+      "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "occurred_at_ms": 1786500133123,
+      "workspace_id": "22222222-2222-4222-8222-222222222222",
+      "allocation_id": "88888888-8888-4888-8888-888888888888",
+      "attempt_id": "99999999-9999-4999-8999-999999999999",
+      "environment_profile": {
+        "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
+        "manifest_sha256": "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4"
+      },
+      "resources": {
+        "cpu_millis": 2000,
+        "memory_mib": 4096,
+        "ephemeral_disk_mib": 20480
+      },
+      "allocated_at_ms": 1786500060000,
+      "released_at_ms": 1786500133123,
+      "disposition": "success"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.automata.example/cloud-core/v1/problem.schema.json",
+  "title": "Automata API problem v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "title", "status", "code", "request_id"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 400,
+      "maximum": 599
+    },
+    "detail": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "instance": {
+      "type": "string",
+      "format": "uri-reference",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "code": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "request_id": {
+      "$ref": "common.schema.json#/definitions/canonicalUuid"
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pointer", "code"],
+        "properties": {
+          "pointer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^(/|#/)"
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      }
+    }
+  }
+}

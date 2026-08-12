@@ -1,0 +1,59 @@
+openapi: 3.0.3
+info:
+  title: Automata Cloud Core-ingestion boundary
+  version: 1.0.0-draft
+  description: >-
+    Initial Fastify-hosted ingestion routes called by Automata Core shards.
+    The endpoint requires configured workload authentication in addition to its
+    exact message schema.
+servers:
+  - url: https://cloud.internal.example
+    description: Private Cloud service endpoint
+tags:
+  - name: usage
+paths:
+  /internal/v1/core-events/usage-batches:
+    post:
+      operationId: ingestUsageEventBatchV1
+      tags: [usage]
+      summary: Durably accept a batch of neutral allocation events
+      description: >-
+        The entire structurally valid batch is accepted transactionally into a
+        durable inbox. Event IDs are deduplicated. Reusing an event ID with
+        different canonical content returns a conflict. Acknowledgement does not
+        mean the events have been priced or delivered to Stripe.
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ./schemas/usage-events.schema.json
+      responses:
+        "200":
+          description: All events are durably accepted or exact duplicates
+          content:
+            application/json:
+              schema:
+                $ref: ./schemas/usage-events.schema.json#/definitions/acknowledgement
+        default:
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Optional tracing identity; it grants no authority or idempotency.
+      schema:
+        type: string
+        format: uuid
+        pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  responses:
+    Problem:
+      description: Bounded RFC 9457 problem response
+      content:
+        application/problem+json:
+          schema:
+            $ref: ./schemas/problem.schema.json
