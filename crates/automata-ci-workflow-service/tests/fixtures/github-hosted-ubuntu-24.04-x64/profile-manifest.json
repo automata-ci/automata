@@ -6,7 +6,7 @@
     "architecture": "x86_64",
     "compatibility_label": "ubuntu-24.04"
   },
-  "base_image": "docker.io/library/ubuntu@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467",
+  "base_image": "docker.io/library/ubuntu@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03",
   "image": "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd",
   "execution": {
     "workspace": "/__w",
