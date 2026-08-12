@@ -1,4 +1,4 @@
-#![cfg(any(target_os = "linux", windows))]
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -58,6 +58,7 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     );
     assert_eq!(environment["RUNNER_ENVIRONMENT"], "self-hosted");
     assert_eq!(environment["RUNNER_OS"], expected_runner_os());
+    assert_eq!(environment["RUNNER_ARCH"], expected_runner_arch());
     assert_eq!(environment["GITHUB_EVENT_PATH"], expected_event_path());
     assert_eq!(environment["GITHUB_ACTOR"], "local-bootstrap");
     assert_eq!(environment["GITHUB_RUN_ID"], "42");
@@ -107,6 +108,10 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     assert_eq!(
         runner.get("os").and_then(GithubValue::as_str),
         Some(expected_runner_os())
+    );
+    assert_eq!(
+        runner.get("arch").and_then(GithubValue::as_str),
+        Some(expected_runner_arch())
     );
 }
 
@@ -725,6 +730,8 @@ fn fixture_runner_config() -> RunnerProductConfig {
     let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
     #[cfg(target_os = "linux")]
     let config_bytes = include_bytes!("../config/runner.local-1.example.json").as_slice();
+    #[cfg(target_os = "macos")]
+    let config_bytes = include_bytes!("../config/runner.macos.example.json").as_slice();
     let mut document: serde_json::Value =
         serde_json::from_slice(config_bytes).expect("runner config JSON");
     document["github"]["server_url"] = serde_json::json!("https://github.com/");
@@ -793,6 +800,7 @@ impl ContextFixture {
         );
         let context = StandardGithubContext::new(
             config.runner_id(),
+            config.inventory().platform().clone(),
             config.environments(),
             config.executor(),
             config.github().clone(),
@@ -1037,19 +1045,35 @@ fn fixture_event_path() -> TargetPath {
     {
         TargetPath::windows(expected_event_path()).expect("event target")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         TargetPath::posix(expected_event_path()).expect("event target")
     }
 }
 
 const fn expected_runner_os() -> &'static str {
-    if cfg!(windows) { "Windows" } else { "Linux" }
+    if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    }
+}
+
+const fn expected_runner_arch() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "ARM64"
+    } else {
+        "X64"
+    }
 }
 
 const fn expected_workspace() -> &'static str {
     if cfg!(windows) {
         r"C:\automata\native\workspaces\automata\automata"
+    } else if cfg!(target_os = "macos") {
+        "/Users/automata-runner/Library/Application Support/Automata/native/workspaces/automata/automata"
     } else {
         "/__w/automata/automata"
     }
@@ -1058,6 +1082,8 @@ const fn expected_workspace() -> &'static str {
 const fn expected_event_path() -> &'static str {
     if cfg!(windows) {
         r"C:\automata\native\runner\attempts\fixture\event.json"
+    } else if cfg!(target_os = "macos") {
+        "/Users/automata-runner/Library/Application Support/Automata/native/runner/attempts/fixture/event.json"
     } else {
         "/__automata/attempts/fixture/event.json"
     }

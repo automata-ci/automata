@@ -598,6 +598,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "http-body-util",
+ "processkit",
  "prometheus-client",
  "prost",
  "rustix",
@@ -740,6 +741,7 @@ dependencies = [
  "automata-ci-runner-spool",
  "automata-ci-runner-transport",
  "automata-ci-sandbox-kubernetes",
+ "automata-ci-sandbox-macos",
  "automata-ci-sandbox-podman",
  "automata-ci-sandbox-windows",
  "automata-ci-scm",
@@ -754,6 +756,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -946,6 +949,21 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tower",
+]
+
+[[package]]
+name = "automata-ci-sandbox-macos"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-execution",
+ "processkit",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "static_assertions",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

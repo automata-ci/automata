@@ -13,7 +13,14 @@ use zeroize::Zeroizing;
 
 /// Maximum supported path length at the product configuration boundary.
 const MAX_PATH_BYTES: usize = 4_096;
+const MAX_KEYCHAIN_LOCATOR_BYTES: usize = 256;
 const TEMPORARY_COMPONENT: &str = "tmp";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_RESULT_LIMIT: i64 = 2;
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SKIP_AUTHENTICATED_ITEMS: bool = true;
+#[cfg(target_os = "macos")]
+const KEYCHAIN_DISABLE_INTERACTION: bool = true;
 
 /// A secret-bearing input location. Secret bytes are never accepted directly
 /// in process arguments or in the runner configuration document.
@@ -30,6 +37,13 @@ pub enum SecretSource {
         /// Canonical environment-variable name; the value is never formatted.
         name: String,
     },
+    /// Read one generic-password item from the default macOS Keychain.
+    MacosKeychain {
+        /// Exact Keychain service attribute.
+        service: String,
+        /// Exact Keychain account attribute.
+        account: String,
+    },
 }
 
 impl SecretSource {
@@ -37,6 +51,15 @@ impl SecretSource {
         match self {
             Self::File { path } => validate_absolute_path(path),
             Self::Environment { name } => validate_environment_name(name),
+            Self::MacosKeychain { service, account } => {
+                validate_keychain_locator(service)?;
+                validate_keychain_locator(account)?;
+                if cfg!(target_os = "macos") {
+                    Ok(())
+                } else {
+                    Err(SecureInputError::UnsupportedPlatform)
+                }
+            }
         }
     }
 
@@ -61,6 +84,9 @@ impl SecretSource {
                     return Err(SecureInputError::InvalidSize);
                 }
                 Ok(Zeroizing::new(value.into_bytes()))
+            }
+            Self::MacosKeychain { service, account } => {
+                read_macos_keychain(service, account, maximum_bytes)
             }
         }
     }
@@ -88,7 +114,7 @@ impl SecretSource {
             Self::File { .. } => maximum_bytes
                 .checked_add(2)
                 .ok_or(SecureInputError::InvalidLimit)?,
-            Self::Environment { .. } => maximum_bytes,
+            Self::Environment { .. } | Self::MacosKeychain { .. } => maximum_bytes,
         };
         let mut bytes = self.read(input_limit)?;
         if matches!(self, Self::File { .. }) {
@@ -125,6 +151,13 @@ impl fmt::Debug for SecretSource {
                 .field("name", name)
                 .field("value", &"[REDACTED]")
                 .finish(),
+            Self::MacosKeychain { service, account } => formatter
+                .debug_struct("SecretSource")
+                .field("kind", &"macos_keychain")
+                .field("service", service)
+                .field("account", account)
+                .field("value", &"[REDACTED]")
+                .finish(),
         }
     }
 }
@@ -141,6 +174,9 @@ pub enum SecureInputError {
     /// An environment-variable name was not canonical.
     #[error("secure input environment name is invalid")]
     InvalidEnvironmentName,
+    /// A Keychain service or account locator was empty, oversized, or non-canonical.
+    #[error("secure input Keychain locator is invalid")]
+    InvalidKeychainLocator,
     /// The source was absent or inaccessible.
     #[error("secure input is unavailable")]
     Unavailable,
@@ -177,7 +213,9 @@ pub(crate) fn read_public_material(
     maximum_bytes: usize,
 ) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
     match source {
-        SecretSource::Environment { .. } => source.read(maximum_bytes),
+        SecretSource::Environment { .. } | SecretSource::MacosKeychain { .. } => {
+            source.read(maximum_bytes)
+        }
         SecretSource::File { path } => {
             read_file(path, maximum_bytes, FileTrust::PublicMaterial).map(Zeroizing::new)
         }
@@ -236,6 +274,90 @@ fn validate_environment_name(name: &str) -> Result<(), SecureInputError> {
     valid
         .then_some(())
         .ok_or(SecureInputError::InvalidEnvironmentName)
+}
+
+fn validate_keychain_locator(value: &str) -> Result<(), SecureInputError> {
+    let valid = !value.is_empty()
+        && value.len() <= MAX_KEYCHAIN_LOCATOR_BYTES
+        && value.trim() == value
+        && value
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic());
+    valid
+        .then_some(())
+        .ok_or(SecureInputError::InvalidKeychainLocator)
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_keychain(
+    service: &str,
+    account: &str,
+    maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
+    use std::sync::Mutex;
+
+    use security_framework::{
+        item::{ItemClass, ItemSearchOptions, Limit},
+        os::macos::keychain::SecKeychain,
+    };
+
+    static KEYCHAIN_INTERACTION: Mutex<()> = Mutex::new(());
+
+    validate_keychain_locator(service)?;
+    validate_keychain_locator(account)?;
+    let _serialized_interaction_policy = KEYCHAIN_INTERACTION
+        .lock()
+        .map_err(|_| SecureInputError::Unavailable)?;
+    let interaction_allowed =
+        SecKeychain::user_interaction_allowed().map_err(|_| SecureInputError::Unavailable)?;
+    let _disabled_interaction = (interaction_allowed && KEYCHAIN_DISABLE_INTERACTION)
+        .then(SecKeychain::disable_user_interaction)
+        .transpose()
+        .map_err(|_| SecureInputError::Unavailable)?;
+    let keychain = SecKeychain::default().map_err(|_| SecureInputError::Unavailable)?;
+    let mut search = ItemSearchOptions::new();
+    let results = search
+        .keychains(std::slice::from_ref(&keychain))
+        .class(ItemClass::generic_password())
+        .service(service)
+        .account(account)
+        .load_data(true)
+        .limit(Limit::Max(KEYCHAIN_RESULT_LIMIT))
+        .skip_authenticated_items(KEYCHAIN_SKIP_AUTHENTICATED_ITEMS)
+        .search()
+        .map_err(|_| SecureInputError::Unavailable)?;
+    select_macos_keychain_password(results, maximum_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn select_macos_keychain_password(
+    mut results: Vec<security_framework::item::SearchResult>,
+    maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
+    use security_framework::item::SearchResult;
+
+    if maximum_bytes == 0 {
+        return Err(SecureInputError::InvalidLimit);
+    }
+    if results.len() != 1 {
+        return Err(SecureInputError::Unavailable);
+    }
+    let SearchResult::Data(password) = results.pop().ok_or(SecureInputError::Unavailable)? else {
+        return Err(SecureInputError::Unavailable);
+    };
+    if password.is_empty() || password.len() > maximum_bytes {
+        return Err(SecureInputError::InvalidSize);
+    }
+    Ok(Zeroizing::new(password))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_macos_keychain(
+    _service: &str,
+    _account: &str,
+    _maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
+    Err(SecureInputError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
@@ -430,7 +552,15 @@ fn read_file(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{FileTrust, file_is_trusted};
+    use super::{
+        FileTrust, SecretSource, SecureInputError, file_is_trusted, validate_keychain_locator,
+    };
+
+    #[cfg(target_os = "macos")]
+    use super::{
+        KEYCHAIN_DISABLE_INTERACTION, KEYCHAIN_RESULT_LIMIT, KEYCHAIN_SKIP_AUTHENTICATED_ITEMS,
+        select_macos_keychain_password,
+    };
 
     #[test]
     fn configuration_and_public_files_require_a_trusted_owner() {
@@ -447,6 +577,99 @@ mod tests {
         assert!(file_is_trusted(1_000, 0o600, FileTrust::OwnerOnly, 1_000));
         assert!(!file_is_trusted(0, 0o600, FileTrust::OwnerOnly, 1_000));
         assert!(!file_is_trusted(1_000, 0o640, FileTrust::OwnerOnly, 1_000));
+    }
+
+    #[test]
+    fn keychain_locators_are_bounded_visible_text() {
+        for value in [
+            "automata-ci.runner",
+            "Automata CI Runner",
+            "runner@example.com",
+        ] {
+            assert_eq!(validate_keychain_locator(value), Ok(()));
+        }
+        for value in ["", " leading", "trailing ", "line\nfeed"] {
+            assert_eq!(
+                validate_keychain_locator(value),
+                Err(SecureInputError::InvalidKeychainLocator)
+            );
+        }
+        assert_eq!(
+            validate_keychain_locator(&"a".repeat(257)),
+            Err(SecureInputError::InvalidKeychainLocator)
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn macos_keychain_source_fails_closed_on_other_unix_hosts() {
+        let source = SecretSource::MacosKeychain {
+            service: "automata-ci.runner".to_owned(),
+            account: "runner@example.com".to_owned(),
+        };
+        assert_eq!(
+            source.validate(),
+            Err(SecureInputError::UnsupportedPlatform)
+        );
+        assert_eq!(source.read(64), Err(SecureInputError::UnsupportedPlatform));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_macos_keychain_item_is_sanitized_without_interaction() {
+        let source = SecretSource::MacosKeychain {
+            service: format!(
+                "automata-ci.missing-test.{}.{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ),
+            account: "missing".to_owned(),
+        };
+        assert_eq!(source.validate(), Ok(()));
+        assert_eq!(source.read(64), Err(SecureInputError::Unavailable));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_selection_rejects_ambiguous_oversized_and_malformed_values() {
+        use security_framework::item::SearchResult;
+
+        assert_eq!(
+            select_macos_keychain_password(
+                vec![
+                    SearchResult::Data(b"first".to_vec()),
+                    SearchResult::Data(b"second".to_vec())
+                ],
+                64,
+            ),
+            Err(SecureInputError::Unavailable)
+        );
+        assert_eq!(
+            select_macos_keychain_password(vec![SearchResult::Data(vec![0x41; 65])], 64),
+            Err(SecureInputError::InvalidSize)
+        );
+        assert_eq!(
+            select_macos_keychain_password(vec![SearchResult::Data(Vec::new())], 64),
+            Err(SecureInputError::InvalidSize)
+        );
+        assert_eq!(
+            select_macos_keychain_password(vec![SearchResult::Other], 64),
+            Err(SecureInputError::Unavailable)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interactive_keychain_items_are_excluded_by_the_bounded_search_policy() {
+        const {
+            assert!(KEYCHAIN_DISABLE_INTERACTION);
+            assert!(KEYCHAIN_SKIP_AUTHENTICATED_ITEMS);
+            assert!(KEYCHAIN_RESULT_LIMIT == 2);
+        }
+        assert_eq!(
+            select_macos_keychain_password(Vec::new(), 64),
+            Err(SecureInputError::Unavailable)
+        );
     }
 }
 

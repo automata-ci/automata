@@ -7,10 +7,10 @@ use automata_ci_execution::{
     MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS,
     NetworkPolicy, OperationId, ProviderCapabilities, ProviderId, ResourceLimits,
     RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration, SandboxHandle,
-    SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
-    ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol, Sha256Digest,
-    TargetPath, ValueError,
+    SandboxPrivilegePolicy, SandboxResourcePolicy, SandboxSpec, ServiceContainerBinding,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
+    ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol,
+    Sha256Digest, TargetPath, ValueError,
 };
 
 const IMAGE: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -31,6 +31,21 @@ fn profile() -> SandboxEnvironment {
         ExecutionEnvironment::empty(),
     )
     .expect("profile")
+}
+
+#[test]
+fn host_shared_resources_are_explicit_and_have_no_hard_limits() {
+    let spec = SandboxSpec::host_shared(
+        OperationId::new(),
+        SandboxGeneration::new(9).expect("generation"),
+        profile(),
+        TargetPath::posix("/__w").expect("workspace"),
+        NetworkPolicy::Host,
+        RootFilesystemPolicy::Host,
+    );
+    assert_eq!(spec.resource_policy(), SandboxResourcePolicy::HostShared);
+    assert_eq!(spec.resources(), None);
+    assert!(spec.has_coherent_resource_contract());
 }
 
 #[test]
@@ -79,7 +94,10 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         spec.profile().image().expect("container image").reference(),
         IMAGE
     );
-    assert_eq!(spec.resources().cpu_millis(), 2_000);
+    assert_eq!(
+        spec.resources().expect("enforced resources").cpu_millis(),
+        2_000
+    );
 }
 
 #[test]

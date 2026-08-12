@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use automata_ci_core::{
     Architecture, ContainerFeature, OperatingSystem, ResourceCapacity, RunnerFeature,

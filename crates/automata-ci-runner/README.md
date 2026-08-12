@@ -1,19 +1,22 @@
 # `automata-runner`
 
-The `automata-ci-runner` package builds the `automata-runner` command for Linux
-and Windows execution hosts. It validates the host, opens an mTLS session to
+The `automata-ci-runner` package builds the `automata-runner` command for Linux,
+Windows, and macOS execution hosts. It validates the host, opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
 `automata-runner run` selects exactly one host-compatible provider from its
 configuration: rootless Podman or Kubernetes on Linux, or the experimental
-native provider on Windows. The checked-in Linux host examples
+trusted-native provider on Windows or Apple Silicon macOS 15+. The checked-in
+Linux host examples
 ([one](config/runner.local-1.example.json),
 [two](config/runner.local-2.example.json), and
 [three](config/runner.local-3.example.json)) select three independent
 single-slot Podman processes; the
-[Windows](config/runner.windows.example.json) example remains one process and
-one slot. The bootstrap guide documents the Kubernetes configuration shape.
+[Windows](config/runner.windows.example.json) and
+[macOS](config/runner.macos.example.json) examples each remain one process and
+one slot. The [configuration guide](config/README.md) documents Kubernetes
+and the native trust boundaries.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -91,6 +94,13 @@ Windows runners. The native-provider tests remain in the repository, but they
 are not a release gate; do not deploy this path until its Windows end-to-end CI
 gate is restored.
 
+The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
+configured Python and PowerShell Core interpreters. Startup probes every
+configured interpreter through the same shipped-binary supervisor used by job
+execution. The provider is single-slot and host-shared: CPU, memory, and PID
+inventory values guide placement but are not hard per-job limits. It does not
+advertise actions, containers, services, GPUs, or ephemeral-disk capacity.
+
 ## Job boundary
 
 On Linux, workload environment values are sent to Podman through a bounded
@@ -111,9 +121,9 @@ must not access runner state paths. See the
 [Windows source-build boundary](../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
 before supplying environment-backed credentials.
 
-Rootless Podman is a shared-kernel Linux boundary, and Windows native execution
-is a trusted-host boundary. Neither is hostile multi-tenant isolation. Stronger
-providers remain planned and are listed in the
+Rootless Podman is a shared-kernel Linux boundary, while Windows and macOS
+native execution are trusted-host boundaries. None is hostile multi-tenant
+isolation. Stronger providers remain planned and are listed in the
 [implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#provider-scope).
 
 ## Configure a host

@@ -106,7 +106,7 @@ impl RunnerProductConfig {
         &self.control_endpoint
     }
 
-    /// Returns the three non-overlapping durable provider-state roots.
+    /// Returns the non-overlapping durable state roots for the selected provider.
     #[must_use]
     pub const fn state(&self) -> &StateRoots {
         &self.state
@@ -150,7 +150,9 @@ impl RunnerProductConfig {
     pub const fn podman(&self) -> Option<&PodmanProductConfig> {
         match &self.provider {
             RunnerProviderConfig::Podman(config) => Some(config),
-            RunnerProviderConfig::Kubernetes(_) | RunnerProviderConfig::WindowsNative(_) => None,
+            RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::MacosNative(_) => None,
         }
     }
 
@@ -159,7 +161,9 @@ impl RunnerProductConfig {
     pub const fn kubernetes(&self) -> Option<&KubernetesProductConfig> {
         match &self.provider {
             RunnerProviderConfig::Kubernetes(config) => Some(config),
-            RunnerProviderConfig::Podman(_) | RunnerProviderConfig::WindowsNative(_) => None,
+            RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::MacosNative(_) => None,
         }
     }
 
@@ -168,7 +172,20 @@ impl RunnerProductConfig {
     pub const fn windows_native(&self) -> Option<&WindowsNativeProductConfig> {
         match &self.provider {
             RunnerProviderConfig::WindowsNative(config) => Some(config),
-            RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => None,
+            RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::MacosNative(_) => None,
+        }
+    }
+
+    /// Returns trusted native-macOS provider policy when selected.
+    #[must_use]
+    pub const fn macos_native(&self) -> Option<&MacosNativeProductConfig> {
+        match &self.provider {
+            RunnerProviderConfig::MacosNative(config) => Some(config),
+            RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::WindowsNative(_) => None,
         }
     }
 
@@ -238,6 +255,7 @@ pub struct StateRoots {
     spool: SpoolRoot,
     podman: Option<PathBuf>,
     windows_native: Option<PathBuf>,
+    macos_native: Option<PathBuf>,
 }
 
 impl StateRoots {
@@ -256,7 +274,10 @@ impl StateRoots {
     /// Returns the selected local execution provider's durable state root.
     #[must_use]
     pub fn provider(&self) -> Option<&Path> {
-        self.podman.as_deref().or(self.windows_native.as_deref())
+        self.podman
+            .as_deref()
+            .or(self.windows_native.as_deref())
+            .or(self.macos_native.as_deref())
     }
 
     /// Returns the rootless-Podman durable state root when selected.
@@ -270,6 +291,25 @@ impl StateRoots {
     pub fn windows_native(&self) -> Option<&Path> {
         self.windows_native.as_deref()
     }
+
+    /// Returns the native-macOS durable state root when selected.
+    #[must_use]
+    pub fn macos_native(&self) -> Option<&Path> {
+        self.macos_native.as_deref()
+    }
+}
+
+/// Validated execution-provider selection for one runner process.
+#[derive(Clone, Debug)]
+pub enum RunnerProviderConfig {
+    /// Rootless Podman on a dedicated Linux execution host.
+    Podman(PodmanProductConfig),
+    /// Authenticated Kubernetes Pods on a dedicated Linux execution host.
+    Kubernetes(KubernetesProductConfig),
+    /// Job Object-contained native processes for trusted Windows jobs.
+    WindowsNative(WindowsNativeProductConfig),
+    /// Supervised POSIX process groups for trusted macOS jobs.
+    MacosNative(MacosNativeProductConfig),
 }
 
 /// Validated Kubernetes product configuration and operator attestations.
@@ -286,20 +326,13 @@ impl KubernetesProductConfig {
     }
 }
 
-/// Validated execution-provider selection for one runner process.
-#[derive(Clone, Debug)]
-pub enum RunnerProviderConfig {
-    /// Rootless Podman on a dedicated Linux execution host.
-    Podman(PodmanProductConfig),
-    /// Authenticated Kubernetes Pods on a dedicated Linux execution host.
-    Kubernetes(KubernetesProductConfig),
-    /// Job Object-contained native processes for trusted Windows jobs.
-    WindowsNative(WindowsNativeProductConfig),
-}
-
 /// Trusted native-Windows execution provider configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsNativeProductConfig;
+
+/// Trusted native-macOS execution provider configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MacosNativeProductConfig;
 
 /// Explicit material locations for outbound runner mTLS.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -856,6 +889,7 @@ enum ProviderKind {
     Podman,
     Kubernetes,
     WindowsNative,
+    MacosNative,
 }
 
 #[derive(Deserialize)]
@@ -874,6 +908,8 @@ struct RawRunnerProductConfig {
     kubernetes: Option<RawKubernetesProductConfig>,
     #[serde(default)]
     windows_native: Option<RawWindowsNativeProductConfig>,
+    #[serde(default)]
+    macos_native: Option<RawMacosNativeProductConfig>,
     executor: RawExecutorProductConfig,
     object_store: RawObjectStoreProductConfig,
     github: RawGithubProductConfig,
@@ -887,7 +923,20 @@ impl RawRunnerProductConfig {
         if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {
             return Err(RunnerProductConfigError::UnsupportedSchema);
         }
+        let provider_kind = match (
+            &self.podman,
+            &self.kubernetes,
+            &self.windows_native,
+            &self.macos_native,
+        ) {
+            (Some(_), None, None, None) => ProviderKind::Podman,
+            (None, Some(_), None, None) => ProviderKind::Kubernetes,
+            (None, None, Some(_), None) => ProviderKind::WindowsNative,
+            (None, None, None, Some(_)) => ProviderKind::MacosNative,
+            _ => return Err(RunnerProductConfigError::InvalidProvider),
+        };
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
+        let state = self.state.validate(provider_kind)?;
         let tls = self.tls.validate()?;
         let spool = self.spool.validate()?;
         let github = self.github.validate()?;
@@ -895,25 +944,24 @@ impl RawRunnerProductConfig {
             .metrics
             .map(RawMetricsProductConfig::validate)
             .transpose()?;
-        let provider_kind = match (
-            self.podman.is_some(),
-            self.kubernetes.is_some(),
-            self.windows_native.is_some(),
-        ) {
-            (true, false, false) => ProviderKind::Podman,
-            (false, true, false) => ProviderKind::Kubernetes,
-            (false, false, true) => ProviderKind::WindowsNative,
-            _ => return Err(RunnerProductConfigError::InvalidProvider),
-        };
-        let state = self.state.validate(provider_kind)?;
         let executor = self.executor.validate(provider_kind)?;
-        let provider = match (self.podman, self.kubernetes, self.windows_native) {
-            (Some(raw), None, None) => {
+        let provider = match (
+            self.podman,
+            self.kubernetes,
+            self.windows_native,
+            self.macos_native,
+        ) {
+            (Some(raw), None, None, None) => {
                 RunnerProviderConfig::Podman(raw.validate(github.server_url())?)
             }
-            (None, Some(raw), None) => RunnerProviderConfig::Kubernetes(raw.validate(&executor)?),
-            (None, None, Some(_)) => {
+            (None, Some(raw), None, None) => {
+                RunnerProviderConfig::Kubernetes(raw.validate(&executor)?)
+            }
+            (None, None, Some(_), None) => {
                 RunnerProviderConfig::WindowsNative(RawWindowsNativeProductConfig::validate()?)
+            }
+            (None, None, None, Some(_)) => {
+                RunnerProviderConfig::MacosNative(RawMacosNativeProductConfig::validate()?)
             }
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
@@ -934,27 +982,33 @@ impl RawRunnerProductConfig {
                 return Err(RunnerProductConfigError::InvalidStateRoots);
             }
         }
+        let (job_container_engine, service_proxy_configured, buildkit_configured) = match &provider
+        {
+            RunnerProviderConfig::Podman(podman) => (
+                podman.job_container_engine(),
+                podman.service_proxy_image().is_some(),
+                podman.buildkit_runtime().is_some(),
+            ),
+            RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::MacosNative(_) => (
+                automata_ci_sandbox_podman::JobContainerEngine::Disabled,
+                false,
+                false,
+            ),
+        };
         let (inventory, environments) = self.inventory.validate(
             self.runner_id,
             &executor,
             provider_kind,
-            match &provider {
-                RunnerProviderConfig::Podman(podman) => podman.job_container_engine(),
-                RunnerProviderConfig::Kubernetes(_) | RunnerProviderConfig::WindowsNative(_) => {
-                    automata_ci_sandbox_podman::JobContainerEngine::Disabled
-                }
-            },
-            matches!(
-                &provider,
-                RunnerProviderConfig::Podman(podman) if podman.service_proxy_image().is_some()
-            ),
-            matches!(
-                &provider,
-                RunnerProviderConfig::Podman(podman) if podman.buildkit_runtime().is_some()
-            ),
+            job_container_engine,
+            service_proxy_configured,
+            buildkit_configured,
         )?;
         match &provider {
-            RunnerProviderConfig::Podman(_) => {
+            RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::MacosNative(_) => {
                 if inventory.resources_per_job().ephemeral_disk_bytes() != 0
                     || inventory.resources_per_job().gpu_count() != 0
                 {
@@ -973,11 +1027,16 @@ impl RawRunnerProductConfig {
                     return Err(RunnerProductConfigError::InvalidKubernetes);
                 }
             }
-            RunnerProviderConfig::WindowsNative(_) => {
-                if !valid_windows_provider_topology(&state, &executor, &environments) {
-                    return Err(RunnerProductConfigError::InvalidInventory);
-                }
-            }
+        }
+        if matches!(&provider, RunnerProviderConfig::WindowsNative(_))
+            && !valid_windows_provider_topology(&state, &executor, &environments)
+        {
+            return Err(RunnerProductConfigError::InvalidInventory);
+        }
+        if matches!(&provider, RunnerProviderConfig::MacosNative(_))
+            && !valid_macos_provider_topology(&state, &executor, &environments)
+        {
+            return Err(RunnerProductConfigError::InvalidInventory);
         }
         let object_store = self.object_store.validate()?;
         Ok(RunnerProductConfig {
@@ -1041,6 +1100,31 @@ fn valid_windows_provider_topology(
     })
 }
 
+fn valid_macos_provider_topology(
+    state: &StateRoots,
+    executor: &ExecutorProductConfig,
+    environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
+) -> bool {
+    let Some(provider_root) = state.macos_native() else {
+        return false;
+    };
+    let strict_descendant = |path: &TargetPath| {
+        path.platform() == TargetPlatform::Posix
+            && Path::new(path.as_str()) != provider_root
+            && Path::new(path.as_str()).starts_with(provider_root)
+    };
+    if !strict_descendant(executor.runner_root()) {
+        return false;
+    }
+    let runner_root = Path::new(executor.runner_root().as_str());
+    environments.values().all(|environment| {
+        let workspace = Path::new(environment.workspace().as_str());
+        strict_descendant(environment.workspace())
+            && !workspace.starts_with(runner_root)
+            && !runner_root.starts_with(workspace)
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMetricsProductConfig {
@@ -1069,31 +1153,31 @@ struct RawStateRoots {
     podman: Option<PathBuf>,
     #[serde(default)]
     windows_native: Option<PathBuf>,
+    #[serde(default)]
+    macos_native: Option<PathBuf>,
 }
 
 impl RawStateRoots {
     fn validate(self, provider_kind: ProviderKind) -> Result<StateRoots, RunnerProductConfigError> {
-        let valid_selection = matches!(
-            (
-                provider_kind,
-                self.podman.is_some(),
-                self.windows_native.is_some()
-            ),
-            (ProviderKind::Podman, true, false)
-                | (ProviderKind::Kubernetes, false, false)
-                | (ProviderKind::WindowsNative, false, true)
-        );
-        if !valid_selection {
-            return Err(RunnerProductConfigError::InvalidStateRoots);
-        }
+        let provider = match (
+            provider_kind,
+            self.podman.as_ref(),
+            self.windows_native.as_ref(),
+            self.macos_native.as_ref(),
+        ) {
+            (ProviderKind::Podman, Some(provider), None, None)
+            | (ProviderKind::WindowsNative, None, Some(provider), None)
+            | (ProviderKind::MacosNative, None, None, Some(provider)) => Some(provider),
+            (ProviderKind::Kubernetes, None, None, None) => None,
+            _ => return Err(RunnerProductConfigError::InvalidStateRoots),
+        };
         let mut roots = vec![&self.journal, &self.spool];
-        roots.extend(self.podman.iter());
-        roots.extend(self.windows_native.iter());
+        roots.extend(provider);
         let invalid_path = roots
             .iter()
             .any(|path| validate_absolute_path(path).is_err());
         let overlap = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes => {
+            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => {
                 roots.iter().enumerate().any(|(left_index, left)| {
                     roots.iter().enumerate().any(|(right_index, right)| {
                         left_index != right_index
@@ -1134,6 +1218,7 @@ impl RawStateRoots {
             spool,
             podman: self.podman,
             windows_native: self.windows_native,
+            macos_native: self.macos_native,
         })
     }
 }
@@ -1255,7 +1340,10 @@ impl RawInventory {
             || self.groups.len() > MAX_SELECTORS
             || self.environment_profiles.is_empty()
             || self.environment_profiles.len() > MAX_ENVIRONMENTS
-            || (provider_kind == ProviderKind::WindowsNative && self.max_parallel_jobs != 1)
+            || (matches!(
+                provider_kind,
+                ProviderKind::WindowsNative | ProviderKind::MacosNative
+            ) && self.max_parallel_jobs != 1)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -1301,10 +1389,16 @@ impl RawInventory {
                 ProviderKind::Podman | ProviderKind::Kubernetes,
                 OperatingSystem::Linux
             ) | (ProviderKind::WindowsNative, OperatingSystem::Windows)
+                | (ProviderKind::MacosNative, OperatingSystem::Macos)
         ) {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
-        let platform = RunnerPlatform::new(host_operating_system, host_architecture()?);
+        let host_architecture = host_architecture()?;
+        if provider_kind == ProviderKind::MacosNative && host_architecture != Architecture::Aarch64
+        {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        let platform = RunnerPlatform::new(host_operating_system, host_architecture);
         let (sandbox, container_features, runner_features) = provider_capabilities(
             provider_kind,
             executor,
@@ -1374,7 +1468,7 @@ fn provider_capabilities(
                 ]),
             )
         }
-        ProviderKind::WindowsNative => (
+        ProviderKind::WindowsNative | ProviderKind::MacosNative => (
             SandboxCapabilities::new(IsolationLevel::Process, [SandboxFeature::CLEAN_WORKSPACE]),
             BTreeSet::new(),
             BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
@@ -1550,6 +1644,18 @@ impl RawEnvironment {
                 SandboxEnvironment::native(attestation, workspace, default_environment)
                     .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
+            ProviderKind::MacosNative => {
+                if self.image.is_some()
+                    || self.keepalive_program.is_some()
+                    || !self.keepalive_arguments.is_empty()
+                {
+                    return Err(RunnerProductConfigError::InvalidInventory);
+                }
+                let workspace = TargetPath::posix(self.workspace)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                SandboxEnvironment::native_posix(attestation, workspace, default_environment)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)
+            }
         }
     }
 }
@@ -1584,6 +1690,19 @@ impl RawWindowsNativeProductConfig {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
         Ok(WindowsNativeProductConfig)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMacosNativeProductConfig {}
+
+impl RawMacosNativeProductConfig {
+    fn validate() -> Result<MacosNativeProductConfig, RunnerProductConfigError> {
+        if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        Ok(MacosNativeProductConfig)
     }
 }
 
@@ -1882,10 +2001,12 @@ impl RawExecutorProductConfig {
                 _,
                 SandboxPrivilegePolicy::Host
             )
-        ) || (provider_kind == ProviderKind::WindowsNative
-            && (network != NetworkPolicy::Host
-                || root_filesystem != RootFilesystemPolicy::Host
-                || privilege != SandboxPrivilegePolicy::Host))
+        ) || (matches!(
+            provider_kind,
+            ProviderKind::WindowsNative | ProviderKind::MacosNative
+        ) && (network != NetworkPolicy::Host
+            || root_filesystem != RootFilesystemPolicy::Host
+            || privilege != SandboxPrivilegePolicy::Host))
         {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
@@ -1899,7 +2020,7 @@ impl RawExecutorProductConfig {
         let tool_cache = parse_path(self.tool_cache)?;
         let temp = parse_path(self.temp)?;
         let path_separator = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes => ':',
+            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => ':',
             ProviderKind::WindowsNative => ';',
         };
         if target_is_root(&home)
@@ -1914,16 +2035,27 @@ impl RawExecutorProductConfig {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
         let toolchain = self.toolchain.validate(provider_kind)?;
-        automata_ci_job_executor_github::GithubJobExecutorConfig::new(
-            resources,
-            network,
-            root_filesystem,
-            privilege,
-            default_step_timeout,
-            self.maximum_output_bytes,
-            runner_root.clone(),
-        )
-        .map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
+        let executor_contract = if provider_kind == ProviderKind::MacosNative {
+            automata_ci_job_executor_github::GithubJobExecutorConfig::host_shared(
+                network,
+                root_filesystem,
+                privilege,
+                default_step_timeout,
+                self.maximum_output_bytes,
+                runner_root.clone(),
+            )
+        } else {
+            automata_ci_job_executor_github::GithubJobExecutorConfig::new(
+                resources,
+                network,
+                root_filesystem,
+                privilege,
+                default_step_timeout,
+                self.maximum_output_bytes,
+                runner_root.clone(),
+            )
+        };
+        executor_contract.map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
         Ok(ExecutorProductConfig {
             resources,
             resource_capacity: validated_resources.capacity,
@@ -1951,7 +2083,9 @@ fn provider_target_path(
         return Err(RunnerProductConfigError::InvalidExecutor);
     }
     match provider_kind {
-        ProviderKind::Podman | ProviderKind::Kubernetes => TargetPath::posix(value),
+        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => {
+            TargetPath::posix(value)
+        }
         ProviderKind::WindowsNative => TargetPath::windows(value),
     }
     .map_err(|_| RunnerProductConfigError::InvalidExecutor)
@@ -2036,6 +2170,19 @@ impl RawToolchainConfig {
                     && config.install.is_none()
                     && config.tar.is_none()
                     && config.sha256sum.is_none()
+                    && config.node12.is_none()
+                    && config.node16.is_none()
+                    && config.node20.is_none()
+                    && config.node24.is_none()
+            }
+            ProviderKind::MacosNative => {
+                config.bash.is_some()
+                    && config.sh.is_some()
+                    && config.install.is_some()
+                    && config.tar.is_some()
+                    && config.sha256sum.is_some()
+                    && config.powershell.is_none()
+                    && config.cmd.is_none()
                     && config.node12.is_none()
                     && config.node16.is_none()
                     && config.node20.is_none()
@@ -2200,6 +2347,7 @@ fn host_operating_system() -> Result<OperatingSystem, RunnerProductConfigError> 
     match std::env::consts::OS {
         "linux" => Ok(OperatingSystem::Linux),
         "windows" => Ok(OperatingSystem::Windows),
+        "macos" => Ok(OperatingSystem::Macos),
         _ => Err(RunnerProductConfigError::InvalidInventory),
     }
 }

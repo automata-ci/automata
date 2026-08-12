@@ -457,6 +457,7 @@ fn parse_max_open_files(process_limits: &str) -> Result<u64, SnapshotError> {
     Err(SnapshotError::Invalid)
 }
 
+#[cfg(target_os = "linux")]
 fn process_start_time_seconds() -> Option<f64> {
     linux_process_start_time_seconds()
 }
@@ -472,8 +473,15 @@ fn linux_process_start_time_seconds() -> Option<f64> {
     )
 }
 
-#[cfg(not(target_os = "linux"))]
-fn linux_process_start_time_seconds() -> Option<f64> {
+#[cfg(target_os = "macos")]
+fn process_start_time_seconds() -> Option<f64> {
+    let process = processkit::process_info(std::process::id()).ok()??;
+    let start_time_micros = process.start_time()?;
+    Some(Duration::from_micros(start_time_micros).as_secs_f64())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_time_seconds() -> Option<f64> {
     None
 }
 

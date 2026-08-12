@@ -57,6 +57,7 @@ fn docker_api_capability_is_advertised_only_when_explicitly_enabled() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn buildkit_capability_requires_the_attempt_api_and_a_successful_local_probe() {
     let scratch = ScratchRoot::new("buildkit-capability-enabled");
@@ -122,6 +123,7 @@ fn buildkit_capability_requires_the_attempt_api_and_a_successful_local_probe() {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn buildkit_capability_rejects_missing_mismatched_or_unprobeable_runtimes() {
     fn mismatch_digest(fake: &FakePodman) {

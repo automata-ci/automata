@@ -439,7 +439,8 @@ pub enum SandboxLaunch {
     /// Launch trusted commands as native host processes.
     ///
     /// Native providers must advertise host network/filesystem semantics and
-    /// enforce process-tree containment plus the requested resource limits.
+    /// process-tree containment. Their sandbox resource policy declares
+    /// whether per-job limits are enforced or explicitly shared with the host.
     Native,
 }
 
@@ -480,7 +481,7 @@ impl SandboxEnvironment {
         })
     }
 
-    /// Binds a trusted native launch to an exact scheduler-selected profile.
+    /// Binds a trusted native Windows launch to an exact scheduler-selected profile.
     ///
     /// # Errors
     ///
@@ -491,6 +492,27 @@ impl SandboxEnvironment {
         default_environment: ExecutionEnvironment,
     ) -> Result<Self, ValueError> {
         if workspace.platform() != TargetPlatform::Windows {
+            return Err(ValueError::InvalidTargetPath);
+        }
+        Ok(Self {
+            attestation,
+            launch: SandboxLaunch::Native,
+            workspace,
+            default_environment,
+        })
+    }
+
+    /// Binds a trusted native POSIX launch to an exact scheduler-selected profile.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a workspace that does not use normalized absolute POSIX syntax.
+    pub fn native_posix(
+        attestation: EnvironmentProfile,
+        workspace: TargetPath,
+        default_environment: ExecutionEnvironment,
+    ) -> Result<Self, ValueError> {
+        if workspace.platform() != TargetPlatform::Posix {
             return Err(ValueError::InvalidTargetPath);
         }
         Ok(Self {

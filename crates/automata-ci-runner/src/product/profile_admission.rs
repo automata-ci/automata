@@ -11,7 +11,8 @@ use automata_ci_execution::{
     ExecutionArgv, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionStage,
     ExecutionTermination, NetworkPolicy, OperationId, OperationOutcome, ProviderError,
     ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, TargetPath,
+    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxResourcePolicy, SandboxSpec,
+    SandboxState, TargetPath, TargetPlatform,
 };
 use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
 use uuid::Uuid;
@@ -27,17 +28,17 @@ const NATIVE_MAX_SHELL_PROBE_COUNT: usize = NATIVE_SHELL_PROBE_COUNT + 1;
 const POWERSHELL_PROBE_SCRIPT: &[u8] = b"$ErrorActionPreference = 'Stop'\r\nexit 0\r\n";
 const CMD_PROBE_SCRIPT: &[u8] = b"@echo off\r\nexit /B 0\r\n";
 const PYTHON_PROBE_SCRIPT: &[u8] = b"raise SystemExit(0)\r\n";
+const POSIX_PROBE_SCRIPT: &[u8] = b"set -eu\nexit 0\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProfileAdmissionPolicy {
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
-    resources: ResourceLimits,
+    resource_policy: SandboxResourcePolicy,
     resource_allocation: JobResourceAllocation,
     native: Option<NativeProfileAdmissionPolicy>,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NativeProfileAdmissionPolicy {
     scratch_root: TargetPath,
@@ -52,6 +53,8 @@ struct NativeShellProbe {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeShellKind {
+    Bash,
+    Sh,
     Pwsh,
     WindowsPowerShell,
     Cmd,
@@ -65,6 +68,8 @@ impl NativeShellProbe {
 
     const fn script_name(&self) -> &'static str {
         match self.kind {
+            NativeShellKind::Bash => "profile admission bash.sh",
+            NativeShellKind::Sh => "profile admission sh.sh",
             NativeShellKind::Pwsh => "profile admission pwsh.ps1",
             NativeShellKind::WindowsPowerShell => "profile admission powershell.ps1",
             NativeShellKind::Cmd => "profile admission cmd.cmd",
@@ -74,6 +79,7 @@ impl NativeShellProbe {
 
     const fn script_content(&self) -> &'static [u8] {
         match self.kind {
+            NativeShellKind::Bash | NativeShellKind::Sh => POSIX_PROBE_SCRIPT,
             NativeShellKind::Pwsh | NativeShellKind::WindowsPowerShell => POWERSHELL_PROBE_SCRIPT,
             NativeShellKind::Cmd => CMD_PROBE_SCRIPT,
             NativeShellKind::Python => PYTHON_PROBE_SCRIPT,
@@ -81,14 +87,38 @@ impl NativeShellProbe {
     }
 
     fn argv(&self, script: &TargetPath) -> Result<ExecutionArgv, ProfileAdmissionError> {
-        let shell = match self.kind {
-            NativeShellKind::Pwsh | NativeShellKind::WindowsPowerShell => {
-                WindowsScriptShell::PowerShell
+        let arguments = match (self.kind, script.platform()) {
+            (NativeShellKind::Bash, TargetPlatform::Posix) => vec![
+                "--noprofile".to_owned(),
+                "--norc".to_owned(),
+                "-e".to_owned(),
+                script.as_str().to_owned(),
+            ],
+            (NativeShellKind::Sh, TargetPlatform::Posix) => {
+                vec!["-e".to_owned(), script.as_str().to_owned()]
             }
-            NativeShellKind::Cmd => WindowsScriptShell::Cmd,
-            NativeShellKind::Python => WindowsScriptShell::Python,
+            (NativeShellKind::Pwsh, TargetPlatform::Posix) => vec![
+                "-command".to_owned(),
+                format!(". '{}'", script.as_str().replace('\'', "''")),
+            ],
+            (NativeShellKind::Python, TargetPlatform::Posix) => {
+                vec![script.as_str().to_owned()]
+            }
+            (
+                NativeShellKind::Pwsh | NativeShellKind::WindowsPowerShell,
+                TargetPlatform::Windows,
+            ) => windows_script_arguments(WindowsScriptShell::PowerShell, script)
+                .ok_or_else(invalid_catalog)?,
+            (NativeShellKind::Cmd, TargetPlatform::Windows) => {
+                windows_script_arguments(WindowsScriptShell::Cmd, script)
+                    .ok_or_else(invalid_catalog)?
+            }
+            (NativeShellKind::Python, TargetPlatform::Windows) => {
+                windows_script_arguments(WindowsScriptShell::Python, script)
+                    .ok_or_else(invalid_catalog)?
+            }
+            _ => return Err(invalid_catalog()),
         };
-        let arguments = windows_script_arguments(shell, script).ok_or_else(invalid_catalog)?;
         ExecutionArgv::new(self.program.clone(), arguments).map_err(|_| invalid_catalog())
     }
 }
@@ -105,7 +135,23 @@ impl ProfileAdmissionPolicy {
             network,
             root_filesystem,
             privilege,
-            resources,
+            resource_policy: SandboxResourcePolicy::Enforced(resources),
+            resource_allocation,
+            native: None,
+        }
+    }
+
+    pub(super) const fn host_shared(
+        network: NetworkPolicy,
+        root_filesystem: RootFilesystemPolicy,
+        privilege: SandboxPrivilegePolicy,
+        resource_allocation: JobResourceAllocation,
+    ) -> Self {
+        Self {
+            network,
+            root_filesystem,
+            privilege,
+            resource_policy: SandboxResourcePolicy::HostShared,
             resource_allocation,
             native: None,
         }
@@ -141,6 +187,44 @@ impl ProfileAdmissionPolicy {
         ];
         if let Some(python) = python {
             shell_probes.push(NativeShellProbe::new(NativeShellKind::Python, python));
+        }
+        self.native = Some(NativeProfileAdmissionPolicy {
+            scratch_root,
+            shell_probes,
+        });
+        Ok(self)
+    }
+
+    pub(super) fn with_native_macos_shells(
+        mut self,
+        scratch_root: TargetPath,
+        bash: TargetPath,
+        sh: TargetPath,
+        python: Option<TargetPath>,
+        pwsh: Option<TargetPath>,
+    ) -> Result<Self, ProfileAdmissionError> {
+        if self.native.is_some()
+            || [scratch_root.platform(), bash.platform(), sh.platform()]
+                .into_iter()
+                .any(|platform| platform != TargetPlatform::Posix)
+            || python
+                .as_ref()
+                .is_some_and(|python| python.platform() != TargetPlatform::Posix)
+            || pwsh
+                .as_ref()
+                .is_some_and(|pwsh| pwsh.platform() != TargetPlatform::Posix)
+        {
+            return Err(invalid_catalog());
+        }
+        let mut shell_probes = vec![
+            NativeShellProbe::new(NativeShellKind::Bash, bash),
+            NativeShellProbe::new(NativeShellKind::Sh, sh),
+        ];
+        if let Some(python) = python {
+            shell_probes.push(NativeShellProbe::new(NativeShellKind::Python, python));
+        }
+        if let Some(pwsh) = pwsh {
+            shell_probes.push(NativeShellProbe::new(NativeShellKind::Pwsh, pwsh));
         }
         self.native = Some(NativeProfileAdmissionPolicy {
             scratch_root,
@@ -351,21 +435,31 @@ impl ProfileAdmissionContext<'_> {
                 native
                     .shell_probes
                     .iter()
-                    .map(|probe| windows_child(scratch, probe.script_name()))
+                    .map(|probe| native_child(scratch, probe.script_name()))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             (None, None) => None,
             _ => return Err(invalid_catalog()),
         };
-        let mut spec = SandboxSpec::new(
-            operation_ids.create,
-            self.generation,
-            environment.clone(),
-            workspace.clone(),
-            self.policy.network,
-            self.policy.root_filesystem,
-            self.policy.resources,
-        )
+        let mut spec = match self.policy.resource_policy {
+            SandboxResourcePolicy::Enforced(resources) => SandboxSpec::new(
+                operation_ids.create,
+                self.generation,
+                environment.clone(),
+                workspace.clone(),
+                self.policy.network,
+                self.policy.root_filesystem,
+                resources,
+            ),
+            SandboxResourcePolicy::HostShared => SandboxSpec::host_shared(
+                operation_ids.create,
+                self.generation,
+                environment.clone(),
+                workspace.clone(),
+                self.policy.network,
+                self.policy.root_filesystem,
+            ),
+        }
         .with_privilege(self.policy.privilege)
         .with_resource_allocation(self.policy.resource_allocation);
         if let Some(scratch) = &scratch {
@@ -396,16 +490,17 @@ impl ProfileAdmissionContext<'_> {
         let Some(native) = &self.policy.native else {
             return Ok((environment.workspace().clone(), None));
         };
-        if environment.workspace().platform() != automata_ci_execution::TargetPlatform::Windows
-            || native.scratch_root.platform() != automata_ci_execution::TargetPlatform::Windows
-            || environment.workspace().as_str().contains(['%', '"'])
-            || native.scratch_root.as_str().contains(['%', '"'])
+        let platform = native.scratch_root.platform();
+        if environment.workspace().platform() != platform
+            || (platform == TargetPlatform::Windows
+                && (environment.workspace().as_str().contains(['%', '"'])
+                    || native.scratch_root.as_str().contains(['%', '"'])))
         {
             return Err(invalid_catalog());
         }
         let suffix = format!("profile-admission-{create_operation_id}");
-        let workspace = windows_child(environment.workspace(), &suffix)?;
-        let scratch = windows_child(&native.scratch_root, &suffix)?;
+        let workspace = native_child(environment.workspace(), &suffix)?;
+        let scratch = native_child(&native.scratch_root, &suffix)?;
         Ok((workspace, Some(scratch)))
     }
 
@@ -716,12 +811,19 @@ impl ProfileAdmissionContext<'_> {
     }
 }
 
-fn windows_child(root: &TargetPath, child: &str) -> Result<TargetPath, ProfileAdmissionError> {
+fn native_child(root: &TargetPath, child: &str) -> Result<TargetPath, ProfileAdmissionError> {
     if child.is_empty() || child.contains(['/', '\\', ':']) || matches!(child, "." | "..") {
         return Err(invalid_catalog());
     }
-    TargetPath::windows(format!("{}\\{child}", root.as_str().trim_end_matches('\\')))
-        .map_err(|_| invalid_catalog())
+    match root.platform() {
+        TargetPlatform::Posix => {
+            TargetPath::posix(format!("{}/{child}", root.as_str().trim_end_matches('/')))
+        }
+        TargetPlatform::Windows => {
+            TargetPath::windows(format!("{}\\{child}", root.as_str().trim_end_matches('\\')))
+        }
+    }
+    .map_err(|_| invalid_catalog())
 }
 
 fn invalid_catalog() -> ProfileAdmissionError {
@@ -750,10 +852,15 @@ fn validate_provider_policy(
                 SandboxCapability::HostNetwork,
                 SandboxCapability::HostFilesystem,
                 SandboxCapability::HostIdentity,
-                SandboxCapability::ResourceLimits,
             ]
             .into_iter()
-            .all(|capability| provider.capabilities().supports(capability)))
+            .all(|capability| provider.capabilities().supports(capability))
+            || !provider
+                .capabilities()
+                .supports(match policy.resource_policy {
+                    SandboxResourcePolicy::Enforced(_) => SandboxCapability::ResourceLimits,
+                    SandboxResourcePolicy::HostShared => SandboxCapability::HostResources,
+                }))
     {
         return Err(ProfileAdmissionError::evidence(
             ProfileAdmissionErrorKind::InvalidProviderEvidence,
@@ -1463,7 +1570,7 @@ mod tests {
             assert_eq!(spec.network(), NetworkPolicy::Disabled);
             assert_eq!(spec.root_filesystem(), RootFilesystemPolicy::Writable);
             assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Administrator);
-            assert_eq!(spec.resources(), policy().resources);
+            assert_eq!(spec.resources(), policy().resource_policy.enforced());
             assert_eq!(spec.generation().get(), ADMISSION_GENERATION);
             let Call::Inspect(inspected) = &calls[1] else {
                 panic!("profile create must be inspected")
@@ -1590,7 +1697,7 @@ mod tests {
                 };
                 assert_eq!(
                     request.target(),
-                    &windows_child(scratch, name).expect("expected script target")
+                    &native_child(scratch, name).expect("expected script target")
                 );
                 assert_eq!(request.content(), content);
                 assert!(operation_ids.insert(request.operation_id()));

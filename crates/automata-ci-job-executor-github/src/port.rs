@@ -8,7 +8,7 @@ use automata_ci_core::{
     JobIrEnvelope, JobRuntimeContext, Lease, OperationId, UnixMillis,
 };
 use automata_ci_execution::{
-    SandboxEnvironment, ServiceContainerBindings, TargetPath, TargetPlatform,
+    ExecutionArgv, SandboxEnvironment, ServiceContainerBindings, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{GithubEvaluationContext, GithubStatus, GithubValue};
 use automata_ci_github_runtime::JobCommandState;
@@ -557,8 +557,8 @@ pub trait GithubToolchain: fmt::Debug + Send + Sync {
     fn install(&self) -> Option<&TargetPath>;
     /// Returns the exact POSIX archive extraction utility, when available.
     fn tar(&self) -> Option<&TargetPath>;
-    /// Returns the exact POSIX SHA-256 regular-file hashing utility, when available.
-    fn sha256sum(&self) -> Option<&TargetPath>;
+    /// Returns the exact POSIX SHA-256 utility and its fixed arguments, when available.
+    fn sha256(&self) -> Option<&ExecutionArgv>;
     /// Returns the exact executable for a metadata-selected Node runtime.
     fn node(&self, runtime: JavascriptRuntime) -> Option<&TargetPath>;
 }

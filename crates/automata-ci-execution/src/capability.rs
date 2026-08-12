@@ -50,6 +50,8 @@ pub enum SandboxCapability {
     DeviceLimits,
     /// Enforces the requested process-count limit as a hard limit.
     ProcessLimits,
+    /// Runs trusted work against shared host resources without per-job hard limits.
+    HostResources,
     /// Creates, health-checks, discovers, and destroys services with a sandbox.
     ServiceContainers,
     /// A policy-filtered Docker Engine API is scoped to one sandbox.

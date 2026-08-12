@@ -152,6 +152,7 @@ impl RunnerMetrics {
         Arc::new(self.clone())
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn podman_observer(&self) -> Arc<dyn PodmanObserver> {
         Arc::new(self.clone())
     }
