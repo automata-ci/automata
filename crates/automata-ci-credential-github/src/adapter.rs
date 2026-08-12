@@ -46,7 +46,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_024;
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 3_600;
 const MAX_PROVIDER_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
-const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v1\0";
+const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v2\0";
 
 struct ValidatedResponseMetadata {
     provider_expires_at: UnixTimestamp,
