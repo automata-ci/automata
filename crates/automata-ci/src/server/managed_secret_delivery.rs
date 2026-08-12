@@ -11,7 +11,12 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use automata_ci_auth::{machine::AuthenticatedMachine, time::Clock};
 use automata_ci_core::{
-    AttemptId, FencingToken, JobId, Lease, LeaseId, RunId, RunnerId, RunnerSessionId, UnixMillis,
+    AttemptId, FencingToken, JobId, Lease, LeaseId, RunId, RunnerId, RunnerSessionId, Sha256Digest,
+    UnixMillis,
+};
+use automata_ci_protocol::ManagedSecretBindingOverlay;
+use automata_ci_runner_control::{
+    ControlPortError, ManagedSecretBindingIssuer, RuntimeAuthorityIssueRequest,
 };
 use automata_ci_protocol::ManagedSecretBindingOverlay;
 use automata_ci_runner_control::{
@@ -20,9 +25,9 @@ use automata_ci_runner_control::{
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerEphemeralRequest,
     EphemeralHandlerFuture, MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID,
-    ManagedSecretDeliveryCoordinates, ManagedSecretDeliveryOperation, ManagedSecretDeliveryRequest,
-    ManagedSecretDeliveryResponse, ManagedSecretDeliveryValue, RunnerEphemeralHandler,
-    RunnerEphemeralReply,
+    ManagedSecretDeliveryBinding, ManagedSecretDeliveryCoordinates, ManagedSecretDeliveryOperation,
+    ManagedSecretDeliveryRequest, ManagedSecretDeliveryResponse, ManagedSecretDeliveryValue,
+    RunnerEphemeralHandler, RunnerEphemeralReply,
 };
 use automata_ci_secret::{
     EnvironmentScopeId, ProviderOperationContext, ProviderRequestId, ProviderSecretLocator,
@@ -42,6 +47,7 @@ use automata_ci_store::{
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::secret_custody::SecretCustodyVerifier;
 
@@ -92,7 +98,7 @@ impl ManagedSecretBindingIssuer for LeasedManagedSecretBindingIssuer {
                 .map_err(|_| ControlPortError::Corrupt)?,
             )
             .await
-            .map_err(protected_environment_port_error)?;
+            .map_err(|error| protected_environment_port_error(&error))?;
         ManagedSecretBindingOverlay::new(
             lease,
             issued
@@ -103,7 +109,7 @@ impl ManagedSecretBindingIssuer for LeasedManagedSecretBindingIssuer {
     }
 }
 
-fn protected_environment_port_error(error: ProtectedEnvironmentStoreError) -> ControlPortError {
+fn protected_environment_port_error(error: &ProtectedEnvironmentStoreError) -> ControlPortError {
     match error {
         ProtectedEnvironmentStoreError::Operation(StoreError::Operation(_)) => {
             ControlPortError::Unavailable
@@ -143,9 +149,17 @@ impl ManagedSecretRuntimeAuthorityIssuer {
     ) -> Result<ResolveManagedSecretAuthority, ManagedSecretAuthorityStoreError> {
         let observed_at = current_millis(self.clock.as_ref())
             .ok_or(ManagedSecretAuthorityStoreError::Unavailable)?;
-        let (lease, runner_id, session_id, slot, run_id, job_id, digest, overlay_digest) =
-            execution_coordinates(request.coordinates())
-                .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
+        let ExecutionCoordinates {
+            lease,
+            runner_id,
+            session_id,
+            slot,
+            run_id,
+            job_id,
+            runtime_context_digest,
+            binding_overlay_digest,
+        } = execution_coordinates(request.coordinates())
+            .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
         let authenticated_machine = ManagedSecretDeliveryMachine::new(
             machine.external_identity().as_str(),
             automata_ci_core::Sha256Digest::from_bytes(*machine.certificate_sha256()),
@@ -172,7 +186,7 @@ impl ManagedSecretRuntimeAuthorityIssuer {
             lease.clone(),
             session,
             slot,
-            digest,
+            runtime_context_digest,
             observed_at,
         )
         .map_err(|_| ManagedSecretAuthorityStoreError::Unauthorized)?;
@@ -189,8 +203,8 @@ impl ManagedSecretRuntimeAuthorityIssuer {
             &lease,
             session,
             slot,
-            digest,
-            overlay_digest,
+            runtime_context_digest,
+            binding_overlay_digest,
             &bindings,
         )
         .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
@@ -208,7 +222,7 @@ impl ManagedSecretRuntimeAuthorityIssuer {
             lease,
             session,
             slot,
-            digest,
+            runtime_context_digest,
             bindings,
             observed_at,
         )
@@ -287,6 +301,7 @@ impl ManagedSecretRunnerHandler {
             .await
             .map_err(map_store_error)?;
         self.custody.verify().await.map_err(|_| unavailable())?;
+        require_exact_bindings(request, receipt.bindings())?;
         let mut values = Vec::with_capacity(receipt.bindings().len());
         for binding in receipt.bindings() {
             values.push(self.resolve_builtin(&receipt, binding).await?);
@@ -305,11 +320,12 @@ impl ManagedSecretRunnerHandler {
             return Err(forbidden());
         }
         self.custody.verify().await.map_err(|_| unavailable())?;
-        let authority = self
+        let (authority, receipt) = self
             .authority
-            .issue(request, machine)
+            .reserve(request, machine)
             .await
             .map_err(map_store_error)?;
+        require_exact_bindings(request, receipt.bindings())?;
         let acknowledgement =
             AcknowledgeManagedSecretDelivery::new(authority).map_err(|_| forbidden())?;
         self.authority
@@ -395,14 +411,16 @@ impl ManagedSecretRunnerHandler {
         {
             return Err(forbidden());
         }
-        let value = std::str::from_utf8(resolved.value().expose_secret())
-            .map_err(|_| forbidden())?
-            .as_bytes()
-            .to_vec();
+        let mut value = Zeroizing::new(
+            std::str::from_utf8(resolved.value().expose_secret())
+                .map_err(|_| forbidden())?
+                .as_bytes()
+                .to_vec(),
+        );
         ManagedSecretDeliveryValue::new(
             binding.grant_id().as_uuid().hyphenated().to_string(),
             binding.version_id().as_uuid().hyphenated().to_string(),
-            value,
+            std::mem::take(&mut *value),
         )
         .map_err(|_| forbidden())
     }
@@ -444,18 +462,18 @@ impl RunnerEphemeralHandler for ManagedSecretRunnerHandler {
     }
 }
 
-fn execution_coordinates(
-    value: ManagedSecretDeliveryCoordinates,
-) -> Option<(
-    Lease,
-    RunnerId,
-    RunnerSessionId,
-    StableRunnerSlot,
-    RunId,
-    JobId,
-    automata_ci_core::Sha256Digest,
-    automata_ci_core::Sha256Digest,
-)> {
+struct ExecutionCoordinates {
+    lease: Lease,
+    runner_id: RunnerId,
+    session_id: RunnerSessionId,
+    slot: StableRunnerSlot,
+    run_id: RunId,
+    job_id: JobId,
+    runtime_context_digest: Sha256Digest,
+    binding_overlay_digest: Sha256Digest,
+}
+
+fn execution_coordinates(value: ManagedSecretDeliveryCoordinates) -> Option<ExecutionCoordinates> {
     let runner = RunnerId::from_uuid(Uuid::from_bytes(value.runner_id));
     let session = RunnerSessionId::from_uuid(Uuid::from_bytes(value.session_id));
     let lease = Lease::new(
@@ -467,16 +485,16 @@ fn execution_coordinates(
         UnixMillis::new(value.lease_expires_at_ms),
     )
     .ok()?;
-    Some((
+    Some(ExecutionCoordinates {
         lease,
-        runner,
-        session,
-        StableRunnerSlot::new(value.slot).ok()?,
-        RunId::from_uuid(Uuid::from_bytes(value.run_id)),
-        JobId::from_uuid(Uuid::from_bytes(value.job_id)),
-        automata_ci_core::Sha256Digest::from_bytes(value.runtime_context_digest),
-        automata_ci_core::Sha256Digest::from_bytes(value.binding_overlay_digest),
-    ))
+        runner_id: runner,
+        session_id: session,
+        slot: StableRunnerSlot::new(value.slot).ok()?,
+        run_id: RunId::from_uuid(Uuid::from_bytes(value.run_id)),
+        job_id: JobId::from_uuid(Uuid::from_bytes(value.job_id)),
+        runtime_context_digest: Sha256Digest::from_bytes(value.runtime_context_digest),
+        binding_overlay_digest: Sha256Digest::from_bytes(value.binding_overlay_digest),
+    })
 }
 
 /// Derives a retry-stable delivery identity after the Store owns the live
@@ -491,8 +509,8 @@ fn derived_operation_id(
     lease: &Lease,
     session: RunnerSessionFence,
     slot: StableRunnerSlot,
-    runtime_context_digest: automata_ci_core::Sha256Digest,
-    binding_overlay_digest: automata_ci_core::Sha256Digest,
+    runtime_context_digest: Sha256Digest,
+    binding_overlay_digest: Sha256Digest,
     bindings: &ManagedSecretBindingSet,
 ) -> Option<ManagedSecretDeliveryOperationId> {
     let mut digest = Sha256::new();
@@ -544,6 +562,45 @@ fn managed_bindings(request: &ManagedSecretDeliveryRequest) -> Option<ManagedSec
         .and_then(|bindings| ManagedSecretBindingSet::new(bindings).ok())
 }
 
+fn require_exact_bindings(
+    request: &ManagedSecretDeliveryRequest,
+    authoritative_bindings: &[ManagedSecretAuthorityBinding],
+) -> Result<(), ApplicationError> {
+    exact_bindings(request, authoritative_bindings)
+        .then_some(())
+        .ok_or_else(forbidden)
+}
+
+fn exact_bindings(
+    request: &ManagedSecretDeliveryRequest,
+    authoritative_bindings: &[ManagedSecretAuthorityBinding],
+) -> bool {
+    request.bindings().len() == authoritative_bindings.len()
+        && request
+            .bindings()
+            .iter()
+            .zip(authoritative_bindings)
+            .all(|(binding, authoritative)| {
+                exact_binding(
+                    binding,
+                    authoritative.canonical_name(),
+                    authoritative.grant_id(),
+                    authoritative.version_id(),
+                )
+            })
+}
+
+fn exact_binding(
+    binding: &ManagedSecretDeliveryBinding,
+    authoritative_canonical_name: &str,
+    authoritative_grant_id: SecretWorkloadGrantId,
+    authoritative_version_id: RepositorySecretVersionId,
+) -> bool {
+    binding.canonical_name() == authoritative_canonical_name
+        && Uuid::parse_str(binding.binding_id()).ok() == Some(authoritative_grant_id.as_uuid())
+        && Uuid::parse_str(binding.version_id()).ok() == Some(authoritative_version_id.as_uuid())
+}
+
 fn exact_values(
     request: &ManagedSecretDeliveryRequest,
     values: &[ManagedSecretDeliveryValue],
@@ -581,5 +638,80 @@ const fn map_store_error(error: ManagedSecretAuthorityStoreError) -> Application
         | ManagedSecretAuthorityStoreError::ResourceExhausted
         | ManagedSecretAuthorityStoreError::CorruptData
         | ManagedSecretAuthorityStoreError::Unavailable => unavailable(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_binding_rejects_overlay_name_mismatch_before_fetch_or_ack_continuation() {
+        let grant_id = Uuid::from_u128(1);
+        let version_id = Uuid::from_u128(2);
+        let binding = ManagedSecretDeliveryBinding::new(
+            "OVERLAY_NAME",
+            grant_id.hyphenated().to_string(),
+            version_id.hyphenated().to_string(),
+        )
+        .expect("binding");
+        let grant_id = SecretWorkloadGrantId::from_uuid(grant_id).expect("grant ID");
+        let version_id = RepositorySecretVersionId::from_uuid(version_id).expect("version ID");
+
+        assert!(exact_binding(
+            &binding,
+            "OVERLAY_NAME",
+            grant_id,
+            version_id,
+        ));
+        assert!(!exact_binding(&binding, "STORE_NAME", grant_id, version_id,));
+    }
+
+    #[test]
+    fn exact_binding_gate_precedes_provider_resolution_and_acknowledgement() {
+        let source = include_str!("managed_secret_delivery.rs");
+        let fetch = source
+            .split_once("    async fn fetch(")
+            .expect("fetch handler")
+            .1
+            .split_once("    async fn acknowledge(")
+            .expect("acknowledgement handler")
+            .0;
+        let fetch_gate = fetch
+            .find("require_exact_bindings(request, receipt.bindings())?")
+            .expect("fetch exact-binding gate");
+        let provider_resolution = fetch
+            .find("self.resolve_builtin(&receipt, binding)")
+            .expect("provider resolution");
+        assert!(
+            fetch_gate < provider_resolution,
+            "the exact Store name must be checked before provider resolution"
+        );
+
+        let acknowledge = source
+            .split_once("    async fn acknowledge(")
+            .expect("acknowledgement handler")
+            .1
+            .split_once("    async fn resolve_builtin(")
+            .expect("provider resolver")
+            .0;
+        assert!(
+            acknowledge.contains(".reserve(request, machine)"),
+            "acknowledgement must replay the reserved Store authority"
+        );
+        assert!(
+            !acknowledge.contains(".issue(request, machine)"),
+            "acknowledgement must not use unchecked reconstructed authority"
+        );
+        let acknowledge_gate = acknowledge
+            .find("require_exact_bindings(request, receipt.bindings())?")
+            .expect("acknowledgement exact-binding gate");
+        let acknowledgement = acknowledge
+            .find("AcknowledgeManagedSecretDelivery::new(authority)")
+            .expect("acknowledgement construction");
+        assert!(
+            acknowledge_gate < acknowledgement,
+            "an overlay-name mismatch must not reach acknowledgement"
+        );
     }
 }

@@ -61,6 +61,15 @@ require_environment() {
   done
 }
 
+require_environment_value() {
+  local variable="$1"
+  local expected="$2"
+  if [[ "${!variable-}" != "$expected" ]]; then
+    printf 'error: coverage lane requires %s=%s\n' "$variable" "$expected" >&2
+    exit 2
+  fi
+}
+
 run_command() {
   if [[ "$plan" == true ]]; then
     printf 'RUN'
@@ -221,12 +230,14 @@ validate_lane_environment() {
       require_environment \
         HOME XDG_RUNTIME_DIR AUTOMATA_LIVE_ROOTLESS_PODMAN \
         AUTOMATA_PODMAN_APPROVED_HELPERS AUTOMATA_PODMAN_TEST_IMAGE \
+        AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE \
         AUTOMATA_PODMAN_TEST_SERVICE_IMAGE AUTOMATA_PODMAN_TEST_SERVICE_PROXY_IMAGE \
         AUTOMATA_TEST_STATIC_RUNNER AUTOMATA_TEST_PODMAN_BINARY \
         AUTOMATA_TEST_PODMAN_STATE_ROOT AUTOMATA_TEST_PODMAN_HOME \
         AUTOMATA_TEST_PODMAN_RUNTIME AUTOMATA_TEST_PODMAN_APPROVED_HELPERS \
         AUTOMATA_TEST_CONMON AUTOMATA_TEST_OCI_RUNTIME AUTOMATA_TEST_CATATONIT \
         AUTOMATA_TEST_SECCOMP_PROFILE
+      require_environment_value AUTOMATA_LIVE_ROOTLESS_BUILDX 1
       ;;
     node-live)
       require_environment \

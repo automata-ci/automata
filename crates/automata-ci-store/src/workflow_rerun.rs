@@ -1,11 +1,8 @@
 //! Domain and schema boundary for authenticated workflow-rerun requests.
 //!
-//! The schema can retain immutable rerun provenance, but reruns are not yet
-//! executable: the current `PostgreSQL` adapter returns
-//! [`WorkflowRerunStoreError::Unsupported`] before authorization, provider
-//! access, or durable writes. A future executable adapter must create a fresh
-//! physical attempt, preserve source and provider-visible identity, and
-//! reauthorize the current caller in the same transaction as its audit record.
+//! A rerun creates one fresh physical attempt while preserving the stable
+//! provider-visible run identity. Immutable selection, carry-forward, actor,
+//! and Check-projection evidence is committed in the same transaction.
 
 use std::fmt;
 
@@ -16,10 +13,11 @@ use thiserror::Error;
 
 use crate::{LogicalWorkflowJobId, RepositoryId, StoreError};
 
-/// Maximum physical attempts retained for one provider-visible workflow run.
-pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 50;
+/// Maximum physical attempts after the original run and its 50 allowed reruns.
+pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;
 /// Database-time retention horizon for starting a rerun of a terminal run.
 pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
 /// Closed selection mode for a durable workflow rerun.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,8 +35,7 @@ pub enum WorkflowRerunSelection {
 /// The actor is intentionally not treated as historical run metadata. An
 /// executable adapter must reauthorize it for `runs:rerun` while holding the
 /// source run and idempotency receipt rows, then record it as the new attempt's
-/// triggering actor and security-audit subject. The current `PostgreSQL`
-/// adapter deliberately fails closed before that work.
+/// triggering actor and security-audit subject.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RerunWorkflow {
     actor: ManagementActor,
@@ -125,6 +122,147 @@ impl RerunWorkflow {
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
     }
+}
+
+/// Current human authority and human-facing repository coordinate for a rerun.
+///
+/// An executable adapter resolves the case-insensitive GitHub `owner/name`
+/// coordinate and reauthorizes `runs:rerun` in the same transaction. Missing
+/// and unauthorized coordinates must remain indistinguishable.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RerunWorkflowByName {
+    actor: ManagementActor,
+    repository_owner: String,
+    repository_name: String,
+    source_run_id: RunId,
+    selection: WorkflowRerunSelection,
+    operation_id: OperationId,
+}
+
+impl fmt::Debug for RerunWorkflowByName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RerunWorkflowByName")
+            .field("repository_owner", &self.repository_owner)
+            .field("repository_name", &self.repository_name)
+            .field("source_run_id", &self.source_run_id)
+            .field("selection", &self.selection)
+            .field("operation_id", &self.operation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RerunWorkflowByName {
+    /// Creates a rerun request addressed by bounded `OWNER/REPOSITORY` text.
+    ///
+    /// # Errors
+    ///
+    /// Rejects ambiguous repository coordinates and nil durable identities.
+    pub fn new(
+        actor: ManagementActor,
+        repository_owner: impl Into<String>,
+        repository_name: impl Into<String>,
+        source_run_id: RunId,
+        selection: WorkflowRerunSelection,
+        operation_id: OperationId,
+    ) -> Result<Self, WorkflowRerunValueError> {
+        let repository_owner = repository_owner.into();
+        let repository_name = repository_name.into();
+        if !valid_repository_segment(&repository_owner)
+            || !valid_repository_segment(&repository_name)
+        {
+            return Err(WorkflowRerunValueError::InvalidRepositoryCoordinate);
+        }
+        validate_request_tail(source_run_id, selection, operation_id)?;
+        Ok(Self {
+            actor,
+            repository_owner,
+            repository_name,
+            source_run_id,
+            selection,
+            operation_id,
+        })
+    }
+
+    /// Returns the caller that must be transactionally reauthorized.
+    #[must_use]
+    pub const fn actor(&self) -> &ManagementActor {
+        &self.actor
+    }
+
+    /// Returns the exact parsed repository-owner spelling.
+    #[must_use]
+    pub fn repository_owner(&self) -> &str {
+        &self.repository_owner
+    }
+
+    /// Returns the exact parsed repository-name spelling.
+    #[must_use]
+    pub fn repository_name(&self) -> &str {
+        &self.repository_name
+    }
+
+    /// Returns the terminal physical attempt selected as the rerun source.
+    #[must_use]
+    pub const fn source_run_id(&self) -> RunId {
+        self.source_run_id
+    }
+
+    /// Returns the immutable selection mode.
+    #[must_use]
+    pub const fn selection(&self) -> WorkflowRerunSelection {
+        self.selection
+    }
+
+    /// Returns the caller-supplied idempotency operation identity.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    pub(crate) fn into_resolved(
+        self,
+        repository_id: RepositoryId,
+    ) -> Result<RerunWorkflow, WorkflowRerunValueError> {
+        RerunWorkflow::new(
+            self.actor,
+            repository_id,
+            self.source_run_id,
+            self.selection,
+            self.operation_id,
+        )
+    }
+}
+
+fn valid_repository_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(value, "." | "..")
+        && value.len() <= MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES
+        && !value.contains('/')
+        && value
+            .chars()
+            .all(|character| !character.is_control() && !character.is_whitespace())
+}
+
+fn validate_request_tail(
+    source_run_id: RunId,
+    selection: WorkflowRerunSelection,
+    operation_id: OperationId,
+) -> Result<(), WorkflowRerunValueError> {
+    for (value, field) in [
+        (source_run_id.as_uuid(), "source workflow run ID"),
+        (operation_id.as_uuid(), "workflow rerun operation ID"),
+    ] {
+        if value.is_nil() {
+            return Err(WorkflowRerunValueError::NilUuid(field));
+        }
+    }
+    if let WorkflowRerunSelection::JobAndDependents(job_id) = selection
+        && job_id.as_uuid().is_nil()
+    {
+        return Err(WorkflowRerunValueError::NilUuid("selected logical job ID"));
+    }
+    Ok(())
 }
 
 /// Stable receipt for a newly created physical attempt or exact replay.
@@ -214,12 +352,20 @@ pub trait WorkflowRerunRepository: fmt::Debug + Send + Sync {
     ///
     /// An implementation that supports reruns must reauthorize the current
     /// actor, record an audit event, and atomically create one new physical
-    /// attempt grouped with attempt one. Implementations without a complete
-    /// activation path return [`WorkflowRerunStoreError::Unsupported`] before
-    /// observing authority or writing state.
+    /// attempt grouped with attempt one and one fresh provider Check subject.
     async fn rerun_workflow(
         &self,
         request: RerunWorkflow,
+    ) -> Result<WorkflowRerunReceipt, WorkflowRerunStoreError>;
+
+    /// Resolves a human-facing GitHub coordinate and requests its rerun.
+    ///
+    /// Resolution, current `runs:rerun` reauthorization, idempotency, and
+    /// admission must share one transaction. Missing and unauthorized
+    /// coordinates both return [`WorkflowRerunStoreError::AuthorityRejected`].
+    async fn rerun_workflow_by_name(
+        &self,
+        request: RerunWorkflowByName,
     ) -> Result<WorkflowRerunReceipt, WorkflowRerunStoreError>;
 }
 
@@ -229,6 +375,9 @@ pub enum WorkflowRerunValueError {
     /// A durable UUID used the nil sentinel.
     #[error("{0} must not be the nil UUID")]
     NilUuid(&'static str),
+    /// A human-facing repository coordinate was ambiguous or unbounded.
+    #[error("workflow rerun repository must be a bounded OWNER/REPOSITORY coordinate")]
+    InvalidRepositoryCoordinate,
     /// An adapter returned an invalid positive provider-visible identity.
     #[error("workflow rerun receipt contains an invalid positive identity")]
     InvalidReceipt,
@@ -240,7 +389,8 @@ pub enum WorkflowRerunStoreError {
     /// The backing durable store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// Current `runs:rerun` authorization did not hold in the transaction.
+    /// Current `runs:rerun` authorization did not hold, or a named repository
+    /// was absent; named admission deliberately combines both states.
     #[error("workflow rerun authority was rejected")]
     AuthorityRejected,
     /// The exact repository/run tuple was absent or outside the caller tenant.
@@ -258,14 +408,9 @@ pub enum WorkflowRerunStoreError {
     /// The requested exact closure cannot be safely carried forward.
     #[error("workflow rerun selection is unsupported by immutable source evidence")]
     UnsupportedSelection,
-    /// Workflow reruns are not yet executable by the durable adapter.
-    ///
-    /// The schema retains immutable rerun and carry-forward evidence, but the
-    /// current activation and admission fences do not yet consume it. Stores
-    /// must return this state before any durable write or mutable provider
-    /// lookup rather than admitting an attempt that cannot execute correctly.
-    #[error("workflow reruns are not implemented by this store")]
-    Unsupported,
+    /// The source workflow's bounded concurrency group has no available slot.
+    #[error("workflow rerun concurrency queue is full")]
+    ConcurrencyQueueFull,
     /// The operation ID was already committed for a non-identical request.
     #[error("workflow rerun operation conflicts with an existing request")]
     IdempotencyConflict,
@@ -306,6 +451,57 @@ mod tests {
             ),
             Err(WorkflowRerunValueError::NilUuid("repository ID"))
         );
+    }
+
+    #[test]
+    fn named_request_accepts_exact_bounds_and_rejects_ambiguous_segments() {
+        let actor = ManagementActor::new(
+            TenantId::new("tenant").expect("tenant"),
+            PrincipalId::new(Uuid::from_u128(7).hyphenated().to_string()).expect("principal"),
+            SessionId::new(Uuid::from_u128(8).hyphenated().to_string()).expect("session"),
+            ManagementRevision::new(1).expect("revision"),
+            None,
+            UnixTimestamp::from_seconds(0),
+        );
+        let source_run_id = RunId::from_uuid(Uuid::from_u128(2));
+        let operation_id = OperationId::from_uuid(Uuid::from_u128(3));
+        let bounded = "r".repeat(MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES);
+        let request = RerunWorkflowByName::new(
+            actor.clone(),
+            "Automata-CI",
+            bounded.clone(),
+            source_run_id,
+            WorkflowRerunSelection::EntireWorkflow,
+            operation_id,
+        )
+        .expect("bounded coordinate");
+        assert_eq!(request.repository_owner(), "Automata-CI");
+        assert_eq!(request.repository_name(), bounded);
+
+        let oversized = "o".repeat(MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES + 1);
+        for (owner, name) in [
+            ("", "repository"),
+            ("owner", ""),
+            ("owner/other", "repository"),
+            ("owner", "repository/other"),
+            (".", "repository"),
+            ("owner", ".."),
+            ("owner name", "repository"),
+            ("owner", "repository\nname"),
+            (oversized.as_str(), "repository"),
+        ] {
+            assert_eq!(
+                RerunWorkflowByName::new(
+                    actor.clone(),
+                    owner,
+                    name,
+                    source_run_id,
+                    WorkflowRerunSelection::EntireWorkflow,
+                    operation_id,
+                ),
+                Err(WorkflowRerunValueError::InvalidRepositoryCoordinate)
+            );
+        }
     }
 
     #[test]

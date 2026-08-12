@@ -124,6 +124,7 @@ pub struct SeedData {
     pub run_id: RunId,
     pub job_id: JobId,
     pub session_fence: RunnerSessionFence,
+    #[allow(dead_code)] // Used only by object-store integration targets.
     pub observed_at: UnixMillis,
 }
 

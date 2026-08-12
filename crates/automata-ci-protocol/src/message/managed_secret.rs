@@ -372,7 +372,10 @@ mod tests {
         AttemptId, FencingToken, Lease, LeaseId, RunnerId, SecretBinding, UnixMillis,
     };
 
-    use super::{ManagedSecretBindingOverlay, ManagedSecretBindingOverlayError};
+    use super::{
+        ManagedSecretBindingOverlay, ManagedSecretBindingOverlayEntry,
+        ManagedSecretBindingOverlayError,
+    };
 
     fn lease() -> Lease {
         Lease::new(
@@ -394,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_and_binds_every_lease_coordinate() {
+    fn canonicalizes_binding_order() {
         let lease = lease();
         let overlay = ManagedSecretBindingOverlay::new(
             &lease,
@@ -417,10 +420,31 @@ mod tests {
         )
         .expect("overlay");
 
-        assert_eq!(overlay.bindings()[0].canonical_name(), "TOKEN_A");
+        assert_eq!(
+            overlay
+                .bindings()
+                .iter()
+                .map(ManagedSecretBindingOverlayEntry::canonical_name)
+                .collect::<Vec<_>>(),
+            ["TOKEN_A", "TOKEN_B"]
+        );
         assert!(overlay.validate_for(&lease).is_ok());
+    }
 
-        let other = Lease::new(
+    #[test]
+    fn rejects_each_changed_lease_coordinate_independently() {
+        let lease = lease();
+        let overlay = ManagedSecretBindingOverlay::empty(&lease);
+        let changed_attempt = Lease::new(
+            lease.lease_id(),
+            AttemptId::new(),
+            lease.runner_id(),
+            lease.fencing_token(),
+            lease.issued_at(),
+            lease.expires_at(),
+        )
+        .expect("changed attempt lease");
+        let changed_lease = Lease::new(
             LeaseId::new(),
             lease.attempt_id(),
             lease.runner_id(),
@@ -428,11 +452,23 @@ mod tests {
             lease.issued_at(),
             lease.expires_at(),
         )
-        .expect("other lease");
-        assert_eq!(
-            overlay.validate_for(&other),
-            Err(ManagedSecretBindingOverlayError::LeaseMismatch)
-        );
+        .expect("changed lease identity");
+        let changed_fence = Lease::new(
+            lease.lease_id(),
+            lease.attempt_id(),
+            lease.runner_id(),
+            FencingToken::new(8).expect("changed fence"),
+            lease.issued_at(),
+            lease.expires_at(),
+        )
+        .expect("changed lease fence");
+
+        for changed in [changed_attempt, changed_lease, changed_fence] {
+            assert_eq!(
+                overlay.validate_for(&changed),
+                Err(ManagedSecretBindingOverlayError::LeaseMismatch)
+            );
+        }
     }
 
     #[test]

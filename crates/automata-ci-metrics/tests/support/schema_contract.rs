@@ -62,6 +62,7 @@ struct ActualFamily {
 }
 
 pub fn assert_exposition_contract(manifest_json: &str, exposition: &str, profile_names: &[&str]) {
+    let expected_histogram_label_sets = expected_histogram_label_sets(manifest_json, profile_names);
     let manifest: Manifest =
         serde_json::from_str(manifest_json).expect("cardinality manifest must be valid JSON");
     validate_manifest(&manifest);
@@ -111,6 +112,15 @@ pub fn assert_exposition_contract(manifest_json: &str, exposition: &str, profile
         actual_series, expected_series,
         "process series total changed"
     );
+    assert_eq!(
+        actual
+            .values()
+            .filter(|family| family.metric_type == "histogram")
+            .map(|family| family.label_sets.len())
+            .sum::<usize>(),
+        expected_histogram_label_sets,
+        "histogram label-set total changed"
+    );
 
     if let Some(product_profile) = profile_names.iter().find_map(|name| {
         manifest.profiles[*name]
@@ -124,6 +134,26 @@ pub fn assert_exposition_contract(manifest_json: &str, exposition: &str, profile
             product_profile.1
         );
     }
+}
+
+pub fn expected_histogram_label_sets(manifest_json: &str, profile_names: &[&str]) -> usize {
+    let manifest: Manifest =
+        serde_json::from_str(manifest_json).expect("cardinality manifest must be valid JSON");
+    validate_manifest(&manifest);
+
+    profile_names
+        .iter()
+        .flat_map(|name| {
+            manifest
+                .profiles
+                .get(*name)
+                .unwrap_or_else(|| panic!("missing metrics profile: {name}"))
+                .families
+                .iter()
+        })
+        .filter(|family| family.metric_type == "histogram")
+        .map(|family| family.maximum_series / (family.buckets.len() + 3))
+        .sum()
 }
 
 pub fn inferred_profile_json(exposition: &str, family_prefixes: &[&str]) -> String {

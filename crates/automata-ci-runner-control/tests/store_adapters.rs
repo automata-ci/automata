@@ -7,12 +7,13 @@ use async_trait::async_trait;
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, Lease,
     LeaseId, OperationId, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis,
-    ValueTemplate, WorkflowId,
+    RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
-    JobRuntimeAuthorities, JobRuntimeAuthority, ProtocolLimits, ProtocolVersion, RunnerSlotOrdinal,
-    RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
+    JobRuntimeAuthorities, JobRuntimeAuthority, ManagedSecretBindingOverlay, ProtocolLimits,
+    ProtocolVersion, RunnerSlotOrdinal, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityName,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_runner_control::{
@@ -529,6 +530,16 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
     let server_operation_id = OperationId::new();
     let digest = Sha256Digest::from_bytes([9; 32]);
     let runtime_authorities = runtime_authorities(&job, &lease);
+    let managed_secret_bindings = ManagedSecretBindingOverlay::new(
+        &lease,
+        [(
+            "DEPLOY_TOKEN".to_owned(),
+            SecretBinding::new("00000000-0000-4000-8000-000000000001")
+                .and_then(|binding| binding.with_version_id("00000000-0000-4000-8000-000000000011"))
+                .expect("value-free binding"),
+        )],
+    )
+    .expect("managed-secret overlay");
     let repository = Arc::new(LeaseOffers::default());
     let publisher = StoreLeaseOfferCommandPublisher::new(
         repository.clone(),
@@ -558,6 +569,9 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
                 runtime_authorities.clone(),
                 UnixMillis::new(20),
             )
+            .and_then(|command| {
+                command.with_managed_secret_bindings(managed_secret_bindings.clone())
+            })
             .expect("valid lease-offer command"),
         )
         .await
@@ -721,10 +735,24 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(body["job"], serde_json::to_value(&job).expect("job JSON"));
         assert_eq!(
             body["managed_secret_bindings"],
-            serde_json::to_value(automata_ci_protocol::ManagedSecretBindingOverlay::empty(
-                &lease
-            ))
-            .expect("managed-secret overlay JSON")
+            serde_json::to_value(&managed_secret_bindings).expect("managed-secret overlay JSON")
+        );
+        assert_eq!(
+            body.as_object()
+                .expect("offer object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "job",
+                "lease",
+                "managed_secret_bindings",
+                "protocol_version",
+                "runtime_authorities",
+                "schema",
+                "slot",
+            ],
+            "the outbox schema has no managed-secret value or bearer field"
         );
         assert_eq!(
             body["runtime_authorities"],

@@ -1416,48 +1416,70 @@ mod tests {
     }
 
     #[test]
-    fn registered_service_ceiling_is_reduced_to_the_verified_provider() {
+    fn registered_helper_ceiling_is_reduced_to_the_verified_provider() {
         let config = RunnerProductConfig::from_json(include_bytes!(
             "../../config/runner.local.example.json"
         ))
         .expect("checked-in runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();
-        registered_features.insert(ContainerFeature::SERVICE_CONTAINERS);
+        registered_features.extend([
+            ContainerFeature::SERVICE_CONTAINERS,
+            ContainerFeature::BUILDKIT,
+        ]);
         let registered = config
             .inventory()
             .clone()
             .with_containers(ContainerCapabilities::new(registered_features));
-        let without_service = ProviderCapabilities::new([SandboxCapability::WholeJob])
+        let without_helpers = ProviderCapabilities::new([SandboxCapability::WholeJob])
             .expect("provider capabilities");
-        let with_service = ProviderCapabilities::new([
+        let with_helpers = ProviderCapabilities::new([
             SandboxCapability::WholeJob,
             SandboxCapability::ServiceContainers,
+            SandboxCapability::BuildKit,
         ])
         .expect("provider capabilities");
 
         assert!(
-            !inventory_for_verified_provider(config.inventory(), false, &without_service)
+            !inventory_for_verified_provider(config.inventory(), false, false, &without_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            !inventory_for_verified_provider(config.inventory(), false, &with_service)
+            !inventory_for_verified_provider(config.inventory(), false, false, &with_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            !inventory_for_verified_provider(&registered, true, &without_service)
+            !inventory_for_verified_provider(&registered, true, true, &without_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
         );
         assert!(
-            inventory_for_verified_provider(&registered, true, &with_service)
+            inventory_for_verified_provider(&registered, true, true, &with_helpers)
                 .containers()
                 .features()
                 .contains(&ContainerFeature::SERVICE_CONTAINERS)
+        );
+        assert!(
+            !inventory_for_verified_provider(&registered, true, false, &with_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
+        );
+        assert!(
+            !inventory_for_verified_provider(&registered, true, true, &without_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
+        );
+        assert!(
+            inventory_for_verified_provider(&registered, true, true, &with_helpers)
+                .containers()
+                .features()
+                .contains(&ContainerFeature::BUILDKIT)
         );
     }
 

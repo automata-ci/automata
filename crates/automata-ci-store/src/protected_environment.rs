@@ -3,11 +3,14 @@
 use std::{collections::BTreeSet, fmt};
 
 use async_trait::async_trait;
-use automata_ci_core::{AttemptId, FencingToken, LeaseId, SecretBinding, Sha256Digest, UnixMillis};
+use automata_ci_auth::management::ManagementActor;
+use automata_ci_core::{
+    AttemptId, FencingToken, Lease, LeaseId, SecretBinding, Sha256Digest, UnixMillis,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{StoreError, TenantScope};
+use crate::{RepositoryId, StoreError, TenantScope};
 
 /// Maximum distinct names retained for either expression context in one job.
 pub const MAX_JOB_CREDENTIAL_REFERENCES: usize = 256;
@@ -146,6 +149,76 @@ impl DeploymentEnvironmentName {
     }
 }
 
+/// Immutable, value-free evidence produced while a logical job activates.
+///
+/// This evidence is retained beside the activated instance rather than in
+/// `JobIR`. It contains no variable value, secret value, workload grant, or
+/// delivery credential.
+#[derive(Clone, Eq, PartialEq)]
+pub struct JobEnvironmentActivationEvidence {
+    environment: Option<DeploymentEnvironmentName>,
+    event_trust: JobEventTrust,
+    source_kind: JobSourceKind,
+    reusable_secret_permission: ReusableSecretPermission,
+}
+
+impl JobEnvironmentActivationEvidence {
+    /// Creates one activation-derived gate input.
+    #[must_use]
+    pub const fn new(
+        environment: Option<DeploymentEnvironmentName>,
+        event_trust: JobEventTrust,
+        source_kind: JobSourceKind,
+        reusable_secret_permission: ReusableSecretPermission,
+    ) -> Self {
+        Self {
+            environment,
+            event_trust,
+            source_kind,
+            reusable_secret_permission,
+        }
+    }
+
+    /// Returns the selected deployment environment, if any.
+    #[must_use]
+    pub const fn environment(&self) -> Option<&DeploymentEnvironmentName> {
+        self.environment.as_ref()
+    }
+
+    /// Returns the event trust derived from authenticated provider evidence.
+    #[must_use]
+    pub const fn event_trust(&self) -> JobEventTrust {
+        self.event_trust
+    }
+
+    /// Returns the provider source classification.
+    #[must_use]
+    pub const fn source_kind(&self) -> JobSourceKind {
+        self.source_kind
+    }
+
+    /// Returns whether a reusable caller explicitly forwarded secret names.
+    #[must_use]
+    pub const fn reusable_secret_permission(&self) -> ReusableSecretPermission {
+        self.reusable_secret_permission
+    }
+}
+
+impl fmt::Debug for JobEnvironmentActivationEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JobEnvironmentActivationEvidence")
+            .field("has_environment", &self.environment.is_some())
+            .field("event_trust", &self.event_trust)
+            .field("source_kind", &self.source_kind)
+            .field(
+                "reusable_secret_permission",
+                &self.reusable_secret_permission,
+            )
+            .finish()
+    }
+}
+
 /// Trust assigned from authenticated event evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobEventTrust {
@@ -213,7 +286,6 @@ pub struct PrepareJobEnvironment {
     event_trust: JobEventTrust,
     source_kind: JobSourceKind,
     reusable_secret_permission: ReusableSecretPermission,
-    requested_by_principal_id: Option<Uuid>,
     approval_request_id: Uuid,
     requested_at: UnixMillis,
     approval_expires_at: UnixMillis,
@@ -247,15 +319,11 @@ impl PrepareJobEnvironment {
         event_trust: JobEventTrust,
         source_kind: JobSourceKind,
         reusable_secret_permission: ReusableSecretPermission,
-        requested_by_principal_id: Option<Uuid>,
         approval_request_id: Uuid,
         requested_at: UnixMillis,
         approval_expires_at: UnixMillis,
     ) -> Result<Self, ProtectedEnvironmentValueError> {
-        if approval_request_id.is_nil()
-            || requested_by_principal_id.is_some_and(|id| id.is_nil())
-            || approval_expires_at <= requested_at
-        {
+        if approval_request_id.is_nil() || approval_expires_at <= requested_at {
             return Err(ProtectedEnvironmentValueError::InvalidRequest);
         }
         Ok(Self {
@@ -266,7 +334,6 @@ impl PrepareJobEnvironment {
             event_trust,
             source_kind,
             reusable_secret_permission,
-            requested_by_principal_id,
             approval_request_id,
             requested_at,
             approval_expires_at,
@@ -293,9 +360,6 @@ impl PrepareJobEnvironment {
     }
     pub(crate) const fn reusable_secret_permission(&self) -> ReusableSecretPermission {
         self.reusable_secret_permission
-    }
-    pub(crate) const fn requested_by_principal_id(&self) -> Option<Uuid> {
-        self.requested_by_principal_id
     }
     pub(crate) const fn approval_request_id(&self) -> Uuid {
         self.approval_request_id
@@ -327,54 +391,59 @@ impl EnvironmentReviewDecision {
 }
 
 /// One authenticated review of the gate for an attempt.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ReviewJobEnvironment {
-    tenant: TenantScope,
+    actor: ManagementActor,
+    repository_id: RepositoryId,
     attempt_id: AttemptId,
-    principal_id: Uuid,
     decision: EnvironmentReviewDecision,
-    decided_at: UnixMillis,
 }
 
 impl ReviewJobEnvironment {
-    /// Creates a review request with a non-nil reviewer identity.
+    /// Creates one exact repository/attempt review by an authenticated human.
     ///
     /// # Errors
     ///
-    /// Returns an error when the reviewer identity is nil.
+    /// Returns an error when an exact durable target identity is nil.
     pub fn new(
-        tenant: TenantScope,
+        actor: ManagementActor,
+        repository_id: RepositoryId,
         attempt_id: AttemptId,
-        principal_id: Uuid,
         decision: EnvironmentReviewDecision,
-        decided_at: UnixMillis,
     ) -> Result<Self, ProtectedEnvironmentValueError> {
-        if principal_id.is_nil() {
+        if repository_id.as_uuid().is_nil() || attempt_id.as_uuid().is_nil() {
             return Err(ProtectedEnvironmentValueError::InvalidRequest);
         }
         Ok(Self {
-            tenant,
+            actor,
+            repository_id,
             attempt_id,
-            principal_id,
             decision,
-            decided_at,
         })
     }
 
-    pub(crate) const fn tenant(&self) -> &TenantScope {
-        &self.tenant
+    pub(crate) const fn actor(&self) -> &ManagementActor {
+        &self.actor
+    }
+    pub(crate) const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
     }
     pub(crate) const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
-    pub(crate) const fn principal_id(&self) -> Uuid {
-        self.principal_id
-    }
     pub(crate) const fn decision(&self) -> EnvironmentReviewDecision {
         self.decision
     }
-    pub(crate) const fn decided_at(&self) -> UnixMillis {
-        self.decided_at
+}
+
+impl fmt::Debug for ReviewJobEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReviewJobEnvironment")
+            .field("repository_id", &self.repository_id)
+            .field("attempt_id", &self.attempt_id)
+            .field("decision", &self.decision)
+            .finish_non_exhaustive()
     }
 }
 
@@ -572,6 +641,43 @@ impl IssueLeasedJobSecretGrants {
     }
 }
 
+/// Read-only request for the authoritative bindings already issued to one live lease.
+///
+/// This is intentionally separate from grant issuance. Private value delivery
+/// uses it after lease acceptance to authenticate canonical names without
+/// creating or changing grants, bindings, or plaintext custody.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectLeasedJobSecretBindings {
+    tenant: TenantScope,
+    lease: Lease,
+}
+
+impl InspectLeasedJobSecretBindings {
+    /// Constructs an exact live-lease binding inspection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid lease or a lease whose interval cannot be represented
+    /// by the durable store.
+    pub fn new(tenant: TenantScope, lease: Lease) -> Result<Self, ProtectedEnvironmentValueError> {
+        lease
+            .validate()
+            .map_err(|_| ProtectedEnvironmentValueError::InvalidRequest)?;
+        if lease.issued_at().get() < 0 || i64::try_from(lease.fencing_token().get()).is_err() {
+            return Err(ProtectedEnvironmentValueError::InvalidRequest);
+        }
+        Ok(Self { tenant, lease })
+    }
+
+    pub(crate) const fn tenant(&self) -> &TenantScope {
+        &self.tenant
+    }
+
+    pub(crate) const fn lease(&self) -> &Lease {
+        &self.lease
+    }
+}
+
 /// One canonical secret name and its opaque runtime binding.
 #[derive(Clone, Eq, PartialEq)]
 pub struct IssuedLeasedJobSecretBinding {
@@ -627,6 +733,94 @@ pub enum JobEnvironmentGateState {
     Cancelled,
 }
 
+/// Durable pre-lease phase of one attempt's environment gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobEnvironmentGatePhase {
+    /// Activation evidence has not yet been applied to the gate.
+    SelectionPending,
+    /// A protected environment awaits review.
+    Waiting,
+    /// Approval is complete and credential names can be resolved.
+    Resolving,
+    /// Every value-free selection is complete and current.
+    Ready,
+    /// The gate is terminal and must never be leased.
+    Terminal,
+}
+
+/// Value-free durable evidence used by the bounded pre-scheduling gate pass.
+#[derive(Clone, Eq, PartialEq)]
+pub struct JobEnvironmentGateSnapshot {
+    phase: JobEnvironmentGatePhase,
+    activation: Option<JobEnvironmentActivationEvidence>,
+    runtime_context_digest: Sha256Digest,
+    created_at: UnixMillis,
+    variable_reference_count: usize,
+}
+
+impl JobEnvironmentGateSnapshot {
+    /// Constructs a value-free snapshot returned by a repository adapter.
+    #[must_use]
+    pub const fn new(
+        phase: JobEnvironmentGatePhase,
+        activation: Option<JobEnvironmentActivationEvidence>,
+        runtime_context_digest: Sha256Digest,
+        created_at: UnixMillis,
+        variable_reference_count: usize,
+    ) -> Self {
+        Self {
+            phase,
+            activation,
+            runtime_context_digest,
+            created_at,
+            variable_reference_count,
+        }
+    }
+
+    /// Returns the durable gate phase.
+    #[must_use]
+    pub const fn phase(&self) -> JobEnvironmentGatePhase {
+        self.phase
+    }
+
+    /// Returns activation-derived selection evidence when this gate needs it.
+    #[must_use]
+    pub const fn activation(&self) -> Option<&JobEnvironmentActivationEvidence> {
+        self.activation.as_ref()
+    }
+
+    /// Returns the immutable runtime-context digest bound to this attempt.
+    #[must_use]
+    pub const fn runtime_context_digest(&self) -> Sha256Digest {
+        self.runtime_context_digest
+    }
+
+    /// Returns the durable gate creation time.
+    #[must_use]
+    pub const fn created_at(&self) -> UnixMillis {
+        self.created_at
+    }
+
+    /// Returns the count of statically referenced workflow variables.
+    #[must_use]
+    pub const fn variable_reference_count(&self) -> usize {
+        self.variable_reference_count
+    }
+}
+
+impl fmt::Debug for JobEnvironmentGateSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JobEnvironmentGateSnapshot")
+            .field("phase", &self.phase)
+            .field("has_activation_evidence", &self.activation.is_some())
+            .field("runtime_context_digest", &self.runtime_context_digest)
+            .field("created_at", &self.created_at)
+            .field("variable_reference_count", &self.variable_reference_count)
+            .finish()
+    }
+}
+
 /// Invalid protected-environment request metadata.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ProtectedEnvironmentValueError {
@@ -667,6 +861,13 @@ pub enum ProtectedEnvironmentStoreError {
 /// Persistence boundary for selection, review, resolution, and lease binding.
 #[async_trait]
 pub trait ProtectedEnvironmentRepository: fmt::Debug + Send + Sync {
+    /// Loads value-free activation evidence and the current pre-lease gate phase.
+    async fn inspect_job_environment_gate(
+        &self,
+        tenant: &TenantScope,
+        attempt_id: AttemptId,
+    ) -> Result<JobEnvironmentGateSnapshot, ProtectedEnvironmentStoreError>;
+
     /// Selects an environment and creates revision-pinned approval evidence when required.
     async fn prepare_job_environment(
         &self,
@@ -696,6 +897,12 @@ pub trait ProtectedEnvironmentRepository: fmt::Debug + Send + Sync {
     async fn issue_leased_job_secret_grants(
         &self,
         request: IssueLeasedJobSecretGrants,
+    ) -> Result<Vec<IssuedLeasedJobSecretBinding>, ProtectedEnvironmentStoreError>;
+
+    /// Loads the exact canonical names and opaque bindings already issued for a live lease.
+    async fn inspect_leased_job_secret_bindings(
+        &self,
+        request: InspectLeasedJobSecretBindings,
     ) -> Result<Vec<IssuedLeasedJobSecretBinding>, ProtectedEnvironmentStoreError>;
 }
 

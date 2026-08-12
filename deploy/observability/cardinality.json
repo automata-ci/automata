@@ -558,6 +558,8 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
+                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
+                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -596,7 +598,7 @@
               ]
             }
           ],
-          "maximum_series": 585,
+          "maximum_series": 615,
           "name": "automata_ci_control_plane_http_request_duration_seconds",
           "type": "histogram",
           "unit": "seconds"
@@ -614,6 +616,8 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
+                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
+                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -652,7 +656,7 @@
               ]
             }
           ],
-          "maximum_series": 39,
+          "maximum_series": 41,
           "name": "automata_ci_control_plane_http_requests_in_flight",
           "type": "gauge"
         },
@@ -682,6 +686,8 @@
                 "/api/v1/auth/device/{operation}",
                 "/api/v1/direct-bindings",
                 "/api/v1/direct-bindings/{binding_id}",
+                "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns",
+                "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews",
                 "/api/v1/repositories/{repository_id}/secrets",
                 "/api/v1/repositories/{repository_id}/secrets/lookup",
                 "/api/v1/repositories/{repository_id}/secrets/{secret_id}",
@@ -731,7 +737,7 @@
               ]
             }
           ],
-          "maximum_series": 1872,
+          "maximum_series": 1968,
           "name": "automata_ci_control_plane_http_requests_total",
           "type": "counter"
         },

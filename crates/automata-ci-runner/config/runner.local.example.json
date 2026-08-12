@@ -73,6 +73,7 @@
     "init_path": "/usr/bin/catatonit",
     "seccomp_profile_path": "/usr/share/containers/seccomp.json",
     "job_container_engine": "attempt_scoped_docker_api",
+    "buildkit_runtime_image": null,
     "map_github_server_to_host_gateway": true
   },
   "executor": {

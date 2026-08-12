@@ -53,7 +53,8 @@
     "podman": {
       "description": "Ignored rootless Podman integration tests",
       "service_requirements": [
-        "Configured rootless Podman, helper binaries, state roots, and test images"
+        "Configured rootless Podman, helper binaries, state roots, and test images",
+        "Explicit Buildx live gate via AUTOMATA_LIVE_ROOTLESS_BUILDX=1 and a digest-pinned BuildKit image via AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE"
       ],
       "source_prefixes": []
     },

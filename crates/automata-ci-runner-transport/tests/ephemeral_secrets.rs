@@ -354,7 +354,7 @@ async fn response_status(sender: &mut RawSender, request: Request<RawBody>) -> S
 }
 
 async fn wait_until(predicate: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         while !predicate() {
             tokio::task::yield_now().await;
         }
@@ -1244,7 +1244,8 @@ async fn typed_client_rejects_noncanonical_ephemeral_response_heads() {
     ];
 
     for response_head in cases {
-        let (endpoint, server) = spawn_fixed_ephemeral_response_server(&pki, response_head).await;
+        let (endpoint, request_checked, server) =
+            spawn_fixed_ephemeral_response_server(&pki, response_head).await;
         let client = HyperRunnerEphemeralClient::new(
             &endpoint,
             &pki.client_tls(&pki.client),
@@ -1260,7 +1261,12 @@ async fn typed_client_rejects_noncanonical_ephemeral_response_heads() {
             .expect_err("noncanonical response head");
         assert_eq!(error.kind(), ClientErrorKind::InvalidResponse);
         assert_eq!(error.retry_class(), RetryClass::Never);
+        tokio::time::timeout(Duration::from_secs(5), request_checked)
+            .await
+            .expect("fixed peer request check deadline")
+            .expect("fixed peer validated the typed request");
         server.abort();
+        let _ = server.await;
     }
 }
 
@@ -1349,12 +1355,14 @@ struct FixedResponseHead {
 async fn spawn_fixed_ephemeral_response_server(
     pki: &TestPki,
     response_head: FixedResponseHead,
-) -> (Uri, JoinHandle<()>) {
+) -> (Uri, tokio::sync::oneshot::Receiver<()>, JoinHandle<()>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind fixed ephemeral peer");
     let address = listener.local_addr().expect("fixed peer address");
     let acceptor = TlsAcceptor::from(Arc::new(pki.raw_server_config()));
+    let (request_checked, request_checked_rx) = tokio::sync::oneshot::channel();
+    let request_checked = Arc::new(Mutex::new(Some(request_checked)));
     let task = tokio::spawn(async move {
         let Ok((tcp, _)) = listener.accept().await else {
             return;
@@ -1362,56 +1370,67 @@ async fn spawn_fixed_ephemeral_response_server(
         let Ok(tls) = acceptor.accept(tcp).await else {
             return;
         };
-        let service = service_fn(move |request: Request<hyper::body::Incoming>| async move {
-            assert_eq!(request.method(), Method::POST);
-            assert_eq!(request.version(), Version::HTTP_2);
-            assert_eq!(request.uri().scheme_str(), Some("https"));
-            assert!(request.uri().authority().is_some());
-            assert_eq!(request.uri().path(), EPHEMERAL_SECRETS_PATH);
-            assert_eq!(request.uri().query(), None);
-            assert_eq!(
-                request.headers().get(CONTENT_TYPE),
-                Some(&HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE))
-            );
-            assert_eq!(
-                request.headers().get(ACCEPT),
-                Some(&HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE))
-            );
-            assert_eq!(
-                request.headers().get(CACHE_CONTROL),
-                Some(&HeaderValue::from_static("no-store"))
-            );
-            assert_eq!(
-                request.headers().get(CONTENT_LENGTH),
-                Some(&HeaderValue::from(REQUEST_VALUE.len()))
-            );
+        let service_request_checked = Arc::clone(&request_checked);
+        let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+            let request_checked = Arc::clone(&service_request_checked);
+            async move {
+                assert_eq!(request.method(), Method::POST);
+                assert_eq!(request.version(), Version::HTTP_2);
+                assert_eq!(request.uri().scheme_str(), Some("https"));
+                assert!(request.uri().authority().is_some());
+                assert_eq!(request.uri().path(), EPHEMERAL_SECRETS_PATH);
+                assert_eq!(request.uri().query(), None);
+                assert_eq!(
+                    request.headers().get(CONTENT_TYPE),
+                    Some(&HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE))
+                );
+                assert_eq!(
+                    request.headers().get(ACCEPT),
+                    Some(&HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE))
+                );
+                assert_eq!(
+                    request.headers().get(CACHE_CONTROL),
+                    Some(&HeaderValue::from_static("no-store"))
+                );
+                assert_eq!(
+                    request.headers().get(CONTENT_LENGTH),
+                    Some(&HeaderValue::from(REQUEST_VALUE.len()))
+                );
+                if let Some(request_checked) = request_checked
+                    .lock()
+                    .expect("request check notification lock")
+                    .take()
+                {
+                    let _ = request_checked.send(());
+                }
 
-            let body = Bytes::from_static(RESPONSE_VALUE);
-            let mut response = Response::new(Full::new(body.clone()));
-            if let Some(content_type) = response_head.content_type {
-                response
-                    .headers_mut()
-                    .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-            }
-            if let Some(cache_control) = response_head.cache_control {
-                response
-                    .headers_mut()
-                    .insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
-                if response_head.duplicate_cache_control {
+                let body = Bytes::from_static(RESPONSE_VALUE);
+                let mut response = Response::new(Full::new(body.clone()));
+                if let Some(content_type) = response_head.content_type {
                     response
                         .headers_mut()
-                        .append(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+                        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
                 }
-            }
-            if let Some(content_encoding) = response_head.content_encoding {
+                if let Some(cache_control) = response_head.cache_control {
+                    response
+                        .headers_mut()
+                        .insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+                    if response_head.duplicate_cache_control {
+                        response
+                            .headers_mut()
+                            .append(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+                    }
+                }
+                if let Some(content_encoding) = response_head.content_encoding {
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_ENCODING, HeaderValue::from_static(content_encoding));
+                }
                 response
                     .headers_mut()
-                    .insert(CONTENT_ENCODING, HeaderValue::from_static(content_encoding));
+                    .insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+                Ok::<_, Infallible>(response)
             }
-            response
-                .headers_mut()
-                .insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
-            Ok::<_, Infallible>(response)
         });
         let mut builder = http2::Builder::new(TokioExecutor::new());
         builder.timer(TokioTimer::new());
@@ -1420,5 +1439,5 @@ async fn spawn_fixed_ephemeral_response_server(
     let endpoint = format!("https://{address}/")
         .parse()
         .expect("fixed peer endpoint");
-    (endpoint, task)
+    (endpoint, request_checked_rx, task)
 }

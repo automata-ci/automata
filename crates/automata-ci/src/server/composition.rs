@@ -64,14 +64,14 @@ use automata_ci_store::{
     RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
     RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
     RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
-    SecretMutationRecoveryRepository, TenantScope,
+    SecretMutationRecoveryRepository, TenantScope, WorkflowRerunRepository,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
     GithubAutonomousWorkflowPhaseExecutor, GithubWorkflowDispatchService,
     GithubWorkflowPlanVerifier, LogicalResultProjectionService, LogicalRunFinalizationService,
     ReusableWorkflowRuntimeService, SystemAdmissionClock, WorkflowAdmissionObserver,
-    WorkflowAdmissionService,
+    WorkflowAdmissionService, WorkflowRerunService,
 };
 use axum::Router;
 use bytes::Bytes;
@@ -104,6 +104,9 @@ use crate::app::{
     },
     human_auth_middleware::HumanRequestAuthentication,
     management_api::management_api_router,
+    protected_environment_review_api::{
+        ProtectedEnvironmentReviewApiBackend, protected_environment_review_api_router,
+    },
     publication_settings::publication_settings_router,
     repository_secrets::{
         OperationalRepositorySecretWebData, RepositorySecretWebData,
@@ -115,6 +118,7 @@ use crate::app::{
         SetupPageAvailabilityError, SetupPageAvailabilityState, WebData,
     },
     workflow_dispatch_api::{WorkflowDispatchApiBackend, workflow_dispatch_api_router},
+    workflow_rerun_api::{WorkflowRerunApiBackend, workflow_rerun_api_router},
 };
 
 use super::human_auth::HumanAuthRuntime;
@@ -122,6 +126,8 @@ use super::installation_setup::InstallationSetupService;
 use super::managed_secret_delivery::{
     LeasedManagedSecretBindingIssuer, ManagedSecretRunnerHandler,
 };
+use super::protected_environment_gate::ProtectedEnvironmentLeaseGate;
+use super::protected_environment_review::OperationalProtectedEnvironmentReviewBackend;
 use super::secret_cleanup::{
     BuiltinSecretCleanupLoop, BuiltinSecretCleanupPorts, SecretCleanupClock,
     SystemSecretCleanupClock,
@@ -130,6 +136,7 @@ use super::secret_custody::SecretCustodyVerifier;
 use super::secret_management::OperationalRepositorySecretBackend;
 use super::secret_mutation_recovery::{SecretMutationRecoveryLoop, SecretMutationRecoveryPorts};
 use super::workflow_dispatch::OperationalWorkflowDispatchBackend;
+use super::workflow_rerun::OperationalWorkflowRerunBackend;
 
 const MAX_TLS_CERTIFICATES: usize = 32;
 const MAX_TLS_CERTIFICATE_DER_BYTES: usize = 1024 * 1024;
@@ -410,6 +417,12 @@ impl ProductionComponents {
         let control_ids: Arc<dyn ControlIdGenerator> = Arc::new(RandomControlIdGenerator);
         let scheduler: Arc<dyn SchedulerPolicy> = Arc::new(DeterministicScheduler);
 
+        let protected_environment_repository: Arc<dyn ProtectedEnvironmentRepository> =
+            store.clone();
+        let protected_environment_gate = Arc::new(ProtectedEnvironmentLeaseGate::new(
+            Arc::clone(&protected_environment_repository),
+            managed_secret_tenant.clone(),
+        ));
         let lease_repository: Arc<dyn automata_ci_control::LeasePollRepository> = store.clone();
         let lease_poller: Arc<dyn LeasePoller> = Arc::new(
             LeasePollAdapter::new(
@@ -419,6 +432,7 @@ impl ProductionComponents {
                 lease_ids,
                 LeasePollConfig::default(),
             )
+            .with_attempt_gate(protected_environment_gate)
             .with_observer(Arc::new(metrics.clone())),
         );
         let sessions: Arc<dyn RunnerSessionRepository> = store.clone();
@@ -439,9 +453,8 @@ impl ProductionComponents {
         let authorizer: Arc<dyn RunnerRegistrationAuthorizer> = authenticator.clone();
         let managed_secret_binding_issuer: Option<Arc<dyn ManagedSecretBindingIssuer>> =
             if secret_build.delivery_provider.is_some() {
-                let repository: Arc<dyn ProtectedEnvironmentRepository> = store.clone();
                 Some(Arc::new(LeasedManagedSecretBindingIssuer::new(
-                    repository,
+                    protected_environment_repository,
                     managed_secret_tenant,
                 )))
             } else {
@@ -1588,6 +1601,22 @@ async fn build_human_api(
         conformance_reads,
         conformance_deliveries,
         blob_store,
+    ));
+    let environment_reviews: Arc<dyn ProtectedEnvironmentRepository> = store.clone();
+    let environment_review_backend: Arc<dyn ProtectedEnvironmentReviewApiBackend> = Arc::new(
+        OperationalProtectedEnvironmentReviewBackend::new(environment_reviews),
+    );
+    router = router.merge(protected_environment_review_api_router(
+        environment_review_backend,
+        Arc::clone(runtime.clock()),
+    ));
+    let rerun_repository: Arc<dyn WorkflowRerunRepository> = store.clone();
+    let rerun_backend: Arc<dyn WorkflowRerunApiBackend> = Arc::new(
+        OperationalWorkflowRerunBackend::new(WorkflowRerunService::new(rerun_repository)),
+    );
+    router = router.merge(workflow_rerun_api_router(
+        rerun_backend,
+        Arc::clone(runtime.clock()),
     ));
     if let Some(secret_management) = secret_management {
         router = router.merge(repository_secret_api_router(

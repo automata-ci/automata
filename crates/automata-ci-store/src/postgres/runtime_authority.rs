@@ -50,6 +50,13 @@ const REVOCATION_OUTCOME_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.revocation-outcome.v4\0";
 const ENVELOPE_DIGEST_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-envelope.v1\0";
 
+pub(super) fn github_manifest_origin_is_closed(origin_kind: &str) -> bool {
+    matches!(
+        origin_kind,
+        "provider_delivery" | "scheduled_fire" | "workflow_rerun"
+    )
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The closed repository protocol is one atomic SQL adapter.
 impl GithubRuntimeAuthorityRepository for PostgresStore {
@@ -3758,14 +3765,14 @@ async fn lock_exact_private_runtime_authority(
 ) -> Result<bool, GithubRuntimeAuthorityStoreError> {
     if visibility == "public"
         && private_authority_id.is_none()
-        && matches!(origin_kind, "provider_delivery" | "scheduled_fire")
+        && github_manifest_origin_is_closed(origin_kind)
         && !origin_id.is_nil()
     {
         return Ok(true);
     }
     let Some(private_authority_id) = private_authority_id.filter(|_| {
         visibility == "private"
-            && matches!(origin_kind, "provider_delivery" | "scheduled_fire")
+            && github_manifest_origin_is_closed(origin_kind)
             && !origin_id.is_nil()
     }) else {
         return Ok(false);
@@ -4599,4 +4606,19 @@ fn is_revoke_owner_conflict(error: &sqlx::Error) -> bool {
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint)
         == Some("github_runtime_authority_revoke_owner_unique")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::github_manifest_origin_is_closed;
+
+    #[test]
+    fn manifest_origins_are_closed_and_exhaustive() {
+        for origin in ["provider_delivery", "scheduled_fire", "workflow_rerun"] {
+            assert!(github_manifest_origin_is_closed(origin));
+        }
+        for origin in ["", "manual", "workflow_rerun_unsealed"] {
+            assert!(!github_manifest_origin_is_closed(origin));
+        }
+    }
 }

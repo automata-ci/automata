@@ -86,7 +86,10 @@ def main() -> int:
     if not selected:
         print("error: ignored coverage command selected zero tests", file=sys.stderr)
         return 2
-    if len(selected) != len(set(selected)):
+    # A package-wide Cargo listing can contain the same unqualified function
+    # name in separate integration-test binaries. That is still two selected
+    # tests. Exact single-source inventories, however, must remain unique.
+    if arguments.policy is not None and len(selected) != len(set(selected)):
         raise ValueError("ignored coverage command listed a test more than once")
     if arguments.policy is not None:
         expected = exact_expected_tests(

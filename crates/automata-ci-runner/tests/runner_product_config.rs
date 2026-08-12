@@ -24,6 +24,7 @@ const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
 const PROFILE_DIGEST: &str = "60a170562937ab00b8772c088781620e38b8f5dbf3783f20a49197218d8cb6d4";
 const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:db8471ae0e6b77038961029f8e8620ae35eb3cdde21978ff831c251e0ec899dd";
 const SERVICE_PROXY_IMAGE: &str = "registry.example.test/automata/service-proxy@sha256:4d7a838e047d65bbf708d4fc315db9b3b91ae73c0d50459b519089c0713ff34b";
+const BUILDKIT_RUNTIME_IMAGE: &str = "registry.example.test/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777";
 
 #[test]
 fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
@@ -81,6 +82,14 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
         Some("/usr/bin/python3")
     );
     assert!(config.executor().toolchain().pwsh().is_none());
+    assert!(
+        config
+            .podman()
+            .expect("Podman config")
+            .buildkit_runtime()
+            .is_none(),
+        "the checked-in runner keeps BuildKit disabled until an operator supplies a local pin"
+    );
     assert!(
         !config
             .inventory()
@@ -637,6 +646,66 @@ fn service_proxy_image_is_optional_strict_and_bounds_registration_authority() {
         assert_eq!(error, RunnerProductConfigError::InvalidPodman);
         let diagnostic = format!("{error:?} {error}");
         assert!(!diagnostic.contains(invalid));
+    }
+}
+
+#[test]
+fn buildkit_runtime_is_optional_pinned_and_requires_the_attempt_api() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    let absent = parse_value(&value).expect("BuildKit may be disabled");
+    assert!(
+        absent
+            .podman()
+            .expect("Podman config")
+            .buildkit_runtime()
+            .is_none()
+    );
+    assert!(
+        !absent
+            .inventory()
+            .containers()
+            .features()
+            .contains(&ContainerFeature::BUILDKIT)
+    );
+
+    value["podman"]["buildkit_runtime_image"] = serde_json::json!(BUILDKIT_RUNTIME_IMAGE);
+    let configured = parse_value(&value).expect("immutable BuildKit runtime image");
+    assert_eq!(
+        configured
+            .podman()
+            .expect("Podman config")
+            .buildkit_runtime()
+            .expect("configured BuildKit runtime")
+            .image()
+            .reference(),
+        BUILDKIT_RUNTIME_IMAGE
+    );
+    assert!(
+        configured
+            .inventory()
+            .containers()
+            .features()
+            .contains(&ContainerFeature::BUILDKIT)
+    );
+
+    value["podman"]["job_container_engine"] = serde_json::json!("disabled");
+    assert_eq!(
+        parse_value(&value).expect_err("BuildKit without the attempt API must fail closed"),
+        RunnerProductConfigError::InvalidPodman
+    );
+    value["podman"]["job_container_engine"] = serde_json::json!("attempt_scoped_docker_api");
+
+    for invalid in [
+        "registry.example.test/buildkit/runtime:latest",
+        "registry.example.test/buildkit/runtime:reviewed@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "registry.example.test/buildkit/runtime@sha256:short",
+        "registry.example.test/buildkit/runtime@sha256:777777777777777777777777777777777777777777777777777777777777777G",
+    ] {
+        value["podman"]["buildkit_runtime_image"] = serde_json::json!(invalid);
+        let error = parse_value(&value).expect_err("invalid BuildKit pin must fail closed");
+        assert_eq!(error, RunnerProductConfigError::InvalidPodman);
+        assert!(!format!("{error:?} {error}").contains(invalid));
     }
 }
 

@@ -453,7 +453,7 @@ impl PodmanProductConfig {
         self.service_proxy_image.as_ref()
     }
 
-    /// Returns the optional immutable BuildKit runtime admitted for the
+    /// Returns the optional immutable `BuildKit` runtime admitted for the
     /// attempt-scoped Docker-compatible API.
     #[must_use]
     pub const fn buildkit_runtime(&self) -> Option<&automata_ci_sandbox_podman::BuildKitRuntime> {

@@ -112,7 +112,8 @@ async fn renewal_ack_is_replayable_but_never_authorizes_work() -> TestResult {
         seed_tenant(&database, &terminal.tenant).await?;
         admit_authenticated_fixture(&database, &mut terminal).await?;
         exercise_terminal_preparation(&database, &terminal).await?;
-        let terminal_instance = exercise_terminal_activation(&database, &terminal).await?;
+        let terminal_instance =
+            Box::pin(exercise_terminal_activation(&database, &terminal)).await?;
         exercise_terminal_materialization(&database, &terminal, &terminal_instance).await?;
 
         let mut quarantined_preparation =

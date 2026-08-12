@@ -55,7 +55,17 @@ impl SecretCustodyAcknowledger for PreExecutionAcknowledger {
 
 #[tokio::test]
 async fn complete_custody_is_masked_and_acknowledged_before_provider_work() {
-    let runtime_context = rich_runtime_context();
+    let runtime_context_with_bindings = rich_runtime_context();
+    let bindings = runtime_context_with_bindings.secrets().clone();
+    let runtime_context = JobRuntimeContext::new(
+        runtime_context_with_bindings.inputs().clone(),
+        runtime_context_with_bindings.vars().clone(),
+        runtime_context_with_bindings.matrix().clone(),
+        runtime_context_with_bindings.strategy(),
+        runtime_context_with_bindings.needs().clone(),
+        BTreeMap::new(),
+    )
+    .expect("secretless immutable context");
     let encoded = encode_runtime_context(&runtime_context);
     let reference = runtime_context_reference(&encoded);
     let content = Arc::new(RecordingContent::bytes(encoded));
@@ -70,7 +80,7 @@ async fn complete_custody_is_masked_and_acknowledged_before_provider_work() {
         provider: Arc::clone(&fixture.provider),
         calls: AtomicUsize::new(0),
     });
-    let fixture = fixture.with_custody_acknowledger(acknowledger.clone());
+    let fixture = fixture.with_managed_secret_custody(acknowledger.clone(), bindings);
     let job = envelope_with_runtime_context_reference(vec![minimal_step()], reference);
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 

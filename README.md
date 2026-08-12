@@ -91,6 +91,7 @@ boundaries.
 | Build from source and run the preview | [Getting started](docs/getting-started.md) |
 | Check whether a workflow feature is supported | [Compatibility](docs/compatibility.md) |
 | Configure login, permissions, and repository visibility | [Authentication and authorization](docs/authentication.md) |
+| Rerun a completed workflow safely | [Workflow reruns](docs/workflow-reruns.md) |
 | Start the durable control plane | [Control-plane setup](docs/deployment.md) |
 | Configure a Linux execution host | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
 | Understand the system design | [Architecture](docs/architecture.md) |

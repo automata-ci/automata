@@ -179,8 +179,10 @@ attempt, and fence; no runner-wide Results credential exists.
 
 Cache lookup checks the current ref first and then the server-owned default
 branch read-only. Entries expire after seven inactive days and a repository has
-a 10 GiB LRU quota. Artifact deletion, cache management, physical object
-collection, and BuildKit cache compatibility are not implemented. See the
+a 10 GiB LRU quota. Artifact deletion, cache management, and physical object
+collection are not implemented. The bounded Buildx/BuildKit session and
+provenance surface is implemented, but cache interoperability is not yet
+production-proven and live CacheService v2 acceptance remains open. See the
 [`automata-ci-results-github` reference](../automata-ci-results-github/README.md)
 for the tested protocol slices.
 
@@ -274,6 +276,34 @@ no runtime authority, and there is no fallback/default installation route.
 The mandatory autonomous worker supervises asynchronous logical preparation,
 activation, and materialization after admission; a successful receipt alone
 does not mean a runnable job has completed the end-to-end acceptance path.
+
+The same protected CLI session can request a durable workflow rerun:
+
+```console
+automata rerun --server-url https://ci.example.test \
+  automata-ci/automata \
+  20000000-0000-4000-8000-000000000002 \
+  --selection entire-workflow
+```
+
+The command supports failed-job and exact job closures, keeps one operation ID
+across bounded retries, and prints that ID for safe exact replay. See the
+[workflow-rerun guide](../../docs/workflow-reruns.md) for the complete contract.
+
+A current protected-environment reviewer can also record one exact decision for
+a repository and gated job attempt:
+
+```console
+automata environment-review --server-url https://ci.example.test \
+  aaaaaaaa-1111-4111-8111-111111111111 \
+  22222222-2222-4222-8222-222222222222 \
+  --decision approve --output json
+```
+
+The command uses the same Secret Service-only CLI session custody, accepts
+`approve` or `reject`, and returns only the closed gate state. It does not retry
+the mutation automatically; an indeterminate result must be inspected before
+the exact same decision is retried.
 
 ## GitHub provider registry
 
@@ -395,6 +425,9 @@ zeroizing execution-local custody, registers every value with output masking,
 and only then acknowledges delivery. The bearer and plaintext never enter
 `JobIR`, the command outbox, the runner journal/spool, or PostgreSQL plaintext
 columns. External and dynamically leased providers remain unsupported.
+Variable-value custody is also not implemented; jobs declaring variable
+references remain unleaseable at both the scheduler gate and PostgreSQL lease
+transition instead of treating durable variable-version selectors as values.
 
 The built-in path now fails closed at restart, periodic readiness, and every
 write boundary. Immutable authenticated canaries prove the loaded bytes for the

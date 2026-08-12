@@ -4,19 +4,32 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
-use sqlx::{PgPool, Postgres, Row as _, Transaction};
+use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
-    BindLeasedJobSecrets, IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding,
-    JobEnvironmentGateState, PrepareJobEnvironment, ProtectedEnvironmentRepository,
-    ProtectedEnvironmentStoreError, ReviewJobEnvironment, StoreError, TenantScope,
+    BindLeasedJobSecrets, DeploymentEnvironmentName, InspectLeasedJobSecretBindings,
+    IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding, JobEnvironmentActivationEvidence,
+    JobEnvironmentGatePhase, JobEnvironmentGateSnapshot, JobEnvironmentGateState, JobEventTrust,
+    JobSourceKind, PrepareJobEnvironment, ProtectedEnvironmentRepository,
+    ProtectedEnvironmentStoreError, ReusableSecretPermission, ReviewJobEnvironment, StoreError,
+    TenantScope,
 };
 
-use super::PostgresStore;
+use super::{PostgresStore, secret_management::authorize_human_repository_action};
+
+const PROTECTED_ENVIRONMENT_REVIEW_PERMISSION: &str = "environments:approve";
 
 #[async_trait]
 impl ProtectedEnvironmentRepository for PostgresStore {
+    async fn inspect_job_environment_gate(
+        &self,
+        tenant: &TenantScope,
+        attempt_id: automata_ci_core::AttemptId,
+    ) -> Result<JobEnvironmentGateSnapshot, ProtectedEnvironmentStoreError> {
+        inspect_job_environment_gate(&self.pool, tenant, attempt_id.as_uuid()).await
+    }
+
     async fn prepare_job_environment(
         &self,
         request: PrepareJobEnvironment,
@@ -52,11 +65,191 @@ impl ProtectedEnvironmentRepository for PostgresStore {
     ) -> Result<Vec<IssuedLeasedJobSecretBinding>, ProtectedEnvironmentStoreError> {
         issue_leased_job_secret_grants(&self.pool, request).await
     }
+
+    async fn inspect_leased_job_secret_bindings(
+        &self,
+        request: InspectLeasedJobSecretBindings,
+    ) -> Result<Vec<IssuedLeasedJobSecretBinding>, ProtectedEnvironmentStoreError> {
+        inspect_leased_job_secret_bindings(&self.pool, request).await
+    }
+}
+
+async fn inspect_job_environment_gate(
+    pool: &PgPool,
+    tenant: &TenantScope,
+    attempt_id: Uuid,
+) -> Result<JobEnvironmentGateSnapshot, ProtectedEnvironmentStoreError> {
+    let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let row = sqlx::query(
+        r"
+        SELECT gate.state, gate.created_at_ms, gate.approval_request_id,
+               concrete.runtime_context_digest,
+               cardinality(job.variable_reference_names) AS variable_reference_count,
+               evidence.environment_normalized_name AS gate_environment,
+               evidence.event_trust AS gate_event_trust,
+               evidence.source_kind AS gate_source_kind,
+               evidence.reusable_secret_permission AS gate_reusable_permission
+        FROM job_environment_gates AS gate
+        JOIN workflow_plan_v2_concrete_jobs AS concrete
+          ON concrete.instance_id = gate.instance_id AND concrete.job_id = gate.job_id
+        JOIN workflow_plan_v2_jobs AS job
+          ON job.run_id = gate.run_id AND job.invocation_id = gate.invocation_id
+         AND job.id = gate.logical_job_id
+        JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
+        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+          ON evidence.instance_id = gate.instance_id
+        WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
+          AND attempt.lifecycle = 'queued'
+        FOR UPDATE OF gate, attempt
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(attempt_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
+    let mut state: String = row.try_get("state").map_err(operation_error)?;
+    if state == "waiting" {
+        let approval_id: Option<Uuid> = row
+            .try_get("approval_request_id")
+            .map_err(operation_error)?;
+        let approval_id = approval_id.ok_or(ProtectedEnvironmentStoreError::CorruptData)?;
+        let approval = sqlx::query(
+            r"
+            SELECT status, expires_at_ms
+            FROM protected_environment_approval_requests
+            WHERE tenant_id = $1 AND id = $2
+            FOR UPDATE
+            ",
+        )
+        .bind(tenant.as_str())
+        .bind(approval_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(operation_error)?
+        .ok_or(ProtectedEnvironmentStoreError::CorruptData)?;
+        let approval_status: String = approval.try_get("status").map_err(operation_error)?;
+        let expires_at_ms: i64 = approval.try_get("expires_at_ms").map_err(operation_error)?;
+        if approval_status != "pending" {
+            return Err(ProtectedEnvironmentStoreError::CorruptData);
+        }
+        let database_now_ms = database_now(&mut transaction).await?;
+        if database_now_ms >= expires_at_ms {
+            expire_gate(
+                &mut transaction,
+                tenant,
+                attempt_id,
+                approval_id,
+                database_now_ms,
+            )
+            .await?;
+            state = "expired".to_owned();
+        }
+    }
+    let phase = match state.as_str() {
+        "selection_pending" => JobEnvironmentGatePhase::SelectionPending,
+        "waiting" => JobEnvironmentGatePhase::Waiting,
+        "resolving" => JobEnvironmentGatePhase::Resolving,
+        "ready" => JobEnvironmentGatePhase::Ready,
+        "rejected" | "expired" | "cancelled" => JobEnvironmentGatePhase::Terminal,
+        "unclassified" => return Err(ProtectedEnvironmentStoreError::AuthorityRejected),
+        _ => return Err(ProtectedEnvironmentStoreError::CorruptData),
+    };
+    let activation = decode_job_environment_activation_evidence(&row).map_err(|error| {
+        if matches!(error, StoreError::CorruptData(_)) {
+            ProtectedEnvironmentStoreError::CorruptData
+        } else {
+            ProtectedEnvironmentStoreError::Operation(error)
+        }
+    })?;
+    let runtime_context_digest = crate::value::decode_sha256_digest(
+        row.try_get::<Vec<u8>, _>("runtime_context_digest")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    let variable_reference_count = usize::try_from(
+        row.try_get::<i32, _>("variable_reference_count")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    let snapshot = JobEnvironmentGateSnapshot::new(
+        phase,
+        activation,
+        runtime_context_digest,
+        automata_ci_core::UnixMillis::new(row.try_get("created_at_ms").map_err(operation_error)?),
+        variable_reference_count,
+    );
+    transaction.commit().await.map_err(operation_error)?;
+    Ok(snapshot)
+}
+
+pub(super) fn decode_job_environment_activation_evidence(
+    row: &PgRow,
+) -> Result<Option<JobEnvironmentActivationEvidence>, StoreError> {
+    let environment: Option<String> = row
+        .try_get("gate_environment")
+        .map_err(StoreError::operation)?;
+    let event_trust: Option<String> = row
+        .try_get("gate_event_trust")
+        .map_err(StoreError::operation)?;
+    let source_kind: Option<String> = row
+        .try_get("gate_source_kind")
+        .map_err(StoreError::operation)?;
+    let reusable_permission: Option<String> = row
+        .try_get("gate_reusable_permission")
+        .map_err(StoreError::operation)?;
+    match (environment, event_trust, source_kind, reusable_permission) {
+        (environment, Some(event_trust), Some(source_kind), Some(reusable_permission)) => {
+            let environment = environment
+                .map(DeploymentEnvironmentName::new)
+                .transpose()
+                .map_err(|_| StoreError::corrupt_data("invalid activation environment name"))?;
+            let event_trust = match event_trust.as_str() {
+                "trusted" => JobEventTrust::Trusted,
+                "untrusted" => JobEventTrust::Untrusted,
+                _ => return Err(StoreError::corrupt_data("invalid activation event trust")),
+            };
+            let source_kind = match source_kind.as_str() {
+                "same_repository" => JobSourceKind::SameRepository,
+                "fork" => JobSourceKind::Fork,
+                "dependabot" => JobSourceKind::Dependabot,
+                _ => return Err(StoreError::corrupt_data("invalid activation source kind")),
+            };
+            if source_kind != JobSourceKind::SameRepository
+                && event_trust != JobEventTrust::Untrusted
+            {
+                return Err(StoreError::corrupt_data(
+                    "activation source trust is inconsistent",
+                ));
+            }
+            let reusable_permission = match reusable_permission.as_str() {
+                "none" => ReusableSecretPermission::None,
+                "explicit" => ReusableSecretPermission::Explicit,
+                _ => {
+                    return Err(StoreError::corrupt_data(
+                        "invalid activation reusable-secret permission",
+                    ));
+                }
+            };
+            Ok(Some(JobEnvironmentActivationEvidence::new(
+                environment,
+                event_trust,
+                source_kind,
+                reusable_permission,
+            )))
+        }
+        (None, None, None, None) => Ok(None),
+        _ => Err(StoreError::corrupt_data(
+            "partial activation environment evidence",
+        )),
+    }
 }
 
 #[derive(Debug)]
 struct GateRow {
     attempt_id: Uuid,
+    run_id: Uuid,
     repository_id: Uuid,
     state: String,
     requirement_kind: String,
@@ -93,17 +286,24 @@ async fn prepare_job_environment(
     .await?;
     verify_runtime_context(&gate, request.activation_context_digest().as_bytes())?;
     let database_now_ms = database_now(&mut transaction).await?;
+    let request_age_ms = database_now_ms
+        .checked_sub(request.requested_at().get())
+        .ok_or(ProtectedEnvironmentStoreError::AuthorityRejected)?;
     if request.requested_at().get() > database_now_ms
-        || database_now_ms - request.requested_at().get() > 60_000
+        || request_age_ms > 60_000
         || request.approval_expires_at().get() <= database_now_ms
     {
         return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
     }
-
     match gate.state.as_str() {
         "waiting" | "resolving" | "ready" | "rejected" | "expired" | "cancelled" => {
+            let requested_by_principal_id = if gate.approval_request_id.is_some() {
+                derive_requester_principal(&mut transaction, request.tenant(), &gate).await?
+            } else {
+                None
+            };
             let stored = load_prepare_replay(&mut transaction, &gate, request.tenant()).await?;
-            verify_prepare_replay(&stored, &request)?;
+            verify_prepare_replay(&stored, &request, requested_by_principal_id)?;
             transaction.commit().await.map_err(operation_error)?;
             return parse_gate_state(&gate.state);
         }
@@ -157,6 +357,11 @@ async fn prepare_job_environment(
             let protection_mode: String = environment
                 .try_get("protection_mode")
                 .map_err(operation_error)?;
+            let requested_by_principal_id = if protection_mode == "required_approvals" {
+                derive_requester_principal(&mut transaction, request.tenant(), &gate).await?
+            } else {
+                None
+            };
 
             if protection_mode == "required_approvals" {
                 sqlx::query(
@@ -184,7 +389,7 @@ async fn prepare_job_environment(
                 .bind(request.tenant().as_str())
                 .bind(environment_id)
                 .bind(request.approval_request_id())
-                .bind(request.requested_by_principal_id())
+                .bind(requested_by_principal_id)
                 .bind(database_now_ms)
                 .bind(request.approval_expires_at().get())
                 .execute(&mut *transaction)
@@ -248,65 +453,124 @@ async fn review_job_environment(
     request: ReviewJobEnvironment,
 ) -> Result<JobEnvironmentGateState, ProtectedEnvironmentStoreError> {
     let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let tenant = TenantScope::from_authenticated_tenant_id(request.actor().tenant_id().as_str())
+        .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    let actor = authorize_human_repository_action(
+        &mut transaction,
+        request.actor(),
+        PROTECTED_ENVIRONMENT_REVIEW_PERMISSION,
+        request.repository_id().as_uuid(),
+    )
+    .await
+    .map_err(human_action_error)?
+    .ok_or(ProtectedEnvironmentStoreError::AuthorityRejected)?;
+    if actor.tenant_id != request.actor().tenant_id().as_str()
+        || actor.principal_id.hyphenated().to_string() != request.actor().principal_id().as_str()
+        || actor.session_id.hyphenated().to_string() != request.actor().session_id().as_str()
+        || i64::try_from(request.actor().authorization_revision().value()).ok()
+            != Some(actor.authorization_revision)
+    {
+        return Err(ProtectedEnvironmentStoreError::CorruptData);
+    }
     let gate = sqlx::query(
         r"
-        SELECT approval_request_id, state
+        SELECT repository_id, approval_request_id, state
         FROM job_environment_gates
         WHERE tenant_id = $1 AND attempt_id = $2
         FOR UPDATE
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(request.attempt_id().as_uuid())
     .fetch_optional(&mut *transaction)
     .await
     .map_err(operation_error)?
     .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
+    let repository_id: Uuid = gate.try_get("repository_id").map_err(operation_error)?;
+    if repository_id != request.repository_id().as_uuid() {
+        return Err(ProtectedEnvironmentStoreError::NotFound);
+    }
     let state: String = gate.try_get("state").map_err(operation_error)?;
     let approval_id: Option<Uuid> = gate
         .try_get("approval_request_id")
         .map_err(operation_error)?;
-    let approval_id = approval_id.ok_or(ProtectedEnvironmentStoreError::AuthorityRejected)?;
     if state != "waiting" {
+        let state = parse_gate_state(&state).map_err(|error| {
+            if state == "selection_pending" {
+                ProtectedEnvironmentStoreError::Conflict
+            } else {
+                error
+            }
+        })?;
+        let approval_id = approval_id.ok_or(ProtectedEnvironmentStoreError::Conflict)?;
+        let existing = existing_review_decision(
+            &mut transaction,
+            &tenant,
+            approval_id,
+            actor.principal_id,
+        )
+        .await?;
+        if existing.as_deref() != Some(request.decision().as_str()) {
+            return Err(ProtectedEnvironmentStoreError::Conflict);
+        }
         transaction.commit().await.map_err(operation_error)?;
-        return parse_gate_state(&state);
+        return Ok(state);
     }
+    let approval_id = approval_id.ok_or(ProtectedEnvironmentStoreError::CorruptData)?;
 
     let request_row = sqlx::query(
         r"
-        SELECT status, required_approvals, expires_at_ms
+        SELECT repository_id, environment_id, environment_revision, status,
+               required_approvals, prevent_self_review,
+               requested_by_principal_id, expires_at_ms
         FROM protected_environment_approval_requests
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(approval_id)
     .fetch_optional(&mut *transaction)
     .await
     .map_err(operation_error)?
     .ok_or(ProtectedEnvironmentStoreError::CorruptData)?;
+    let approval_repository_id: Uuid = request_row
+        .try_get("repository_id")
+        .map_err(operation_error)?;
+    let environment_id: Uuid = request_row
+        .try_get("environment_id")
+        .map_err(operation_error)?;
+    let environment_revision: i64 = request_row
+        .try_get("environment_revision")
+        .map_err(operation_error)?;
     let status: String = request_row.try_get("status").map_err(operation_error)?;
     let required: i16 = request_row
         .try_get("required_approvals")
         .map_err(operation_error)?;
+    let prevent_self_review: bool = request_row
+        .try_get("prevent_self_review")
+        .map_err(operation_error)?;
+    let requested_by_principal_id: Option<Uuid> = request_row
+        .try_get("requested_by_principal_id")
+        .map_err(operation_error)?;
     let expires_at_ms: i64 = request_row
         .try_get("expires_at_ms")
         .map_err(operation_error)?;
+    if approval_repository_id != repository_id
+        || environment_id.is_nil()
+        || environment_revision <= 0
+        || required <= 0
+    {
+        return Err(ProtectedEnvironmentStoreError::CorruptData);
+    }
     let database_now_ms = database_now(&mut transaction).await?;
     if status != "pending" {
-        transaction.commit().await.map_err(operation_error)?;
-        return gate_state_after_environment(
-            pool,
-            request.tenant(),
-            request.attempt_id().as_uuid(),
-        )
-        .await;
+        return Err(ProtectedEnvironmentStoreError::CorruptData);
     }
     if database_now_ms >= expires_at_ms {
         expire_gate(
             &mut transaction,
-            request.tenant(),
+            &tenant,
             request.attempt_id().as_uuid(),
             approval_id,
             database_now_ms,
@@ -325,33 +589,23 @@ async fn review_job_environment(
         ON CONFLICT (tenant_id, request_id, principal_id) DO NOTHING
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(approval_id)
-    .bind(request.principal_id())
+    .bind(actor.principal_id)
     .bind(decision)
-    .bind(request.decided_at().get())
+    .bind(database_now_ms)
     .execute(&mut *transaction)
     .await
-    .map_err(operation_error)?;
+    .map_err(review_operation_error)?;
     if inserted.rows_affected() == 0 {
-        let existing: Option<(String, i64)> = sqlx::query_as(
-            r"
-            SELECT decision, decided_at_ms FROM protected_environment_approval_decisions
-            WHERE tenant_id = $1 AND request_id = $2 AND principal_id = $3
-            ",
+        let existing = existing_review_decision(
+            &mut transaction,
+            &tenant,
+            approval_id,
+            actor.principal_id,
         )
-        .bind(request.tenant().as_str())
-        .bind(approval_id)
-        .bind(request.principal_id())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if existing
-            .as_ref()
-            .is_none_or(|(stored_decision, stored_at_ms)| {
-                stored_decision != decision || *stored_at_ms != request.decided_at().get()
-            })
-        {
+        .await?;
+        if existing.as_deref() != Some(decision) {
             return Err(ProtectedEnvironmentStoreError::Conflict);
         }
     }
@@ -361,11 +615,18 @@ async fn review_job_environment(
         SELECT EXISTS (
             SELECT 1 FROM protected_environment_approval_decisions
             WHERE tenant_id = $1 AND request_id = $2 AND decision = 'reject'
+              AND automata_environment_reviewer_assignment_is_current(
+                  $1, $3, $4, $5, principal_id, $6
+              )
         )
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(approval_id)
+    .bind(repository_id)
+    .bind(environment_id)
+    .bind(environment_revision)
+    .bind(database_now_ms)
     .fetch_one(&mut *transaction)
     .await
     .map_err(operation_error)?;
@@ -373,10 +634,23 @@ async fn review_job_environment(
         r"
         SELECT count(*) FROM protected_environment_approval_decisions
         WHERE tenant_id = $1 AND request_id = $2 AND decision = 'approve'
+          AND (
+              NOT $7
+              OR ($8::UUID IS NOT NULL AND principal_id <> $8)
+          )
+          AND automata_environment_reviewer_assignment_is_current(
+              $1, $3, $4, $5, principal_id, $6
+          )
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(approval_id)
+    .bind(repository_id)
+    .bind(environment_id)
+    .bind(environment_revision)
+    .bind(database_now_ms)
+    .bind(prevent_self_review)
+    .bind(requested_by_principal_id)
     .fetch_one(&mut *transaction)
     .await
     .map_err(operation_error)?;
@@ -389,7 +663,7 @@ async fn review_job_environment(
         transaction.commit().await.map_err(operation_error)?;
         return Ok(JobEnvironmentGateState::Waiting);
     };
-    sqlx::query(
+    let approval_update = sqlx::query(
         r"
         UPDATE protected_environment_approval_requests
         SET status = $3, resolved_at_ms = $4, resolution_reason = $5,
@@ -397,30 +671,56 @@ async fn review_job_environment(
         WHERE tenant_id = $1 AND id = $2 AND status = 'pending'
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(approval_id)
     .bind(approval_status)
     .bind(database_now_ms)
     .bind(reason)
     .execute(&mut *transaction)
     .await
-    .map_err(operation_error)?;
-    sqlx::query(
+    .map_err(review_operation_error)?;
+    if approval_update.rows_affected() != 1 {
+        return Err(ProtectedEnvironmentStoreError::Conflict);
+    }
+    let gate_update = sqlx::query(
         r"
         UPDATE job_environment_gates
         SET state = $3, updated_at_ms = $4, revision = revision + 1
         WHERE tenant_id = $1 AND attempt_id = $2 AND state = 'waiting'
         ",
     )
-    .bind(request.tenant().as_str())
+    .bind(tenant.as_str())
     .bind(request.attempt_id().as_uuid())
     .bind(gate_status)
     .bind(database_now_ms)
     .execute(&mut *transaction)
     .await
-    .map_err(operation_error)?;
+    .map_err(review_operation_error)?;
+    if gate_update.rows_affected() != 1 {
+        return Err(ProtectedEnvironmentStoreError::Conflict);
+    }
     transaction.commit().await.map_err(operation_error)?;
     parse_gate_state(gate_status)
+}
+
+async fn existing_review_decision(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantScope,
+    approval_id: Uuid,
+    principal_id: Uuid,
+) -> Result<Option<String>, ProtectedEnvironmentStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT decision FROM protected_environment_approval_decisions
+        WHERE tenant_id = $1 AND request_id = $2 AND principal_id = $3
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(approval_id)
+    .bind(principal_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)
 }
 
 #[allow(clippy::too_many_lines)] // One transaction makes the complete resolution immutable.
@@ -542,6 +842,16 @@ async fn resolve_job_credentials(
             JOIN job_environment_gates AS gate ON gate.attempt_id = $1
             WHERE secret.tenant_id = gate.tenant_id
               AND secret.canonical_name = $2
+              AND (
+                  gate.invocation_kind = 'direct'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM workflow_plan_v2_reusable_secret_bindings AS binding
+                      WHERE binding.run_id = gate.run_id
+                        AND binding.invocation_id = gate.invocation_id
+                        AND upper(binding.target_name) = $2
+                  )
+              )
               AND automata_secret_is_available_to_gate(secret, policy, gate)
             ORDER BY CASE secret.scope_kind
                 WHEN 'environment' THEN 0 WHEN 'repository' THEN 1 ELSE 2 END
@@ -788,7 +1098,8 @@ async fn issue_leased_job_secret_grants(
             source_kind.as_str(),
             "same_repository" | "fork" | "dependabot"
         )
-        || (invocation_kind == "reusable" && reusable_permission != "explicit")
+        || !matches!(invocation_kind.as_str(), "direct" | "reusable")
+        || !matches!(reusable_permission.as_str(), "none" | "explicit")
     {
         return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
     }
@@ -812,6 +1123,13 @@ async fn issue_leased_job_secret_grants(
             .fetch_one(&mut *transaction)
             .await
             .map_err(operation_error)?;
+    if !secret_selection_permission_allows_issue(
+        &invocation_kind,
+        &reusable_permission,
+        expected_count,
+    ) {
+        return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
+    }
     let selections = sqlx::query(
         r"
         SELECT selection.canonical_name, selection.secret_id,
@@ -1073,6 +1391,142 @@ async fn issue_leased_job_secret_grants(
     Ok(issued)
 }
 
+fn secret_selection_permission_allows_issue(
+    invocation_kind: &str,
+    reusable_permission: &str,
+    selected_secret_count: i64,
+) -> bool {
+    match (invocation_kind, reusable_permission) {
+        ("direct", "none") => true,
+        ("reusable", "explicit") => true,
+        ("reusable", "none") => selected_secret_count == 0,
+        _ => false,
+    }
+}
+
+async fn inspect_leased_job_secret_bindings(
+    pool: &PgPool,
+    request: InspectLeasedJobSecretBindings,
+) -> Result<Vec<IssuedLeasedJobSecretBinding>, ProtectedEnvironmentStoreError> {
+    let lease = request.lease();
+    let fence = i64::try_from(lease.fencing_token().get())
+        .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    let mut transaction = pool.begin().await.map_err(operation_error)?;
+    let counts = sqlx::query(
+        r"
+        SELECT gate.state, attempt.lifecycle, attempt.lease_id,
+               attempt.fencing_token, attempt.runner_id,
+               attempt.lease_issued_at_ms, attempt.lease_expires_at_ms,
+               (SELECT count(*) FROM job_secret_selections AS selection
+                WHERE selection.attempt_id = gate.attempt_id) AS selected_secret_count,
+               (SELECT count(*) FROM job_secret_bindings AS binding
+                WHERE binding.attempt_id = gate.attempt_id) AS issued_binding_count
+        FROM job_environment_gates AS gate
+        JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
+        WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
+        FOR SHARE OF gate, attempt
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(lease.attempt_id().as_uuid())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
+    let state: String = counts.try_get("state").map_err(operation_error)?;
+    let lifecycle: String = counts.try_get("lifecycle").map_err(operation_error)?;
+    let lease_id: Option<Uuid> = counts.try_get("lease_id").map_err(operation_error)?;
+    let stored_fence: i64 = counts.try_get("fencing_token").map_err(operation_error)?;
+    let runner_id: Option<Uuid> = counts.try_get("runner_id").map_err(operation_error)?;
+    let issued_at: Option<i64> = counts
+        .try_get("lease_issued_at_ms")
+        .map_err(operation_error)?;
+    let expires_at: Option<i64> = counts
+        .try_get("lease_expires_at_ms")
+        .map_err(operation_error)?;
+    if state != "ready"
+        || !matches!(lifecycle.as_str(), "leased" | "preparing" | "running")
+        || lease_id != Some(lease.lease_id().as_uuid())
+        || stored_fence != fence
+        || runner_id != Some(lease.runner_id().as_uuid())
+        || issued_at != Some(lease.issued_at().get())
+        || expires_at != Some(lease.expires_at().get())
+    {
+        return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
+    }
+    let selected_secret_count: i64 = counts
+        .try_get("selected_secret_count")
+        .map_err(operation_error)?;
+    let issued_binding_count: i64 = counts
+        .try_get("issued_binding_count")
+        .map_err(operation_error)?;
+    let rows = sqlx::query(
+        r"
+        SELECT binding.canonical_name, binding.grant_id,
+               grant.secret_version_id
+        FROM job_secret_bindings AS binding
+        JOIN job_secret_selections AS selection
+          ON selection.attempt_id = binding.attempt_id
+         AND selection.canonical_name = binding.canonical_name
+        JOIN secret_workload_grants AS grant
+          ON grant.tenant_id = binding.tenant_id
+         AND grant.id = binding.grant_id
+         AND grant.attempt_id = binding.attempt_id
+         AND grant.secret_id = selection.secret_id
+         AND grant.secret_version_id = selection.secret_version_id
+         AND grant.secret_version_number = selection.secret_version_number
+        WHERE binding.attempt_id = $1
+          AND binding.tenant_id = $2
+          AND binding.lease_id = $3
+          AND binding.fencing_token = $4
+          AND binding.binding_digest IS NOT DISTINCT FROM
+              automata_job_secret_binding_digest(
+                  binding.attempt_id, binding.canonical_name, binding.tenant_id,
+                  binding.grant_id, binding.lease_id, binding.fencing_token
+              )
+          AND grant.lease_id = $3
+          AND grant.fencing_token = $4
+          AND grant.issued_at_ms = $5
+          AND grant.expires_at_ms = $6
+          AND grant.grant_mode = 'readable_secret'
+          AND grant.status = 'active'
+        ORDER BY binding.canonical_name
+        LIMIT 257
+        FOR SHARE OF binding, selection, grant
+        ",
+    )
+    .bind(lease.attempt_id().as_uuid())
+    .bind(request.tenant().as_str())
+    .bind(lease.lease_id().as_uuid())
+    .bind(fence)
+    .bind(lease.issued_at().get())
+    .bind(lease.expires_at().get())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(operation_error)?;
+    let expected = usize::try_from(selected_secret_count)
+        .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    let issued = usize::try_from(issued_binding_count)
+        .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+    if expected > 256 || issued != expected || rows.len() != expected {
+        return Err(ProtectedEnvironmentStoreError::AuthorityRejected);
+    }
+    let bindings = rows
+        .into_iter()
+        .map(|row| {
+            let name: String = row.try_get("canonical_name").map_err(operation_error)?;
+            let grant_id: Uuid = row.try_get("grant_id").map_err(operation_error)?;
+            let version_id: Uuid = row.try_get("secret_version_id").map_err(operation_error)?;
+            let binding = automata_ci_core::SecretBinding::new(grant_id.hyphenated().to_string())
+                .and_then(|value| value.with_version_id(version_id.hyphenated().to_string()))
+                .map_err(|_| ProtectedEnvironmentStoreError::CorruptData)?;
+            Ok(IssuedLeasedJobSecretBinding::new(name, binding))
+        })
+        .collect::<Result<Vec<_>, ProtectedEnvironmentStoreError>>()?;
+    transaction.commit().await.map_err(operation_error)?;
+    Ok(bindings)
+}
+
 fn deterministic_grant_id(
     attempt_id: Uuid,
     secret_id: Uuid,
@@ -1122,7 +1576,8 @@ async fn lock_gate_for_prepare(
 ) -> Result<GateRow, ProtectedEnvironmentStoreError> {
     let row = sqlx::query(
         r"
-        SELECT gate.repository_id, gate.state, gate.environment_requirement_kind,
+        SELECT gate.run_id, gate.repository_id, gate.state,
+               gate.environment_requirement_kind,
                concrete.runtime_context_digest, gate.event_trust,
                gate.source_kind, gate.reusable_secret_permission,
                gate.approval_request_id
@@ -1143,6 +1598,7 @@ async fn lock_gate_for_prepare(
     .ok_or(ProtectedEnvironmentStoreError::NotFound)?;
     Ok(GateRow {
         attempt_id,
+        run_id: row.try_get("run_id").map_err(operation_error)?,
         repository_id: row.try_get("repository_id").map_err(operation_error)?,
         state: row.try_get("state").map_err(operation_error)?,
         requirement_kind: row
@@ -1160,6 +1616,173 @@ async fn lock_gate_for_prepare(
             .try_get("approval_request_id")
             .map_err(operation_error)?,
     })
+}
+
+/// Resolves only immutable, exact human admission evidence for the gate's run.
+/// Provider webhooks and schedules intentionally return `None`: a display login
+/// is not a stable human identity and must never weaken self-review separation.
+async fn derive_requester_principal(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantScope,
+    gate: &GateRow,
+) -> Result<Option<Uuid>, ProtectedEnvironmentStoreError> {
+    let rerun = sqlx::query(
+        r"
+        SELECT rerun.actor_principal_id, rerun.actor_session_id,
+               rerun.authorization_revision, rerun.committed_at_ms,
+               evidence.recorded_at_ms, audit.occurred_at_ms,
+               audit.actor_kind, audit.actor_principal_id AS audit_principal_id,
+               audit.actor_session_id AS audit_session_id,
+               audit.authorization_revision AS audit_authorization_revision,
+               audit.action, audit.outcome, audit.resource_kind, audit.resource_id
+        FROM workflow_rerun_requests AS rerun
+        LEFT JOIN workflow_rerun_audit_evidence AS evidence
+          ON evidence.tenant_id = rerun.tenant_id
+         AND evidence.operation_id = rerun.operation_id
+         AND evidence.run_id = rerun.rerun_run_id
+        LEFT JOIN security_audit_events AS audit
+          ON audit.event_id = evidence.event_id
+         AND audit.tenant_id = rerun.tenant_id
+        WHERE rerun.tenant_id = $1
+          AND rerun.repository_id = $2
+          AND rerun.rerun_run_id = $3
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(gate.repository_id)
+    .bind(gate.run_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if let Some(row) = rerun {
+        let principal_id: Uuid = row.try_get("actor_principal_id").map_err(operation_error)?;
+        let session_id: Uuid = row.try_get("actor_session_id").map_err(operation_error)?;
+        let authorization_revision: i64 = row
+            .try_get("authorization_revision")
+            .map_err(operation_error)?;
+        let committed_at_ms: Option<i64> =
+            row.try_get("committed_at_ms").map_err(operation_error)?;
+        let expected_resource_id = gate.run_id.hyphenated().to_string();
+        let exact = !principal_id.is_nil()
+            && !session_id.is_nil()
+            && authorization_revision > 0
+            && committed_at_ms.is_some()
+            && row
+                .try_get::<Option<i64>, _>("recorded_at_ms")
+                .map_err(operation_error)?
+                == committed_at_ms
+            && row
+                .try_get::<Option<i64>, _>("occurred_at_ms")
+                .map_err(operation_error)?
+                == committed_at_ms
+            && row
+                .try_get::<Option<String>, _>("actor_kind")
+                .map_err(operation_error)?
+                .as_deref()
+                == Some("human")
+            && row
+                .try_get::<Option<Uuid>, _>("audit_principal_id")
+                .map_err(operation_error)?
+                == Some(principal_id)
+            && row
+                .try_get::<Option<Uuid>, _>("audit_session_id")
+                .map_err(operation_error)?
+                == Some(session_id)
+            && row
+                .try_get::<Option<i64>, _>("audit_authorization_revision")
+                .map_err(operation_error)?
+                == Some(authorization_revision)
+            && row
+                .try_get::<Option<String>, _>("action")
+                .map_err(operation_error)?
+                .as_deref()
+                == Some("workflow.rerun")
+            && row
+                .try_get::<Option<String>, _>("outcome")
+                .map_err(operation_error)?
+                .as_deref()
+                == Some("succeeded")
+            && row
+                .try_get::<Option<String>, _>("resource_kind")
+                .map_err(operation_error)?
+                .as_deref()
+                == Some("workflow_run")
+            && row
+                .try_get::<Option<String>, _>("resource_id")
+                .map_err(operation_error)?
+                .as_deref()
+                == Some(expected_resource_id.as_str());
+        return exact
+            .then_some(Some(principal_id))
+            .ok_or(ProtectedEnvironmentStoreError::CorruptData);
+    }
+
+    let rows = sqlx::query(
+        r"
+        SELECT run.event_name, run.actor, run.created_at_ms,
+               audit.actor_kind, audit.actor_principal_id,
+               audit.actor_session_id, audit.authorization_revision,
+               audit.occurred_at_ms, audit.outcome
+        FROM repositories AS repository
+        JOIN workflow_runs AS run ON run.repository_id = repository.id
+        LEFT JOIN security_audit_events AS audit
+          ON audit.tenant_id = repository.tenant_id
+         AND audit.action = 'workflow.dispatch'
+         AND audit.resource_kind = 'workflow_run'
+         AND audit.resource_id = run.id::TEXT
+        WHERE repository.tenant_id = $1
+          AND repository.id = $2
+          AND run.id = $3
+        LIMIT 2
+        ",
+    )
+    .bind(tenant.as_str())
+    .bind(gate.repository_id)
+    .bind(gate.run_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if rows.is_empty() || rows.len() > 1 {
+        return Err(ProtectedEnvironmentStoreError::CorruptData);
+    }
+    let row = &rows[0];
+    let event_name: String = row.try_get("event_name").map_err(operation_error)?;
+    if event_name != "workflow_dispatch" {
+        return Ok(None);
+    }
+    let principal_id: Option<Uuid> = row.try_get("actor_principal_id").map_err(operation_error)?;
+    let run_actor: Option<String> = row.try_get("actor").map_err(operation_error)?;
+    let run_created_at_ms: i64 = row.try_get("created_at_ms").map_err(operation_error)?;
+    let expected_actor = principal_id.map(|id| id.hyphenated().to_string());
+    let exact = principal_id.is_some_and(|id| !id.is_nil())
+        && run_actor.as_deref() == expected_actor.as_deref()
+        && row
+            .try_get::<Option<String>, _>("actor_kind")
+            .map_err(operation_error)?
+            .as_deref()
+            == Some("human")
+        && row
+            .try_get::<Option<Uuid>, _>("actor_session_id")
+            .map_err(operation_error)?
+            .is_some_and(|id| !id.is_nil())
+        && row
+            .try_get::<Option<i64>, _>("authorization_revision")
+            .map_err(operation_error)?
+            .is_some_and(|revision| revision > 0)
+        && row
+            .try_get::<Option<i64>, _>("occurred_at_ms")
+            .map_err(operation_error)?
+            == Some(run_created_at_ms)
+        && row
+            .try_get::<Option<String>, _>("outcome")
+            .map_err(operation_error)?
+            .as_deref()
+            == Some("succeeded");
+    exact
+        .then_some(principal_id)
+        .flatten()
+        .map(Some)
+        .ok_or(ProtectedEnvironmentStoreError::CorruptData)
 }
 
 fn verify_runtime_context(
@@ -1219,6 +1842,7 @@ async fn load_prepare_replay(
 fn verify_prepare_replay(
     stored: &StoredPrepareReplay,
     request: &PrepareJobEnvironment,
+    requested_by_principal_id: Option<Uuid>,
 ) -> Result<(), ProtectedEnvironmentStoreError> {
     let environment_matches = match (
         stored.requirement_kind.as_str(),
@@ -1234,7 +1858,7 @@ fn verify_prepare_replay(
     let approval_matches = match stored.approval_request_id {
         Some(approval_id) => {
             approval_id == request.approval_request_id()
-                && stored.requested_by_principal_id == request.requested_by_principal_id()
+                && stored.requested_by_principal_id == requested_by_principal_id
                 && stored.approval_expires_at_ms == Some(request.approval_expires_at().get())
         }
         None => true,
@@ -1376,6 +2000,37 @@ fn operation_error(error: sqlx::Error) -> ProtectedEnvironmentStoreError {
     ProtectedEnvironmentStoreError::Operation(StoreError::operation(error))
 }
 
+fn human_action_error(error: StoreError) -> ProtectedEnvironmentStoreError {
+    match error {
+        operation @ StoreError::Operation(_) => {
+            ProtectedEnvironmentStoreError::Operation(operation)
+        }
+        StoreError::CorruptData(_) => ProtectedEnvironmentStoreError::CorruptData,
+        _ => ProtectedEnvironmentStoreError::CorruptData,
+    }
+}
+
+fn review_operation_error(error: sqlx::Error) -> ProtectedEnvironmentStoreError {
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint);
+    match constraint {
+        Some(
+            "protected_environment_approval_decisions_pending"
+            | "protected_environment_approval_decisions_current_policy"
+            | "protected_environment_approval_decisions_lifetime"
+            | "protected_environment_approval_decisions_reviewer"
+            | "protected_environment_approval_decisions_self_review"
+            | "protected_environment_approval_requester_required"
+            | "protected_environment_approval_resolution_current"
+            | "protected_environment_approval_resolution_proven"
+            | "protected_environment_approval_threshold_proven"
+            | "protected_environment_approval_rejection_proven",
+        ) => ProtectedEnvironmentStoreError::AuthorityRejected,
+        _ => operation_error(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use automata_ci_core::{AttemptId, Sha256Digest, UnixMillis};
@@ -1388,10 +2043,28 @@ mod tests {
     const REQUESTED_AT: i64 = 10;
     const EXPIRES_AT: i64 = 100;
 
+    #[test]
+    fn reusable_permission_is_required_only_when_secret_selection_is_nonempty() {
+        assert!(secret_selection_permission_allows_issue(
+            "reusable", "none", 0
+        ));
+        assert!(!secret_selection_permission_allows_issue(
+            "reusable", "none", 1
+        ));
+        assert!(secret_selection_permission_allows_issue(
+            "reusable", "explicit", 1
+        ));
+        assert!(secret_selection_permission_allows_issue(
+            "direct", "none", 1
+        ));
+        assert!(!secret_selection_permission_allows_issue(
+            "direct", "explicit", 0
+        ));
+    }
+
     fn prepare_request(
         environment: &str,
         approval_request_id: Uuid,
-        requested_by_principal_id: Option<Uuid>,
         approval_expires_at: i64,
         event_trust: JobEventTrust,
         source_kind: JobSourceKind,
@@ -1405,7 +2078,6 @@ mod tests {
             event_trust,
             source_kind,
             reusable_secret_permission,
-            requested_by_principal_id,
             approval_request_id,
             UnixMillis::new(REQUESTED_AT),
             UnixMillis::new(approval_expires_at),
@@ -1430,19 +2102,17 @@ mod tests {
         let exact = prepare_request(
             "Production",
             approval_request_id,
-            Some(requested_by_principal_id),
             EXPIRES_AT,
             JobEventTrust::Trusted,
             JobSourceKind::SameRepository,
             ReusableSecretPermission::None,
         );
-        assert!(verify_prepare_replay(&stored, &exact).is_ok());
+        assert!(verify_prepare_replay(&stored, &exact, Some(requested_by_principal_id)).is_ok());
 
         let mismatches = [
             prepare_request(
                 "staging",
                 approval_request_id,
-                Some(requested_by_principal_id),
                 EXPIRES_AT,
                 JobEventTrust::Trusted,
                 JobSourceKind::SameRepository,
@@ -1451,7 +2121,6 @@ mod tests {
             prepare_request(
                 "production",
                 Uuid::from_u128(4),
-                Some(requested_by_principal_id),
                 EXPIRES_AT,
                 JobEventTrust::Trusted,
                 JobSourceKind::SameRepository,
@@ -1460,16 +2129,6 @@ mod tests {
             prepare_request(
                 "production",
                 approval_request_id,
-                Some(Uuid::from_u128(5)),
-                EXPIRES_AT,
-                JobEventTrust::Trusted,
-                JobSourceKind::SameRepository,
-                ReusableSecretPermission::None,
-            ),
-            prepare_request(
-                "production",
-                approval_request_id,
-                Some(requested_by_principal_id),
                 EXPIRES_AT + 1,
                 JobEventTrust::Trusted,
                 JobSourceKind::SameRepository,
@@ -1478,7 +2137,6 @@ mod tests {
             prepare_request(
                 "production",
                 approval_request_id,
-                Some(requested_by_principal_id),
                 EXPIRES_AT,
                 JobEventTrust::Untrusted,
                 JobSourceKind::SameRepository,
@@ -1487,7 +2145,6 @@ mod tests {
             prepare_request(
                 "production",
                 approval_request_id,
-                Some(requested_by_principal_id),
                 EXPIRES_AT,
                 JobEventTrust::Trusted,
                 JobSourceKind::Fork,
@@ -1496,7 +2153,6 @@ mod tests {
             prepare_request(
                 "production",
                 approval_request_id,
-                Some(requested_by_principal_id),
                 EXPIRES_AT,
                 JobEventTrust::Trusted,
                 JobSourceKind::SameRepository,
@@ -1505,9 +2161,13 @@ mod tests {
         ];
         for mismatch in mismatches {
             assert!(matches!(
-                verify_prepare_replay(&stored, &mismatch),
+                verify_prepare_replay(&stored, &mismatch, Some(requested_by_principal_id)),
                 Err(ProtectedEnvironmentStoreError::Conflict)
             ));
         }
+        assert!(matches!(
+            verify_prepare_replay(&stored, &exact, Some(Uuid::from_u128(5))),
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
     }
 }

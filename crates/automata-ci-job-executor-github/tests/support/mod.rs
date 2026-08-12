@@ -21,8 +21,9 @@ use automata_ci_core::{
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle,
     JobOutputDefinition, JobPermissionRequest, JobResourceAllocation, JobRuntimeContext, JobSource,
     Lease, LeaseId, OperationId, ResourceCapacity, RunId, RunValueTemplates, RunnerId,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, StrategyContext, UnixMillis, ValueSource, ValueTemplate, WorkflowId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, StrategyContext, UnixMillis, ValueSource, ValueTemplate,
+    WorkflowId,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
@@ -220,6 +221,31 @@ impl Fixture {
         } = self;
         Self {
             executor: executor.with_secret_custody(Arc::new(FakeSecrets), acknowledger),
+            provider,
+            endpoint_state,
+            events,
+            environment,
+        }
+    }
+
+    pub fn with_managed_secret_custody(
+        self,
+        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
+        bindings: BTreeMap<String, SecretBinding>,
+    ) -> Self {
+        let Self {
+            executor,
+            provider,
+            endpoint_state,
+            events,
+            environment,
+        } = self;
+        Self {
+            executor: executor.with_managed_secret_custody(
+                Arc::new(FakeSecrets),
+                acknowledger,
+                bindings,
+            ),
             provider,
             endpoint_state,
             events,

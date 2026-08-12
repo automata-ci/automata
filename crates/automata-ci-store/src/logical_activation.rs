@@ -17,9 +17,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AdmissionObject, LogicalActivationPreparationReceipt, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES, ObjectKey,
-    ReusableWorkflowPermissionSnapshot, StoreError, TenantScope, WorkflowRuntimePolicyPin,
+    AdmissionObject, JobEnvironmentActivationEvidence, LogicalActivationPreparationReceipt,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, MAX_JOB_IR_BYTES,
+    ObjectKey, ReusableWorkflowPermissionSnapshot, StoreError, TenantScope,
+    WorkflowRuntimePolicyPin,
 };
 
 /// Maximum duration of one logical-job activation claim.
@@ -947,6 +948,7 @@ pub struct ActivatedLogicalInstanceDescriptor {
     workspace: String,
     job_ir: LogicalActivationObject,
     runtime_context: LogicalActivationObject,
+    environment_gate: Option<JobEnvironmentActivationEvidence>,
 }
 
 impl ActivatedLogicalInstanceDescriptor {
@@ -990,7 +992,15 @@ impl ActivatedLogicalInstanceDescriptor {
             workspace,
             job_ir,
             runtime_context,
+            environment_gate: None,
         })
+    }
+
+    /// Attaches value-free, activation-derived environment-gate evidence.
+    #[must_use]
+    pub fn with_environment_gate(mut self, evidence: JobEnvironmentActivationEvidence) -> Self {
+        self.environment_gate = Some(evidence);
+        self
     }
 
     #[allow(clippy::too_many_arguments)] // Mirrors one immutable durable descriptor row exactly.
@@ -1005,6 +1015,7 @@ impl ActivatedLogicalInstanceDescriptor {
         workspace: String,
         job_ir: LogicalActivationObject,
         runtime_context: LogicalActivationObject,
+        environment_gate: Option<JobEnvironmentActivationEvidence>,
     ) -> Result<Self, LogicalActivationValueError> {
         let maximum_instances = u32::try_from(MAX_LOGICAL_ACTIVATED_INSTANCES)
             .map_err(|_| LogicalActivationValueError::NoncanonicalMatrixInstances)?;
@@ -1028,6 +1039,7 @@ impl ActivatedLogicalInstanceDescriptor {
             workspace,
             job_ir,
             runtime_context,
+            environment_gate,
         })
     }
 
@@ -1071,6 +1083,12 @@ impl ActivatedLogicalInstanceDescriptor {
     #[must_use]
     pub const fn runtime_context(&self) -> &LogicalActivationObject {
         &self.runtime_context
+    }
+
+    /// Returns value-free activation evidence retained outside `JobIR`.
+    #[must_use]
+    pub const fn environment_gate(&self) -> Option<&JobEnvironmentActivationEvidence> {
+        self.environment_gate.as_ref()
     }
 }
 
@@ -1405,8 +1423,38 @@ pub(crate) fn rederive_publication_digest(
         hasher.update(workspace);
         hash_object(&mut hasher, instance.job_ir());
         hash_object(&mut hasher, instance.runtime_context());
+        hash_environment_gate(&mut hasher, instance.environment_gate());
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn hash_environment_gate(hasher: &mut Sha256, evidence: Option<&JobEnvironmentActivationEvidence>) {
+    let Some(evidence) = evidence else {
+        return;
+    };
+    hasher.update(b"automata.store.logical-activation-environment-gate.v1\0");
+    match evidence.environment() {
+        Some(environment) => {
+            hasher.update([1]);
+            let value = environment.normalized().as_bytes();
+            hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(value);
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update([match evidence.event_trust() {
+        crate::JobEventTrust::Trusted => 1,
+        crate::JobEventTrust::Untrusted => 2,
+    }]);
+    hasher.update([match evidence.source_kind() {
+        crate::JobSourceKind::SameRepository => 1,
+        crate::JobSourceKind::Fork => 2,
+        crate::JobSourceKind::Dependabot => 3,
+    }]);
+    hasher.update([match evidence.reusable_secret_permission() {
+        crate::ReusableSecretPermission::None => 1,
+        crate::ReusableSecretPermission::Explicit => 2,
+    }]);
 }
 
 fn hash_object(hasher: &mut Sha256, object: &LogicalActivationObject) {
@@ -1473,4 +1521,105 @@ fn validate_workspace(value: &str) -> Result<(), LogicalActivationValueError> {
         return Err(LogicalActivationValueError::InvalidWorkspace);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DeploymentEnvironmentName, JobEventTrust, JobSourceKind, ReusableSecretPermission,
+    };
+
+    fn activation_evidence(
+        event_trust: JobEventTrust,
+        source_kind: JobSourceKind,
+        reusable_secret_permission: ReusableSecretPermission,
+    ) -> JobEnvironmentActivationEvidence {
+        JobEnvironmentActivationEvidence::new(
+            Some(DeploymentEnvironmentName::new("Production").expect("environment")),
+            event_trust,
+            source_kind,
+            reusable_secret_permission,
+        )
+    }
+
+    fn instance(
+        evidence: Option<JobEnvironmentActivationEvidence>,
+    ) -> ActivatedLogicalInstanceDescriptor {
+        ActivatedLogicalInstanceDescriptor::from_durable(
+            LogicalWorkflowInstanceId::from_uuid(Uuid::from_u128(4)).expect("instance"),
+            RunId::from_uuid(Uuid::from_u128(1)),
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
+            LogicalWorkflowJobId::from_uuid(Uuid::from_u128(3)).expect("job"),
+            0,
+            1,
+            Sha256Digest::from_bytes([4; 32]),
+            "/work/job".to_owned(),
+            LogicalActivationObject::job_ir(
+                Sha256Digest::from_bytes([5; 32]),
+                ObjectKey::new("jobs/ir").expect("job IR key"),
+                1,
+            )
+            .expect("job IR"),
+            LogicalActivationObject::runtime_context(
+                Sha256Digest::from_bytes([6; 32]),
+                ObjectKey::new("jobs/context").expect("runtime-context key"),
+                1,
+            )
+            .expect("runtime context"),
+            evidence,
+        )
+        .expect("instance")
+    }
+
+    fn digest(instance: ActivatedLogicalInstanceDescriptor) -> Sha256Digest {
+        rederive_publication_digest(
+            RunId::from_uuid(Uuid::from_u128(1)),
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
+            LogicalWorkflowJobId::from_uuid(Uuid::from_u128(3)).expect("job"),
+            Sha256Digest::from_bytes([7; 32]),
+            true,
+            &[instance],
+        )
+    }
+
+    #[test]
+    fn activation_gate_evidence_is_retry_stable_and_digest_bound() {
+        let trusted = activation_evidence(
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+        );
+        let expected = digest(instance(Some(trusted.clone())));
+        assert_eq!(expected, digest(instance(Some(trusted))));
+
+        for substitution in [
+            Some(activation_evidence(
+                JobEventTrust::Untrusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::None,
+            )),
+            Some(activation_evidence(
+                JobEventTrust::Trusted,
+                JobSourceKind::Fork,
+                ReusableSecretPermission::None,
+            )),
+            Some(activation_evidence(
+                JobEventTrust::Trusted,
+                JobSourceKind::SameRepository,
+                ReusableSecretPermission::Explicit,
+            )),
+            None,
+        ] {
+            assert_ne!(expected, digest(instance(substitution)));
+        }
+    }
+
+    #[test]
+    fn evidence_free_descriptor_retains_legacy_publication_digest() {
+        assert_eq!(
+            digest(instance(None)).to_string(),
+            "a05f7087a3ced475fb5b9e37a66379be12793b004f4d104520fea8bf7c7fd1f1"
+        );
+    }
 }

@@ -14,12 +14,13 @@ use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimedLogicalJobActivation,
+    DeploymentEnvironmentName, JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
     LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LogicalActivationExecutionContext,
     LogicalActivationObject, LogicalActivationPublicationReceipt, LogicalActivationRepository,
     LogicalActivationStoreError, LogicalActivationValueError, LogicalActivationWorkerId,
     LogicalWorkQuarantineKind, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, PinnedWorkflowRuntimePolicy, PublishLogicalJobActivation,
-    StoreError, TenantScope,
+    ReusableSecretPermission, StoreError, TenantScope,
 };
 use automata_ci_workflow_github::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
 use bytes::Bytes;
@@ -637,6 +638,25 @@ impl GithubLogicalJobOrchestrationService {
         let Ok(profiles) = runtime_profile_catalog(prepared.runtime_policy()) else {
             return Ok(activation_relational_failure());
         };
+        let Ok((event_trust, source_kind)) =
+            github_job_source_evidence(&plan, prepared.execution(), &event_bytes)
+        else {
+            return Ok(activation_payload_failure());
+        };
+        let Ok(credential_requirements) =
+            crate::discover_job_credential_requirements(plan.logical(), &logical_job)
+        else {
+            return Ok(activation_payload_failure());
+        };
+        let reusable_secret_permission = reusable_secret_permission(
+            permission_ceiling.is_some(),
+            !credential_requirements.secret_names().is_empty(),
+        );
+        let gate_evidence = ActivationGateEvidence {
+            event_trust,
+            source_kind,
+            reusable_secret_permission,
+        };
 
         lease.renew(shutdown).await?;
         if !claim_matches_preparation(
@@ -658,6 +678,7 @@ impl GithubLogicalJobOrchestrationService {
                     instance,
                     &profiles,
                     permission_ceiling.as_ref(),
+                    gate_evidence,
                 )
                 .await
             {
@@ -742,6 +763,7 @@ impl GithubLogicalJobOrchestrationService {
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
         permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
+        gate_evidence: ActivationGateEvidence,
     ) -> Result<ActivatedLogicalInstanceDescriptor, SelectedActivationFailure> {
         let (runtime_payload, job_payload) = self
             .project_instance_payloads(prepared, job, instance, profiles, permission_ceiling)
@@ -770,6 +792,7 @@ impl GithubLogicalJobOrchestrationService {
             instance,
             &job_descriptor,
             &runtime_descriptor,
+            gate_evidence,
         )
         .map_err(SelectedActivationFailure::Operation)
     }
@@ -853,15 +876,66 @@ enum SelectedActivationFailure {
     Operation(GithubLogicalJobOrchestrationError),
 }
 
+#[derive(Clone, Copy)]
+struct ActivationGateEvidence {
+    event_trust: JobEventTrust,
+    source_kind: JobSourceKind,
+    reusable_secret_permission: ReusableSecretPermission,
+}
+
+const fn reusable_secret_permission(
+    reusable_invocation: bool,
+    job_references_secret: bool,
+) -> ReusableSecretPermission {
+    if reusable_invocation && job_references_secret {
+        ReusableSecretPermission::Explicit
+    } else {
+        ReusableSecretPermission::None
+    }
+}
+
+#[cfg(test)]
+mod reusable_secret_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn permission_is_scoped_to_secret_references_in_the_selected_reusable_job() {
+        assert_eq!(
+            reusable_secret_permission(true, true),
+            ReusableSecretPermission::Explicit
+        );
+        assert_eq!(
+            reusable_secret_permission(true, false),
+            ReusableSecretPermission::None
+        );
+        assert_eq!(
+            reusable_secret_permission(false, true),
+            ReusableSecretPermission::None
+        );
+    }
+}
+
 fn activated_instance_descriptor(
     claimed: &ClaimedLogicalJobActivation,
     prepared: &PreparedLogicalJobActivation,
     instance: &crate::ActivatedJobInstance,
     job_descriptor: &BlobDescriptor,
     runtime_descriptor: &BlobDescriptor,
+    gate_evidence: ActivationGateEvidence,
 ) -> Result<ActivatedLogicalInstanceDescriptor, GithubLogicalJobOrchestrationError> {
     let runtime = logical_activation_object(runtime_descriptor, false)?;
     let job_object = logical_activation_object(job_descriptor, true)?;
+    let environment = instance
+        .deployment_environment()
+        .map(|environment| DeploymentEnvironmentName::new(environment.as_str()))
+        .transpose()
+        .map_err(|_| GithubLogicalJobOrchestrationError::Internal)?;
+    let evidence = JobEnvironmentActivationEvidence::new(
+        environment,
+        gate_evidence.event_trust,
+        gate_evidence.source_kind,
+        gate_evidence.reusable_secret_permission,
+    );
     ActivatedLogicalInstanceDescriptor::new(
         claimed,
         instance.identity(),
@@ -869,6 +943,7 @@ fn activated_instance_descriptor(
         job_object,
         runtime,
     )
+    .map(|descriptor| descriptor.with_environment_gate(evidence))
     .map_err(GithubLogicalJobOrchestrationError::PersistenceValue)
 }
 
@@ -1146,6 +1221,131 @@ pub(crate) fn github_activation_context(
         GithubObject::new(values).map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)?;
     GithubActivationContext::new(GithubValue::object(object))
         .map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)
+}
+
+fn github_job_source_evidence(
+    plan: &WorkflowPlan,
+    execution: &LogicalActivationExecutionContext,
+    event_bytes: &[u8],
+) -> Result<(JobEventTrust, JobSourceKind), GithubLogicalJobOrchestrationError> {
+    let event: serde_json::Value = serde_json::from_slice(event_bytes)
+        .map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)?;
+    let PlanSourceOrigin::Repository { repository, .. } = plan.source().origin() else {
+        return Err(GithubLogicalJobOrchestrationError::PlanClaimMismatch);
+    };
+    let actor = execution.actor().or_else(|| {
+        event
+            .pointer("/sender/login")
+            .and_then(serde_json::Value::as_str)
+    });
+    classify_github_job_source(repository.as_str(), plan.event().name(), actor, &event)
+}
+
+fn classify_github_job_source(
+    repository: &str,
+    event_name: &str,
+    actor: Option<&str>,
+    event: &serde_json::Value,
+) -> Result<(JobEventTrust, JobSourceKind), GithubLogicalJobOrchestrationError> {
+    if actor.is_some_and(is_dependabot_actor) {
+        return Ok((JobEventTrust::Untrusted, JobSourceKind::Dependabot));
+    }
+    let source_repository = match event_name {
+        "pull_request"
+        | "pull_request_target"
+        | "pull_request_review"
+        | "pull_request_review_comment" => Some(
+            event
+                .pointer("/pull_request/head/repo/full_name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
+        ),
+        "workflow_run" => Some(
+            event
+                .pointer("/workflow_run/head_repository/full_name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
+        ),
+        _ => None,
+    };
+    let Some(source_repository) = source_repository else {
+        return Ok((JobEventTrust::Trusted, JobSourceKind::SameRepository));
+    };
+    if source_repository.eq_ignore_ascii_case(repository) {
+        Ok((JobEventTrust::Trusted, JobSourceKind::SameRepository))
+    } else {
+        Ok((JobEventTrust::Untrusted, JobSourceKind::Fork))
+    }
+}
+
+fn is_dependabot_actor(actor: &str) -> bool {
+    actor.eq_ignore_ascii_case("dependabot[bot]") || actor.eq_ignore_ascii_case("dependabot")
+}
+
+#[cfg(test)]
+mod source_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn pull_request_source_is_compared_case_insensitively() {
+        let event = serde_json::json!({
+            "pull_request": {"head": {"repo": {"full_name": "Owner/Repository"}}}
+        });
+        assert_eq!(
+            classify_github_job_source("owner/repository", "pull_request", Some("alice"), &event)
+                .expect("source evidence"),
+            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
+        );
+    }
+
+    #[test]
+    fn fork_and_dependency_automation_are_untrusted() {
+        let fork = serde_json::json!({
+            "pull_request": {"head": {"repo": {"full_name": "someone/fork"}}}
+        });
+        assert_eq!(
+            classify_github_job_source("owner/repository", "pull_request", Some("alice"), &fork)
+                .expect("fork evidence"),
+            (JobEventTrust::Untrusted, JobSourceKind::Fork)
+        );
+        assert_eq!(
+            classify_github_job_source(
+                "owner/repository",
+                "pull_request",
+                Some("Dependabot[bot]"),
+                &serde_json::json!({}),
+            )
+            .expect("dependency automation evidence"),
+            (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
+        );
+    }
+
+    #[test]
+    fn missing_source_on_source_bearing_event_fails_closed() {
+        assert!(matches!(
+            classify_github_job_source(
+                "owner/repository",
+                "workflow_run",
+                Some("alice"),
+                &serde_json::json!({}),
+            ),
+            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
+        ));
+    }
+
+    #[test]
+    fn non_source_event_is_same_repository() {
+        assert_eq!(
+            classify_github_job_source(
+                "owner/repository",
+                "push",
+                Some("alice"),
+                &serde_json::json!({}),
+            )
+            .expect("push evidence"),
+            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
+        );
+    }
 }
 
 fn exact_github_integer(value: u64) -> Result<GithubValue, GithubLogicalJobOrchestrationError> {

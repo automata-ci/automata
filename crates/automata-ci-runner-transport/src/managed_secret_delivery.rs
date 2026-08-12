@@ -801,6 +801,7 @@ mod tests {
         let encoded = request.encode().expect("bounded encoding");
         let decoded = ManagedSecretDeliveryRequest::decode(&encoded).expect("valid decoding");
         assert_eq!(decoded.operation(), ManagedSecretDeliveryOperation::Fetch);
+        assert_eq!(decoded.expose_bearer(), &[12; 32]);
         assert_eq!(decoded.coordinates(), coordinates);
         assert_eq!(decoded.bindings(), bindings);
         let diagnostic = format!("{decoded:?}");
@@ -809,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn response_rejects_changed_or_duplicate_exact_bindings() {
+    fn response_round_trips_and_rejects_duplicate_bindings() {
         let response = ManagedSecretDeliveryResponse::Values(vec![
             ManagedSecretDeliveryValue::new("binding-a", "version-a", b"fixture-value".to_vec())
                 .expect("first value"),

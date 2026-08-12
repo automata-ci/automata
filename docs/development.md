@@ -99,9 +99,11 @@ cargo test -p automata-ci-workflow-service --test live_admission --locked -- --i
 cargo test -p automata-ci-results-github --test http_compatibility --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-results-github --test cache_http --locked -- --ignored --test-threads=1
 
-# Rootless Podman contracts. Configure the AUTOMATA_PODMAN_TEST_* variables
-# declared by live_rootless.rs and the AUTOMATA_TEST_* paths required by the
-# runner active-probe test.
+# Rootless Podman contracts. Set AUTOMATA_LIVE_ROOTLESS_PODMAN=1 and
+# AUTOMATA_LIVE_ROOTLESS_BUILDX=1. Configure the AUTOMATA_PODMAN_TEST_*
+# variables declared by live_rootless.rs, including a digest-pinned
+# AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE, and the AUTOMATA_TEST_* paths required
+# by the runner active-probe test.
 cargo test -p automata-ci-sandbox-podman --test live_rootless --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-runner --locked \
   configured_rootless_lifecycle_matches_both_production_network_policies -- \

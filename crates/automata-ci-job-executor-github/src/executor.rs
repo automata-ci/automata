@@ -5177,6 +5177,10 @@ impl fmt::Debug for GithubJobExecutor {
                 "custody_acknowledger",
                 &self.custody_acknowledger.as_ref().map(|_| "configured"),
             )
+            .field(
+                "managed_secret_bindings",
+                &self.managed_secret_bindings.as_ref().map(BTreeMap::len),
+            )
             .finish()
     }
 }

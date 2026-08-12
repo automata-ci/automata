@@ -29,6 +29,7 @@ mod reusable_workflow;
 mod run_finalization;
 mod runner_policy;
 mod service;
+mod workflow_rerun;
 
 pub use activation::{
     ActivateLogicalJobRequest, ActivatedDeploymentEnvironment, ActivatedJobInstance,
@@ -109,6 +110,7 @@ pub use runner_policy::{
     MAX_GITHUB_RUNNER_POLICY_MAPPINGS,
 };
 pub use service::{WorkflowAdmissionError, WorkflowAdmissionService};
+pub use workflow_rerun::WorkflowRerunService;
 
 /// Immutable media type used for exact GitHub workflow source.
 pub const GITHUB_WORKFLOW_MEDIA_TYPE: &str = "application/vnd.github-actions.workflow+yaml";

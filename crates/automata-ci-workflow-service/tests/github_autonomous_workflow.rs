@@ -25,7 +25,7 @@ use automata_ci_store::{
     CommitLogicalInstanceMaterialization, ConsumeSelectedLogicalInstanceMaterialization,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
     ConsumedSelectedLogicalInstanceMaterialization, ConsumedSelectedLogicalJobOrchestration,
-    LogicalActivationBaseContextKind, LogicalActivationClaimFence,
+    JobEventTrust, JobSourceKind, LogicalActivationBaseContextKind, LogicalActivationClaimFence,
     LogicalActivationExecutionContext, LogicalActivationGeneration, LogicalActivationObject,
     LogicalActivationPreparationClaimFence, LogicalActivationPreparationDescriptor,
     LogicalActivationPreparationGeneration, LogicalActivationPreparationReceipt,
@@ -47,8 +47,9 @@ use automata_ci_store::{
     RenewLogicalActivationPreparation, RenewLogicalInstanceMaterialization,
     RenewLogicalJobActivation, RenewedLogicalActivationPreparation,
     RenewedLogicalInstanceMaterialization, RenewedLogicalJobActivation, RepositoryId,
-    SelectedLogicalInstanceMaterialization, SelectedLogicalJobOrchestration, StoreError,
-    TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
+    ReusableSecretPermission, SelectedLogicalInstanceMaterialization,
+    SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicy,
+    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
@@ -2236,6 +2237,17 @@ async fn real_executor_completes_all_phases_without_a_second_claim() {
             HarnessOperation::PublishActivation,
         ],
         "activation must read all inputs, write runtime then JobIR, and publish last"
+    );
+    let publication = harness.repository.publication_attempts();
+    let gate = publication[0].instances()[0]
+        .environment_gate()
+        .expect("activation-derived environment gate evidence");
+    assert_eq!(gate.environment(), None);
+    assert_eq!(gate.event_trust(), JobEventTrust::Trusted);
+    assert_eq!(gate.source_kind(), JobSourceKind::SameRepository);
+    assert_eq!(
+        gate.reusable_secret_permission(),
+        ReusableSecretPermission::None
     );
     assert_eq!(
         harness

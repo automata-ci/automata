@@ -4,9 +4,9 @@ use automata_ci_execution::{ProviderId, ResourceLimits, SandboxHandle};
 use serde_json::{Value, json};
 
 use super::{
-    BUILDX_DEFAULT_IMAGE, ContainerOperation, DockerLaunchValidator, DockerRoute, ExecOperation,
-    ProxyPolicy, ResponseTransform, validate_build_query, validate_buildkit_config_archive,
-    validate_buildkit_exec_create,
+    BUILDX_DEFAULT_IMAGE, BufferedResponse, ContainerOperation, DockerLaunchValidator, DockerRoute,
+    ExecOperation, ProxyPolicy, ResponseTransform, validate_build_query,
+    validate_buildkit_config_archive, validate_buildkit_exec_create,
 };
 
 #[derive(Debug)]
@@ -220,6 +220,9 @@ fn buildkit_create(name: &str) -> Value {
         "HostConfig": {
             "Privileged": true,
             "Init": true,
+            "NetworkMode": "",
+            "CgroupParent": "/docker/buildx",
+            "ConsoleSize": [0, 0],
             "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
             "Mounts": [{
                 "Type": "volume",
@@ -310,6 +313,10 @@ fn buildkit_info_is_opt_in_and_scrubs_only_rootless_engine_markers() {
 #[test]
 fn buildkit_image_alias_rewrites_the_target_and_hides_the_private_reference() {
     let policy = buildkit_proxy_policy();
+    let private_reference = format!(
+        "registry.example.invalid/buildkit/runtime@sha256:{}",
+        "66".repeat(32)
+    );
     let authorized = policy
         .authorize(
             "GET",
@@ -329,21 +336,81 @@ fn buildkit_image_alias_rewrites_the_target_and_hides_the_private_reference() {
         ResponseTransform::RewriteBuildKitImageInspect
     ));
 
-    let response = policy
-        .rewrite_buildkit_image_inspect(&encoded(&json!({
+    let mut response = BufferedResponse {
+        status_line: format!("HTTP/1.1 200 private {private_reference}"),
+        fields: vec![
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+            (
+                "Docker-Content-Digest".to_owned(),
+                private_reference.clone(),
+            ),
+        ],
+        body: encoded(&json!({
             "Id": format!("sha256:{}", "66".repeat(32)),
             "RepoTags": ["registry.example.invalid/private:tag"],
-            "Descriptor": {"digest": format!("sha256:{}", "66".repeat(32))}
-        })))
+            "RepoDigests": [format!(
+                "registry.example.invalid/private@sha256:{}",
+                "66".repeat(32)
+            )],
+            "Descriptor": {
+                "digest": format!("sha256:{}", "66".repeat(32)),
+                "annotations": {"private.reference": private_reference}
+            },
+            "NamesHistory": [private_reference],
+            "ImageName": private_reference,
+            "Config": {"Labels": {"private.reference": private_reference}}
+        })),
+    };
+    policy
+        .rewrite_buildkit_image_inspect_response(&mut response)
         .expect("valid image response");
-    let response: Value = serde_json::from_slice(&response).expect("rewritten image JSON");
-    assert_eq!(response["RepoTags"], json!([BUILDX_DEFAULT_IMAGE]));
-    assert!(response.get("Descriptor").is_none());
-    assert!(
-        !encoded(&response)
-            .windows(b"registry.example.invalid/private".len())
-            .any(|window| window == b"registry.example.invalid/private")
+    assert_eq!(response.status_line, "HTTP/1.1 200 BuildKit image response");
+    assert_eq!(
+        response.fields,
+        [("Content-Type".to_owned(), "application/json".to_owned())]
     );
+    let document: Value = serde_json::from_slice(&response.body).expect("rewritten image JSON");
+    assert_eq!(
+        document,
+        json!({
+            "Id": format!("sha256:{}", "66".repeat(32)),
+            "RepoTags": [BUILDX_DEFAULT_IMAGE],
+            "RepoDigests": [],
+        })
+    );
+    assert!(!format!("{response:?}").contains("registry.example.invalid"));
+}
+
+#[test]
+fn buildkit_image_alias_replaces_backend_errors_and_headers_without_exposing_the_target() {
+    let policy = buildkit_proxy_policy();
+    let private_reference = format!(
+        "registry.example.invalid/buildkit/runtime@sha256:{}",
+        "66".repeat(32)
+    );
+    let mut response = BufferedResponse {
+        status_line: format!("HTTP/1.1 404 missing {private_reference}"),
+        fields: vec![
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+            ("Location".to_owned(), private_reference.clone()),
+        ],
+        body: encoded(&json!({"message": format!("no such image {private_reference}")})),
+    };
+
+    policy
+        .rewrite_buildkit_image_inspect_response(&mut response)
+        .expect("bounded backend error response");
+
+    assert_eq!(response.status_line, "HTTP/1.1 404 BuildKit image response");
+    assert_eq!(
+        response.fields,
+        [("Content-Type".to_owned(), "application/json".to_owned())]
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body).expect("synthetic error JSON"),
+        json!({"message": "BuildKit image is unavailable"})
+    );
+    assert!(!format!("{response:?}").contains("registry.example.invalid"));
 }
 
 #[test]
@@ -469,7 +536,17 @@ fn buildkit_special_policy_rejects_custom_images_driver_resources_and_host_acces
         (
             "network driver opt",
             "/HostConfig/NetworkMode",
-            json!("host"),
+            json!("bridge"),
+        ),
+        (
+            "cgroup driver opt",
+            "/HostConfig/CgroupParent",
+            json!("custom.slice"),
+        ),
+        (
+            "restart driver opt",
+            "/HostConfig/RestartPolicy/Name",
+            json!("no"),
         ),
         ("host bind", "/HostConfig/Binds", json!(["/:/host"])),
         (
@@ -478,6 +555,12 @@ fn buildkit_special_policy_rejects_custom_images_driver_resources_and_host_acces
             json!([{"PathOnHost": "/dev/kvm", "PathInContainer": "/dev/kvm"}]),
         ),
         ("unprivileged shape", "/HostConfig/Privileged", json!(false)),
+        ("unknown config field", "/FutureHostAccess", json!(true)),
+        (
+            "unknown host field",
+            "/HostConfig/FutureHostAccess",
+            json!(true),
+        ),
     ];
     for (case, pointer, replacement) in mutations {
         let mut request = buildkit_create(name);

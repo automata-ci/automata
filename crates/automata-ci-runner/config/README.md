@@ -18,6 +18,38 @@ both fields and use a top-level `kubernetes` object. The runner loads
 credentials through Kubernetes' standard in-cluster or ambient kubeconfig
 discovery; the JSON remains secret-free.
 
+The Podman BuildKit surface is a separate, default-off opt-in. Configure it
+only with the attempt-scoped Docker API and one locally preloaded, untagged
+digest pin:
+
+```json
+{
+  "podman": {
+    "job_container_engine": "attempt_scoped_docker_api",
+    "buildkit_runtime_image": "registry.example.invalid/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  }
+}
+```
+
+Omit the field or set it to `null` to keep BuildKit disabled. Startup refuses
+a tag, a tagged digest, a missing local image, a mismatched inspected digest,
+or a failed no-network `buildkitd --version` probe. Only after the provider has
+passed that immutable-image gate does the runner register
+`automata.core/buildkit@v1`; configured inventory alone is not sufficient.
+Server-side runtime-policy mappings used by Buildx jobs must request that
+container feature explicitly so those jobs cannot be leased to a runner where
+the opt-in is absent. Action names are not inferred as scheduling requirements.
+
+The admitted surface targets unchanged default `docker/setup-buildx-action`
+`docker-container` operation and `docker/build-push-action`, including
+CacheService v2 traffic carried through the BuildKit session. It does not
+expose a host Podman/Docker socket or registry credentials. Custom images,
+driver resource/network options, host mounts/devices, additional privileged
+containers, custom BuildKit configuration, and cross-attempt objects are
+rejected. Because Buildx and Podman request shapes evolve, validate the exact
+deployed versions with the opt-in live rootless fixture before enabling this
+field; an unreviewed future Docker create field fails closed.
+
 A Kubernetes selection has this provider-specific shape:
 
 ```json

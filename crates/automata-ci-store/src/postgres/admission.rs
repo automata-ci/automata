@@ -1377,6 +1377,7 @@ async fn finalize_logical_concurrency_cancellation(
             updated_at_ms = $2
         WHERE run_id = $1
           AND state IN ('pending', 'activating', 'activated', 'skipped')
+          AND NOT rerun_carried
         ",
     )
     .bind(run_id)

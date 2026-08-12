@@ -11,7 +11,7 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_core::{
-    Architecture, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
+    Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
     JobRuntimeContext, JobSource, Lease, LeaseId, OperatingSystem, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId,
@@ -39,7 +39,9 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LogicalActivationObject, LogicalActivationPreparationStore as _,
+    IssueLeasedJobSecretGrants, JobCredentialRequirements, JobEnvironmentActivationEvidence,
+    JobEnvironmentGatePhase, JobEnvironmentGateState, JobEnvironmentRequirement, JobEventTrust,
+    JobSourceKind, LogicalActivationObject, LogicalActivationPreparationStore as _,
     LogicalActivationPreparationTarget, LogicalActivationRepository as _,
     LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
     LogicalInstanceMaterializationTarget, LogicalJobOrchestrationSelectionOutcome,
@@ -49,15 +51,16 @@ use automata_ci_store::{
     ManagedSecretAuthorityRepository as _, ManagedSecretAuthorityStoreError, ManagedSecretBinding,
     ManagedSecretBindingSet, ManagedSecretDeliveryMachine, ManagedSecretDeliveryOperationId,
     ManagedSecretDeliveryProposal, ObjectKey, OpenRunnerSession, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    PostgresSecretManagementRepository, PrepareJobEnvironment, ProtectedEnvironmentRepository as _,
+    ProtectedEnvironmentStoreError, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, PublishLogicalJobActivation, RepositoryId, RepositorySecretId,
     RepositorySecretManagementRepository as _, RepositorySecretMutationId, RepositorySecretName,
     RepositorySecretProviderMutationResult, RepositorySecretVersionId,
     ReserveRepositorySecretVersionMutation, ReserveRepositorySecretVersionMutationOutcome,
-    ResolveManagedSecretAuthority, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionRepository as _, SecretCustodyKeySet,
+    ResolveManagedSecretAuthority, ReusableSecretPermission, RoutingDocument, RunnerGeneration,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _, SecretCustodyKeySet,
     SecretCustodyRepository as _, SecretWorkloadGrantId, StableRunnerSlot, TenantScope,
     VerifySecretCustody, VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency,
     WorkflowSnapshotId,
@@ -110,6 +113,17 @@ struct PreparedInstance {
     encoded: Vec<u8>,
     runtime_context: JobRuntimeContext,
     runtime_encoded: Vec<u8>,
+}
+
+struct QueuedExecutionFixture {
+    tenant: String,
+    repository_id: RepositoryId,
+    run_id: RunId,
+    job_id: JobId,
+    attempt_id: AttemptId,
+    runtime_context: JobRuntimeContext,
+    runtime_context_digest: Sha256Digest,
+    bindings: Vec<BindingIdentity>,
 }
 
 struct ExecutionFixture {
@@ -251,7 +265,10 @@ fn fixture_manifest(tenant: TenantScope) -> GithubProviderManifest {
     )
 }
 
-fn logical_fixture(bindings: Vec<BindingIdentity>) -> LogicalFixture {
+fn logical_fixture_with_requirements(
+    bindings: Vec<BindingIdentity>,
+    credential_requirements: JobCredentialRequirements,
+) -> LogicalFixture {
     let tenant = format!("secret-authority-{}", Uuid::new_v4().simple());
     let tenant_scope = TenantScope::from_authenticated_tenant_id(&tenant).expect("test tenant");
     let manifest = fixture_manifest(tenant_scope.clone());
@@ -270,7 +287,8 @@ fn logical_fixture(bindings: Vec<BindingIdentity>) -> LogicalFixture {
         LogicalWorkflowJobKind::Steps,
         Vec::new(),
     )
-    .expect("test logical job");
+    .expect("test logical job")
+    .with_credential_requirements(credential_requirements);
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(delivery_key.clone())
@@ -721,7 +739,13 @@ fn prepare_instance(
         .expect("test JobIR descriptor"),
         runtime,
     )
-    .expect("test activated instance");
+    .expect("test activated instance")
+    .with_environment_gate(JobEnvironmentActivationEvidence::new(
+        None,
+        JobEventTrust::Trusted,
+        JobSourceKind::SameRepository,
+        ReusableSecretPermission::None,
+    ));
     PreparedInstance {
         activated,
         envelope,
@@ -731,12 +755,12 @@ fn prepare_instance(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn seed_current_execution(
+async fn seed_queued_execution(
     database: &TestDatabase,
     bindings: Vec<BindingIdentity>,
-) -> TestResult<ExecutionFixture> {
-    let fixture = logical_fixture(bindings);
+    credential_requirements: JobCredentialRequirements,
+) -> TestResult<QueuedExecutionFixture> {
+    let fixture = logical_fixture_with_requirements(bindings, credential_requirements);
     seed_tenant(database, &fixture.tenant).await?;
     admit_authenticated_fixture(database, &fixture).await?;
     let claimed = claim_activation(database, &fixture).await?;
@@ -770,6 +794,25 @@ async fn seed_current_execution(
         )?)
         .await?;
 
+    let runtime_context_digest =
+        Sha256Digest::from_bytes(Sha256::digest(&prepared.runtime_encoded).into());
+    Ok(QueuedExecutionFixture {
+        tenant: fixture.tenant,
+        repository_id: fixture.repository_id,
+        run_id: fixture.command.run_id(),
+        job_id: materialized.job_id(),
+        attempt_id: materialized.attempt_id(),
+        runtime_context: prepared.runtime_context,
+        runtime_context_digest,
+        bindings: fixture.bindings,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn lease_execution(
+    database: &TestDatabase,
+    queued: QueuedExecutionFixture,
+) -> TestResult<ExecutionFixture> {
     let runner_id = RunnerId::new();
     let capabilities = RunnerCapabilities::new(
         runner_id,
@@ -789,7 +832,7 @@ async fn seed_current_execution(
         ",
     )
     .bind(runner_id.as_uuid())
-    .bind(&fixture.tenant)
+    .bind(&queued.tenant)
     .bind(format!("secret-runner-{}", runner_id.as_uuid().simple()))
     .bind(serde_json::to_value(&capabilities)?)
     .bind(&external_identity)
@@ -834,7 +877,7 @@ async fn seed_current_execution(
         WHERE id = $1 AND lifecycle = 'queued'
         ",
     )
-    .bind(materialized.attempt_id().as_uuid())
+    .bind(queued.attempt_id.as_uuid())
     .bind(i64::try_from(fence.get())?)
     .bind(lease_id.as_uuid())
     .bind(runner_id.as_uuid())
@@ -848,16 +891,14 @@ async fn seed_current_execution(
     if changed.rows_affected() != 1 {
         return Err("initial attempt was not queued".into());
     }
-    let runtime_context_digest =
-        Sha256Digest::from_bytes(Sha256::digest(&prepared.runtime_encoded).into());
     Ok(ExecutionFixture {
-        tenant: fixture.tenant,
-        repository_id: fixture.repository_id,
-        run_id: fixture.command.run_id(),
-        job_id: materialized.job_id(),
+        tenant: queued.tenant,
+        repository_id: queued.repository_id,
+        run_id: queued.run_id,
+        job_id: queued.job_id,
         lease: Lease::new(
             lease_id,
-            materialized.attempt_id(),
+            queued.attempt_id,
             runner_id,
             fence,
             UnixMillis::new(lease_issued_at),
@@ -865,10 +906,19 @@ async fn seed_current_execution(
         )?,
         session: session.fence(),
         machine: ManagedSecretDeliveryMachine::new(external_identity, certificate_sha256)?,
-        runtime_context: prepared.runtime_context,
-        runtime_context_digest,
-        bindings: fixture.bindings,
+        runtime_context: queued.runtime_context,
+        runtime_context_digest: queued.runtime_context_digest,
+        bindings: queued.bindings,
     })
+}
+
+async fn seed_current_execution(
+    database: &TestDatabase,
+    bindings: Vec<BindingIdentity>,
+) -> TestResult<ExecutionFixture> {
+    let queued =
+        seed_queued_execution(database, bindings, JobCredentialRequirements::default()).await?;
+    lease_execution(database, queued).await
 }
 
 #[allow(clippy::too_many_lines)] // Human authority fixture spells out all durable evidence.
@@ -1021,7 +1071,7 @@ async fn activate_builtin_provider(pool: &PgPool, tenant: &str, updated_at_ms: i
 
 async fn seed_repository_secret(
     pool: &PgPool,
-    execution: &ExecutionFixture,
+    repository_id: RepositoryId,
     actor: &SecretActor,
     binding: BindingIdentity,
     index: usize,
@@ -1033,7 +1083,7 @@ async fn seed_repository_secret(
         actor.actor(),
         mutation_id,
         secret_id,
-        execution.repository_id,
+        repository_id,
         RepositorySecretName::new(format!("authority_token_{index}"))?,
         None,
     )?;
@@ -1380,7 +1430,14 @@ async fn seed_authority_state(
     .await?;
     activate_builtin_provider(database.pool(), &execution.tenant, execution.time(100_000)).await?;
     for (index, binding) in execution.bindings.iter().copied().enumerate() {
-        seed_repository_secret(database.pool(), execution, &actor, binding, index).await?;
+        seed_repository_secret(
+            database.pool(),
+            execution.repository_id,
+            &actor,
+            binding,
+            index,
+        )
+        .await?;
     }
     let (environment_id, approval_id) =
         seed_environment(database.pool(), execution, &actor, protected).await?;
@@ -1398,6 +1455,249 @@ async fn seed_authority_state(
         }
     }
     Ok((actor, Some(environment_id), approval_id))
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)]
+async fn protected_environment_issues_only_exact_server_derived_lease_bindings() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::None,
+            ["AUTHORITY_TOKEN_0".to_owned()],
+            [],
+        )?;
+        let queued = seed_queued_execution(&database, vec![binding], requirements).await?;
+        let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+        let snapshot = database
+            .store()
+            .inspect_job_environment_gate(&tenant, queued.attempt_id)
+            .await?;
+        assert_eq!(snapshot.phase(), JobEnvironmentGatePhase::SelectionPending);
+        assert_eq!(
+            snapshot.runtime_context_digest(),
+            queued.runtime_context_digest
+        );
+        assert_eq!(snapshot.variable_reference_count(), 0);
+        let activation = snapshot.activation().expect("durable activation evidence");
+        assert_eq!(activation.environment(), None);
+        assert_eq!(activation.event_trust(), JobEventTrust::Trusted);
+        assert_eq!(activation.source_kind(), JobSourceKind::SameRepository);
+        assert_eq!(
+            activation.reusable_secret_permission(),
+            ReusableSecretPermission::None
+        );
+        let now = database_now_ms(&database).await?;
+        let actor = seed_secret_actor(database.pool(), &queued.tenant, now).await?;
+        activate_builtin_provider(database.pool(), &queued.tenant, now).await?;
+        seed_repository_secret(database.pool(), queued.repository_id, &actor, binding, 0).await?;
+
+        let approval_request_id = Uuid::new_v4();
+        let prepare_request = |context_digest, source_kind| {
+            PrepareJobEnvironment::new(
+                tenant.clone(),
+                queued.attempt_id,
+                None,
+                context_digest,
+                JobEventTrust::Trusted,
+                source_kind,
+                ReusableSecretPermission::None,
+                approval_request_id,
+                UnixMillis::new(now),
+                UnixMillis::new(now + 300_000),
+            )
+        };
+        let prepare =
+            prepare_request(queued.runtime_context_digest, JobSourceKind::SameRepository)?;
+        let wrong_context = prepare_request(digest(0xff), JobSourceKind::SameRepository)?;
+        assert!(matches!(
+            database
+                .store()
+                .prepare_job_environment(wrong_context)
+                .await,
+            Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        ));
+        assert_eq!(
+            database
+                .store()
+                .prepare_job_environment(prepare.clone())
+                .await?,
+            JobEnvironmentGateState::Resolving
+        );
+        assert_eq!(
+            database
+                .store()
+                .prepare_job_environment(prepare.clone())
+                .await?,
+            JobEnvironmentGateState::Resolving
+        );
+        let conflicting_replay =
+            prepare_request(queued.runtime_context_digest, JobSourceKind::Fork)?;
+        assert!(matches!(
+            database
+                .store()
+                .prepare_job_environment(conflicting_replay)
+                .await,
+            Err(ProtectedEnvironmentStoreError::Conflict)
+        ));
+        assert_eq!(
+            database
+                .store()
+                .resolve_job_credentials(&tenant, queued.attempt_id)
+                .await?,
+            JobEnvironmentGateState::Ready
+        );
+
+        let execution = lease_execution(&database, queued).await?;
+        let issue_request = |lease_id, fencing_token| {
+            IssueLeasedJobSecretGrants::new(
+                tenant.clone(),
+                execution.lease.attempt_id(),
+                lease_id,
+                fencing_token,
+                execution.lease.issued_at(),
+                execution.lease.expires_at(),
+            )
+        };
+        let exact_issue =
+            issue_request(execution.lease.lease_id(), execution.lease.fencing_token())?;
+        let wrong_fence = issue_request(
+            execution.lease.lease_id(),
+            FencingToken::new(execution.lease.fencing_token().get() + 1)?,
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .issue_leased_job_secret_grants(wrong_fence)
+                .await,
+            Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        ));
+        let wrong_lease = issue_request(LeaseId::new(), execution.lease.fencing_token())?;
+        assert!(matches!(
+            database
+                .store()
+                .issue_leased_job_secret_grants(wrong_lease)
+                .await,
+            Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+        ));
+        let premature_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM job_secret_bindings WHERE attempt_id = $1")
+                .bind(execution.lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(premature_rows, 0);
+
+        let issued = database
+            .store()
+            .issue_leased_job_secret_grants(exact_issue.clone())
+            .await?;
+        assert_eq!(issued.len(), 1);
+        assert_eq!(issued[0].canonical_name(), "AUTHORITY_TOKEN_0");
+        let expected_version_id = binding.version_id.hyphenated().to_string();
+        assert_eq!(
+            issued[0].binding().version_id(),
+            Some(expected_version_id.as_str())
+        );
+        let issued_grant_id = Uuid::parse_str(issued[0].binding().binding_id())?;
+        let durable: (Uuid, Uuid, i64, bool, String, Uuid) = sqlx::query_as(
+            r"
+            SELECT binding.grant_id, binding.lease_id, binding.fencing_token,
+                   binding.binding_digest IS NOT DISTINCT FROM
+                       automata_job_secret_binding_digest(
+                           binding.attempt_id, binding.canonical_name,
+                           binding.tenant_id, binding.grant_id,
+                           binding.lease_id, binding.fencing_token
+                       ),
+                   workload_grant.authority_digest_key_id,
+                   workload_grant.secret_version_id
+            FROM job_secret_bindings AS binding
+            JOIN secret_workload_grants AS workload_grant
+              ON workload_grant.tenant_id = binding.tenant_id
+             AND workload_grant.id = binding.grant_id
+            WHERE binding.attempt_id = $1 AND binding.canonical_name = $2
+            ",
+        )
+        .bind(execution.lease.attempt_id().as_uuid())
+        .bind("AUTHORITY_TOKEN_0")
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable.0, issued_grant_id);
+        assert_eq!(durable.1, execution.lease.lease_id().as_uuid());
+        assert_eq!(
+            durable.2,
+            i64::try_from(execution.lease.fencing_token().get())?
+        );
+        assert!(durable.3);
+        assert_eq!(durable.4, "leased-job-secret-grant-v1");
+        assert_eq!(durable.5, binding.version_id);
+
+        let replayed = database
+            .store()
+            .issue_leased_job_secret_grants(exact_issue)
+            .await?;
+        assert_eq!(replayed, issued);
+        let durable_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM job_secret_bindings WHERE attempt_id = $1")
+                .bind(execution.lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(durable_rows, 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn variable_bearing_job_cannot_bypass_custody_at_lease_boundary() -> TestResult {
+    run_with_database(|database| async move {
+        let requirements = JobCredentialRequirements::new(
+            JobEnvironmentRequirement::None,
+            [],
+            ["PENDING_CONFIG".to_owned()],
+        )?;
+        let queued = seed_queued_execution(&database, Vec::new(), requirements).await?;
+        let tenant = TenantScope::from_authenticated_tenant_id(&queued.tenant)?;
+        let now = database_now_ms(&database).await?;
+        let request = PrepareJobEnvironment::new(
+            tenant.clone(),
+            queued.attempt_id,
+            None,
+            queued.runtime_context_digest,
+            JobEventTrust::Trusted,
+            JobSourceKind::SameRepository,
+            ReusableSecretPermission::None,
+            Uuid::new_v4(),
+            UnixMillis::new(now),
+            UnixMillis::new(now + 300_000),
+        )?;
+        assert_eq!(
+            database.store().prepare_job_environment(request).await?,
+            JobEnvironmentGateState::Resolving
+        );
+        assert_eq!(
+            database
+                .store()
+                .resolve_job_credentials(&tenant, queued.attempt_id)
+                .await?,
+            JobEnvironmentGateState::Ready
+        );
+
+        let Err(error) = lease_execution(&database, queued).await else {
+            return Err("variable-bearing attempt bypassed custody at lease time".into());
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<sqlx::Error>()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("job_attempts_variable_custody_required"),
+            "unexpected lease rejection: {error}",
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1926,7 +2226,14 @@ async fn in_flight_grant_insert_is_linearized_before_exact_cardinality() -> Test
         let (actor, environment_id, _) =
             seed_authority_state(&database, &execution, false, true).await?;
         let concurrent_binding = BindingIdentity::fresh();
-        seed_repository_secret(database.pool(), &execution, &actor, concurrent_binding, 1).await?;
+        seed_repository_secret(
+            database.pool(),
+            execution.repository_id,
+            &actor,
+            concurrent_binding,
+            1,
+        )
+        .await?;
         let mut transaction = database.pool().begin().await?;
         let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *transaction)

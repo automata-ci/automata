@@ -345,11 +345,13 @@ pub use postgres::{
 };
 pub use protected_environment::{
     BindLeasedJobSecrets, DeploymentEnvironmentName, EnvironmentReviewDecision,
-    IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding, JobCredentialRequirements,
-    JobEnvironmentGateState, JobEnvironmentRequirement, JobEventTrust, JobSourceKind,
-    MAX_DEPLOYMENT_ENVIRONMENT_NAME_BYTES, MAX_JOB_CREDENTIAL_REFERENCES, PrepareJobEnvironment,
-    ProtectedEnvironmentRepository, ProtectedEnvironmentStoreError, ProtectedEnvironmentValueError,
-    ReusableSecretPermission, ReviewJobEnvironment, SecretLeaseAuthority,
+    InspectLeasedJobSecretBindings, IssueLeasedJobSecretGrants, IssuedLeasedJobSecretBinding,
+    JobCredentialRequirements, JobEnvironmentActivationEvidence, JobEnvironmentGatePhase,
+    JobEnvironmentGateSnapshot, JobEnvironmentGateState, JobEnvironmentRequirement, JobEventTrust,
+    JobSourceKind, MAX_DEPLOYMENT_ENVIRONMENT_NAME_BYTES, MAX_JOB_CREDENTIAL_REFERENCES,
+    PrepareJobEnvironment, ProtectedEnvironmentRepository, ProtectedEnvironmentStoreError,
+    ProtectedEnvironmentValueError, ReusableSecretPermission, ReviewJobEnvironment,
+    SecretLeaseAuthority,
 };
 pub use provider_delivery::{
     AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
@@ -504,7 +506,7 @@ pub use web::{
     MAX_HUMAN_LOG_SEGMENT_PAGE_SIZE, MAX_HUMAN_PAGE_SIZE, RepositoryCoordinate,
 };
 pub use workflow_rerun::{
-    MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow,
+    MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow, RerunWorkflowByName,
     WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
     WorkflowRerunValueError,
 };

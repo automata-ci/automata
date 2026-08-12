@@ -299,10 +299,10 @@ fn schedule_policy_is_optional_but_bounded_when_configured() {
     let mut configured = manifest(vec![public_repository()]);
     configured["schedule"] = json!({
         "poll_millis": 2000,
-        "discovery_claim_millis": 120000,
-        "fire_claim_millis": 120000,
-        "retry_millis": 15000,
-        "staleness_millis": 60000,
+        "discovery_claim_millis": 120_000,
+        "fire_claim_millis": 120_000,
+        "retry_millis": 15_000,
+        "staleness_millis": 60_000,
         "maximum_manifests": 64,
         "maximum_fires_per_pass": 8
     });

@@ -77,8 +77,9 @@ support `HEAD`, full `GET`, and one byte range with `206` and `416` behavior.
 Eviction currently leaves unreferenced immutable objects for a future bounded
 collector. There is no cache management or delete API.
 
-BuildKit compatibility is not claimed. It needs its own pinned
-BuildKit/go-actions-cache fixture.
+The bounded Buildx/BuildKit session and provenance surface is implemented, but
+cache interoperability is not yet production-proven. Live CacheService v2
+acceptance still needs its own pinned BuildKit fixture.
 
 ## Runtime authority and listener policy
 
