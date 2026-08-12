@@ -3175,11 +3175,47 @@ async fn lock_exact_authority_attempt(
     lock_exact_authority_graph(transaction, identity).await
 }
 
-#[allow(clippy::too_many_lines)] // One query locks the complete historical authority graph.
+async fn lock_exact_authority_runner_session(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &GithubRuntimeAuthorityIdentity,
+) -> Result<bool, GithubRuntimeAuthorityStoreError> {
+    sqlx::query_scalar(
+        r"
+        SELECT TRUE
+        FROM runners AS runner
+        JOIN runner_sessions AS session
+          ON session.id = $2
+         AND session.runner_id = runner.id
+        WHERE runner.id = $1
+          AND runner.tenant_id = $3
+          AND session.session_epoch = $4
+          AND session.runner_generation = $5
+        FOR SHARE OF runner, session
+        ",
+    )
+    .bind(identity.runner_id().as_uuid())
+    .bind(identity.runner_session_id().as_uuid())
+    .bind(identity.tenant().as_str())
+    .bind(positive_i64(identity.runner_session_epoch().get())?)
+    .bind(positive_i64(identity.runner_generation().get())?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map(|locked| locked.unwrap_or(false))
+    .map_err(operation_error)
+}
+
+#[allow(clippy::too_many_lines)] // Phase-ordered queries lock the historical authority graph.
 async fn lock_exact_authority_graph(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &GithubRuntimeAuthorityIdentity,
 ) -> Result<bool, GithubRuntimeAuthorityStoreError> {
+    // Lease renewal takes these same two locks before it locks the attempt.
+    // Keep reconciliation and every other authority operation in that order:
+    // runner/session, execution graph, historical graph, then issuance.
+    if !lock_exact_authority_runner_session(transaction, identity).await? {
+        return Ok(false);
+    }
+
     let execution_locked: bool = sqlx::query_scalar(
         r"
         SELECT TRUE
@@ -3200,12 +3236,6 @@ async fn lock_exact_authority_graph(
         JOIN workflow_snapshots AS snapshot
           ON snapshot.id = run.snapshot_id
          AND snapshot.workflow_id = run.workflow_id
-        JOIN runners AS runner
-          ON runner.id = $12
-         AND runner.tenant_id = repository.tenant_id
-        JOIN runner_sessions AS session
-          ON session.id = $13
-         AND session.runner_id = runner.id
         WHERE attempt.id = $1
           AND attempt.job_id = $2
           AND job.job_ir_schema = $6
@@ -3215,9 +3245,7 @@ async fn lock_exact_authority_graph(
           AND repository.scm_provider = 'github'
           AND repository.provider_repository_id = $10::TEXT
           AND repository.owner || '/' || repository.name = $11
-          AND session.session_epoch = $14
-          AND session.runner_generation = $15
-        FOR SHARE OF attempt, job, run, repository, workflow, snapshot, runner, session
+        FOR SHARE OF attempt, job, run, repository, workflow, snapshot
         ",
     )
     .bind(identity.key().attempt_id().as_uuid())
@@ -3231,10 +3259,6 @@ async fn lock_exact_authority_graph(
     .bind(identity.policy_digest().as_bytes().as_slice())
     .bind(identity.github_repository_id().as_i64())
     .bind(identity.github_repository_name().as_str())
-    .bind(identity.runner_id().as_uuid())
-    .bind(identity.runner_session_id().as_uuid())
-    .bind(positive_i64(identity.runner_session_epoch().get())?)
-    .bind(positive_i64(identity.runner_generation().get())?)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?

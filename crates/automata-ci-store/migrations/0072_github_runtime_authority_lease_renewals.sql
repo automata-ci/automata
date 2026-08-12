@@ -110,12 +110,75 @@ CREATE FUNCTION automata_validate_github_runtime_authority_lease_renewal()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $automata$
+DECLARE
+    database_now BIGINT;
 BEGIN
+    -- Match the Store's global runner/session -> attempt -> authority order.
+    -- These separate row-lock phases also make direct SQL writers deterministic
+    -- instead of relying on a multi-relation plan's row-mark order.
+    PERFORM 1
+    FROM runners AS runner
+    JOIN runner_sessions AS session
+      ON session.runner_id = runner.id
+     AND session.id = NEW.runner_session_id
+     AND session.session_epoch = NEW.runner_session_epoch
+     AND session.runner_generation = NEW.runner_generation
+    WHERE runner.id = NEW.runner_id
+      AND runner.generation = NEW.runner_generation
+      AND runner.session_epoch = NEW.runner_session_epoch
+      AND runner.status = 'online'
+      AND runner.desired_state IN ('active', 'draining')
+      AND session.disconnected_at_ms IS NULL
+      AND session.job_ir_schema = 5
+    FOR SHARE OF runner, session;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'GitHub runtime authority lease renewal lacks a live runner session'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT =
+                      'github_runtime_authority_lease_renewal_receipts_authority';
+    END IF;
+
+    PERFORM 1
+    FROM job_attempts AS attempt
+    WHERE attempt.id = NEW.attempt_id
+      AND attempt.fencing_token = NEW.fencing_token
+      AND attempt.lease_id = NEW.lease_id
+      AND attempt.lease_expires_at_ms = NEW.previous_lease_expires_at_ms
+      AND attempt.runner_id = NEW.runner_id
+      AND attempt.runner_session_id = NEW.runner_session_id
+      AND attempt.runner_session_epoch = NEW.runner_session_epoch
+      AND attempt.runner_generation = NEW.runner_generation
+      AND attempt.lifecycle IN ('leased', 'preparing', 'running', 'cancelling')
+      AND attempt.changed_at_ms <= NEW.authorized_at_ms
+    FOR UPDATE OF attempt;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'GitHub runtime authority lease renewal lacks the exact current attempt'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT =
+                      'github_runtime_authority_lease_renewal_receipts_authority';
+    END IF;
+
+    -- Sample after every preceding row lock. A writer that queued while the
+    -- predecessor was live must not renew it after waiting past its horizon.
+    database_now := floor(
+        extract(epoch FROM clock_timestamp()) * 1000
+    )::BIGINT;
+    IF NEW.authorized_at_ms > database_now
+        OR NEW.previous_lease_expires_at_ms <= database_now
+    THEN
+        RAISE EXCEPTION 'GitHub runtime authority lease renewal uses a stale lease horizon'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT =
+                      'github_runtime_authority_lease_renewal_receipts_authority';
+    END IF;
+
     PERFORM 1
     FROM github_runtime_authority_issuances AS authority
-    JOIN job_attempts AS attempt
-      ON attempt.id = authority.attempt_id
-     AND attempt.job_id = authority.job_id
+    JOIN job_attempts AS exact_attempt
+      ON exact_attempt.id = authority.attempt_id
+     AND exact_attempt.job_id = authority.job_id
     WHERE authority.attempt_id = NEW.attempt_id
       AND authority.fencing_token = NEW.fencing_token
       AND authority.lease_id = NEW.lease_id
@@ -128,21 +191,15 @@ BEGIN
       AND authority.provider_expires_at_ms IS NOT NULL
       AND authority.provider_expires_at_ms - 60000
             >= NEW.renewed_lease_expires_at_ms
-      AND attempt.fencing_token = authority.fencing_token
-      AND attempt.lease_id = authority.lease_id
-      AND attempt.lease_issued_at_ms = authority.lease_issued_at_ms
-      AND attempt.lease_expires_at_ms = NEW.previous_lease_expires_at_ms
-      AND attempt.runner_id = authority.runner_id
-      AND attempt.runner_session_id = authority.runner_session_id
-      AND attempt.runner_session_epoch = authority.runner_session_epoch
-      AND attempt.runner_generation = authority.runner_generation
-      AND attempt.changed_at_ms <= NEW.authorized_at_ms
+      AND exact_attempt.fencing_token = authority.fencing_token
+      AND exact_attempt.lease_id = authority.lease_id
+      AND exact_attempt.lease_issued_at_ms = authority.lease_issued_at_ms
       AND automata_github_runtime_authority_lease_horizon_is_tail(
           authority,
           NEW.previous_lease_expires_at_ms,
           NEW.authorized_at_ms
       )
-    FOR SHARE OF authority, attempt;
+    FOR SHARE OF authority;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'GitHub runtime authority lease renewal lacks exact durable authority'
@@ -169,8 +226,13 @@ STABLE
 AS $automata$
     SELECT EXISTS (
         SELECT 1
-        FROM github_runtime_authority_issuances AS authority
+        FROM runners AS runner
+        JOIN runner_sessions AS session
+          ON session.runner_id = runner.id
         JOIN job_attempts AS attempt
+          ON attempt.runner_id = runner.id
+         AND attempt.runner_session_id = session.id
+        JOIN github_runtime_authority_issuances AS authority
           ON attempt.id = authority.attempt_id
          AND attempt.job_id = authority.job_id
         JOIN github_runtime_authority_lease_renewal_receipts AS tail
@@ -188,10 +250,24 @@ AS $automata$
           AND authority.state = 'ready'
           AND attempt.fencing_token = authority.fencing_token
           AND attempt.lease_id = authority.lease_id
+          AND attempt.lease_issued_at_ms = authority.lease_issued_at_ms
           AND attempt.runner_id = authority.runner_id
           AND attempt.runner_session_id = authority.runner_session_id
           AND attempt.runner_session_epoch = authority.runner_session_epoch
           AND attempt.runner_generation = authority.runner_generation
+          AND attempt.lifecycle IN ('leased', 'preparing', 'running', 'cancelling')
+          AND attempt.changed_at_ms < attempt.lease_expires_at_ms
+          AND runner.id = authority.runner_id
+          AND runner.tenant_id = authority.tenant_id
+          AND runner.generation = authority.runner_generation
+          AND runner.session_epoch = authority.runner_session_epoch
+          AND runner.status = 'online'
+          AND runner.desired_state IN ('active', 'draining')
+          AND session.id = authority.runner_session_id
+          AND session.session_epoch = authority.runner_session_epoch
+          AND session.runner_generation = authority.runner_generation
+          AND session.disconnected_at_ms IS NULL
+          AND session.job_ir_schema = 5
           AND NOT EXISTS (
               SELECT 1
               FROM github_runtime_authority_lease_renewal_receipts AS successor
@@ -255,7 +331,11 @@ CREATE CONSTRAINT TRIGGER job_attempts_github_runtime_authority_renewal_exact
 AFTER UPDATE ON job_attempts
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-WHEN (OLD.lease_expires_at_ms IS DISTINCT FROM NEW.lease_expires_at_ms)
+WHEN (
+    NEW.lease_expires_at_ms IS NOT NULL
+    AND OLD.lease_expires_at_ms IS DISTINCT FROM NEW.lease_expires_at_ms
+    AND NEW.lifecycle IN ('leased', 'preparing', 'running', 'cancelling')
+)
 EXECUTE FUNCTION automata_require_github_runtime_authority_attempt_renewal();
 
 CREATE FUNCTION automata_reject_github_runtime_authority_lease_renewal_mutation()
