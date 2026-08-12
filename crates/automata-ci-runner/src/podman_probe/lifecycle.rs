@@ -814,7 +814,7 @@ impl<'a> ProbeResources<'a> {
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
-    device: u64,
+    device: rustix::fs::Dev,
     inode: u64,
 }
 
@@ -1127,7 +1127,7 @@ fn ensure_private_directory_descriptor(
 fn ensure_owned_directory_descriptor(
     descriptor: &impl std::os::fd::AsFd,
     description: &str,
-    expected_mode: u32,
+    expected_mode: rustix::fs::RawMode,
 ) -> Result<(), String> {
     let metadata =
         fstat(descriptor).map_err(|error| format!("could not inspect {description}: {error}"))?;

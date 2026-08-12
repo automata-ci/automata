@@ -318,7 +318,7 @@ fn read_file(
 #[cfg(unix)]
 const fn file_is_trusted(
     owner: u32,
-    permission_bits: u32,
+    permission_bits: rustix::fs::RawMode,
     trust: FileTrust,
     effective_uid: u32,
 ) -> bool {

@@ -361,7 +361,7 @@ fn execute_system_command(
     let (termination, wait_error) =
         wait_for_termination(&mut child, request, cancellation, deadline);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let mut wait_error = wait_error;
 
     #[cfg(target_os = "linux")]
