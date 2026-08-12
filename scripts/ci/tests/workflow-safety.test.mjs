@@ -378,7 +378,7 @@ test("repository CI omits the hosted Windows job and retains fixture parity", ()
 });
 
 test("CI runs the native macOS contract on pinned Apple Silicon", () => {
-  const ci = source(".github/workflows/ci.yml");
+  const ci = source(".ci/workflows/ci.yml");
   const macos = workflowJob(ci, "macos");
 
   assert.match(macos, /runs-on: macos-15/);
