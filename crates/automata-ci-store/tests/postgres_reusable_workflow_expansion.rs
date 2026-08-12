@@ -709,6 +709,16 @@ async fn reusable_secret_identity_chain_accepts_only_unambiguous_same_name_forwa
                     'INHERITED_TOKEN', TRUE
                 ),
                 (
+                    'two-hop/omitted-parent',
+                    '10000000-0000-0000-0000-000000000113'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
+                    'two-hop/parent-casefold-ambiguity',
+                    '10000000-0000-0000-0000-000000000114'::uuid,
+                    'TOKEN', FALSE
+                ),
+                (
                     'one-hop/unrelated-target',
                     '10000000-0000-0000-0000-000000000108'::uuid,
                     'TOKEN', FALSE

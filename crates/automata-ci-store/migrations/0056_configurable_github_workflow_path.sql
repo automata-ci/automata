@@ -1,3 +1,4 @@
+-- Forward-only configurable exact workflow selection.
 ALTER TABLE github_provider_manifest_revisions
     DROP CONSTRAINT github_provider_manifest_revisions_selector_exact,
     ADD CONSTRAINT github_provider_manifest_revisions_selector_exact CHECK (

@@ -48,7 +48,7 @@ END;
 $automata$;
 
 -- Rerun origins are introduced by this migration, so the reusable/OIDC
--- predicates originally installed by 0061 are replaced forward-only here.
+-- predicates originally installed by 0063 are replaced forward-only here.
 CREATE OR REPLACE FUNCTION automata_github_oidc_authority_is_current(
     authority github_oidc_authorities,
     observed_at_ms BIGINT,
@@ -2631,6 +2631,8 @@ BEGIN
         JOIN workflow_plan_v2_runs AS source_marker
           ON source_marker.run_id = attempt.source_run_id
          AND target_marker.orchestration_schema = source_marker.orchestration_schema
+         AND target_marker.runner_requirements_schema = 3
+         AND source_marker.runner_requirements_schema = 3
          AND target_marker.state = 'pending'
          AND target_marker.revision = 1
          AND target_marker.admitted_at_ms = attempt.created_at_ms
@@ -2666,8 +2668,9 @@ BEGIN
          AND session.provider_id = identity.provider_id
          AND session.provider_subject = identity.provider_subject
         JOIN workflow_runs AS target_run
-          ON target_run.id = attempt.run_id
+         ON target_run.id = attempt.run_id
          AND target_run.triggering_actor = identity.provider_login
+         AND target_run.runner_requirements_schema = 3
          AND target_run.status = 'queued'
          AND target_run.created_at_ms = attempt.created_at_ms
          AND target_run.updated_at_ms = attempt.created_at_ms
@@ -2676,6 +2679,7 @@ BEGIN
          AND target_run.concurrency_cancel_in_progress IS NULL
         JOIN workflow_runs AS source_run
           ON source_run.id = attempt.source_run_id
+         AND source_run.runner_requirements_schema = 3
          AND source_run.concurrency_group_key IS NULL
          AND source_run.concurrency_queue_policy IS NULL
          AND source_run.concurrency_cancel_in_progress IS NULL

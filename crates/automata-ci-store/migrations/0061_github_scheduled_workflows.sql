@@ -2325,7 +2325,7 @@ $automata$;
 
 -- Root graph publication must accept either signed webhook evidence or the
 -- schedule-specific evidence inserted by the authenticated admission path.
--- Migration 0052 only knew about webhook subjects, which otherwise makes
+-- Migration 0055 only knew about webhook subjects, which otherwise makes
 -- every scheduled admission fail when its first logical job is inserted.
 CREATE OR REPLACE FUNCTION automata_require_open_workflow_admission_graph()
 RETURNS TRIGGER

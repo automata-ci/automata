@@ -124,7 +124,7 @@ CREATE TABLE workflow_plan_v2_concrete_jobs (
         AND display_name !~ '[[:cntrl:]]'
     ),
     CONSTRAINT workflow_plan_v2_concrete_jobs_requirements_current CHECK (
-        requirements @> '{"schema_version": 3}'::jsonb
+        requirements @> '{"schema_version": 2}'::jsonb
     ),
     CONSTRAINT workflow_plan_v2_concrete_jobs_event_key_shape CHECK (
         octet_length(event_object_key) BETWEEN 1 AND 1024

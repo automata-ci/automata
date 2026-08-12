@@ -47,14 +47,13 @@ ALTER TABLE automata_cluster_compatibility
 
 UPDATE automata_cluster_compatibility
 SET minimum_admission_epoch = 4,
-    job_ir_schema = 5,
-    runner_requirements_schema = 3;
+    job_ir_schema = 5;
 
 ALTER TABLE automata_cluster_compatibility
     ADD CONSTRAINT automata_cluster_compatibility_job_ir_v5 CHECK (
         minimum_admission_epoch = 4
         AND job_ir_schema = 5
-        AND runner_requirements_schema = 3
+        AND runner_requirements_schema = 2
     );
 
 -- A v4 session cannot execute JobIR v5. Retain its audit row but revoke its
@@ -91,7 +90,7 @@ ALTER TABLE jobs
         admission_epoch = 4
         AND job_ir_schema = 5
         AND job_ir_size_bytes BETWEEN 1 AND 16777216
-        AND requirements @> '{"schema_version": 3}'::jsonb
+        AND requirements @> '{"schema_version": 2}'::jsonb
     );
 
 ALTER TABLE runner_operation_receipts
