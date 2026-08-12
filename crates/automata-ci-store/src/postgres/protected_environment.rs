@@ -87,15 +87,6 @@ impl ProtectedEnvironmentRepository for PostgresStore {
     }
 }
 
-const fn terminal_gate_state(state: JobEnvironmentGateState) -> bool {
-    matches!(
-        state,
-        JobEnvironmentGateState::Rejected
-            | JobEnvironmentGateState::Expired
-            | JobEnvironmentGateState::Cancelled
-    )
-}
-
 async fn conclude_terminal_job_environment(
     store: &PostgresStore,
     tenant: &TenantScope,
@@ -211,7 +202,8 @@ async fn conclude_gate_with_encryption(
     let existing = sqlx::query(
         r"
         SELECT operation_id, requested_by, reason, requested_at_ms,
-               delivery_session_id
+               acknowledged_at_ms, delivery_session_id,
+               delivery_command_sequence
         FROM attempt_cancellation_intents
         WHERE attempt_id = $1
         FOR UPDATE
@@ -222,10 +214,19 @@ async fn conclude_gate_with_encryption(
     .await
     .map_err(operation_error)?;
     let request = if let Some(existing) = existing {
-        if existing
-            .try_get::<Option<Uuid>, _>("delivery_session_id")
-            .map_err(operation_error)?
-            .is_some()
+        if attempt_lifecycle != "cancelled"
+            || existing
+                .try_get::<Option<i64>, _>("acknowledged_at_ms")
+                .map_err(operation_error)?
+                .is_some()
+            || existing
+                .try_get::<Option<Uuid>, _>("delivery_session_id")
+                .map_err(operation_error)?
+                .is_some()
+            || existing
+                .try_get::<Option<i64>, _>("delivery_command_sequence")
+                .map_err(operation_error)?
+                .is_some()
         {
             return Err(ProtectedEnvironmentStoreError::CorruptData);
         }
@@ -264,9 +265,18 @@ async fn conclude_gate_with_encryption(
             automata_ci_core::UnixMillis::new(now),
         )
     };
-    super::g1::request_cancellation_in_transaction(transaction, encryption, request)
+    super::g1::request_cancellation_in_transaction(transaction, encryption, request.clone())
         .await
-        .map_err(ProtectedEnvironmentStoreError::Operation)?;
+        .map_err(terminal_cancellation_error)?;
+    // An arbitrary immutable cancellation row is not enough. A prior user or
+    // administrator cancellation is reusable only when the canonical G1 state
+    // machine produced the exact no-delivery queued terminal authority for it.
+    super::server_cancellation_terminal::verify_queued_server_cancellation_terminal(
+        transaction,
+        &request,
+    )
+    .await
+    .map_err(terminal_cancellation_error)?;
     Ok(())
 }
 
@@ -921,7 +931,10 @@ async fn review_job_environment(
         } else {
             false
         };
-        if terminal_gate_state(state) {
+        if matches!(
+            state,
+            JobEnvironmentGateState::Expired | JobEnvironmentGateState::Cancelled
+        ) {
             let database_now_ms = database_now(&mut transaction).await?;
             conclude_gate_in_transaction(
                 store,
@@ -930,14 +943,27 @@ async fn review_job_environment(
                 database_now_ms,
             )
             .await?;
-            // A terminal gate must close the queued attempt even when this is
-            // not an exact review replay. Commit liveness first, then report
-            // the non-applied/opposite decision as a conflict.
+            // Expiry/cancellation never applies the requested review decision.
+            // Commit liveness, but do not turn an older matching approval row
+            // into a successful replay of this non-applied review.
             transaction.commit().await.map_err(operation_error)?;
-            if !decision_is_exact {
-                return Err(ProtectedEnvironmentStoreError::Conflict);
-            }
-            return Ok(state);
+            return Err(ProtectedEnvironmentStoreError::Conflict);
+        }
+        if state == JobEnvironmentGateState::Rejected {
+            let database_now_ms = database_now(&mut transaction).await?;
+            conclude_gate_in_transaction(
+                store,
+                &mut transaction,
+                request.attempt_id(),
+                database_now_ms,
+            )
+            .await?;
+            transaction.commit().await.map_err(operation_error)?;
+            return if decision_is_exact {
+                Ok(state)
+            } else {
+                Err(ProtectedEnvironmentStoreError::Conflict)
+            };
         }
         if !decision_is_exact {
             return Err(ProtectedEnvironmentStoreError::Conflict);
@@ -2485,6 +2511,13 @@ fn parse_gate_state(
 
 fn operation_error(error: sqlx::Error) -> ProtectedEnvironmentStoreError {
     ProtectedEnvironmentStoreError::Operation(StoreError::operation(error))
+}
+
+fn terminal_cancellation_error(error: StoreError) -> ProtectedEnvironmentStoreError {
+    match error {
+        StoreError::CorruptData(_) => ProtectedEnvironmentStoreError::CorruptData,
+        error => ProtectedEnvironmentStoreError::Operation(error),
+    }
 }
 
 fn human_action_error(error: StoreError) -> ProtectedEnvironmentStoreError {
