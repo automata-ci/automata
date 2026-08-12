@@ -120,7 +120,7 @@ automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "
 automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 bytes = "=1.12.1"
 clap = { version = "4.5.45", features = ["derive", "env"] }
 futures = "0.3.31"
