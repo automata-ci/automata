@@ -125,12 +125,12 @@ for instance in 1 2 3; do
   runner_account="automata-runner-${instance}"
   runner_uid="$((1000 + instance))"
   sudo install -d -m 0700 -o "$runner_account" -g "$runner_account" \
-    "/run/automata-runner-${instance}"
+    "/run/automata_runner_${instance}"
   sudo mount -t tmpfs "automata-runner-runtime-${instance}" \
-    "/run/automata-runner-${instance}" \
+    "/run/automata_runner_${instance}" \
     -o "nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=${runner_uid},gid=${runner_uid}"
   findmnt -no TARGET,FSTYPE,OPTIONS \
-    --target "/run/automata-runner-${instance}"
+    --target "/run/automata_runner_${instance}"
 done
 ```
 

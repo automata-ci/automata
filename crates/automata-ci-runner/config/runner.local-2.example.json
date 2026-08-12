@@ -5,7 +5,7 @@
   "state": {
     "journal": "/var/lib/automata-runner/2/journal",
     "spool": "/var/lib/automata-runner/2/spool",
-    "podman": "/run/automata-runner-2/automata-ci-podman/state"
+    "podman": "/run/automata_runner_2/automata-ci-podman/state"
   },
   "tls": {
     "server_roots": {
@@ -66,7 +66,7 @@
   "podman": {
     "binary": "/usr/bin/podman",
     "home": "/var/lib/automata-runner/2/home",
-    "runtime_directory": "/run/automata-runner-2",
+    "runtime_directory": "/run/automata_runner_2",
     "approved_helper_directory": "/opt/automata/private/usr/sbin",
     "conmon_path": "/usr/bin/conmon",
     "oci_runtime_path": "/usr/bin/crun",

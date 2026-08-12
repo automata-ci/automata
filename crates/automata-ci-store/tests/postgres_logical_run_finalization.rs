@@ -1808,40 +1808,42 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
 }
 
 async fn set_linked_check_back_to_queued(database: &TestDatabase, subject_id: Uuid) -> TestResult {
-    let mut transaction = database.pool().begin().await?;
     sqlx::query(
         "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_update_guard",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
     sqlx::query(
         "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_wake_projection",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
-    sqlx::query(
-        r"
-        UPDATE github_check_subjects
-        SET desired_state = 'queued', desired_revision = 1,
-            desired_updated_at_ms = created_at_ms
-        WHERE id = $1
-        ",
-    )
-    .bind(subject_id)
-    .execute(&mut *transaction)
-    .await?;
+    let mutation: TestResult = async {
+        sqlx::query(
+            r"
+            UPDATE github_check_subjects
+            SET desired_state = 'queued', desired_revision = 1,
+                desired_updated_at_ms = created_at_ms
+            WHERE id = $1
+            ",
+        )
+        .bind(subject_id)
+        .execute(database.pool())
+        .await?;
+        Ok(())
+    }
+    .await;
     sqlx::query(
         "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_wake_projection",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
     sqlx::query(
         "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_update_guard",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
-    transaction.commit().await?;
-    Ok(())
+    mutation
 }
 
 async fn seed_additional_linked_github_check(
@@ -1851,53 +1853,57 @@ async fn seed_additional_linked_github_check(
     namespace: u128,
 ) -> TestResult<Uuid> {
     let subject_id = Uuid::from_u128(namespace);
-    let mut transaction = database.pool().begin().await?;
     sqlx::query(
         "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_00_delivery_evidence_exact",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
-    sqlx::query(
-        r"
-        INSERT INTO github_check_subjects (
-            id, tenant_id, repository_id, provider_delivery_id, subject_key,
-            provider_connection_id, provider_installation_id,
-            github_repository_id, github_app_id, head_sha, check_name,
-            external_id, created_at_ms, desired_updated_at_ms
+    let mutation: TestResult<Uuid> = async {
+        let mut transaction = database.pool().begin().await?;
+        sqlx::query(
+            r"
+            INSERT INTO github_check_subjects (
+                id, tenant_id, repository_id, provider_delivery_id, subject_key,
+                provider_connection_id, provider_installation_id,
+                github_repository_id, github_app_id, head_sha, check_name,
+                external_id, created_at_ms, desired_updated_at_ms
+            )
+            SELECT $2, tenant_id, repository_id, provider_delivery_id,
+                   subject_key || '/duplicate', provider_connection_id,
+                   provider_installation_id, github_repository_id, github_app_id,
+                   head_sha, check_name || ' duplicate',
+                   'automata-check:' || $2::TEXT, 1_401, 1_401
+            FROM github_check_subjects
+            WHERE id = $1
+            ",
         )
-        SELECT $2, tenant_id, repository_id, provider_delivery_id,
-               subject_key || '/duplicate', provider_connection_id,
-               provider_installation_id, github_repository_id, github_app_id,
-               head_sha, check_name || ' duplicate',
-               'automata-check:' || $2::TEXT, 1_401, 1_401
-        FROM github_check_subjects
-        WHERE id = $1
-        ",
-    )
-    .bind(original_subject_id)
-    .bind(subject_id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r"
-        UPDATE github_check_subjects
-        SET workflow_run_id = $2, linked_at_ms = 1_401,
-            desired_state = 'in_progress', desired_revision = 2,
-            desired_updated_at_ms = 1_401
-        WHERE id = $1
-        ",
-    )
-    .bind(subject_id)
-    .bind(fixture.command.run_id().as_uuid())
-    .execute(&mut *transaction)
-    .await?;
+        .bind(original_subject_id)
+        .bind(subject_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE github_check_subjects
+            SET workflow_run_id = $2, linked_at_ms = 1_401,
+                desired_state = 'in_progress', desired_revision = 2,
+                desired_updated_at_ms = 1_401
+            WHERE id = $1
+            ",
+        )
+        .bind(subject_id)
+        .bind(fixture.command.run_id().as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(subject_id)
+    }
+    .await;
     sqlx::query(
         "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_00_delivery_evidence_exact",
     )
-    .execute(&mut *transaction)
+    .execute(database.pool())
     .await?;
-    transaction.commit().await?;
-    Ok(subject_id)
+    mutation
 }
 
 async fn claim_two_ready_runs(

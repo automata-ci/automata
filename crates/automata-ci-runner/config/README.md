@@ -133,7 +133,7 @@ The three `runner.local-N.example.json` files assume:
   non-overlapping subordinate ID ranges;
 - durable journal and spool state below `/var/lib/automata-runner`;
 - Linux 6.4 or newer with three dedicated, bounded `tmpfs,noswap` mounts at
-  `/run/automata-runner-1` through `/run/automata-runner-3`;
+  `/run/automata_runner_1` through `/run/automata_runner_3`;
 - distinct TLS leaves/keys and spool keys below each
   `/etc/automata-runner/instances/N` boundary;
 - a control-plane runner listener reachable at the configured HTTPS URL;
@@ -180,8 +180,8 @@ three separate 20 GiB mounts; the equivalent instance-one mount is:
 
 ```console
 sudo install -d -m 0700 -o automata-runner-1 -g automata-runner-1 \
-  /run/automata-runner-1
-sudo mount -t tmpfs automata-runner-runtime-1 /run/automata-runner-1 \
+  /run/automata_runner_1
+sudo mount -t tmpfs automata-runner-runtime-1 /run/automata_runner_1 \
   -o nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=1001,gid=1001
 ```
 

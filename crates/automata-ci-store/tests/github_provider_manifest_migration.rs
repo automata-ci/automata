@@ -260,10 +260,7 @@ async fn assert_direct_unpinned_delivery_is_guarded(
     .execute(database.pool())
     .await
     .expect_err("post-migration direct GitHub delivery insert must be guarded");
-    assert_constraint(
-        &delivery_error,
-        "github_delivery_atomic_queued_check_required",
-    );
+    assert_constraint(&delivery_error, "github_delivery_atomic_evidence_required");
     Ok(())
 }
 

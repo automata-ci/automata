@@ -5,7 +5,7 @@ PartOf=automata-runner-host.target
 
 [Mount]
 What=automata-runner-runtime-1
-Where=/run/automata-runner-1
+Where=/run/automata_runner_1
 Type=tmpfs
 Options=nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=1001,gid=1001
 

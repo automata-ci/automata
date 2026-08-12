@@ -1,6 +1,7 @@
 [package]
 name = "automata-ci-sandbox-guest"
 description = "Ephemeral in-sandbox command transport for Automata sandbox providers"
+readme = "README.md"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -9,6 +10,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+
+[package.metadata.automata-ci]
+artifact-role = "image-helper"
 
 [lints]
 workspace = true

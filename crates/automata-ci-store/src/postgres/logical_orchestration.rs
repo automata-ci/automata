@@ -641,7 +641,53 @@ async fn record_workflow_dispatch_audit(
     .await
     .map_err(operation_error)?;
     validate_workflow_dispatch_audit(transaction, command, claim, actor, command.admitted_at())
-        .await
+        .await?;
+    pin_workflow_dispatch_runtime_policy(transaction, command).await
+}
+
+async fn pin_workflow_dispatch_runtime_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO workflow_plan_v2_runtime_policy_pins (
+            run_id, tenant_id, repository_id, policy_revision,
+            policy_digest, pinned_at_ms
+        )
+        SELECT $1, $2, $3, manifest.runtime_policy_revision,
+               manifest.runtime_policy_digest, $4
+        FROM github_provider_manifest_current AS current_manifest
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
+        JOIN workflow_runtime_policy_revisions AS policy
+          ON policy.tenant_id = manifest.tenant_id
+         AND policy.repository_id = manifest.repository_id
+         AND policy.policy_revision = manifest.runtime_policy_revision
+         AND policy.policy_digest = manifest.runtime_policy_digest
+         AND policy.state = 'sealed'
+        WHERE current_manifest.tenant_id = $2
+          AND current_manifest.repository_id = $3
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.admitted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "workflow dispatch lacks one exact current runtime policy",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn validate_workflow_dispatch_audit(

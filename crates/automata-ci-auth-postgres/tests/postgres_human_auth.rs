@@ -370,7 +370,7 @@ async fn schema_uses_canonical_permissions_and_bumps_membership_authorization_re
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(permission_count, 51);
+        assert_eq!(permission_count, 52);
         assert_eq!(dotted_count, 0);
 
         let role = Uuid::new_v4();

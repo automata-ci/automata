@@ -3147,7 +3147,7 @@ async fn inspection_requires_exact_provider_identity_and_direct_lifecycle_edits_
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn one_worker_concurrently_creates_only_one_revocation_claim() -> TestResult {
+async fn concurrent_same_worker_calls_return_one_durable_revocation_claim() -> TestResult {
     run_with_database(|database| async move {
         let first = seed_authority(&database).await?;
         let second = seed_authority(&database).await?;
@@ -3163,7 +3163,15 @@ async fn one_worker_concurrently_creates_only_one_revocation_claim() -> TestResu
             right_store.claim_github_runtime_authority_revocation(revocation_claim(owner, 5_000)?,)
         );
         let claims = [left?, right?].into_iter().flatten().collect::<Vec<_>>();
-        assert_eq!(claims.len(), 1);
+        let claim = claims.first().expect("one caller claims the authority");
+        for replay in &claims[1..] {
+            assert_eq!(replay.key(), claim.key());
+            assert_eq!(replay.owner(), claim.owner());
+            assert_eq!(replay.fence(), claim.fence());
+            assert_eq!(replay.attempt(), claim.attempt());
+            assert_eq!(replay.claimed_at(), claim.claimed_at());
+            assert_eq!(replay.expires_at(), claim.expires_at());
+        }
         let active_claim_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM github_runtime_authority_issuances \
              WHERE revoke_claim_owner_id = $1",

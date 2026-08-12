@@ -832,7 +832,7 @@ async fn g1_upgrade_fences_populated_legacy_execution_state_without_fake_metadat
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(current_compatibility, (4, 5, 2));
+        assert_eq!(current_compatibility, (4, 5, 3));
         Ok(())
     })
     .await
@@ -1081,7 +1081,7 @@ async fn job_ir_v4_upgrade_fences_v3_then_v5_upgrade_rejects_obsolete_history() 
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(compatibility, (4, 5, 2));
+        assert_eq!(compatibility, (4, 5, 3));
         Ok(())
     })
     .await

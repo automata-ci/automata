@@ -354,7 +354,8 @@ async fn claim_receipts_bind_one_based_slots_and_cancellation_delivery() -> Test
         assert!(replay.was_replayed());
         assert_eq!(replay.outcome(), receipt.outcome());
 
-        let changed_attempt = insert_attempt(database.store(), seed.job_id, 2, 11).await?;
+        let changed_job = insert_job(&database, seed.run_id, "changed-selection").await?;
+        let changed_attempt = insert_attempt(database.store(), changed_job, 1, 11).await?;
         let changed_page = scan(&database, fence, 1).await?;
         let changed_observed_at = database_now(&database).await?;
         let changed = TryClaimAttempt::new(
@@ -382,7 +383,8 @@ async fn claim_receipts_bind_one_based_slots_and_cancellation_delivery() -> Test
             Err(StoreError::OperationConflict { .. })
         ));
 
-        let occupied_attempt = insert_attempt(database.store(), seed.job_id, 3, 12).await?;
+        let occupied_job = insert_job(&database, seed.run_id, "occupied-selection").await?;
+        let occupied_attempt = insert_attempt(database.store(), occupied_job, 1, 12).await?;
         let occupied = database
             .store()
             .try_claim(claim(&database, OperationId::new(), occupied_attempt, fence, 1).await?)
@@ -557,7 +559,8 @@ async fn lease_poll_receipts_replay_selection_and_no_work_before_rescheduling() 
         let seed = seed_control_plane(database.pool(), 1).await?;
         let fence = seed.session_fences[0];
         let attempt_a = insert_attempt(database.store(), seed.job_id, 1, 10).await?;
-        let attempt_b = insert_attempt(database.store(), seed.job_id, 2, 11).await?;
+        let job_b = insert_job(&database, seed.run_id, "lease-poll-b").await?;
+        let attempt_b = insert_attempt(database.store(), job_b, 1, 11).await?;
         let lease_key =
             LeaseRequestKey::first(fence, OperationId::new(), StableRunnerSlot::new(1)?);
         begin_isolated_lease_request(&database, lease_key).await?;
@@ -653,7 +656,8 @@ async fn lease_poll_receipts_replay_selection_and_no_work_before_rescheduling() 
         assert!(matches!(no_work.outcome(), TryClaimOutcome::NoWork));
         assert!(!no_work.was_replayed());
 
-        let attempt_c = insert_attempt(database.store(), seed.job_id, 3, 24).await?;
+        let job_c = insert_job(&database, seed.run_id, "lease-poll-c").await?;
+        let attempt_c = insert_attempt(database.store(), job_c, 1, 24).await?;
         let no_work_retry_page = scan(&database, fence, 3).await?;
         let no_work_retry_at = database_now(&database).await?;
         let no_work_retry = database
@@ -1041,7 +1045,8 @@ async fn reconnect_does_not_release_a_stable_runner_slot() -> TestResult {
                 database_now(&database).await?,
             ))
             .await?;
-        let blocked_attempt = insert_attempt(database.store(), seed.job_id, 2, 11).await?;
+        let blocked_job = insert_job(&database, seed.run_id, "reconnect-blocked").await?;
+        let blocked_attempt = insert_attempt(database.store(), blocked_job, 1, 11).await?;
         let blocked = database
             .store()
             .try_claim(
@@ -1061,7 +1066,8 @@ async fn reconnect_does_not_release_a_stable_runner_slot() -> TestResult {
                 if *attempt_id == occupied_attempt
         ));
 
-        let free_attempt = insert_attempt(database.store(), seed.job_id, 3, 12).await?;
+        let free_job = insert_job(&database, seed.run_id, "reconnect-free").await?;
+        let free_attempt = insert_attempt(database.store(), free_job, 1, 12).await?;
         let free = database
             .store()
             .try_claim(
@@ -1619,13 +1625,8 @@ async fn expiry_only_requeues_work_that_never_started_running() -> TestResult {
         let mut attempts = Vec::new();
         let mut claims = Vec::new();
         for ordinal in 1_u16..=5 {
-            let attempt = insert_attempt(
-                database.store(),
-                seed.job_id,
-                u32::from(ordinal),
-                i64::from(ordinal),
-            )
-            .await?;
+            let job = insert_job(&database, seed.run_id, &format!("expiry-{ordinal}")).await?;
+            let attempt = insert_attempt(database.store(), job, 1, i64::from(ordinal)).await?;
             let receipt = database
                 .store()
                 .try_claim(claim(&database, OperationId::new(), attempt, fence, ordinal).await?)

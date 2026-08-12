@@ -553,6 +553,85 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn reusable_child_publication_rejects_credential_drift_atomically() -> TestResult {
+    run_with_database(|database| async move {
+        let mut fixture = fixture(&database, "materialization-credential-drift", 75_000).await?;
+        seed_tenant(&database, &fixture.tenant).await?;
+        admit_authenticated_fixture(&database, &mut fixture, true).await?;
+        let (publication, child_invocation_id, child_job_id) =
+            planned_reusable_child(&database, &fixture).await?;
+
+        // Simulate application/trigger drift after the immutable expansion was
+        // accepted. The injected name is independently canonical, so only the
+        // seal-time equality proof can reject the manufactured credential.
+        sqlx::raw_sql(
+            r"
+            CREATE FUNCTION automata_test_tamper_reusable_child_credentials()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $automata$
+            BEGIN
+                NEW.secret_reference_names := ARRAY['INJECTED_SECRET'];
+                RETURN NEW;
+            END;
+            $automata$;
+            CREATE TRIGGER workflow_plan_v2_jobs_00_test_credential_tamper
+            BEFORE INSERT ON workflow_plan_v2_jobs
+            FOR EACH ROW
+            EXECUTE FUNCTION automata_test_tamper_reusable_child_credentials();
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+
+        assert!(matches!(
+            database
+                .store()
+                .publish_reusable_workflow_call(publication.clone())
+                .await,
+            Err(ReusableWorkflowRuntimeStoreError::Conflict)
+        ));
+
+        let leaked_rows: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*)::BIGINT
+                 FROM workflow_plan_v2_reusable_call_publications
+                 WHERE run_id = $1 AND child_invocation_id = $2),
+                (SELECT count(*)::BIGINT
+                 FROM workflow_plan_v2_invocations
+                 WHERE run_id = $1 AND id = $2),
+                (SELECT count(*)::BIGINT
+                 FROM workflow_plan_v2_jobs
+                 WHERE run_id = $1 AND invocation_id = $2 AND id = $3)
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(child_invocation_id.as_uuid())
+        .bind(child_job_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(leaked_rows, (0, 0, 0));
+
+        let parent: (String, i64) = sqlx::query_as(
+            r"
+            SELECT state, activation_fence
+            FROM workflow_plan_v2_jobs
+            WHERE run_id = $1 AND id = $2
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind(publication.caller_logical_job_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(parent, ("pending".to_owned(), 0));
+        Ok(())
+    })
+    .await
+}
+
 async fn assert_activation_idle_reconciliation_rejected(
     database: &TestDatabase,
     namespace: u128,
@@ -838,7 +917,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         .bind(fixture.command.run_id().as_uuid())
         .fetch_all(database.pool())
         .await?;
-        assert_eq!(routing_shape, vec![(4, 5, 2), (4, 5, 2)]);
+        assert_eq!(routing_shape, vec![(4, 5, 3), (4, 5, 3)]);
         let runner = open_v5_runner(&database, &fixture.tenant, 10_300).await?;
         let runnable = database
             .store()
@@ -1416,7 +1495,10 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *gate)
             .await?;
-        sqlx::query("LOCK TABLE workflow_plan_v2_concrete_jobs IN ACCESS EXCLUSIVE MODE")
+        // Stop the commit after it owns the run but before it locks the
+        // materialization claim. Unlike the concrete-job table, this table is
+        // not read by the admission-side current-attempt liveness trigger.
+        sqlx::query("LOCK TABLE workflow_plan_v2_materialization_claims IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *gate)
             .await?;
 
@@ -1427,12 +1509,9 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
                 .commit_logical_instance_materialization(commit_for_task)
                 .await
         });
-        let materialization_pid = wait_for_backend_blocked_by(
-            database.pool(),
-            gate_pid,
-            "INSERT INTO workflow_plan_v2_concrete_jobs",
-        )
-        .await?;
+        let materialization_pid =
+            wait_for_backend_blocked_by(database.pool(), gate_pid, "SELECT instance.matrix_index")
+                .await?;
 
         let admission_store = database.store().clone();
         let admission =
@@ -2155,10 +2234,11 @@ async fn planned_reusable_child(
         r"
         INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
             run_id, invocation_id, logical_job_id, logical_key,
-            source_order, execution_kind, descriptor_digest
+            source_order, execution_kind, descriptor_digest,
+            environment_requirement_kind
         ) VALUES
-            ($1,$2,$3,'build',0,'reusable_workflow',$4),
-            ($1,$5,$6,'build',0,'steps',$7)
+            ($1,$2,$3,'build',0,'reusable_workflow',$4,'none'),
+            ($1,$5,$6,'build',0,'steps',$7,'none')
         ",
     )
     .bind(run_id.as_uuid())

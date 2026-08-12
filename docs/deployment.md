@@ -1,8 +1,8 @@
 # Control-plane setup
 
-This guide starts `automata server`, PostgreSQL, RustFS, and one statically
-registered runner on a development machine. Optional sections add GitHub login,
-provider ingress, and the built-in secret provider.
+This guide starts `automata server`, PostgreSQL, RustFS, and three statically
+registered runner processes on a development machine. Optional sections add
+GitHub login, provider ingress, and the built-in secret provider.
 
 > [!CAUTION]
 > This is not a production deployment. Runner enrollment is static, production

@@ -42,6 +42,32 @@ ALTER TABLE workflow_plan_v2_jobs
         credential_requirements_schema = 1
     );
 
+-- Reusable child jobs are admitted before their invocation is published into
+-- workflow_plan_v2_jobs. Preserve the same immutable classification on that
+-- pre-publication ledger so publication cannot manufacture or discard access.
+ALTER TABLE workflow_plan_v2_reusable_expanded_jobs
+    ADD COLUMN environment_requirement_kind TEXT NOT NULL DEFAULT 'unclassified',
+    ADD COLUMN environment_template_digest BYTEA,
+    ADD COLUMN secret_reference_names TEXT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN variable_reference_names TEXT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN credential_requirements_schema SMALLINT NOT NULL DEFAULT 1,
+    ADD CONSTRAINT reusable_expanded_jobs_environment_requirement CHECK (
+        environment_requirement_kind IN ('unclassified', 'none', 'environment')
+    ),
+    ADD CONSTRAINT reusable_expanded_jobs_environment_shape CHECK ((
+        (environment_requirement_kind = 'environment'
+         AND octet_length(environment_template_digest) = 32)
+        OR (environment_requirement_kind IN ('unclassified', 'none')
+            AND environment_template_digest IS NULL)
+    ) IS TRUE),
+    ADD CONSTRAINT reusable_expanded_jobs_reference_limits CHECK (
+        cardinality(secret_reference_names) <= 256
+        AND cardinality(variable_reference_names) <= 256
+    ),
+    ADD CONSTRAINT reusable_expanded_jobs_credential_schema CHECK (
+        credential_requirements_schema = 1
+    );
+
 ALTER TABLE protected_environment_approval_requests
     ADD CONSTRAINT protected_environment_approval_one_per_attempt
         UNIQUE (tenant_id, attempt_id);
@@ -548,6 +574,63 @@ CREATE TRIGGER workflow_plan_v2_jobs_credential_requirements_validate
 BEFORE INSERT OR UPDATE ON workflow_plan_v2_jobs
 FOR EACH ROW
 EXECUTE FUNCTION automata_validate_logical_job_credential_requirements();
+
+-- The immutable reusable-expansion ledger is populated before child graph
+-- publication. Apply the same canonical-array validation at that first write;
+-- migration 0051 already rejects every later update or delete.
+CREATE TRIGGER workflow_plan_v2_reusable_jobs_credential_requirements_validate
+BEFORE INSERT ON workflow_plan_v2_reusable_expanded_jobs
+FOR EACH ROW
+EXECUTE FUNCTION automata_validate_logical_job_credential_requirements();
+
+-- The publication transaction copies the classified child requirements into
+-- the live logical-job ledger before it seals the child graph. Bind all five
+-- fields at that exact transition so application or trigger drift cannot
+-- manufacture, discard, or rewrite credential authority.
+CREATE FUNCTION automata_require_exact_reusable_child_credentials_at_seal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $automata$
+BEGIN
+    IF OLD.child_graph_sealed_at_ms IS NULL
+       AND NEW.child_graph_sealed_at_ms IS NOT NULL
+       AND NEW.condition_matched
+       AND EXISTS (
+           SELECT 1
+           FROM workflow_plan_v2_reusable_expanded_jobs AS planned
+           LEFT JOIN workflow_plan_v2_jobs AS active
+             ON active.run_id = planned.run_id
+            AND active.invocation_id = planned.invocation_id
+            AND active.id = planned.logical_job_id
+           WHERE planned.run_id = NEW.run_id
+             AND planned.invocation_id = NEW.child_invocation_id
+             AND (
+                 planned.environment_requirement_kind = 'unclassified'
+                 OR active.environment_requirement_kind IS DISTINCT FROM
+                    planned.environment_requirement_kind
+                 OR active.environment_template_digest IS DISTINCT FROM
+                    planned.environment_template_digest
+                 OR active.secret_reference_names IS DISTINCT FROM
+                    planned.secret_reference_names
+                 OR active.variable_reference_names IS DISTINCT FROM
+                    planned.variable_reference_names
+                 OR active.credential_requirements_schema IS DISTINCT FROM
+                    planned.credential_requirements_schema
+             )
+       ) THEN
+        RAISE EXCEPTION 'reusable child credential requirements do not match immutable expansion evidence'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_plan_v2_reusable_call_credential_requirements_exact';
+    END IF;
+    RETURN NEW;
+END;
+$automata$;
+
+CREATE TRIGGER workflow_plan_v2_reusable_calls_credentials_exact
+BEFORE UPDATE OF child_graph_sealed_at_ms
+ON workflow_plan_v2_reusable_call_publications
+FOR EACH ROW
+EXECUTE FUNCTION automata_require_exact_reusable_child_credentials_at_seal();
 
 CREATE FUNCTION automata_require_classified_logical_job_credentials()
 RETURNS trigger

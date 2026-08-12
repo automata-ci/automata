@@ -1505,7 +1505,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
         )
         .await
         .expect_err("a bare GitHub inbox must fail at statement commit");
-        assert_constraint(&bare_error, "github_delivery_atomic_queued_check_required");
+        assert_constraint(&bare_error, "github_delivery_atomic_evidence_required");
 
         let mut no_check = database.pool().begin().await?;
         let no_check_id = Uuid::new_v4();
@@ -1533,6 +1533,7 @@ async fn direct_sql_cannot_commit_bare_delivery_evidence_or_unpinned_check() -> 
         assert_constraint_one_of(
             &commit_error,
             &[
+                "github_delivery_atomic_evidence_required",
                 "github_delivery_atomic_queued_check_required",
                 "github_provider_delivery_evidence_check_subject",
             ],

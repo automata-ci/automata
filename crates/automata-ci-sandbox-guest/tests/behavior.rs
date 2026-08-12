@@ -42,12 +42,11 @@ struct TempDir {
 }
 
 impl TempDir {
-    fn new(label: &str) -> Self {
+    fn new(_label: &str) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "automata-sandbox-guest-test-{}-{sequence}-{label}",
-            std::process::id()
-        ));
+        // CI deliberately uses a repository-local TMPDIR. Keep the socket's
+        // child name short enough for Linux's fixed-size Unix path field.
+        let path = std::env::temp_dir().join(format!(".asg-{:x}-{sequence:x}", std::process::id()));
         std::fs::create_dir(&path).expect("create isolated test directory");
         Self { path }
     }
@@ -63,7 +62,7 @@ impl Drop for TempDir {
             .path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("automata-sandbox-guest-test-"));
+            .is_some_and(|name| name.starts_with(".asg-"));
         if is_owned_test_directory {
             let _ = std::fs::remove_dir_all(&self.path);
         }

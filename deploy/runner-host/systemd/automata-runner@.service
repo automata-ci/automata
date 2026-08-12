@@ -1,7 +1,7 @@
 [Unit]
 Description=Automata CI runner instance %i
 Documentation=https://github.com/automata-ci/automata/blob/main/deploy/runner-host/README.md
-RequiresMountsFor=/run/automata-runner-%i
+RequiresMountsFor=/run/automata_runner_%i
 After=network-online.target
 Wants=network-online.target
 PartOf=automata-runner-host.target

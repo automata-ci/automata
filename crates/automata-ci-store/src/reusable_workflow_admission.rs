@@ -5,7 +5,8 @@ use automata_ci_core::{
 };
 
 use crate::{
-    AdmissionObject, LogicalWorkflowInvocationId, LogicalWorkflowJobId, WorkflowSnapshotId,
+    AdmissionObject, JobCredentialRequirements, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    WorkflowSnapshotId,
 };
 
 /// One exact source/plan pair in a repository-local reusable-workflow catalog.
@@ -290,6 +291,7 @@ pub struct AdmittedReusableJob {
     reusable: bool,
     descriptor_digest: Sha256Digest,
     prerequisites: Vec<LogicalWorkflowJobId>,
+    credential_requirements: JobCredentialRequirements,
 }
 
 impl AdmittedReusableJob {
@@ -310,7 +312,18 @@ impl AdmittedReusableJob {
             reusable,
             descriptor_digest,
             prerequisites,
+            credential_requirements: JobCredentialRequirements::default(),
         }
+    }
+
+    /// Binds exact static credential references discovered from the child plan.
+    #[must_use]
+    pub fn with_credential_requirements(
+        mut self,
+        credential_requirements: JobCredentialRequirements,
+    ) -> Self {
+        self.credential_requirements = credential_requirements;
+        self
     }
 
     /// Returns the deterministic job identity.
@@ -347,6 +360,12 @@ impl AdmittedReusableJob {
     #[must_use]
     pub fn prerequisites(&self) -> &[LogicalWorkflowJobId] {
         &self.prerequisites
+    }
+
+    /// Returns immutable deployment and credential-reference requirements.
+    #[must_use]
+    pub const fn credential_requirements(&self) -> &JobCredentialRequirements {
+        &self.credential_requirements
     }
 }
 

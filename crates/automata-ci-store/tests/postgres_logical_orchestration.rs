@@ -334,7 +334,7 @@ fn fixture_at(
         second_id,
         WorkflowJobKey::new("verify").expect("key"),
         1,
-        LogicalWorkflowJobKind::ReusableWorkflow,
+        LogicalWorkflowJobKind::Steps,
         vec![first_id],
     )
     .expect("second job");
@@ -470,7 +470,7 @@ async fn assert_logical_admission_shape(
             (
                 "verify".to_owned(),
                 1,
-                "reusable_workflow".to_owned(),
+                "steps".to_owned(),
                 "pending".to_owned(),
             ),
         ]
@@ -827,6 +827,7 @@ async fn seed_dispatch_actor(
     .await?;
     let now_ms = database_now_ms(database).await?;
     let issued_at = now_ms.saturating_sub(1_000);
+    let activation_deadline = now_ms.checked_add(60_000).ok_or("clock overflow")?;
     let idle_expires_at = now_ms.checked_add(3_600_000).ok_or("clock overflow")?;
     let expires_at = now_ms.checked_add(7_200_000).ok_or("clock overflow")?;
     let mut token_hash = [0_u8; 32];
@@ -838,10 +839,12 @@ async fn seed_dispatch_actor(
             id, tenant_id, principal_id, provider_id, provider_subject,
             session_kind, audience, token_hash, token_hash_key_id,
             authorization_revision, issued_at_ms, last_seen_at_ms,
-            idle_expires_at_ms, expires_at_ms
+            idle_expires_at_ms, expires_at_ms,
+            lifecycle_status, activation_deadline_ms
         ) VALUES (
             $1,$2,$3,'github',$4,'cli','automata.cli',$5,
-            'dispatch-session-v1',$6,$7,$7,$8,$9
+            'dispatch-session-v1',$6,$7,$7,$8,$9,
+            'pending_activation',$10
         )
         ",
     )
@@ -854,6 +857,19 @@ async fn seed_dispatch_actor(
     .bind(issued_at)
     .bind(idle_expires_at)
     .bind(expires_at)
+    .bind(activation_deadline)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        UPDATE human_sessions
+        SET lifecycle_status = 'active', activated_at_ms = $2,
+            revision = revision + 1
+        WHERE id = $1
+        ",
+    )
+    .bind(session_id)
+    .bind(now_ms)
     .execute(database.pool())
     .await?;
     let actor = ManagementActor::new(
@@ -892,7 +908,7 @@ fn workflow_dispatch_fixture(
             second_id,
             WorkflowJobKey::new("verify").expect("key"),
             1,
-            LogicalWorkflowJobKind::ReusableWorkflow,
+            LogicalWorkflowJobKind::Steps,
             vec![first_id],
         )
         .expect("second job"),
@@ -1027,6 +1043,29 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
             audit[0].2,
             Some(i64::try_from(actor.authorization_revision().value())?)
         );
+        let runtime_pin: (i64, Vec<u8>, i64, i64, Vec<u8>) = sqlx::query_as(
+            r"
+            SELECT pin.policy_revision, pin.policy_digest, pin.pinned_at_ms,
+                   manifest.runtime_policy_revision, manifest.runtime_policy_digest
+            FROM workflow_plan_v2_runtime_policy_pins AS pin
+            JOIN github_provider_manifest_current AS current_manifest
+              ON current_manifest.tenant_id = pin.tenant_id
+             AND current_manifest.repository_id = pin.repository_id
+            JOIN github_provider_manifest_revisions AS manifest
+              ON manifest.tenant_id = current_manifest.tenant_id
+             AND manifest.repository_id = current_manifest.repository_id
+             AND manifest.provider_connection_id = current_manifest.provider_connection_id
+             AND manifest.manifest_revision = current_manifest.manifest_revision
+             AND manifest.manifest_digest = current_manifest.manifest_digest
+            WHERE pin.run_id = $1
+            ",
+        )
+        .bind(first.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(runtime_pin.0, runtime_pin.3);
+        assert_eq!(runtime_pin.1, runtime_pin.4);
+        assert_eq!(runtime_pin.2, dispatch.admitted_at().get());
         let github_evidence: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM github_workflow_run_subject_evidence WHERE run_id=$1",
         )

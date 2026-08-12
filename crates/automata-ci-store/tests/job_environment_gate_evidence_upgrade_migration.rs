@@ -300,10 +300,12 @@ async fn assert_0067_absent(database: &TestDatabase) -> TestResult {
                 'automata_reject_job_environment_evidence_mutation()'
             )::TEXT,
             (SELECT count(*) FROM pg_trigger
-             WHERE tgname IN (
-                 'job_attempts_00_require_variable_custody_before_lease',
-                 'workflow_plan_v2_instances_require_environment_evidence'
-             ))
+             WHERE (tgrelid = 'job_attempts'::regclass
+                    AND tgname =
+                        'job_attempts_00_require_variable_custody_before_lease')
+                OR (tgrelid = 'workflow_plan_v2_instances'::regclass
+                    AND tgname =
+                        'workflow_plan_v2_instances_require_environment_evidence'))
         ",
     )
     .fetch_one(database.pool())

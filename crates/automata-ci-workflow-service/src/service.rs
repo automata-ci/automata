@@ -24,10 +24,10 @@ use automata_ci_store::{
     AdmittedReusableSecret, AdmittedReusableWorkflowCatalogEntry,
     AdmittedReusableWorkflowExpansion, AuthenticatedGithubDeliveryClaim,
     AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    GithubScheduleFireClaim, LogicalWorkflowAdmissionRepository,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ObjectKey, ProviderDeliveryId,
-    ResolveAuthenticatedWorkflowDispatchSource, WorkflowAdmissionIdempotency,
+    GithubScheduleFireClaim, JobCredentialRequirements, JobEnvironmentRequirement,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowAdmissionValueError, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    ProviderDeliveryId, ResolveAuthenticatedWorkflowDispatchSource, WorkflowAdmissionIdempotency,
     WorkflowAdmissionValueError, WorkflowConcurrency,
 };
 use bytes::Bytes;
@@ -931,20 +931,32 @@ fn prepare_reusable_workflow_expansion(
                 .collect(),
             permission_digest,
         );
+        let invocation_plan = workflow_plan_for_path(request, &catalog, invocation.workflow_path())
+            .ok_or(WorkflowAdmissionError::Internal)?;
         let jobs = invocation
             .jobs()
             .iter()
             .map(|job| {
-                AdmittedReusableJob::new(
+                let logical_job = invocation_plan
+                    .jobs()
+                    .iter()
+                    .find(|candidate| candidate.key().value() == job.key())
+                    .ok_or(WorkflowAdmissionError::Internal)?;
+                let credential_requirements = crate::discover_job_credential_requirements(
+                    invocation_plan.logical(),
+                    logical_job,
+                )?;
+                Ok(AdmittedReusableJob::new(
                     job.id(),
                     job.key().clone(),
                     job.source_order(),
                     job.is_reusable(),
-                    reusable_job_descriptor_digest(invocation.id(), job),
+                    reusable_job_descriptor_digest(invocation.id(), job, &credential_requirements),
                     job.prerequisites().to_vec(),
                 )
+                .with_credential_requirements(credential_requirements))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, WorkflowAdmissionError>>()?;
         let input_bindings_digest = admitted_inputs_digest(&inputs);
         let secret_bindings_digest = admitted_secrets_digest(&secrets);
         let output_contract_digest = admitted_outputs_digest(&outputs);
@@ -1158,9 +1170,10 @@ fn admitted_outputs_digest(outputs: &[AdmittedReusableOutput]) -> Sha256Digest {
 fn reusable_job_descriptor_digest(
     invocation_id: automata_ci_store::LogicalWorkflowInvocationId,
     job: &crate::ExpandedReusableJob,
+    credential_requirements: &JobCredentialRequirements,
 ) -> Sha256Digest {
     let mut hasher = Sha256::new();
-    hasher.update(b"automata.reusable-workflow.job-descriptor.v1\0");
+    hasher.update(b"automata.reusable-workflow.job-descriptor.v2\0");
     for part in [
         invocation_id.as_uuid().as_bytes().as_slice(),
         job.id().as_uuid().as_bytes().as_slice(),
@@ -1172,6 +1185,21 @@ fn reusable_job_descriptor_digest(
     }
     for prerequisite in job.prerequisites() {
         digest_field(&mut hasher, prerequisite.as_uuid().as_bytes());
+    }
+    match credential_requirements.environment() {
+        JobEnvironmentRequirement::None => digest_field(&mut hasher, b"environment:none"),
+        JobEnvironmentRequirement::Environment(digest) => {
+            digest_field(&mut hasher, b"environment:template");
+            digest_field(&mut hasher, digest.as_bytes());
+        }
+    }
+    digest_field(&mut hasher, b"secrets");
+    for name in credential_requirements.secret_names() {
+        digest_field(&mut hasher, name.as_bytes());
+    }
+    digest_field(&mut hasher, b"variables");
+    for name in credential_requirements.variable_names() {
+        digest_field(&mut hasher, name.as_bytes());
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
 }

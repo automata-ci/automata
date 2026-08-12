@@ -1,5 +1,8 @@
 const MIGRATION: &str = include_str!("../migrations/0064_protected_environment_variables.sql");
 const POSTGRES_ADAPTER: &str = include_str!("../src/postgres/protected_environment.rs");
+const REUSABLE_ADMISSION_ADAPTER: &str =
+    include_str!("../src/postgres/reusable_workflow_admission.rs");
+const REUSABLE_RUNTIME_ADAPTER: &str = include_str!("../src/postgres/reusable_workflow_runtime.rs");
 
 #[test]
 fn migration_rejects_ambiguous_credential_arrays_and_unclassified_activation() {
@@ -20,6 +23,53 @@ fn migration_rejects_ambiguous_credential_arrays_and_unclassified_activation() {
         assert!(
             MIGRATION.contains(required),
             "missing invariant: {required}"
+        );
+    }
+}
+
+#[test]
+fn reusable_child_credentials_are_classified_before_publication() {
+    for required in [
+        "ALTER TABLE workflow_plan_v2_reusable_expanded_jobs",
+        "environment_requirement_kind TEXT NOT NULL DEFAULT 'unclassified'",
+        "reusable_expanded_jobs_environment_shape",
+        "reusable_expanded_jobs_reference_limits",
+        "reusable_expanded_jobs_credential_schema",
+        "workflow_plan_v2_reusable_jobs_credential_requirements_validate",
+        "automata_require_exact_reusable_child_credentials_at_seal",
+        "planned.environment_requirement_kind = 'unclassified'",
+        "active.environment_requirement_kind IS DISTINCT FROM",
+        "active.environment_template_digest IS DISTINCT FROM",
+        "active.secret_reference_names IS DISTINCT FROM",
+        "active.variable_reference_names IS DISTINCT FROM",
+        "active.credential_requirements_schema IS DISTINCT FROM",
+        "workflow_plan_v2_reusable_call_credential_requirements_exact",
+    ] {
+        assert!(
+            MIGRATION.contains(required),
+            "missing reusable credential invariant: {required}"
+        );
+    }
+    for required in [
+        "job.credential_requirements().environment().kind()",
+        "job.credential_requirements().secret_names()",
+        "job.credential_requirements().variable_names()",
+    ] {
+        assert!(
+            REUSABLE_ADMISSION_ADAPTER.contains(required),
+            "reusable admission drops credential evidence: {required}"
+        );
+    }
+    for required in [
+        "planned.environment_requirement_kind",
+        "planned.environment_template_digest",
+        "planned.secret_reference_names",
+        "planned.variable_reference_names",
+        "planned.credential_requirements_schema",
+    ] {
+        assert!(
+            REUSABLE_RUNTIME_ADAPTER.contains(required),
+            "reusable publication drops credential evidence: {required}"
         );
     }
 }

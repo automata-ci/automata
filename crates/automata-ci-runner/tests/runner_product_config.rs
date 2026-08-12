@@ -254,7 +254,7 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     assert_eq!(
         target
             .lines()
-            .filter(|line| line.starts_with("Requires=run-automata\\x2drunner\\x2d"))
+            .filter(|line| line.starts_with("Requires=run-automata_runner_"))
             .count(),
         3
     );
@@ -263,7 +263,7 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     for required in [
         "User=automata-runner-%i",
         "Group=automata-runner-%i",
-        "RequiresMountsFor=/run/automata-runner-%i",
+        "RequiresMountsFor=/run/automata_runner_%i",
         "Slice=automata-runner-host.slice",
         "ExecStart=/usr/bin/automata-runner run --config /etc/automata-runner/instances/%i/runner.json",
         "Delegate=yes",
@@ -286,13 +286,13 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     }
 
     let mounts = [
-        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d1.mount"),
-        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d2.mount"),
-        include_str!("../../../deploy/runner-host/systemd/run-automata\\x2drunner\\x2d3.mount"),
+        include_str!("../../../deploy/runner-host/systemd/run-automata_runner_1.mount"),
+        include_str!("../../../deploy/runner-host/systemd/run-automata_runner_2.mount"),
+        include_str!("../../../deploy/runner-host/systemd/run-automata_runner_3.mount"),
     ];
     for (offset, mount) in mounts.into_iter().enumerate() {
         let instance = offset + 1;
-        let where_line = format!("Where=/run/automata-runner-{instance}");
+        let where_line = format!("Where=/run/automata_runner_{instance}");
         assert!(mount.lines().any(|line| line == where_line.as_str()));
         let uid = 1001 + offset;
         let ownership = format!("uid={uid},gid={uid}");

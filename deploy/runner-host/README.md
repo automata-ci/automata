@@ -11,9 +11,9 @@ The checked-in examples are:
 
 | Instance | Configuration | Metrics | Podman runtime mount |
 | --- | --- | --- | --- |
-| `1` | `runner.local-1.example.json` | `127.0.0.1:9464` | `/run/automata-runner-1` |
-| `2` | `runner.local-2.example.json` | `127.0.0.1:9465` | `/run/automata-runner-2` |
-| `3` | `runner.local-3.example.json` | `127.0.0.1:9466` | `/run/automata-runner-3` |
+| `1` | `runner.local-1.example.json` | `127.0.0.1:9464` | `/run/automata_runner_1` |
+| `2` | `runner.local-2.example.json` | `127.0.0.1:9465` | `/run/automata_runner_2` |
+| `3` | `runner.local-3.example.json` | `127.0.0.1:9466` | `/run/automata_runner_3` |
 
 Every configuration advertises `max_parallel_jobs: 1`. At the checked-in
 per-job ceiling, the host therefore advertises three jobs in aggregate:
@@ -56,9 +56,9 @@ sudo install -o root -g root -m 0644 \
   deploy/runner-host/systemd/automata-runner@.service \
   deploy/runner-host/systemd/automata-runner-host.slice \
   deploy/runner-host/systemd/automata-runner-host.target \
-  'deploy/runner-host/systemd/run-automata\x2drunner\x2d1.mount' \
-  'deploy/runner-host/systemd/run-automata\x2drunner\x2d2.mount' \
-  'deploy/runner-host/systemd/run-automata\x2drunner\x2d3.mount' \
+  deploy/runner-host/systemd/run-automata_runner_1.mount \
+  deploy/runner-host/systemd/run-automata_runner_2.mount \
+  deploy/runner-host/systemd/run-automata_runner_3.mount \
   /etc/systemd/system/
 sudo install -o root -g root -m 0644 \
   deploy/runner-host/systemd/automata-runner-host.tmpfiles \

@@ -1493,7 +1493,10 @@ async fn assert_queued_gate_concluded(
     .await?;
     assert_eq!(row.0, "cancelled");
     assert_eq!(row.1, expected_gate_state);
-    assert_eq!(row.2, "completed");
+    assert_eq!(
+        row.2, "in_progress",
+        "logical result projection, not gate cancellation, owns run finalization"
+    );
     assert_eq!(row.3, 1);
     assert_eq!(row.4, "server_cancellation");
     assert!(row.5);
@@ -2421,13 +2424,19 @@ async fn stale_resolving_approval_and_environment_are_atomically_concluded() -> 
                 "{stale_kind} must close resolving rather than poison the queue"
             );
             assert_queued_gate_concluded(&database, &queued, "cancelled").await?;
-            assert!(matches!(
-                database
-                    .store()
-                    .review_job_environment(approval_review)
-                    .await,
-                Err(ProtectedEnvironmentStoreError::Conflict)
-            ));
+            let stale_review = database
+                .store()
+                .review_job_environment(approval_review)
+                .await;
+            let expected = if stale_kind == "reviewer_revocation" {
+                matches!(
+                    stale_review,
+                    Err(ProtectedEnvironmentStoreError::AuthorityRejected)
+                )
+            } else {
+                matches!(stale_review, Err(ProtectedEnvironmentStoreError::Conflict))
+            };
+            assert!(expected, "{stale_kind} stale review returned {stale_review:?}");
         }
         Ok(())
     })

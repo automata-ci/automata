@@ -3498,12 +3498,94 @@ BEGIN
 END;
 $automata$;
 
+-- Manual workflow dispatches are authenticated control-plane admissions, not
+-- provider deliveries. Preserve the existing manifest-origin provenance for
+-- webhook and scheduled runs while admitting a dispatch pin only when its
+-- append-only human audit and exact current sealed manifest policy agree.
+CREATE OR REPLACE FUNCTION automata_require_workflow_runtime_policy_pin_provenance()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $automata$
+BEGIN
+    PERFORM 1
+    FROM github_workflow_run_manifest_origins AS origin
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = origin.tenant_id
+     AND manifest.repository_id = origin.repository_id
+     AND manifest.provider_connection_id = origin.provider_connection_id
+     AND manifest.manifest_revision = origin.provider_manifest_revision
+     AND manifest.manifest_digest = origin.provider_manifest_digest
+    JOIN workflow_runtime_policy_revisions AS policy
+      ON policy.tenant_id = manifest.tenant_id
+     AND policy.repository_id = manifest.repository_id
+     AND policy.policy_revision = manifest.runtime_policy_revision
+     AND policy.policy_digest = manifest.runtime_policy_digest
+     AND policy.state = 'sealed'
+    JOIN workflow_runs AS run
+      ON run.id = origin.run_id
+     AND run.repository_id = origin.repository_id
+    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = origin.run_id
+    WHERE origin.run_id = NEW.run_id
+      AND origin.tenant_id = NEW.tenant_id
+      AND origin.repository_id = NEW.repository_id
+      AND origin.admitted_at_ms = NEW.pinned_at_ms
+      AND manifest.runtime_policy_revision = NEW.policy_revision
+      AND manifest.runtime_policy_digest = NEW.policy_digest
+    FOR SHARE OF manifest, policy, run, marker;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM workflow_runs AS run
+    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+    JOIN security_audit_events AS audit
+      ON audit.tenant_id = NEW.tenant_id
+     AND audit.action = 'workflow.dispatch'
+     AND audit.outcome = 'succeeded'
+     AND audit.resource_kind = 'workflow_run'
+     AND audit.resource_id = NEW.run_id::TEXT
+     AND audit.occurred_at_ms = NEW.pinned_at_ms
+     AND audit.actor_kind = 'human'
+     AND audit.actor_principal_id IS NOT NULL
+     AND audit.actor_session_id IS NOT NULL
+     AND audit.authorization_revision IS NOT NULL
+    JOIN github_provider_manifest_current AS current_manifest
+      ON current_manifest.tenant_id = NEW.tenant_id
+     AND current_manifest.repository_id = NEW.repository_id
+    JOIN github_provider_manifest_revisions AS manifest
+      ON manifest.tenant_id = current_manifest.tenant_id
+     AND manifest.repository_id = current_manifest.repository_id
+     AND manifest.provider_connection_id = current_manifest.provider_connection_id
+     AND manifest.manifest_revision = current_manifest.manifest_revision
+     AND manifest.manifest_digest = current_manifest.manifest_digest
+    JOIN workflow_runtime_policy_revisions AS policy
+      ON policy.tenant_id = manifest.tenant_id
+     AND policy.repository_id = manifest.repository_id
+     AND policy.policy_revision = manifest.runtime_policy_revision
+     AND policy.policy_digest = manifest.runtime_policy_digest
+     AND policy.state = 'sealed'
+    WHERE run.id = NEW.run_id
+      AND run.repository_id = NEW.repository_id
+      AND manifest.runtime_policy_revision = NEW.policy_revision
+      AND manifest.runtime_policy_digest = NEW.policy_digest
+    FOR SHARE OF run, marker, audit, current_manifest, manifest, policy;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'workflow runtime policy pin lacks authenticated manifest provenance'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_plan_v2_runtime_policy_pin_provenance';
+    END IF;
+    RETURN NEW;
+END;
+$automata$;
+
 CREATE OR REPLACE FUNCTION automata_github_check_subject_delivery_evidence_exact()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $automata$
 DECLARE
     authority RECORD;
+    workflow_authorized BOOLEAN := FALSE;
 BEGIN
     IF NEW.origin_kind IN ('scheduled_fire', 'workflow_rerun') THEN
         RETURN NEW;
@@ -3516,9 +3598,12 @@ BEGIN
            evidence_source.github_check_subject_id,
            evidence_source.github_check_head_sha,
            inbox_source.accepted_at_ms,
+           inbox_source.state AS inbox_state,
+           manifest_source.workflow_selection_kind,
            manifest_source.check_subject_key,
            manifest_source.github_app_id,
-           manifest_source.check_name
+           manifest_source.check_name,
+           manifest_source.manifest_digest
       INTO authority
     FROM github_provider_delivery_evidence AS evidence_source
     JOIN provider_delivery_inbox AS inbox_source
@@ -3537,19 +3622,53 @@ BEGIN
       AND evidence_source.tenant_id = NEW.tenant_id
     FOR SHARE OF evidence_source, inbox_source, manifest_source;
 
-    IF NOT FOUND
+    IF FOUND
+       AND authority.workflow_selection_kind = 'all_direct'
+       AND NEW.id <> authority.github_check_subject_id
+    THEN
+        SELECT TRUE INTO workflow_authorized
+        FROM provider_delivery_workflow_inventories AS inventory
+        JOIN provider_delivery_workflow_inventory_entries AS entry
+          ON entry.inbox_id = inventory.inbox_id
+         AND entry.tenant_id = inventory.tenant_id
+        WHERE inventory.inbox_id = NEW.provider_delivery_id
+          AND inventory.tenant_id = NEW.tenant_id
+          AND inventory.manifest_digest = authority.manifest_digest
+          AND entry.workflow_path = NEW.subject_key
+          AND (
+              entry.source_state = 'ready'
+              OR EXISTS (
+                  SELECT 1
+                  FROM provider_delivery_workflow_progress AS progress
+                  WHERE progress.inbox_id = inventory.inbox_id
+                    AND progress.tenant_id = inventory.tenant_id
+                    AND progress.inventory_digest = inventory.inventory_digest
+                    AND progress.workflow_path = entry.workflow_path
+                    AND progress.outcome_kind = 'failed'
+              )
+          )
+        FOR SHARE OF inventory, entry;
+    END IF;
+
+    IF authority.repository_id IS NULL
         OR NEW.origin_kind <> 'provider_delivery'
-        OR NEW.id <> authority.github_check_subject_id
         OR NEW.repository_id <> authority.repository_id
         OR NEW.provider_connection_id <> authority.provider_connection_id
         OR NEW.provider_installation_id <> authority.provider_installation_id
         OR NEW.github_repository_id <> authority.github_repository_id
         OR NEW.github_repository_name <> authority.github_repository_name
-        OR NEW.subject_key <> authority.check_subject_key
         OR NEW.github_app_id <> authority.github_app_id
         OR NEW.head_sha <> authority.github_check_head_sha
         OR NEW.check_name <> authority.check_name
         OR NEW.created_at_ms <> authority.accepted_at_ms
+        OR NOT (
+            NEW.id = authority.github_check_subject_id
+            AND NEW.subject_key = authority.check_subject_key
+            OR authority.workflow_selection_kind = 'all_direct'
+            AND authority.inbox_state = 'claimed'
+            AND NEW.id <> authority.github_check_subject_id
+            AND workflow_authorized
+        )
     THEN
         RAISE EXCEPTION 'GitHub Check subject does not match its signed delivery evidence'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -4611,6 +4730,33 @@ BEGIN
     END IF;
 
     PERFORM 1
+    FROM workflow_plan_v2_runs AS marker
+    JOIN workflow_admission_receipts AS receipt ON receipt.run_id = marker.run_id
+    JOIN workflow_plan_v2_runtime_policy_pins AS pin ON pin.run_id = marker.run_id
+    JOIN security_audit_events AS audit
+      ON audit.tenant_id = pin.tenant_id
+     AND audit.action = 'workflow.dispatch'
+     AND audit.outcome = 'succeeded'
+     AND audit.resource_kind = 'workflow_run'
+     AND audit.resource_id = marker.run_id::TEXT
+     AND audit.occurred_at_ms = pin.pinned_at_ms
+     AND audit.actor_kind = 'human'
+     AND audit.actor_principal_id IS NOT NULL
+     AND audit.actor_session_id IS NOT NULL
+     AND audit.authorization_revision IS NOT NULL
+    WHERE marker.run_id = NEW.run_id
+      AND marker.root_invocation_id = NEW.invocation_id
+      AND marker.admission_graph_sealed_at_ms IS NULL
+      AND receipt.committed_at_ms IS NOT NULL
+      AND receipt.github_subject_evidence_required = FALSE
+      AND receipt.request_digest = marker.admission_digest
+      AND pin.pinned_at_ms = receipt.committed_at_ms
+    FOR KEY SHARE OF marker, receipt, pin, audit;
+    IF FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
     FROM workflow_plan_v2_reusable_call_publications AS publication
     JOIN workflow_plan_v2_runs AS marker ON marker.run_id = publication.run_id
     WHERE publication.run_id = NEW.run_id
@@ -4698,6 +4844,53 @@ BEGIN
                   ), 0)
               )
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM workflow_plan_v2_dependencies AS dependency
+              LEFT JOIN workflow_plan_v2_effective_job_results AS prerequisite
+                ON prerequisite.logical_job_id = dependency.prerequisite_job_id
+               AND prerequisite.run_id = dependency.run_id
+               AND prerequisite.invocation_id = dependency.invocation_id
+              WHERE dependency.run_id = job.run_id
+                AND dependency.invocation_id = job.invocation_id
+                AND dependency.logical_job_id = job.id
+                AND (prerequisite.logical_job_id IS NULL
+                     OR prerequisite.claim_state IS DISTINCT FROM 'finalized'
+                     OR NEW.claimed_at_ms < prerequisite.finalized_at_ms)
+          )
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM workflow_plan_v2_jobs AS job
+        JOIN workflow_plan_v2_invocations AS invocation
+          ON invocation.run_id = job.run_id
+         AND invocation.id = job.invocation_id
+        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = job.run_id
+        JOIN workflow_runs AS run ON run.id = marker.run_id
+        JOIN workflow_plan_v2_reusable_call_publications AS publication
+          ON publication.run_id = job.run_id
+         AND publication.parent_invocation_id = job.invocation_id
+         AND publication.caller_logical_job_id = job.id
+        JOIN workflow_plan_v2_reusable_call_results AS call_result
+          ON call_result.run_id = publication.run_id
+         AND call_result.parent_invocation_id = publication.parent_invocation_id
+         AND call_result.caller_logical_job_id = publication.caller_logical_job_id
+        WHERE job.run_id = NEW.run_id
+          AND job.invocation_id = NEW.invocation_id
+          AND job.id = NEW.logical_job_id
+          AND job.execution_kind = 'reusable_workflow'
+          AND job.state IN ('activated', 'skipped')
+          AND invocation.plan_schema = 2
+          AND invocation.plan_media_type =
+              'application/vnd.automata.workflow-plan+json'
+          AND invocation.state IN ('pending', 'active')
+          AND marker.orchestration_schema = 1
+          AND marker.state IN ('pending', 'active')
+          AND run.admission_epoch = 4
+          AND run.plan_schema = 2
+          AND publication.child_graph_sealed_at_ms IS NOT NULL
+          AND call_result.sealed_at_ms IS NOT NULL
+          AND call_result.parent_result_descriptor_digest = NEW.descriptor_digest
+          AND NEW.claimed_at_ms >= call_result.completed_at_ms
           AND NOT EXISTS (
               SELECT 1
               FROM workflow_plan_v2_dependencies AS dependency
