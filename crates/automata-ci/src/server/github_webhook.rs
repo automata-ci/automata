@@ -267,7 +267,9 @@ impl GithubWebhookHttpOutcome {
             GithubDeliveryIngressError::ReplayConflict => Self::ReplayConflict,
             GithubDeliveryIngressError::InvalidTrustedTime
             | GithubDeliveryIngressError::RawObject { .. }
-            | GithubDeliveryIngressError::InboxRejected
+            | GithubDeliveryIngressError::InboxAuthorityRejected
+            | GithubDeliveryIngressError::InboxNotFound
+            | GithubDeliveryIngressError::InboxCorrupt
             | GithubDeliveryIngressError::InvariantViolation => Self::Internal,
         }
     }

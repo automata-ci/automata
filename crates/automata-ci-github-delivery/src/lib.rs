@@ -955,9 +955,15 @@ pub enum GithubDeliveryIngressError {
     /// The same delivery identity was reused with changed immutable evidence.
     #[error("the GitHub delivery replay conflicts with durable evidence")]
     ReplayConflict,
-    /// The provider inbox rejected an invalid acceptance transition.
-    #[error("the durable provider delivery inbox rejected the acceptance")]
-    InboxRejected,
+    /// The current provider manifest did not authorize the authenticated delivery.
+    #[error("the durable provider delivery inbox rejected the current authority")]
+    InboxAuthorityRejected,
+    /// Required durable provider-delivery evidence was unexpectedly absent.
+    #[error("the durable provider delivery inbox evidence was not found")]
+    InboxNotFound,
+    /// Durable provider-delivery evidence failed invariant validation.
+    #[error("the durable provider delivery inbox evidence was corrupt")]
+    InboxCorrupt,
     /// Trusted construction unexpectedly violated an internal invariant.
     #[error("trusted GitHub delivery construction violated an invariant")]
     InvariantViolation,
@@ -968,9 +974,9 @@ impl GithubDeliveryIngressError {
         match error {
             GithubSubjectEvidenceStoreError::Operation(_) => Self::InboxUnavailable,
             GithubSubjectEvidenceStoreError::ReplayConflict => Self::ReplayConflict,
-            GithubSubjectEvidenceStoreError::AuthorityRejected
-            | GithubSubjectEvidenceStoreError::NotFound
-            | GithubSubjectEvidenceStoreError::CorruptData => Self::InboxRejected,
+            GithubSubjectEvidenceStoreError::AuthorityRejected => Self::InboxAuthorityRejected,
+            GithubSubjectEvidenceStoreError::NotFound => Self::InboxNotFound,
+            GithubSubjectEvidenceStoreError::CorruptData => Self::InboxCorrupt,
         }
     }
 }
