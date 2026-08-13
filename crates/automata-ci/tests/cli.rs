@@ -408,8 +408,17 @@ fn runner_token_has_safe_scoped_defaults() {
         panic!("runner command expected");
     };
     let automata_ci::cli::RunnerCommand::Token(token) = args.command;
+    assert!(!token.discard_pending);
     assert_eq!(token.group, "default");
     assert_eq!(token.expires_in_seconds, 900);
+
+    let cli = Cli::try_parse_from(["automata", "runner", "token", "--discard-pending"])
+        .expect("pending runner token discard must parse");
+    let Command::Runner(args) = cli.command else {
+        panic!("runner command expected");
+    };
+    let automata_ci::cli::RunnerCommand::Token(token) = args.command;
+    assert!(token.discard_pending);
 
     assert!(
         Cli::try_parse_from([

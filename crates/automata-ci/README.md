@@ -229,7 +229,9 @@ After CLI login, `automata runner token` creates a one-use tenant/group-scoped
 token with a 15-minute default lifetime. `automata-runner enroll` consumes it,
 generates the private key locally, registers the exact configured capability
 ceiling, and creates new TLS credential files without overwriting. The server
-stores only a domain-separated token digest and the signed leaf digest. See the
+stores a domain-separated token digest, the signed leaf digest, and the exact
+non-secret redemption response needed for idempotent recovery; it never stores
+token plaintext or runner private keys. See the
 [runner security and lifecycle plan](../../docs/runner-control-plane-security-and-enrollment.md).
 
 ## Human authentication

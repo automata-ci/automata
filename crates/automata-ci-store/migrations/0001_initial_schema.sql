@@ -15165,6 +15165,9 @@ BEGIN
        OR (OLD.consumed_at_ms IS NOT NULL AND (
            NEW.consumed_at_ms IS DISTINCT FROM OLD.consumed_at_ms
            OR NEW.consumed_runner_id IS DISTINCT FROM OLD.consumed_runner_id
+           OR NEW.redeem_operation_id IS DISTINCT FROM OLD.redeem_operation_id
+           OR NEW.redeem_request_sha256 IS DISTINCT FROM OLD.redeem_request_sha256
+           OR NEW.redeem_response IS DISTINCT FROM OLD.redeem_response
        )) THEN
         RAISE EXCEPTION 'runner enrollment token authority is immutable and consumption is write-once'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -25619,11 +25622,14 @@ CREATE TABLE runner_enrollment_tokens (
     expires_at_ms bigint NOT NULL,
     consumed_at_ms bigint,
     consumed_runner_id uuid,
+    redeem_operation_id uuid,
+    redeem_request_sha256 bytea,
+    redeem_response bytea,
     CONSTRAINT runner_enrollment_tokens_digest CHECK ((octet_length(token_sha256) = 32)),
-    CONSTRAINT runner_enrollment_tokens_ids_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_group_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_session_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((consumed_runner_id IS NULL) OR (consumed_runner_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
+    CONSTRAINT runner_enrollment_tokens_ids_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_group_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_session_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((consumed_runner_id IS NULL) OR (consumed_runner_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((redeem_operation_id IS NULL) OR (redeem_operation_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
     CONSTRAINT runner_enrollment_tokens_lifetime CHECK (((issued_at_ms >= 0) AND ((expires_at_ms - issued_at_ms) >= 60000) AND ((expires_at_ms - issued_at_ms) <= 3600000))),
     CONSTRAINT runner_enrollment_tokens_revision_positive CHECK ((issued_authorization_revision > 0)),
-    CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL))) IS TRUE))
+    CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL) AND (redeem_operation_id IS NULL) AND (redeem_request_sha256 IS NULL) AND (redeem_response IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL) AND (redeem_operation_id IS NOT NULL) AND (octet_length(redeem_request_sha256) = 32) AND (octet_length(redeem_response) >= 1) AND (octet_length(redeem_response) <= 524288))) IS TRUE))
 );
 
 CREATE TABLE runner_operation_receipts (

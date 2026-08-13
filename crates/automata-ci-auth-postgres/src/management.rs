@@ -40,8 +40,9 @@ use crate::{
 mod runner_enrollment;
 
 pub use runner_enrollment::{
-    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, PreparedRunnerEnrollment,
-    RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
+    RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
 };
 
 const ACTION_ROLE_CREATE: &str = "rbac.role.create";

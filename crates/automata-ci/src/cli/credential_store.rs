@@ -9,6 +9,8 @@ use std::{
     error::Error,
     ffi::OsStr,
     fmt,
+    fs::File,
+    io::{Read as _, Write as _},
     os::fd::OwnedFd,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -18,7 +20,10 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::session_credential::SessionCredential;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rustix::fs::{self, FileType, FlockOperation, Mode, OFlags, fstat, mkdirat, openat};
+use rustix::fs::{
+    self, FileType, FlockOperation, Mode, OFlags, RenameFlags, fstat, mkdirat, openat,
+    renameat_with,
+};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 use tokio::{
@@ -40,6 +45,7 @@ const MAX_SEARCH_OUTPUT_BYTES: usize = 16 * 1_024;
 const MAX_STORED_CREDENTIAL_BYTES: usize = 512;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const LOCK_DIRECTORY: &str = "automata-ci";
+const MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES: usize = 2 * 1_024;
 
 #[async_trait]
 pub(crate) trait CliCredentialStore: fmt::Debug + Send + Sync {
@@ -443,6 +449,8 @@ impl Error for CredentialStoreError {}
 
 /// Exact per-origin process lock held across local and remote session lifecycle.
 pub(crate) struct CliAuthProcessLock {
+    directory: OwnedFd,
+    runner_enrollment_receipt: String,
     _file: OwnedFd,
 }
 
@@ -492,8 +500,162 @@ impl CliAuthProcessLock {
                 CliAuthLockError::Unavailable
             }
         })?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            directory,
+            runner_enrollment_receipt: format!(
+                "runner-enrollment-{}.json",
+                account_id(server_origin)
+            ),
+            _file: file,
+        })
     }
+
+    pub(crate) fn load_runner_enrollment_receipt(
+        &self,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CliAuthLockError> {
+        if let Some(receipt) = self.read_runner_enrollment_receipt(
+            self.runner_enrollment_receipt.as_str(),
+        )? {
+            rustix::fs::fsync(&self.directory).map_err(|_| CliAuthLockError::Unavailable)?;
+            return Ok(Some(receipt));
+        }
+        let temporary = self.runner_enrollment_temporary();
+        let Some(receipt) = self.read_runner_enrollment_receipt(&temporary)? else {
+            return Ok(None);
+        };
+        renameat_with(
+            &self.directory,
+            temporary.as_str(),
+            &self.directory,
+            self.runner_enrollment_receipt.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|_| CliAuthLockError::Unavailable)?;
+        rustix::fs::fsync(&self.directory).map_err(|_| CliAuthLockError::Unavailable)?;
+        Ok(Some(receipt))
+    }
+
+    fn read_runner_enrollment_receipt(
+        &self,
+        name: &str,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CliAuthLockError> {
+        let descriptor = match openat(
+            &self.directory,
+            name,
+            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err(CliAuthLockError::Unavailable),
+        };
+        verify_private_regular_file(&descriptor)?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES));
+        let mut file = File::from(descriptor);
+        std::io::Read::by_ref(&mut file)
+            .take((MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CliAuthLockError::Unavailable)?;
+        file.sync_all().map_err(|_| CliAuthLockError::Unavailable)?;
+        if bytes.is_empty() || bytes.len() > MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES {
+            return Err(CliAuthLockError::Unavailable);
+        }
+        Ok(Some(bytes))
+    }
+
+    fn runner_enrollment_temporary(&self) -> String {
+        format!("{}.automata-write", self.runner_enrollment_receipt)
+    }
+
+    pub(crate) fn store_runner_enrollment_receipt(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(), CliAuthLockError> {
+        if bytes.is_empty() || bytes.len() > MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES {
+            return Err(CliAuthLockError::Unavailable);
+        }
+        if let Some(existing) = self.load_runner_enrollment_receipt()? {
+            return if existing.as_slice() == bytes {
+                Ok(())
+            } else {
+                Err(CliAuthLockError::Unavailable)
+            };
+        }
+        let temporary = self.runner_enrollment_temporary();
+        let descriptor = openat(
+            &self.directory,
+            temporary.as_str(),
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::CLOEXEC
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| CliAuthLockError::Unavailable)?;
+        let result = (|| {
+            rustix::fs::fchmod(&descriptor, Mode::from_raw_mode(0o600))
+                .map_err(|_| CliAuthLockError::Unavailable)?;
+            let mut file = File::from(descriptor);
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| CliAuthLockError::Unavailable)?;
+            drop(file);
+            renameat_with(
+                &self.directory,
+                temporary.as_str(),
+                &self.directory,
+                self.runner_enrollment_receipt.as_str(),
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(|_| CliAuthLockError::Unavailable)
+        })();
+        if let Err(error) = result {
+            let _ = rustix::fs::unlinkat(
+                &self.directory,
+                temporary.as_str(),
+                rustix::fs::AtFlags::empty(),
+            );
+            let _ = rustix::fs::fsync(&self.directory);
+            return Err(error);
+        }
+        rustix::fs::fsync(&self.directory).map_err(|_| CliAuthLockError::Unavailable)
+    }
+
+    pub(crate) fn remove_runner_enrollment_receipt(&self) -> Result<(), CliAuthLockError> {
+        let temporary = self.runner_enrollment_temporary();
+        let mut removed = false;
+        for name in [self.runner_enrollment_receipt.as_str(), temporary.as_str()] {
+            match rustix::fs::unlinkat(
+                &self.directory,
+                name,
+                rustix::fs::AtFlags::empty(),
+            ) {
+                Ok(()) => removed = true,
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err(CliAuthLockError::Unavailable),
+            }
+        }
+        if removed {
+            rustix::fs::fsync(&self.directory).map_err(|_| CliAuthLockError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn verify_private_regular_file(file: &OwnedFd) -> Result<(), CliAuthLockError> {
+    let metadata = fstat(file).map_err(|_| CliAuthLockError::Unavailable)?;
+    let current_user = rustix::process::getuid().as_raw();
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+        || metadata.st_uid != current_user
+        || metadata.st_nlink != 1
+        || metadata.st_mode & 0o077 != 0
+    {
+        return Err(CliAuthLockError::Unavailable);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for CliAuthProcessLock {
@@ -649,6 +811,75 @@ mod tests {
         drop((first, other));
         let reacquired = CliAuthProcessLock::acquire_in(&root, "https://ci.example").unwrap();
         drop(reacquired);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn runner_enrollment_receipt_is_exact_durable_and_never_overwritten() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.blocking_lock();
+        let root = test_directory("runner-enrollment-receipt");
+        let process_lock =
+            CliAuthProcessLock::acquire_in(&root, "https://ci.example").expect("process lock");
+        let receipt = br#"{"schema":1,"token":"secret"}"#;
+        process_lock
+            .store_runner_enrollment_receipt(receipt)
+            .expect("stage receipt");
+        process_lock
+            .store_runner_enrollment_receipt(receipt)
+            .expect("exact receipt replay");
+        assert!(
+            process_lock
+                .store_runner_enrollment_receipt(b"different")
+                .is_err()
+        );
+        assert_eq!(
+            process_lock
+                .load_runner_enrollment_receipt()
+                .expect("load receipt")
+                .expect("receipt exists")
+                .as_slice(),
+            receipt
+        );
+        process_lock
+            .remove_runner_enrollment_receipt()
+            .expect("remove receipt");
+        assert!(
+            process_lock
+                .load_runner_enrollment_receipt()
+                .expect("load absent receipt")
+                .is_none()
+        );
+        drop(process_lock);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn runner_enrollment_receipt_recovers_a_complete_pre_rename_write() {
+        let _spawn_guard = PROCESS_SPAWN_GATE.blocking_lock();
+        let root = test_directory("runner-enrollment-receipt-recovery");
+        let process_lock =
+            CliAuthProcessLock::acquire_in(&root, "https://ci.example").expect("process lock");
+        let receipt = br#"{"schema":1,"token":"secret"}"#;
+        let temporary = root
+            .join(LOCK_DIRECTORY)
+            .join(process_lock.runner_enrollment_temporary());
+        std::fs::write(&temporary, receipt).expect("staging write");
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+            .expect("staging permissions");
+        File::open(&temporary)
+            .expect("staging file")
+            .sync_all()
+            .expect("staging sync");
+        assert_eq!(
+            process_lock
+                .load_runner_enrollment_receipt()
+                .expect("recover receipt")
+                .expect("receipt exists")
+                .as_slice(),
+            receipt
+        );
+        assert!(!temporary.exists());
+        drop(process_lock);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

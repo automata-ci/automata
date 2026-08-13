@@ -227,7 +227,11 @@ done
 The runner generates its ECDSA P-256 key locally. The control plane receives a
 CSR, registers the exact configuration capabilities, and returns only the
 signed client chain and server roots. Tokens are tenant/group scoped, one-use,
-and stored only as domain-separated digests. See the
+and stored only as domain-separated digests. Interrupted enrollment can be
+rerun: a private adjacent stage retains the operation and key until all three
+credential files are durably reconciled, including when the exact server response
+had not yet been staged. The token source is not needed again after that request
+stage has been created. See the
 [security and lifecycle plan](runner-control-plane-security-and-enrollment.md).
 
 ### Optional GitHub provider runtime
