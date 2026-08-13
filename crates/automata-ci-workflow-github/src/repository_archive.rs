@@ -262,6 +262,8 @@ fn inspect_archive_entries<R: io::Read>(
 struct ArchiveInspection {
     root: Option<String>,
     seen_paths: BTreeSet<String>,
+    portable_workflow_filenames: BTreeSet<String>,
+    native_workflow_filenames: BTreeSet<String>,
     workflows: BTreeMap<String, Result<Vec<u8>, RepositoryWorkflowDiscoveryFailure>>,
     entry_count: usize,
     expanded_bytes: u64,
@@ -335,6 +337,21 @@ impl ArchiveInspection {
         let relative_path = relative_components.join("/");
         if !self.seen_paths.insert(relative_path.clone()) {
             return Err(RepositoryWorkflowDiscoveryError::DuplicatePath);
+        }
+
+        if let Some(filename) = direct_workflow_filename(relative_components, ".ci") {
+            let collision_key = workflow_collision_key(filename);
+            if self.native_workflow_filenames.contains(&collision_key) {
+                return Err(RepositoryWorkflowDiscoveryError::WorkflowPathCollision);
+            }
+            self.portable_workflow_filenames.insert(collision_key);
+        }
+        if let Some(filename) = direct_filename(relative_components, ".github") {
+            let collision_key = workflow_collision_key(filename);
+            if self.portable_workflow_filenames.contains(&collision_key) {
+                return Err(RepositoryWorkflowDiscoveryError::WorkflowPathCollision);
+            }
+            self.native_workflow_filenames.insert(collision_key);
         }
 
         let is_workflow = is_direct_workflow(relative_components);
@@ -510,12 +527,38 @@ fn canonical_components(
 }
 
 fn is_direct_workflow(relative_components: &[&str]) -> bool {
-    relative_components.len() == 3
-        && relative_components[0] == ".ci"
-        && relative_components[1] == "workflows"
-        && relative_components[2]
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| matches!(extension, "yml" | "yaml"))
+    direct_workflow_filename(relative_components, ".ci").is_some()
+}
+
+fn direct_workflow_filename<'path>(
+    relative_components: &'path [&'path str],
+    owner_directory: &str,
+) -> Option<&'path str> {
+    let filename = direct_filename(relative_components, owner_directory)?;
+    if !filename
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| matches!(extension, "yml" | "yaml"))
+    {
+        return None;
+    }
+    Some(filename)
+}
+
+fn direct_filename<'path>(
+    relative_components: &'path [&'path str],
+    owner_directory: &str,
+) -> Option<&'path str> {
+    if relative_components.len() != 3
+        || relative_components[0] != owner_directory
+        || relative_components[1] != "workflows"
+    {
+        return None;
+    }
+    Some(relative_components[2])
+}
+
+fn workflow_collision_key(filename: &str) -> String {
+    filename.to_ascii_lowercase()
 }
 
 fn consume_entry<R: io::Read>(
@@ -803,6 +846,8 @@ pub enum RepositoryWorkflowDiscoveryError {
     UnsafePath,
     /// Two archive entries resolve to the same canonical relative path.
     DuplicatePath,
+    /// Portable and native workflow directories contain the same direct filename.
+    WorkflowPathCollision,
     /// The archive uses an unsupported entry type or metadata extension.
     UnsupportedArchiveEntry,
     /// A direct workflow path is not represented by a regular file.
@@ -818,6 +863,9 @@ impl fmt::Display for RepositoryWorkflowDiscoveryError {
             Self::ResourceLimit => "repository archive exceeds a configured resource limit",
             Self::UnsafePath => "repository archive contains an unsafe path or link",
             Self::DuplicatePath => "repository archive contains a duplicate path",
+            Self::WorkflowPathCollision => {
+                "portable and native repository workflows have a filename collision"
+            }
             Self::UnsupportedArchiveEntry => {
                 "repository archive contains unsupported metadata or an entry type"
             }

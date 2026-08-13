@@ -387,12 +387,13 @@ test("portable workflows merge beside native workflow files without overwrite", 
   assert.match(executor, /for source in \.ci\/workflows\/\*/);
   assert.match(
     executor,
-    /\[ ! -e \\"\$destination\\" \] && \[ ! -L \\"\$destination\\" \]/,
+    /\[ -e \\"\$destination\\" \] \|\| \[ -L \\"\$destination\\" \]/,
   );
+  assert.match(executor, /portable workflow path collides with native path/);
   assert.match(executor, /Get-ChildItem -LiteralPath '\.ci\/workflows' -File/);
   assert.match(
     executor,
-    /Get-Item -LiteralPath \$destination -Force -ErrorAction SilentlyContinue/,
+    /\$null -ne \(Get-Item -LiteralPath \$destination -Force -ErrorAction SilentlyContinue\)/,
   );
   assert.doesNotMatch(executor, /cp -R -- \.ci\/workflows \.github\/workflows/);
 });

@@ -179,6 +179,13 @@ native workflow closed. The App ID is deployment-specific and must match the
 App configured in Automata's provider manifest; it is not inferred from an
 untrusted Check name.
 
+Repository admission rejects an archive that contains an ASCII-case-insensitive
+direct YAML filename collision between `.ci/workflows` and
+`.github/workflows`. The runner merges portable files into its compatibility
+view one file at a time and fails before execution if the target filesystem
+finds an existing native path. It never overwrites or silently selects
+different workflow bytes on Linux or Windows.
+
 The portable Automata workflow retains its `pull_request` trigger. Requiring
 its external App-owned Check on pull requests is deferred until the installed
 App subscribes to and has live acceptance evidence for pull-request delivery;
