@@ -377,24 +377,15 @@ test("repository CI omits the hosted Windows job and retains fixture parity", ()
   assert.doesNotMatch(ci, /^[ \t]+runs-on: windows-/m);
 });
 
-test("CI runs the native macOS contract on pinned Apple Silicon", () => {
+test("repository CI omits paid GitHub-hosted macOS execution", () => {
   const ci = source(".ci/workflows/ci.yml");
-  const macos = workflowJob(ci, "macos");
 
-  assert.match(macos, /runs-on: macos-15/);
-  assert.match(macos, /host_triple[^\n]+aarch64-apple-darwin/);
-  assert.match(macos, /sw_vers -productVersion/);
-  assert.match(macos, /-p automata-ci-metrics/);
-  assert.match(macos, /-p automata-ci-sandbox-macos/);
-  assert.match(macos, /--test product_context/);
-  assert.match(macos, /--test runner_product_config_macos/);
-  assert.match(macos, /--test native_runner_process_e2e/);
-  assert.match(macos, /macos-supervisor-smoke\.py/);
-  assert.match(macos, /Record GitHub-hosted Bash shell reference/);
-  assert.match(macos, /Record GitHub-hosted sh shell reference/);
-  assert.match(macos, /AUTOMATA_MACOS_DIFFERENTIAL_REFERENCE/);
-  assert.match(macos, /steps\.macos_shell_reference\.outputs\.fixture/);
-  assert.doesNotMatch(macos, /self-hosted/);
+  assert.doesNotMatch(
+    ci,
+    /^  macos:[ \t]*\r?$/m,
+    "macOS validation waits for repository-scoped self-hosted capacity",
+  );
+  assert.doesNotMatch(ci, /^[ \t]+runs-on: macos-/m);
 });
 
 test("Rust CI publishes an ordinary-lane report with a service-aware guard", () => {
@@ -515,7 +506,7 @@ test("distribution build overlaps validation while the final gate retains every 
   );
   assert.match(
     dist,
-    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - rust_coverage\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - macos\n      - frontend\n      - renderer/,
+    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - rust_coverage\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
   );
   assert.match(dist, /needs\.dist_build\.result == 'success'/);
   assert.match(dist, /needs\.verify\.result == 'success'/);
@@ -524,7 +515,6 @@ test("distribution build overlaps validation while the final gate retains every 
   assert.match(dist, /needs\.renderer_tests\.result == 'success'/);
   assert.match(dist, /needs\.postgres_store\.result == 'success'/);
   assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);
-  assert.match(dist, /needs\.macos\.result == 'success'/);
   assert.match(dist, /needs\.frontend\.result == 'success'/);
   assert.match(
     dist,
