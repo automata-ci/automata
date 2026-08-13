@@ -153,10 +153,18 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-            event_object_key, head_sha, status, created_at_ms, updated_at_ms,
+            event_object_key, event_digest, event_size_bytes, event_media_type,
+            plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
+            plan_schema, workflow_name, head_sha, status, created_at_ms, updated_at_ms,
             runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', 'test/results-event', $5, 'queued', 1, 1, 1)
+        VALUES (
+            $1, $2, $3, $4, 1, 'push', 'test/results-event',
+            decode(repeat('21', 32), 'hex'), 1, 'application/json',
+            decode(repeat('22', 32), 'hex'), 'test/results-plan', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1, 'Results test',
+            $5, 'queued', 1, 1, 1
+        )
         ",
     )
     .bind(run_id)

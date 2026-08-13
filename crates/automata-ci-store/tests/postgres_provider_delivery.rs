@@ -90,10 +90,18 @@ async fn seed_workflow_run(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number,
-            event_name, event_object_key, head_sha, status,
+            event_name, event_object_key, event_digest, event_size_bytes,
+            event_media_type, plan_digest, plan_object_key, plan_size_bytes,
+            plan_media_type, plan_schema, workflow_name, head_sha, status,
             created_at_ms, updated_at_ms, runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', $5, $6, 'queued', 1, 1, 1)
+        VALUES (
+            $1, $2, $3, $4, 1, 'push', $5,
+            decode(repeat('31', 32), 'hex'), 1, 'application/json',
+            decode(repeat('32', 32), 'hex'), 'test/provider-delivery-plan', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1,
+            'Provider delivery', $6, 'queued', 1, 1, 1
+        )
         ",
     )
     .bind(run_id)

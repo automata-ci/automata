@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_trait::async_trait;
-use automata_ci_core::{RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId};
+use automata_ci_core::{
+    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
+};
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -14,8 +16,9 @@ use super::{
 };
 use crate::{
     MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow,
-    RerunWorkflowByName, StoreError, WorkflowConcurrency, WorkflowRerunReceipt,
-    WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
+    RerunWorkflowByName, StoreError, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+    WorkflowConcurrency, WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection,
+    WorkflowRerunStoreError,
 };
 
 const RERUN_PERMISSION: &str = "runs:rerun";
@@ -988,24 +991,12 @@ fn validate_source_row(row: &PgRow) -> Result<Uuid, WorkflowRerunStoreError> {
     if !terminal {
         return Err(WorkflowRerunStoreError::SourceNotTerminal);
     }
-    if row
-        .try_get::<i32, _>("admission_epoch")
-        .map_err(operation_error)?
-        != 4
-        || row
-            .try_get::<Option<i32>, _>("plan_schema")
-            .map_err(operation_error)?
-            != Some(2)
-    {
-        return Err(WorkflowRerunStoreError::UnsupportedSelection);
-    }
-    if row
-        .try_get::<Option<i16>, _>("base_context_schema")
-        .map_err(operation_error)?
-        != Some(2)
-    {
-        return Err(WorkflowRerunStoreError::UnsupportedSelection);
-    }
+    validate_current_source_contract(
+        row.try_get("admission_epoch").map_err(operation_error)?,
+        row.try_get("plan_schema").map_err(operation_error)?,
+        row.try_get("base_context_schema")
+            .map_err(operation_error)?,
+    )?;
     if row
         .try_get::<i64, _>("check_subject_count")
         .map_err(operation_error)?
@@ -1019,6 +1010,22 @@ fn validate_source_row(row: &PgRow) -> Result<Uuid, WorkflowRerunStoreError> {
     }
 
     Ok(root_run_id)
+}
+
+fn validate_current_source_contract(
+    admission_epoch: i32,
+    plan_schema: Option<i32>,
+    base_context_schema: Option<i16>,
+) -> Result<(), WorkflowRerunStoreError> {
+    let runtime_context_schema = i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)
+        .map_err(|_| StoreError::corrupt_data("current runtime context schema exceeds SMALLINT"))?;
+    if admission_epoch != i32::from(WORKFLOW_ADMISSION_EPOCH)
+        || plan_schema != Some(i32::from(WORKFLOW_PLAN_SCHEMA))
+        || base_context_schema != Some(runtime_context_schema)
+    {
+        return Err(WorkflowRerunStoreError::UnsupportedSelection);
+    }
+    Ok(())
 }
 
 fn decode_concurrency(row: &PgRow) -> Result<Option<WorkflowConcurrency>, WorkflowRerunStoreError> {
@@ -2242,4 +2249,42 @@ fn corrupt_value(error: impl std::fmt::Display) -> WorkflowRerunStoreError {
 
 fn operation_error(error: sqlx::Error) -> WorkflowRerunStoreError {
     StoreError::operation(error).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION;
+
+    use crate::{WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowRerunStoreError};
+
+    use super::validate_current_source_contract;
+
+    #[test]
+    fn post_terminal_source_contract_accepts_current_schema_and_rejects_skew() {
+        let admission_epoch = i32::from(WORKFLOW_ADMISSION_EPOCH);
+        let plan_schema = i32::from(WORKFLOW_PLAN_SCHEMA);
+        let context_schema =
+            i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).expect("current context schema");
+
+        assert!(
+            validate_current_source_contract(
+                admission_epoch,
+                Some(plan_schema),
+                Some(context_schema),
+            )
+            .is_ok()
+        );
+        for candidate in [
+            (admission_epoch + 1, Some(plan_schema), Some(context_schema)),
+            (admission_epoch, None, Some(context_schema)),
+            (admission_epoch, Some(plan_schema + 1), Some(context_schema)),
+            (admission_epoch, Some(plan_schema), None),
+            (admission_epoch, Some(plan_schema), Some(context_schema + 1)),
+        ] {
+            assert!(matches!(
+                validate_current_source_contract(candidate.0, candidate.1, candidate.2),
+                Err(WorkflowRerunStoreError::UnsupportedSelection)
+            ));
+        }
+    }
 }

@@ -294,9 +294,7 @@ async fn export_run(
 ) -> Result<RunDocument, ApiError> {
     let mut blob_budget = 0_u64;
     for job in &detail.jobs {
-        if let Some(metadata) = &job.job_ir {
-            blob_budget = add_blob_budget(blob_budget, metadata.encoded_size())?;
-        }
+        blob_budget = add_blob_budget(blob_budget, job.job_ir.encoded_size())?;
         if let Some(result) = job
             .latest_attempt
             .as_ref()
@@ -311,22 +309,16 @@ async fn export_run(
     let workflow_path = detail.run.workflow_path.clone();
     let mut jobs = Vec::with_capacity(detail.jobs.len());
     for job in detail.jobs {
-        let (job_ir, runtime_context) = match &job.job_ir {
-            Some(metadata) => {
-                let (job_ir, runtime_context) = load_job_ir(
-                    state.blobs.as_ref(),
-                    metadata,
-                    run_id,
-                    workflow_id,
-                    &workflow_path,
-                    job.id,
-                    &mut blob_budget,
-                )
-                .await?;
-                (Some(job_ir), Some(runtime_context))
-            }
-            None => (None, None),
-        };
+        let (job_ir, runtime_context) = load_job_ir(
+            state.blobs.as_ref(),
+            &job.job_ir,
+            run_id,
+            workflow_id,
+            &workflow_path,
+            job.id,
+            &mut blob_budget,
+        )
+        .await?;
         let latest_attempt = match job.latest_attempt.as_ref() {
             Some(attempt) => Some(load_attempt(state.blobs.as_ref(), attempt).await?),
             None => None,
@@ -679,7 +671,7 @@ struct RunDocument {
     id: String,
     workflow_id: String,
     workflow_path: String,
-    workflow_name: Option<String>,
+    workflow_name: String,
     run_number: u64,
     run_attempt: u32,
     event_name: String,
@@ -701,8 +693,8 @@ struct JobDocument {
     logical_key: String,
     display_name: String,
     created_at_ms: i64,
-    job_ir: Option<JobIrEnvelope>,
-    runtime_context: Option<RuntimeContextDocument>,
+    job_ir: JobIrEnvelope,
+    runtime_context: RuntimeContextDocument,
     latest_attempt: Option<AttemptDocument>,
 }
 

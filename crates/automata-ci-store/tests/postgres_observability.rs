@@ -1217,12 +1217,13 @@ async fn insert_metrics_workflow(
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, event_digest, event_size_bytes, event_media_type,
             plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
-            plan_schema, head_sha, status, admission_epoch, created_at_ms, updated_at_ms,
+            plan_schema, workflow_name, head_sha, status, admission_epoch,
+            created_at_ms, updated_at_ms,
             runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, 1, 'push', 'metrics/event', $5, 128,
             'application/json', $6, 'metrics/plan', 128,
-            'application/vnd.automata.workflow-plan.protobuf', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1, 'Metrics',
             $7, 'queued', $8, 1, 1, 1
         )
         ",

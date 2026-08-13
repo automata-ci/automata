@@ -41,7 +41,7 @@ INSERT INTO workflow_snapshots (
     '10000000-0000-0000-0000-000000000003',
     '10000000-0000-0000-0000-000000000002',
     decode(repeat('01', 32), 'hex'), 'reusable/root-source.yml', 1,
-    1, 4, 128, 'application/yaml'
+    1, 1, 128, 'application/yaml'
 );
 INSERT INTO workflow_runs (
     id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
@@ -56,11 +56,11 @@ INSERT INTO workflow_runs (
     '10000000-0000-0000-0000-000000000002',
     '10000000-0000-0000-0000-000000000003',
     1, 1, 1, 'push', 'reusable/event.json', decode(repeat('09', 20), 'hex'),
-    'in_progress', 1, 1, 4, decode(repeat('02', 32), 'hex'), 128,
+    'in_progress', 1, 1, 1, decode(repeat('02', 32), 'hex'), 128,
     'application/json', decode(repeat('03', 32), 'hex'),
     'reusable/root-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
-    'Root', 'refs/heads/main', 'synthetic-actor', 3
+    'application/vnd.automata.workflow-plan+json', 1,
+    'Root', 'refs/heads/main', 'synthetic-actor', 1
 );
 INSERT INTO logical_workflow_runs (
     run_id, root_invocation_id, admission_digest, state, admitted_at_ms,
@@ -68,7 +68,7 @@ INSERT INTO logical_workflow_runs (
 ) VALUES (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000005',
-    decode(repeat('04', 32), 'hex'), 'active', 1, 1, 1, 3
+    decode(repeat('04', 32), 'hex'), 'active', 1, 1, 1, 1
 );
 INSERT INTO logical_workflow_invocations (
     id, run_id, plan_digest, plan_object_key, plan_size_bytes,
@@ -77,7 +77,7 @@ INSERT INTO logical_workflow_invocations (
     '10000000-0000-0000-0000-000000000005',
     '10000000-0000-0000-0000-000000000004',
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2, 'active', 1, 1
+    'application/vnd.automata.workflow-plan+json', 1, 'active', 1, 1
 );
 INSERT INTO logical_workflow_jobs (
     id, run_id, invocation_id, logical_key, source_order, execution_kind,
@@ -180,7 +180,7 @@ INSERT INTO logical_workflow_reusable_workflow_catalog (
     '.ci/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
     'reusable/root-source.yml', 128, 'application/yaml',
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
+    'application/vnd.automata.workflow-plan+json', 1,
     NULL, decode(repeat('11', 32), 'hex'), 1, 1, 2
 ),
 (
@@ -189,7 +189,7 @@ INSERT INTO logical_workflow_reusable_workflow_catalog (
     '.ci/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
     'reusable/child-source.yml', 128, 'application/yaml',
     decode(repeat('13', 32), 'hex'), 'reusable/child-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
+    'application/vnd.automata.workflow-plan+json', 1,
     decode(repeat('14', 32), 'hex'), decode(repeat('15', 32), 'hex'), 2, 0, 2
 );
 INSERT INTO logical_workflow_reusable_invocation_expansions (
@@ -294,7 +294,7 @@ INSERT INTO logical_workflow_reusable_workflow_catalog (
     '.ci/workflows/root.yml', repeat('09', 20), decode(repeat('01', 32), 'hex'),
     'reusable/root-source.yml', 128, 'application/yaml',
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
+    'application/vnd.automata.workflow-plan+json', 1,
     NULL, decode(repeat('51', 32), 'hex'), 7, 7, 2
 ),
 (
@@ -303,7 +303,7 @@ INSERT INTO logical_workflow_reusable_workflow_catalog (
     '.ci/workflows/child.yml', repeat('09', 20), decode(repeat('12', 32), 'hex'),
     'reusable/child-source.yml', 128, 'application/yaml',
     decode(repeat('13', 32), 'hex'), 'reusable/child-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
+    'application/vnd.automata.workflow-plan+json', 1,
     decode(repeat('52', 32), 'hex'), decode(repeat('53', 32), 'hex'), 1, 1, 2
 ),
 (
@@ -313,7 +313,7 @@ INSERT INTO logical_workflow_reusable_workflow_catalog (
     decode(repeat('16', 32), 'hex'), 'reusable/grandchild-source.yml', 128,
     'application/yaml', decode(repeat('17', 32), 'hex'),
     'reusable/grandchild-plan.json', 128,
-    'application/vnd.automata.workflow-plan+json', 2,
+    'application/vnd.automata.workflow-plan+json', 1,
     decode(repeat('54', 32), 'hex'), decode(repeat('55', 32), 'hex'), 1, 0, 2
 );
 INSERT INTO logical_workflow_reusable_invocation_expansions (

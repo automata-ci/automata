@@ -272,7 +272,7 @@ pub struct HumanWorkflow {
     pub path: String,
     /// Whether new events may select this workflow.
     pub enabled: bool,
-    /// The newest non-null run projection. Its visibility must be authorized
+    /// The newest run projection. Its visibility must be authorized
     /// independently before presentation; `path` remains the honest fallback.
     pub projected_name: Option<HumanWorkflowProjectedName>,
 }
@@ -417,7 +417,7 @@ impl HumanGitCommitId {
     }
 }
 
-/// Human-readable run row with legacy projection fields preserved as optional.
+/// Human-readable workflow run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanRun {
     /// Durable run identity within its tenant and repository.
@@ -438,8 +438,8 @@ pub struct HumanRun {
     pub status: crate::WorkflowRunStatus,
     /// Stable aggregate conclusion once derivable from latest attempts.
     pub conclusion: Option<HumanRunConclusion>,
-    /// Optional immutable human-facing workflow-name projection.
-    pub workflow_name: Option<String>,
+    /// Immutable human-facing workflow name.
+    pub workflow_name: String,
     /// Optional exact canonical source ref.
     pub git_ref: Option<String>,
     /// Optional sanitized trigger actor label.
@@ -615,8 +615,8 @@ pub struct HumanJob {
     pub display_name: String,
     /// Time at which the durable job was created.
     pub created_at: UnixMillis,
-    /// Legacy jobs lack a trustworthy size/schema and therefore have no descriptor.
-    pub job_ir: Option<JobIrMetadata>,
+    /// Exact immutable `JobIR` descriptor.
+    pub job_ir: JobIrMetadata,
     /// Latest durable attempt, absent when the job has not entered the queue.
     pub latest_attempt: Option<HumanJobAttempt>,
     /// Publication ceiling for the latest attempt's log stream. Absence means

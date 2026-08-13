@@ -24719,15 +24719,15 @@ CREATE TABLE workflow_runs (
     updated_at_ms bigint NOT NULL,
     concurrency_group_key text,
     admission_epoch integer DEFAULT 1 NOT NULL,
-    event_digest bytea,
-    event_size_bytes bigint,
-    event_media_type text,
-    plan_digest bytea,
-    plan_object_key text,
-    plan_size_bytes bigint,
-    plan_media_type text,
-    plan_schema integer,
-    workflow_name text,
+    event_digest bytea NOT NULL,
+    event_size_bytes bigint NOT NULL,
+    event_media_type text NOT NULL,
+    plan_digest bytea NOT NULL,
+    plan_object_key text NOT NULL,
+    plan_size_bytes bigint NOT NULL,
+    plan_media_type text NOT NULL,
+    plan_schema integer NOT NULL,
+    workflow_name text NOT NULL,
     git_ref text,
     actor text,
     display_title text,
@@ -24768,7 +24768,7 @@ CREATE TABLE workflow_runs (
     CONSTRAINT workflow_runs_sha CHECK ((octet_length(head_sha) = ANY (ARRAY[20, 32]))),
     CONSTRAINT workflow_runs_status CHECK ((status = ANY (ARRAY['queued'::text, 'in_progress'::text, 'completed'::text, 'cancelled'::text]))),
     CONSTRAINT workflow_runs_triggering_actor_shape CHECK (((triggering_actor IS NULL) OR (((octet_length(triggering_actor) >= 1) AND (octet_length(triggering_actor) <= 1024)) AND (triggering_actor !~ '[[:cntrl:]]'::text)))),
-    CONSTRAINT workflow_runs_workflow_name_shape CHECK (((workflow_name IS NULL) OR (((octet_length(workflow_name) >= 1) AND (octet_length(workflow_name) <= 1024)) AND (workflow_name !~ '[[:cntrl:]]'::text))))
+    CONSTRAINT workflow_runs_workflow_name_shape CHECK ((((octet_length(workflow_name) >= 1) AND (octet_length(workflow_name) <= 1024)) AND (workflow_name !~ '[[:cntrl:]]'::text)))
 );
 
 CREATE VIEW github_workflow_run_manifest_origins AS
@@ -25163,11 +25163,10 @@ CREATE TABLE jobs (
     requirements jsonb NOT NULL,
     created_at_ms bigint NOT NULL,
     admission_epoch integer NOT NULL,
-    job_ir_schema integer,
-    job_ir_size_bytes bigint,
+    job_ir_schema integer NOT NULL,
+    job_ir_size_bytes bigint NOT NULL,
     CONSTRAINT jobs_admission_epoch_exact CHECK ((admission_epoch = 1)),
     CONSTRAINT jobs_current_admission_metadata CHECK (((admission_epoch = 1) AND (job_ir_schema = 1) AND ((job_ir_size_bytes >= 1) AND (job_ir_size_bytes <= 16777216)) AND (requirements @> '{"schema_version": 1}'::jsonb) AND (requirements ? 'resource_allocation'::text))),
-    CONSTRAINT jobs_ir_metadata_complete CHECK (((job_ir_schema IS NULL) = (job_ir_size_bytes IS NULL))),
     CONSTRAINT jobs_ir_object_key_nonempty CHECK ((length(job_ir_object_key) > 0)),
     CONSTRAINT jobs_ir_sha256 CHECK ((octet_length(job_ir_digest) = 32)),
     CONSTRAINT jobs_key_nonempty CHECK ((length(job_key) > 0))
@@ -25708,12 +25707,8 @@ CREATE TABLE runner_sessions (
     CONSTRAINT runner_sessions_epoch_positive CHECK ((session_epoch > 0)),
     CONSTRAINT runner_sessions_generation_positive CHECK ((runner_generation > 0)),
     CONSTRAINT runner_sessions_heartbeat_monotonic CHECK ((heartbeat_at_ms >= connected_at_ms)),
-    CONSTRAINT runner_sessions_job_ir_positive CHECK ((job_ir_schema > 0)),
-    CONSTRAINT runner_sessions_job_ir_u16 CHECK ((job_ir_schema <= 65535)),
-    CONSTRAINT runner_sessions_live_job_ir_current CHECK (((disconnected_at_ms IS NOT NULL) OR (job_ir_schema = 1))),
-    CONSTRAINT runner_sessions_live_protocol_current CHECK (((disconnected_at_ms IS NOT NULL) OR (protocol_version = 1))),
-    CONSTRAINT runner_sessions_protocol_positive CHECK ((protocol_version > 0)),
-    CONSTRAINT runner_sessions_protocol_u16 CHECK ((protocol_version <= 65535))
+    CONSTRAINT runner_sessions_job_ir_current CHECK ((job_ir_schema = 1)),
+    CONSTRAINT runner_sessions_protocol_current CHECK ((protocol_version = 1))
 );
 
 CREATE TABLE runners (

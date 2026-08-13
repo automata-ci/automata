@@ -1113,11 +1113,7 @@ fn map_workflow(workflow: &HumanWorkflow) -> WorkflowDefinition {
 fn workflow_from_run(run: &HumanRun) -> Workflow {
     Workflow {
         id: run.workflow_id,
-        name: run
-            .workflow_name
-            .as_ref()
-            .and_then(|name| visible_text(name))
-            .unwrap_or_else(|| run.workflow_path.clone()),
+        name: visible_text(&run.workflow_name).unwrap_or_else(|| run.workflow_path.clone()),
         path: run.workflow_path.clone(),
     }
 }
@@ -2772,16 +2768,16 @@ mod tests {
     };
     use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType, MemoryBlobStore};
     use automata_ci_core::{
-        AttemptId, AttemptNumber, JobId, JobLifecycle, LogChannel as CoreLogChannel, LogFrame,
-        LogSequence, LogStreamId, RunId, UnixMillis, WorkflowId,
+        AttemptId, AttemptNumber, JobId, JobIrVersion, JobLifecycle, LogChannel as CoreLogChannel,
+        LogFrame, LogSequence, LogStreamId, RunId, Sha256Digest, UnixMillis, WorkflowId,
     };
     use automata_ci_store::{
         DocumentSchema, HumanAuthorizationTarget, HumanGitCommitId, HumanJob, HumanJobAttempt,
         HumanJobDetail, HumanJobNavigation, HumanLogSegment, HumanLogSegmentPage, HumanLogStream,
         HumanOutputPublication, HumanRawLogDisposition, HumanRepository, HumanRepositoryCursor,
         HumanRepositoryPage, HumanRun, HumanRunConclusion, HumanRunCursor, HumanRunPageDirection,
-        HumanRunPublication, HumanWorkflow, HumanWorkflowReadRepository, RepositoryCoordinate,
-        RepositoryId, StoreError, TenantScope, WorkflowRunStatus,
+        HumanRunPublication, HumanWorkflow, HumanWorkflowReadRepository, JobIrMetadata, ObjectKey,
+        RepositoryCoordinate, RepositoryId, StoreError, TenantScope, WorkflowRunStatus,
     };
 
     use super::{
@@ -3306,7 +3302,7 @@ mod tests {
             head_commit: HumanGitCommitId::new(vec![7; 20]).expect("commit ID"),
             status: WorkflowRunStatus::Completed,
             conclusion: Some(HumanRunConclusion::Lost),
-            workflow_name: Some("CI".to_owned()),
+            workflow_name: "CI".to_owned(),
             git_ref: Some("refs/heads/main".to_owned()),
             actor: Some("octocat".to_owned()),
             display_title: Some("Validate checkout flow".to_owned()),
@@ -3324,6 +3320,18 @@ mod tests {
                 safety_schema: 1,
             },
         }
+    }
+
+    fn fixture_job_ir(job_id: JobId, run_id: RunId) -> JobIrMetadata {
+        JobIrMetadata::new(
+            job_id,
+            run_id,
+            JobIrVersion::new(1).expect("JobIR version"),
+            1,
+            Sha256Digest::from_bytes([7; 32]),
+            ObjectKey::new(format!("tests/job-ir/{job_id}")).expect("JobIR object key"),
+        )
+        .expect("JobIR metadata")
     }
 
     fn fixture_output_publication(
@@ -3372,7 +3380,7 @@ mod tests {
             key: "build".to_owned(),
             display_name: "Build".to_owned(),
             created_at: UnixMillis::new(1_050),
-            job_ir: None,
+            job_ir: fixture_job_ir(job_id, run.id),
             latest_attempt: Some(attempt),
             log_publication: Some(log_stream.publication.clone()),
         };
@@ -4366,7 +4374,7 @@ mod tests {
             head_commit: HumanGitCommitId::new(vec![7; 20]).expect("commit ID"),
             status: WorkflowRunStatus::Completed,
             conclusion: Some(HumanRunConclusion::Success),
-            workflow_name: Some("\u{200b}".to_owned()),
+            workflow_name: "\u{200b}".to_owned(),
             git_ref: Some("\u{202e}".to_owned()),
             actor: Some("\u{202e}octocat".to_owned()),
             display_title: Some(" \u{200b}".to_owned()),
@@ -4392,12 +4400,13 @@ mod tests {
         assert!(mapped.actor.is_none());
         assert!(mapped.commit_subject.is_none());
 
+        let job_id = JobId::new();
         let job = HumanJob {
-            id: JobId::new(),
+            id: job_id,
             key: "build".to_owned(),
             display_name: "\u{200b}".to_owned(),
             created_at: UnixMillis::new(1),
-            job_ir: None,
+            job_ir: fixture_job_ir(job_id, run.id),
             latest_attempt: None,
             log_publication: None,
         };

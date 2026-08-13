@@ -14,7 +14,7 @@ use automata_ci_postgres_test_support::{
 };
 use automata_ci_store::{
     OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionRepository as _, SessionEpoch,
+    RunnerSessionFence, RunnerSessionRepository as _,
 };
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
@@ -89,7 +89,7 @@ where
     }
 }
 
-#[allow(dead_code)] // Only the migration integration-test crate uses the partial-upgrade fixture.
+#[allow(dead_code)] // Only integration tests that control migration application use this fixture.
 pub async fn run_with_unmigrated_database<Test, TestFuture>(test: Test) -> TestResult
 where
     Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
@@ -213,31 +213,6 @@ async fn seed_control_plane_with_optional_concurrency(
         .fetch_one(pool)
         .await?;
     let job_ir_version = JobIrVersion::new(u16::try_from(job_ir_schema)?)?;
-    let current_runner_session_schema: bool = sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = 'runner_command_outbox'
-              AND column_name = 'payload_tombstone_reason'
-        )
-        ",
-    )
-    .fetch_one(pool)
-    .await?;
-    let workflow_run_requirements_column: bool = sqlx::query_scalar(
-        r"
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = 'workflow_runs'
-              AND column_name = 'runner_requirements_schema'
-        )
-        ",
-    )
-    .fetch_one(pool)
-    .await?;
 
     let requirements = serde_json::to_value(RunnerRequirements::default())?;
 
@@ -304,70 +279,34 @@ async fn seed_control_plane_with_optional_concurrency(
     .bind(vec![7_u8; 32])
     .execute(pool)
     .await?;
-    if workflow_run_requirements_column {
-        sqlx::query(
-            r"
-            INSERT INTO workflow_runs (
-                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-                event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-                concurrency_group_key, concurrency_queue_policy,
-                runner_requirements_schema
-            ) VALUES (
-                $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
-                $6, $7, $8
-            )
-            ",
+    sqlx::query(
+        r"
+        INSERT INTO workflow_runs (
+            id, repository_id, workflow_id, snapshot_id, run_number, event_name,
+            event_object_key, event_digest, event_size_bytes, event_media_type,
+            plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
+            plan_schema, workflow_name, head_sha, status, created_at_ms, updated_at_ms,
+            concurrency_group_key, concurrency_queue_policy,
+            runner_requirements_schema
+        ) VALUES (
+            $1, $2, $3, $4, 1, 'push', 'test/event',
+            decode(repeat('09', 32), 'hex'), 1, 'application/json',
+            decode(repeat('0a', 32), 'hex'), 'test/plan', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1, 'Store test',
+            $5, 'queued', 1, 1, $6, $7, $8
         )
-        .bind(run_id)
-        .bind(repository_id)
-        .bind(workflow_id)
-        .bind(snapshot_id)
-        .bind(vec![9_u8; 20])
-        .bind(concurrency.map(|(group, _)| group))
-        .bind(concurrency.map(|(_, queue_policy)| queue_policy))
-        .bind(i16::try_from(runner_requirements_schema)?)
-        .execute(pool)
-        .await?;
-    } else if let Some((group, queue_policy)) = concurrency {
-        sqlx::query(
-            r"
-            INSERT INTO workflow_runs (
-                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-                event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-                concurrency_group_key, concurrency_queue_policy
-            ) VALUES (
-                $1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1,
-                $6, $7
-            )
-            ",
-        )
-        .bind(run_id)
-        .bind(repository_id)
-        .bind(workflow_id)
-        .bind(snapshot_id)
-        .bind(vec![9_u8; 20])
-        .bind(group)
-        .bind(queue_policy)
-        .execute(pool)
-        .await?;
-    } else {
-        sqlx::query(
-            r"
-            INSERT INTO workflow_runs (
-                id, repository_id, workflow_id, snapshot_id, run_number, event_name,
-                event_object_key, head_sha, status, created_at_ms, updated_at_ms
-            )
-            VALUES ($1, $2, $3, $4, 1, 'push', 'test/event', $5, 'queued', 1, 1)
-            ",
-        )
-        .bind(run_id)
-        .bind(repository_id)
-        .bind(workflow_id)
-        .bind(snapshot_id)
-        .bind(vec![9_u8; 20])
-        .execute(pool)
-        .await?;
-    }
+        ",
+    )
+    .bind(run_id)
+    .bind(repository_id)
+    .bind(workflow_id)
+    .bind(snapshot_id)
+    .bind(vec![9_u8; 20])
+    .bind(concurrency.map(|(group, _)| group))
+    .bind(concurrency.map(|(_, queue_policy)| queue_policy))
+    .bind(i16::try_from(runner_requirements_schema)?)
+    .execute(pool)
+    .await?;
     sqlx::query(
         r"
         INSERT INTO jobs (
@@ -396,58 +335,18 @@ async fn seed_control_plane_with_optional_concurrency(
         .with_runner_payload_encryption(test_runner_payload_key_provider());
     for runner_id in &runner_ids {
         let capabilities = runner_capability_document(pool, *runner_id).await?;
-        if current_runner_session_schema {
-            let session = store
-                .open_session(OpenRunnerSession::new(
-                    RunnerSessionId::new(),
-                    *runner_id,
-                    RunnerGeneration::new(1)?,
-                    RunnerProtocolVersion::new(1)?,
-                    job_ir_version,
-                    capabilities,
-                    UnixMillis::new(2),
-                ))
-                .await?;
-            session_fences.push(session.fence());
-        } else {
-            let session_id = RunnerSessionId::new();
-            let generation = RunnerGeneration::new(1)?;
-            let epoch = SessionEpoch::new(1)?;
-            let updated = sqlx::query(
-                "UPDATE runners SET session_epoch = $1 WHERE id = $2 AND generation = $3",
-            )
-            .bind(i64::try_from(epoch.get())?)
-            .bind(runner_id.as_uuid())
-            .bind(i64::try_from(generation.get())?)
-            .execute(pool)
+        let session = store
+            .open_session(OpenRunnerSession::new(
+                RunnerSessionId::new(),
+                *runner_id,
+                RunnerGeneration::new(1)?,
+                RunnerProtocolVersion::new(1)?,
+                job_ir_version,
+                capabilities,
+                UnixMillis::new(2),
+            ))
             .await?;
-            assert_eq!(
-                updated.rows_affected(),
-                1,
-                "fixture runner must remain exact"
-            );
-            sqlx::query(
-                r"
-                INSERT INTO runner_sessions (
-                    id, runner_id, protocol_version, job_ir_schema,
-                    capability_snapshot, connected_at_ms, heartbeat_at_ms,
-                    runner_generation, session_epoch
-                ) VALUES ($1, $2, $3, $4, $5::jsonb, 2, 2, $6, $7)
-                ",
-            )
-            .bind(session_id.as_uuid())
-            .bind(runner_id.as_uuid())
-            .bind(1)
-            .bind(job_ir_schema)
-            .bind(capabilities.as_str())
-            .bind(i64::try_from(generation.get())?)
-            .bind(i64::try_from(epoch.get())?)
-            .execute(pool)
-            .await?;
-            session_fences.push(RunnerSessionFence::new(
-                session_id, *runner_id, generation, epoch,
-            ));
-        }
+        session_fences.push(session.fence());
     }
 
     Ok(SeedData {

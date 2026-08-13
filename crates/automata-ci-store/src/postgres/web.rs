@@ -222,7 +222,6 @@ const WORKFLOWS_FIRST_SQL: &str = r"
         FROM workflow_runs AS run
         WHERE run.repository_id = repository.id
           AND run.workflow_id = workflow.id
-          AND run.workflow_name IS NOT NULL
         ORDER BY run.created_at_ms DESC, run.id DESC
         LIMIT 1
     ) AS projected ON TRUE
@@ -246,7 +245,6 @@ const WORKFLOWS_AFTER_SQL: &str = r"
         FROM workflow_runs AS run
         WHERE run.repository_id = repository.id
           AND run.workflow_id = workflow.id
-          AND run.workflow_name IS NOT NULL
         ORDER BY run.created_at_ms DESC, run.id DESC
         LIMIT 1
     ) AS projected ON TRUE
@@ -841,34 +839,26 @@ async fn load_jobs(
 
 fn decode_job(row: &PgRow, run_id: RunId) -> Result<HumanJob, StoreError> {
     let job_id = JobId::from_uuid(row.try_get("job_id").map_err(operation_error)?);
-    let job_ir_schema: Option<i32> = row.try_get("job_ir_schema").map_err(operation_error)?;
-    let job_ir_size: Option<i64> = row.try_get("job_ir_size_bytes").map_err(operation_error)?;
-    let job_ir_metadata = match (job_ir_schema, job_ir_size) {
-        (None, None) => None,
-        (Some(schema), Some(size)) => {
-            let version = JobIrVersion::new(positive_u16(schema, "JobIR schema")?)
-                .map_err(|_| StoreError::corrupt_data("JobIR schema is invalid"))?;
-            let size = positive_u64(size, "JobIR encoded size")?;
-            let digest = decode_digest(
-                row.try_get("job_ir_digest").map_err(operation_error)?,
-                "JobIR digest",
-            )?;
-            let key = crate::ObjectKey::new(
-                row.try_get::<String, _>("job_ir_object_key")
-                    .map_err(operation_error)?,
-            )
-            .map_err(|_| StoreError::corrupt_data("JobIR object key is invalid"))?;
-            Some(
-                JobIrMetadata::new(job_id, run_id, version, size, digest, key)
-                    .map_err(|_| StoreError::corrupt_data("JobIR descriptor is invalid"))?,
-            )
-        }
-        _ => {
-            return Err(StoreError::corrupt_data(
-                "legacy JobIR schema and size are inconsistently null",
-            ));
-        }
-    };
+    let version = JobIrVersion::new(positive_u16(
+        row.try_get("job_ir_schema").map_err(operation_error)?,
+        "JobIR schema",
+    )?)
+    .map_err(|_| StoreError::corrupt_data("JobIR schema is invalid"))?;
+    let size = positive_u64(
+        row.try_get("job_ir_size_bytes").map_err(operation_error)?,
+        "JobIR encoded size",
+    )?;
+    let digest = decode_digest(
+        row.try_get("job_ir_digest").map_err(operation_error)?,
+        "JobIR digest",
+    )?;
+    let key = crate::ObjectKey::new(
+        row.try_get::<String, _>("job_ir_object_key")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| StoreError::corrupt_data("JobIR object key is invalid"))?;
+    let job_ir_metadata = JobIrMetadata::new(job_id, run_id, version, size, digest, key)
+        .map_err(|_| StoreError::corrupt_data("JobIR descriptor is invalid"))?;
 
     let attempt_id: Option<Uuid> = row.try_get("attempt_id").map_err(operation_error)?;
     let latest_attempt = attempt_id

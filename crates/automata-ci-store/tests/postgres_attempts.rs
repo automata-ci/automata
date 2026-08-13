@@ -7,7 +7,7 @@ use std::{
 };
 
 use automata_ci_core::{
-    AttemptId, AttemptNumber, FencingToken, JobLifecycle, LeaseGuard, LeaseId, UnixMillis,
+    AttemptId, AttemptNumber, FencingToken, JobId, JobLifecycle, LeaseGuard, LeaseId, UnixMillis,
 };
 use automata_ci_store::{
     AcquireLease, AttemptCommandError, AttemptStoreError, ConcludeQueuedAttempt,
@@ -97,6 +97,40 @@ async fn queued_creation_persists_current_safety_and_retries_reuse_the_job_ceili
                 classified_at: 71,
             }
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn queued_creation_rejects_a_missing_job_without_writes() -> TestResult {
+    run_with_database(|database| async move {
+        let attempt_id = AttemptId::new();
+        let missing_job_id = JobId::new();
+        let result = database
+            .store()
+            .insert_queued(QueuedAttempt::new(
+                attempt_id,
+                missing_job_id,
+                AttemptNumber::new(1)?,
+                UnixMillis::new(70),
+            ))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AttemptStoreError::CorruptData(message))
+                if message == "queued attempt references a missing workflow job"
+        ));
+
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT count(*)::BIGINT FROM job_attempts WHERE id = $1 OR job_id = $2",
+        )
+        .bind(attempt_id.as_uuid())
+        .bind(missing_job_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(persisted, 0);
         Ok(())
     })
     .await

@@ -98,7 +98,7 @@ async fn tenant_scoped_human_reads_preserve_exact_descriptors_and_visibility() -
         assert_eq!(runs.runs[0].id, fixture.run_id);
         assert_eq!(runs.runs[0].run_number, 2);
         assert_eq!(runs.runs[0].run_attempt, 3);
-        assert_eq!(runs.runs[0].workflow_name.as_deref(), Some("CI"));
+        assert_eq!(runs.runs[0].workflow_name, "CI");
         assert_eq!(runs.runs[0].actor.as_deref(), Some("octocat"));
         assert_eq!(
             runs.runs[0].publication.effective_dashboard_visibility,
@@ -121,7 +121,7 @@ async fn tenant_scoped_human_reads_preserve_exact_descriptors_and_visibility() -
                 .effective_visibility,
             OutputVisibility::Public
         );
-        let job_ir = detail.jobs[0].job_ir.as_ref().expect("current JobIR");
+        let job_ir = &detail.jobs[0].job_ir;
         assert_eq!(job_ir.encoded_size(), 128);
         let attempt = detail.jobs[0]
             .latest_attempt
@@ -1210,14 +1210,19 @@ async fn seed_public_completed_run(
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id,
             run_number, run_attempt, event_name, event_object_key,
-            head_sha, status, created_at_ms, updated_at_ms,
+            event_digest, event_size_bytes, event_media_type,
+            plan_digest, plan_object_key, plan_size_bytes, plan_media_type,
+            plan_schema, head_sha, status, created_at_ms, updated_at_ms,
             workflow_name, git_ref, actor, display_title, commit_subject,
             publication_policy_revision, requested_dashboard_visibility,
             effective_dashboard_visibility, requested_log_visibility,
             requested_artifact_visibility, publication_safety_reason,
             publication_safety_schema, runner_requirements_schema
         ) VALUES (
-            $1, $2, $3, $4, 2, 3, 'push', 'web/event', $5,
+            $1, $2, $3, $4, 2, 3, 'push', 'web/event',
+            decode(repeat('41', 32), 'hex'), 1, 'application/json',
+            decode(repeat('42', 32), 'hex'), 'web/plan', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1, $5,
             'completed', 10, 21, 'CI', 'refs/heads/main', 'octocat',
             'Typed dashboard reads', 'Preserve immutable descriptors',
             2, 'public', 'public', 'public', 'public', 'repository_policy', 1, 1
@@ -1504,12 +1509,17 @@ async fn insert_queued_run(
         r"
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id,
-            run_number, event_name, event_object_key, head_sha,
+            run_number, event_name, event_object_key, event_digest,
+            event_size_bytes, event_media_type, plan_digest, plan_object_key,
+            plan_size_bytes, plan_media_type, plan_schema, workflow_name, head_sha,
             status, created_at_ms, updated_at_ms,
             requested_dashboard_visibility, effective_dashboard_visibility,
             publication_safety_reason, runner_requirements_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, 'push', 'web/keyset-event', $6,
+            $1, $2, $3, $4, $5, 'push', 'web/keyset-event',
+            decode(repeat('43', 32), 'hex'), 1, 'application/json',
+            decode(repeat('44', 32), 'hex'), 'web/keyset-plan', 1,
+            'application/vnd.automata.workflow-plan.protobuf', 1, 'Keyset', $6,
             'queued', $7, $7, $8, $8, 'repository_policy', 1
         )
         ",
