@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::collections::BTreeMap;
 
@@ -53,7 +53,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 struct Fixture {
     tenant: String,
@@ -358,7 +358,8 @@ async fn project_server_cancellation(
 #[allow(clippy::too_many_lines)]
 async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResult {
     run_with_database(|database| async move {
-        let idle_observed_at = database_now_ms(&database).await?;
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let idle_observed_at = clock.now().await?;
         let idle_request = ClaimNextLogicalInstanceResult::new(
             LogicalInstanceResultSelectionId::from_uuid(Uuid::from_u128(30_390))?,
             LogicalInstanceResultWorkerId::from_uuid(Uuid::from_u128(30_391))?,
@@ -582,7 +583,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             &prepared.envelope,
             UnixMillis::new(first_observed_at + 200),
         )?;
-        wait_until_database_after(&database, first_expires_at).await?;
+        clock.set(first_expires_at + 1).await?;
         assert!(matches!(
             database
                 .store()
@@ -784,11 +785,13 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
                 .await?,
             LogicalInstanceResultClaimNextOutcome::Idle
         ));
-        wait_until_database_after(
-            &database,
-            first_expires_at.max(short_idle_request.expires_at().get()),
-        )
-        .await?;
+        clock
+            .set(
+                first_expires_at
+                    .max(short_idle_request.expires_at().get())
+                    + 1,
+            )
+            .await?;
         let cleanup_observed_at = database_now_ms(&database).await?;
         assert!(matches!(
             database
@@ -984,7 +987,8 @@ async fn credential_free_attempt_accepts_and_persists_secretless_terminal_exposu
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> TestResult {
     run_with_database(|database| async move {
-        let database_now = database_now_ms(&database).await?;
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let database_now = clock.now().await?;
         let observed_at = database_now - 59_000;
         let request = ClaimNextLogicalInstanceResult::new(
             LogicalInstanceResultSelectionId::from_uuid(Uuid::from_u128(31_800))?,
@@ -1015,7 +1019,7 @@ async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> 
             "an ordinary statement cannot jump the trusted replay horizon"
         );
 
-        wait_until_database_after(&database, observed_at + 60_100).await?;
+        clock.set(observed_at + 60_101).await?;
         assert!(matches!(
             database
                 .store()
@@ -1146,22 +1150,6 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
             .fetch_one(database.pool())
             .await?,
     )
-}
-
-async fn wait_until_database_after(database: &TestDatabase, deadline_ms: i64) -> TestResult {
-    sqlx::query(
-        r"
-        SELECT pg_sleep(GREATEST(
-            0::double precision,
-            ($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + 1)
-                ::double precision / 1000
-        ))
-        ",
-    )
-    .bind(deadline_ms)
-    .execute(database.pool())
-    .await?;
-    Ok(())
 }
 
 fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile) -> Fixture {

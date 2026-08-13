@@ -19,6 +19,7 @@ use automata_ci_auth::{
 use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresRequestAuthenticationResolver,
 };
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -138,6 +139,7 @@ async fn create(
 async fn activation_final_write_resamples_after_a_statement_delay() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         let principal = seed_actor(pool).await?;
         let session_id = Uuid::new_v4();
         let cli_lookup = lookup(0x51);
@@ -168,11 +170,25 @@ async fn activation_final_write_resamples_after_a_statement_delay() -> TestResul
         .bind(cli_lookup.key_id().as_str())
         .execute(pool)
         .await?;
+        let activation_deadline_ms: i64 =
+            sqlx::query_scalar("SELECT activation_deadline_ms FROM human_sessions WHERE id=$1")
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
+        clock
+            .set(
+                activation_deadline_ms
+                    .checked_sub(1)
+                    .expect("time immediately before activation expiry"),
+            )
+            .await?;
         sqlx::query(
             r"
-            CREATE FUNCTION delay_cli_activation_update() RETURNS trigger AS $$
+            CREATE FUNCTION advance_cli_activation_test_clock() RETURNS trigger AS $$
             BEGIN
-                PERFORM pg_sleep(2.1);
+                UPDATE automata_test.__automata_test_clock
+                SET now_ms = now_ms + 2100
+                WHERE singleton;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql
@@ -182,9 +198,9 @@ async fn activation_final_write_resamples_after_a_statement_delay() -> TestResul
         .await?;
         sqlx::query(
             r"
-            CREATE TRIGGER delay_cli_activation_update
+            CREATE TRIGGER advance_cli_activation_test_clock
             BEFORE UPDATE ON human_sessions
-            FOR EACH STATEMENT EXECUTE FUNCTION delay_cli_activation_update()
+            FOR EACH STATEMENT EXECUTE FUNCTION advance_cli_activation_test_clock()
             ",
         )
         .execute(pool)

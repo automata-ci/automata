@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use common::{TestResult, run_with_database};
 

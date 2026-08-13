@@ -46,6 +46,7 @@ use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring,
     LocalKeyMaterial, SecretBytes, WrappedDataKey,
 };
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -1283,6 +1284,7 @@ async fn finalizer_distinguishes_exact_access_and_closed_admission_outcomes_with
 -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         seed_tenant(pool).await?;
         seed_human(pool, SUBJECT, 100_000, 5).await?;
         let disabled_principal = seed_human(pool, "disabled-subject", 100_000, 7).await?;
@@ -1456,7 +1458,12 @@ async fn finalizer_distinguishes_exact_access_and_closed_admission_outcomes_with
             101,
         )
         .await?;
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let expired_at_ms: i64 =
+            sqlx::query_scalar("SELECT expires_at_ms FROM human_login_transactions WHERE id=$1")
+                .bind(Uuid::parse_str("99999999-9999-4999-8999-999999999999")?)
+                .fetch_one(pool)
+                .await?;
+        clock.set(expired_at_ms).await?;
         assert!(matches!(
             finalize_for(
                 pool, &finalizer, expired, 2, "github", SUBJECT, 160, 170, 180,

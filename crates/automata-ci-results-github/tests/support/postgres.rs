@@ -1,22 +1,24 @@
-use std::{error::Error, future::Future, str::FromStr as _, sync::Arc};
+use std::{error::Error, future::Future, sync::Arc};
 
 use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
     RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
 };
+use automata_ci_postgres_test_support::{
+    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
+};
 use automata_ci_store::{
     OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, WORKFLOW_ADMISSION_EPOCH,
 };
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-pub const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
 pub type TestError = Box<dyn Error + Send + Sync>;
 pub type TestResult<T = ()> = Result<T, TestError>;
+
+static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
 
 pub async fn run_with_database<Test, TestFuture>(test: Test) -> TestResult
 where
@@ -43,64 +45,26 @@ where
 
 #[derive(Debug)]
 pub struct TestDatabase {
-    schema: String,
-    admin: PgPool,
+    database: IsolatedTestDatabase,
     store: PostgresStore,
 }
 
 impl TestDatabase {
     async fn create() -> TestResult<Self> {
-        let database_url = std::env::var(DATABASE_URL_ENVIRONMENT).map_err(|_| {
-            format!("set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL test server URL")
-        })?;
-        let admin = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        let schema = format!("automata_results_{}", Uuid::new_v4().simple());
-        let quoted_schema = quote_identifier(&admin, &schema).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {quoted_schema}")))
-            .execute(&admin)
-            .await?;
-
-        let connection_schema = schema.clone();
-        let options = PgConnectOptions::from_str(&database_url)?;
-        let pool = match PgPoolOptions::new()
-            .max_connections(16)
-            .after_connect(move |connection, _metadata| {
-                let schema = connection_schema.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        .bind(schema)
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
+        let harness = PostgresTestHarness::from_environment()?;
+        let template = PREPARED_TEMPLATE
+            .get_or_try_init(|| async {
+                harness
+                    .prepare_template(|pool| async move {
+                        PostgresStore::from_postgres_pool(pool).migrate().await?;
+                        Ok(())
+                    })
+                    .await
             })
-            .connect_with(options)
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => {
-                let cleanup = drop_schema(&admin, &schema).await;
-                admin.close().await;
-                cleanup?;
-                return Err(error.into());
-            }
-        };
-        let store = PostgresStore::from_postgres_pool(pool);
-        if let Err(error) = store.migrate().await {
-            store.postgres_pool().close().await;
-            let cleanup = drop_schema(&admin, &schema).await;
-            admin.close().await;
-            cleanup?;
-            return Err(error.into());
-        }
-        Ok(Self {
-            schema,
-            admin,
-            store,
-        })
+            .await?;
+        let database = template.create_database().await?;
+        let store = PostgresStore::from_postgres_pool(database.pool().clone());
+        Ok(Self { database, store })
     }
 
     pub const fn store(&self) -> &PostgresStore {
@@ -113,9 +77,7 @@ impl TestDatabase {
 
     async fn cleanup(&self) -> TestResult {
         self.store.postgres_pool().close().await;
-        drop_schema(&self.admin, &self.schema).await?;
-        self.admin.close().await;
-        Ok(())
+        self.database.cleanup().await
     }
 }
 
@@ -274,21 +236,4 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
         session_fence: session.fence(),
         observed_at,
     })
-}
-
-async fn quote_identifier(pool: &PgPool, identifier: &str) -> TestResult<String> {
-    Ok(sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
-        .bind(identifier)
-        .fetch_one(pool)
-        .await?)
-}
-
-async fn drop_schema(pool: &PgPool, schema: &str) -> TestResult {
-    let quoted_schema = quote_identifier(pool, schema).await?;
-    sqlx::query(AssertSqlSafe(format!(
-        "DROP SCHEMA {quoted_schema} CASCADE"
-    )))
-    .execute(pool)
-    .await?;
-    Ok(())
 }

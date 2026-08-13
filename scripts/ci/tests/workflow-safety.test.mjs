@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -153,103 +153,88 @@ function assertRegistryAttestationsUsePrivateHome(
   assert.match(job, /rm -f --[\s\S]*"\$DOCKER_CONFIG\/config\.json"/);
 }
 
-test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () => {
+test("CI pins one PostgreSQL 18 service and covers every database-only ignored suite", () => {
   const ci = source(".ci/workflows/ci.yml");
-  const store = workflowJob(ci, "postgres_store");
-  const integrations = workflowJob(ci, "postgres_integrations");
-  const storeShard = source("scripts/ci/run-postgres-store-shard.sh");
+  const postgres = workflowJob(ci, "postgres");
+  const runner = source("scripts/ci/run-postgres-tests.sh");
   const versionGate = source("scripts/ci/verify-postgres-version.sh");
-  const pinnedPostgres =
-    /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/;
+  const plan = spawnSync(
+    path.join(repositoryRoot, "scripts/ci/run-postgres-tests.sh"),
+    ["--plan"],
+    { cwd: repositoryRoot, encoding: "utf8" },
+  );
 
-  for (const job of [store, integrations]) {
-    assert.match(job, pinnedPostgres);
-    assert.match(job, /AUTOMATA_TEST_DATABASE_URL:/);
-    assert.match(job, /postgresql-client/);
-    assert.equal(
-      (job.match(/\.\/scripts\/ci\/verify-postgres-version\.sh/g) ?? []).length,
-      1,
-      "each PostgreSQL job must run the exact version gate once",
-    );
-    assert.doesNotMatch(job, /sudo service postgresql|CREATE ROLE|CREATE DATABASE/);
-  }
+  assert.equal(plan.status, 0, plan.stderr);
+  const commands = plan.stdout.trim().split("\n");
+  assert.equal(commands.length, 4, plan.stdout);
+  assert.equal((ci.match(/^  postgres:[ \t]*$/gm) ?? []).length, 1);
+  assert.match(
+    postgres,
+    /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/,
+  );
+  assert.match(postgres, /AUTOMATA_TEST_DATABASE_URL:/);
+  assert.match(
+    postgres,
+    /AUTOMATA_TEST_DATABASE_NAMESPACE: ci_\$\{\{ github\.run_id \}\}_\$\{\{ github\.run_attempt \}\}/,
+  );
+  assert.match(postgres, /postgresql-client/);
+  assert.equal(
+    (postgres.match(/\.\/scripts\/ci\/verify-postgres-version\.sh/g) ?? [])
+      .length,
+    1,
+  );
+  assert.equal(
+    (postgres.match(/\.\/scripts\/ci\/run-postgres-tests\.sh/g) ?? []).length,
+    1,
+  );
+  assert.doesNotMatch(postgres, /^\s+cargo test /m);
+  assert.doesNotMatch(postgres, /matrix:|run-postgres-store-shard/);
+  assert.doesNotMatch(ci, /^  postgres_(?:store|integrations):[ \t]*$/m);
+  assert.equal(
+    existsSync(path.join(repositoryRoot, "scripts/ci/run-postgres-store-shard.sh")),
+    false,
+  );
+
   assert.match(versionGate, /AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004/);
   assert.match(versionGate, /--command='SHOW server_version_num'/);
-  assert.match(versionGate, /\[\[ "\$server_version" != "\$expected_version" \]\]/);
+  assert.match(versionGate, /rolcreatedb OR rolsuper/);
+  assert.match(versionGate, /--set=ON_ERROR_STOP=1/);
 
-  assert.match(store, /matrix:\n        shard: \[1, 2, 3, 4\]/);
   assert.match(
-    store,
-    /\.\/scripts\/ci\/run-postgres-store-shard\.sh "\$\{\{ matrix\.shard \}\}" 4/,
-  );
-  assert.doesNotMatch(store, /^\s+cargo test /m);
-  assert.match(
-    storeShard,
-    /cargo metadata --format-version 1 --no-deps --locked/,
+    commands[0],
+    /-p automata-ci-store --test store_postgres_execution --test store_postgres_orchestration --test store_postgres_provider --test store_postgres_security .*--ignored --test-threads=4$/,
   );
   assert.match(
-    storeShard,
-    /package\["name"\] == "automata-ci-store"/,
+    commands[1],
+    /-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --tests .*--ignored --test-threads=4$/,
   );
-  assert.match(storeShard, /target\["kind"\] != \["test"\]/);
-  assert.match(storeShard, /source\.count\("#\[ignore"\)/);
   assert.match(
-    storeShard,
-    /sorted\(weighted_targets, key=lambda item: \(-item\[1\], item\[0\]\)\)/,
+    commands[2],
+    /-p automata-ci-results-github --test postgres_artifacts --test postgres_cache .*--ignored --test-threads=4$/,
   );
-  assert.match(storeShard, /cargo_targets\+=\(--test "\$target"\)/);
-  assert.match(storeShard, /cargo test \\\n  -p automata-ci-store \\\n  "\$\{cargo_targets\[@\]\}"/);
-  assert.doesNotMatch(storeShard, /--tests|--workspace|--all-targets/);
-  assert.equal((storeShard.match(/^cargo test /gm) ?? []).length, 1);
+  assert.match(
+    commands[3],
+    /-p automata-ci --test github_provider_end_to_end_matrix .*--ignored --test-threads=1$/,
+  );
+  assert.equal((runner.match(/-p automata-ci-store/g) ?? []).length, 1);
+  assert.doesNotMatch(
+    runner,
+    /--test store_(?:contracts|migration_contracts|migrations)|--workspace|--all-targets/,
+  );
+  assert.match(runner, /trap cleanup_postgres_tests EXIT/);
+  assert.match(runner, /automata_cleanup_postgres_test_namespace/);
 
   const broadDatabasePackages = new Set([
     "automata-ci-auth-postgres",
+    "automata-ci-postgres-test-support",
     "automata-ci-runner-auth-postgres",
     "automata-ci-secret-postgres",
     "automata-ci-store",
   ]);
-  const broadIntegrationPackages = new Set([
-    "automata-ci-auth-postgres",
-    "automata-ci-runner-auth-postgres",
-    "automata-ci-secret-postgres",
-  ]);
-  const expectedCommands = [];
-  for (const packageName of broadIntegrationPackages) {
-    const command =
-      `cargo test -p ${packageName} --tests --all-features --locked ` +
-      "-- --ignored --test-threads=1";
-    expectedCommands.push(command);
-    assert.equal(
-      integrations.split(command).length - 1,
-      1,
-      `${packageName} database suite must run exactly once`,
-    );
-  }
   const explicitDatabaseTargets = new Map([
     ["automata-ci", new Set(["github_provider_end_to_end_matrix"])],
     ["automata-ci-results-github", new Set(["postgres_artifacts", "postgres_cache"])],
   ]);
-  for (const [packageName, targets] of explicitDatabaseTargets) {
-    for (const target of targets) {
-      const command =
-        `cargo test -p ${packageName} --test ${target} ` +
-        "--all-features --locked -- --ignored --test-threads=1";
-      expectedCommands.push(command);
-      assert.equal(
-        integrations.split(command).length - 1,
-        1,
-        `the database-only ${packageName}/${target} suite must run exactly once`,
-      );
-    }
-  }
-  const actualCommands = (integrations.match(/^\s+cargo test .+$/gm) ?? []).map(
-    (command) => command.trim(),
-  );
-  assert.deepEqual(
-    actualCommands.sort(),
-    expectedCommands.sort(),
-    "PostgreSQL integration CI must contain only the inventoried database commands",
-  );
 
   const ignored = ignoredRustSuites();
   const broadExternalSuites = ignored.filter(({ reason, relativePath }) => {
@@ -284,8 +269,7 @@ test("CI pins PostgreSQL 18 and covers every database-only ignored suite", () =>
 
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".ci/workflows/ci.yml");
-  const verify = section(ci, "\n  verify:", "\n  rust_tests:");
-  const rustTests = section(ci, "\n  rust_tests:", "\n  rust_coverage:");
+  const verify = section(ci, "\n  verify:", "\n  rust_coverage:");
   const rustCoverage = section(
     ci,
     "\n  rust_coverage:",
@@ -294,7 +278,7 @@ test("CI executes documentation and committed script contract suites", () => {
   const rendererTests = section(
     ci,
     "\n  renderer_tests:",
-    "\n  postgres_store:",
+    "\n  postgres:",
   );
   const shellContracts = section(
     verify,
@@ -312,14 +296,15 @@ test("CI executes documentation and committed script contract suites", () => {
     /run_command cargo test \\\n    --workspace \\\n    --exclude automata-ci-ui-renderer \\\n    --all-targets \\\n    --all-features \\\n    --locked/,
   );
   assert.match(
-    rustTests,
-    /cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked/,
-  );
-  assert.match(
-    rustTests,
+    verify,
     /cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked/,
   );
-  assert.doesNotMatch(rustTests, /cargo-llvm-cov|run-rust-coverage\.sh/);
+  assert.doesNotMatch(ci, /^  rust_tests:[ \t]*\r?$/m);
+  assert.doesNotMatch(
+    ci,
+    /cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked/,
+    "ordinary workspace tests must execute only through the coverage lane",
+  );
   assert.match(
     rustCoverage,
     /run-rust-coverage\.sh target\/coverage\/rust ordinary/,
@@ -335,6 +320,8 @@ test("CI executes documentation and committed script contract suites", () => {
   assert.match(shellContracts, /renderer-preflight\.test\.sh/);
   assert.match(shellContracts, /renderer-provenance\.test\.sh/);
   assert.match(shellContracts, /regenerate-renderer-atomicity\.test\.sh/);
+  assert.match(shellContracts, /actionlint \.ci\/workflows\/\*\.yml/);
+  assert.doesNotMatch(shellContracts, /actionlint \.github\/workflows/);
   assert.match(shellContracts, /deploy\/observability\/inventory\/\*\.sh/);
   assert.match(shellContracts, /inventory-scratch\.test\.sh/);
   assert.match(shellContracts, /release-handoff\.test\.py/);
@@ -358,7 +345,7 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
-test("repository CI omits the hosted Windows job and retains fixture parity", () => {
+test("repository workflows omit hosted Windows jobs and CI retains fixture parity", () => {
   const ci = source(".ci/workflows/ci.yml");
   const fixture = source(
     "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
@@ -374,7 +361,14 @@ test("repository CI omits the hosted Windows job and retains fixture parity", ()
     /^  windows:[ \t]*\r?$/m,
     "the hosted Windows CI job is temporarily disabled",
   );
-  assert.doesNotMatch(ci, /^[ \t]+runs-on: windows-/m);
+  for (const workflowPath of filesRecursively(
+    path.join(repositoryRoot, ".ci/workflows"),
+  )) {
+    if (!workflowPath.endsWith(".yml")) continue;
+    const workflow = readFileSync(workflowPath, "utf8");
+    assert.doesNotMatch(workflow, /^  windows:[ \t]*\r?$/m, workflowPath);
+    assert.doesNotMatch(workflow, /^[ \t]+runs-on: windows-/m, workflowPath);
+  }
 });
 
 test("repository CI omits paid GitHub-hosted macOS execution", () => {
@@ -479,6 +473,11 @@ test("frontend CI retains the production-source coverage gate", () => {
     1,
     "the frontend job must run the coverage threshold gate exactly once",
   );
+  assert.match(frontend, /npm run test:build-verifier/);
+  assert.match(frontend, /npm run build/);
+  assert.doesNotMatch(frontend, /npm run check/);
+  assert.match(frontend, /npm ci --no-audit/);
+  assert.doesNotMatch(frontend, /playwright install|npm run screenshots/);
 });
 
 test("distribution build overlaps validation while the final gate retains every prerequisite", () => {
@@ -506,26 +505,32 @@ test("distribution build overlaps validation while the final gate retains every 
   );
   assert.match(
     dist,
-    /needs:\n      - dist_build\n      - verify\n      - rust_tests\n      - rust_coverage\n      - renderer_tests\n      - postgres_store\n      - postgres_integrations\n      - frontend\n      - renderer/,
+    /needs:\n      - dist_build\n      - verify\n      - rust_coverage\n      - renderer_tests\n      - postgres\n      - frontend\n      - renderer/,
   );
-  assert.match(dist, /needs\.dist_build\.result == 'success'/);
-  assert.match(dist, /needs\.verify\.result == 'success'/);
-  assert.match(dist, /needs\.rust_tests\.result == 'success'/);
-  assert.match(dist, /needs\.rust_coverage\.result == 'success'/);
-  assert.match(dist, /needs\.renderer_tests\.result == 'success'/);
-  assert.match(dist, /needs\.postgres_store\.result == 'success'/);
-  assert.match(dist, /needs\.postgres_integrations\.result == 'success'/);
-  assert.match(dist, /needs\.frontend\.result == 'success'/);
+  assert.match(dist, /if: \$\{\{ !cancelled\(\) \}\}/);
+  for (const result of [
+    "DIST_BUILD_RESULT",
+    "VERIFY_RESULT",
+    "RUST_COVERAGE_RESULT",
+    "RENDERER_TESTS_RESULT",
+    "POSTGRES_RESULT",
+    "FRONTEND_RESULT",
+  ]) {
+    assert.match(dist, new RegExp(`\\[\\[ "\\$${result}" == success \\]\\]`));
+  }
   assert.match(
     dist,
-    /needs\.renderer\.result == 'success'[\s\S]+github\.event_name == 'pull_request'[\s\S]+needs\.renderer\.result == 'skipped'/,
+    /\[\[ "\$RENDERER_RESULT" == success \|\| "\$RENDERER_RESULT" == skipped \]\]/,
   );
+  assert.match(dist, /\[\[ "\$RENDERER_RESULT" == success \]\]/);
 });
 
 test("Pages and profile publication isolate concurrency and environments", () => {
   const pages = source(".ci/workflows/pages.yml");
   const profile = source(".ci/workflows/profile-image.yml");
   const promote = profile.slice(profile.indexOf("\n  promote:"));
+
+  assert.match(pages, /npm ci --no-audit/);
 
   assert.match(
     pages,
@@ -535,6 +540,12 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     pages,
     /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/,
   );
+  assert.equal(
+    (pages.match(/- "\.ci\/workflows\/pages\.yml"/g) ?? []).length,
+    2,
+    "Pages must run when its current workflow source changes",
+  );
+  assert.doesNotMatch(pages, /\.github\/workflows\/pages\.yml/);
   assert.match(
     pages,
     /- name: Upload screenshot review artifact\n        if: \$\{\{ always\(\) && hashFiles\('ui\/dist\/preview\/screenshots\/\*\.png'\) != '' \}\}/,
@@ -544,6 +555,22 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     /group: publish-runner-profile-\$\{\{ inputs\.operation \}\}/,
   );
   assert.match(promote, /environment: profile-promotion/);
+});
+
+test("hosted publication verification retains GitHub signer identities", () => {
+  const profile = source(".ci/workflows/profile-image.yml");
+  const serviceProxy = source(".ci/workflows/service-proxy-image.yml");
+
+  // These values identify the hosted GitHub publisher recorded in attestations;
+  // they are deliberately not Automata's current `.ci` source paths.
+  assert.match(
+    profile,
+    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/profile-image\.yml/,
+  );
+  assert.match(
+    serviceProxy,
+    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/service-proxy-image\.yml/,
+  );
 });
 
 test("registry attestations use the isolated Docker credential home", () => {

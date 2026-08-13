@@ -33,6 +33,17 @@ every value before acknowledgement. Tenant/environment management, external and
 dynamically leased providers, and variable-value delivery remain uncomposed and
 unadvertised.
 
+## Tests
+
+Store integration tests are compiled into six reviewed targets: source
+contracts, migration contracts, and four current-schema PostgreSQL domains.
+The PostgreSQL runner prepares the current schema once, clones an isolated
+database per test, executes current-schema tests with bounded parallelism, and
+leaves the non-database migration inventory contract in the ordinary Rust test
+lane. Run the complete database lane with `./scripts/ci/run-postgres-tests.sh`
+after setting `AUTOMATA_TEST_DATABASE_URL`; see the development guide for the
+namespace and PostgreSQL 18 requirements.
+
 - [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
 - API documentation: run `cargo doc -p automata-ci-store --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

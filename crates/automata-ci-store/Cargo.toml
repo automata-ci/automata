@@ -10,6 +10,31 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 publish.workspace = true
+autotests = false
+
+[[test]]
+name = "store_contracts"
+path = "tests/store_contracts.rs"
+
+[[test]]
+name = "store_migration_contracts"
+path = "tests/store_migration_contracts.rs"
+
+[[test]]
+name = "store_postgres_execution"
+path = "tests/store_postgres_execution.rs"
+
+[[test]]
+name = "store_postgres_orchestration"
+path = "tests/store_postgres_orchestration.rs"
+
+[[test]]
+name = "store_postgres_provider"
+path = "tests/store_postgres_provider.rs"
+
+[[test]]
+name = "store_postgres_security"
+path = "tests/store_postgres_security.rs"
 
 [dependencies]
 async-trait.workspace = true
@@ -28,6 +53,9 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+automata-ci-postgres-test-support.workspace = true
 
 [lints]
 workspace = true

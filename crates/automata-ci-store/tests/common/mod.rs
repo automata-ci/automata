@@ -1,4 +1,4 @@
-use std::{error::Error, future::Future, str::FromStr as _, sync::Arc};
+use std::{error::Error, future::Future, sync::Arc};
 
 use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
@@ -7,10 +7,21 @@ use automata_ci_core::{
 use automata_ci_key_management::{
     KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
+#[allow(unused_imports)] // Consolidated binaries consume different fixture subsets.
+pub use automata_ci_postgres_test_support::{DATABASE_URL_ENVIRONMENT, TestClock};
+use automata_ci_postgres_test_support::{
+    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
+};
 use automata_ci_store::{
     OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, SessionEpoch,
 };
+use sqlx::PgPool;
+use tokio::sync::OnceCell;
+use uuid::Uuid;
+
+pub type TestError = Box<dyn Error + Send + Sync>;
+pub type TestResult<T = ()> = Result<T, TestError>;
 
 #[allow(dead_code)]
 pub fn authenticated_github_event_object(
@@ -23,15 +34,24 @@ pub fn authenticated_github_event_object(
         "application/vnd.automata.github-authenticated-event+json",
     )?)
 }
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use uuid::Uuid;
 
-pub const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
-pub type TestError = Box<dyn Error + Send + Sync>;
-pub type TestResult<T = ()> = Result<T, TestError>;
+static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
+
+async fn prepared_template() -> TestResult<&'static PreparedTemplate> {
+    PREPARED_TEMPLATE
+        .get_or_try_init(|| async {
+            PostgresTestHarness::from_environment()?
+                .prepare_template(|pool| async move {
+                    PostgresStore::from_postgres_pool(pool)
+                        .with_runner_payload_encryption(test_runner_payload_key_provider())
+                        .migrate()
+                        .await?;
+                    Ok(())
+                })
+                .await
+        })
+        .await
+}
 
 pub fn test_runner_payload_key_provider() -> Arc<dyn KeyEncryptionProvider> {
     let active = LocalKeyMaterial::new(
@@ -96,8 +116,7 @@ where
 
 #[derive(Debug)]
 pub struct TestDatabase {
-    schema: String,
-    admin: PgPool,
+    database: IsolatedTestDatabase,
     store: PostgresStore,
 }
 
@@ -112,63 +131,15 @@ impl TestDatabase {
     }
 
     async fn create_inner(run_migrations: bool) -> TestResult<Self> {
-        let database_url = std::env::var(DATABASE_URL_ENVIRONMENT).map_err(|_| {
-            format!("set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL test server URL")
-        })?;
-        let admin = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        let schema = format!("automata_test_{}", Uuid::new_v4().simple());
-        let quoted_schema = quote_identifier(&admin, &schema).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {quoted_schema}")))
-            .execute(&admin)
-            .await?;
-
-        let connection_schema = schema.clone();
-        let options = PgConnectOptions::from_str(&database_url)?;
-        let pool = match PgPoolOptions::new()
-            .max_connections(16)
-            .after_connect(move |connection, _metadata| {
-                let schema = connection_schema.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        // Keep the catalog explicit and second so every current
-                        // and replacement connection resolves test-schema clock
-                        // overrides deterministically when a focused fixture
-                        // installs one. Generated schema names are canonical
-                        // unquoted PostgreSQL identifiers.
-                        .bind(format!("{schema}, pg_catalog"))
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => {
-                let cleanup = drop_schema(&admin, &schema).await;
-                admin.close().await;
-                cleanup?;
-                return Err(error.into());
-            }
+        let harness = PostgresTestHarness::from_environment()?;
+        let database = if run_migrations {
+            prepared_template().await?.create_database().await?
+        } else {
+            harness.create_empty_database().await?
         };
-        let store = PostgresStore::from_postgres_pool(pool)
+        let store = PostgresStore::from_postgres_pool(database.pool().clone())
             .with_runner_payload_encryption(test_runner_payload_key_provider());
-        if run_migrations && let Err(error) = store.migrate().await {
-            store.postgres_pool().close().await;
-            let cleanup = drop_schema(&admin, &schema).await;
-            admin.close().await;
-            cleanup?;
-            return Err(error.into());
-        }
-        Ok(Self {
-            schema,
-            admin,
-            store,
-        })
+        Ok(Self { database, store })
     }
 
     pub const fn store(&self) -> &PostgresStore {
@@ -179,11 +150,15 @@ impl TestDatabase {
         self.store().postgres_pool()
     }
 
+    /// Creates another pool connected to this exact isolated database.
+    #[allow(dead_code)] // Only connection-replacement tests consume this helper.
+    pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
+        self.database.connect_pool(max_connections).await
+    }
+
     pub async fn cleanup(&self) -> TestResult {
         self.store.postgres_pool().close().await;
-        drop_schema(&self.admin, &self.schema).await?;
-        self.admin.close().await;
-        Ok(())
+        self.database.cleanup().await
     }
 }
 
@@ -530,23 +505,4 @@ async fn seed_runners(
         runner_ids.push(runner_id);
     }
     Ok(runner_ids)
-}
-
-async fn quote_identifier(pool: &PgPool, identifier: &str) -> TestResult<String> {
-    // PostgreSQL performs the identifier escaping; no untrusted identifier is
-    // ever concatenated directly into DDL.
-    Ok(sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
-        .bind(identifier)
-        .fetch_one(pool)
-        .await?)
-}
-
-async fn drop_schema(pool: &PgPool, schema: &str) -> TestResult {
-    let quoted_schema = quote_identifier(pool, schema).await?;
-    sqlx::query(AssertSqlSafe(format!(
-        "DROP SCHEMA {quoted_schema} CASCADE"
-    )))
-    .execute(pool)
-    .await?;
-    Ok(())
 }

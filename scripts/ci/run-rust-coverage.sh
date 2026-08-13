@@ -39,6 +39,8 @@ done
 
 repository_root="$(git rev-parse --show-toplevel)"
 cd "$repository_root"
+# shellcheck source=scripts/ci/postgres-test-environment.sh
+source "$repository_root/scripts/ci/postgres-test-environment.sh"
 output_directory="$(realpath -m -- "$output_directory")"
 if [[ "$output_directory" != "$repository_root/"* ]]; then
   printf 'error: coverage output must be inside the repository\n' >&2
@@ -148,22 +150,11 @@ run_ordinary() {
 }
 
 run_postgres() {
-  run_ignored_command cargo test -p automata-ci-store --tests --all-features --locked -- \
-    --ignored --test-threads=1
-  for package in \
-    automata-ci-auth-postgres \
-    automata-ci-runner-auth-postgres \
-    automata-ci-secret-postgres
-  do
-    run_ignored_command cargo test -p "$package" --tests --all-features --locked -- \
-      --ignored --test-threads=1
-  done
-  run_ignored_command cargo test -p automata-ci-results-github --test postgres_artifacts \
-    --all-features --locked -- --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci-results-github --test postgres_cache \
-    --all-features --locked -- --ignored --test-threads=1
-  run_ignored_command cargo test -p automata-ci --test github_provider_end_to_end_matrix \
-    --all-features --locked -- --ignored --test-threads=1
+  if [[ "$plan" == true ]]; then
+    ./scripts/ci/run-postgres-tests.sh --plan --defer-cleanup
+  else
+    ./scripts/ci/run-postgres-tests.sh --defer-cleanup
+  fi
 }
 
 run_s3() {
@@ -278,7 +269,30 @@ rm -f -- \
   "$output_directory/summary.json"
 coverage_stage="$(mktemp -d "$output_directory/.rust-coverage-stage.XXXXXX")"
 publish_complete=false
+postgres_cleanup_required=false
+postgres_cleanup_attempted=false
+
+cleanup_postgres_namespace_once() {
+  postgres_cleanup_attempted=true
+  if automata_cleanup_postgres_test_namespace; then
+    return 0
+  else
+    local cleanup_status=$?
+    printf 'error: PostgreSQL namespace cleanup failed with status %d\n' \
+      "$cleanup_status" >&2
+    return "$cleanup_status"
+  fi
+}
+
 cleanup_stage() {
+  local primary_status=$?
+  local cleanup_status=0
+  trap - EXIT
+  set +e
+  if [[ "$postgres_cleanup_required" == true && "$postgres_cleanup_attempted" != true ]]; then
+    cleanup_postgres_namespace_once
+    cleanup_status=$?
+  fi
   if [[ "${publish_complete-}" != true ]]; then
     rm -f -- \
       "$output_directory/coverage.lcov" \
@@ -289,11 +303,19 @@ cleanup_stage() {
     find "$coverage_stage" -depth -mindepth 1 -delete 2>/dev/null || true
     rmdir -- "$coverage_stage" 2>/dev/null || true
   fi
+  if (( cleanup_status != 0 && primary_status == 0 )); then
+    primary_status=$cleanup_status
+  fi
+  exit "$primary_status"
 }
 trap cleanup_stage EXIT
 for lane in "${lanes[@]}"; do
   validate_lane_environment "$lane"
 done
+if [[ -n "${selected[postgres]+present}" || -n "${selected[s3]+present}" ]]; then
+  automata_configure_postgres_test_namespace
+  postgres_cleanup_required=true
+fi
 ignore_regex="$(
   python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["report_scope"]["ignore_filename_regex"])' \
@@ -328,6 +350,9 @@ cargo llvm-cov clean --workspace
 for lane in "${lanes[@]}"; do
   "run_${lane//-/_}"
 done
+if [[ "$postgres_cleanup_required" == true ]]; then
+  cleanup_postgres_namespace_once
+fi
 
 cargo llvm-cov report \
   --remap-path-prefix \

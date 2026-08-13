@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobPayload, MediaType};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, Sha256Digest, UnixMillis};
+use automata_ci_postgres_test_support::TestClock;
 use automata_ci_results_github::{
     ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactBlock, ArtifactBlockReservation,
     ArtifactFinalizationReservation, ArtifactFinalizationWork, ArtifactManifest, ArtifactName,
@@ -929,6 +930,7 @@ async fn bounded_caller_skew_cannot_steal_or_commit_at_exact_expiry() -> TestRes
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn finalization_rejects_expiry_during_a_lock_wait() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (repository, authority) = active_attempt(&database).await?;
         let upload_id = UploadId::from_uuid(Uuid::new_v4());
         repository
@@ -976,6 +978,9 @@ async fn finalization_rejects_expiry_during_a_lock_wait() -> TestResult {
             .await?;
 
         let mut blocker = database.pool().begin().await?;
+        let blocker_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query(
             r"
             UPDATE workflow_artifacts
@@ -989,7 +994,7 @@ async fn finalization_rejects_expiry_during_a_lock_wait() -> TestResult {
         .await?;
         let completion_repository = repository.clone();
         let completion_observed_at = database_now_seconds(&database).await?;
-        let mut completion = tokio::spawn(async move {
+        let completion = tokio::spawn(async move {
             completion_repository
                 .complete_finalization(CompleteArtifactFinalization {
                     claim,
@@ -997,13 +1002,9 @@ async fn finalization_rejects_expiry_during_a_lock_wait() -> TestResult {
                 })
                 .await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut completion)
-                .await
-                .is_err(),
-            "publication must wait for the exact artifact lock"
-        );
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        wait_for_direct_blocker(database.pool(), blocker_pid).await?;
+        assert!(!completion.is_finished(), "publication must remain blocked");
+        clock.advance(1_000).await?;
         blocker.commit().await?;
         let error = completion
             .await?
@@ -1549,5 +1550,31 @@ async fn expire_finalization_claim(database: &TestDatabase, upload_id: UploadId)
     .bind(upload_id.as_uuid())
     .execute(database.pool())
     .await?;
+    Ok(())
+}
+
+async fn wait_for_direct_blocker(pool: &PgPool, blocking_pid: i32) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked = sqlx::query_scalar::<_, bool>(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+                )
+                ",
+            )
+            .bind(blocking_pid)
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "artifact publication did not reach its row-lock gate")??;
     Ok(())
 }

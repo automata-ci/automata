@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use std::{sync::Arc, time::Duration};
 
@@ -22,7 +22,7 @@ use automata_ci_store::{
 use sqlx::{PgPool, migrate::Migrate as _};
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_unmigrated_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_unmigrated_database};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -104,6 +104,7 @@ async fn caller_clock_is_admission_only_and_database_issues_full_duration() -> T
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration() -> TestResult {
     run_with_unmigrated_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         apply_authority_migrations(&database).await?;
         let fixture = seed_authority(&database).await?;
         let caller_observed_at = database_now_ms(&database).await?;
@@ -139,7 +140,13 @@ async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration()
             "FROM github_server_service_authorities",
         )
         .await?;
-        tokio::time::sleep(Duration::from_millis(2_200)).await;
+        clock
+            .set(
+                caller_observed_at
+                    .checked_add(CLAIM_DURATION_MILLIS + 1)
+                    .ok_or("service-authority delayed-claim clock overflow")?,
+            )
+            .await?;
         let release_floor = database_now_ms(&database).await?;
         blocker.commit().await?;
 
@@ -261,6 +268,7 @@ async fn fast_clock_cannot_reduce_live_mint_or_erase_ready_custody() -> TestResu
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
     run_with_unmigrated_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         apply_authority_migrations(&database).await?;
         let fixture = seed_authority(&database).await?;
         let claimed = claim_and_begin(&database, &fixture, 2_000, 5_000).await?;
@@ -268,7 +276,7 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
         let committed_at = UnixMillis::new(claimed.claimed_at().get() + 50);
         let finish =
             FinishGithubServerServiceMint::ready(claimed.claim().clone(), protected, committed_at)?;
-        wait_until_database_time(&database, claimed.claim_expires_at().get()).await?;
+        wait_until_database_time(&clock, claimed.claim_expires_at().get()).await?;
         let begin_replay = database
             .store()
             .begin_github_server_service_mint(BeginGithubServerServiceMint::new(
@@ -317,7 +325,7 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
         assert_eq!(replay.claimed_at(), first.claimed_at());
         assert_eq!(replay.claim_expires_at(), first.claim_expires_at());
 
-        wait_until_database_time(&database, first.claim_expires_at().get()).await?;
+        wait_until_database_time(&clock, first.claim_expires_at().get()).await?;
         let takeover = database
             .store()
             .claim_github_server_service_revocation(revocation_request)
@@ -474,10 +482,14 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
     )
 }
 
-async fn wait_until_database_time(database: &TestDatabase, target: i64) -> TestResult {
-    while database_now_ms(database).await? < target {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+async fn wait_until_database_time(clock: &TestClock, target: i64) -> TestResult {
+    clock
+        .set(
+            target
+                .checked_add(1)
+                .ok_or("service-authority expiry clock overflow")?,
+        )
+        .await?;
     Ok(())
 }
 
@@ -512,7 +524,8 @@ async fn wait_for_backend_blocked_by(
             r"
             SELECT pid
             FROM pg_stat_activity
-            WHERE pid <> $1
+            WHERE datname = current_database()
+              AND pid <> $1
               AND $1 = ANY(pg_blocking_pids(pid))
               AND query LIKE '%' || $2 || '%'
             ORDER BY pid

@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

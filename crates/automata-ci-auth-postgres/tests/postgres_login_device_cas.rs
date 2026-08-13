@@ -19,6 +19,7 @@ use automata_ci_auth::{
 };
 use automata_ci_auth_postgres::PostgresLoginTransactionRepository;
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -204,6 +205,7 @@ async fn wait_for_blocked_transaction(pool: &PgPool) -> TestResult<bool> {
 async fn replacement_rebases_poll_delay_after_lock_wait_and_caller_skew() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         let repository = PostgresLoginTransactionRepository::new(pool.clone(), keyring());
         let created_at = now();
         repository
@@ -248,7 +250,7 @@ async fn replacement_rebases_poll_delay_after_lock_wait_and_caller_skew() -> Tes
             gate.rollback().await?;
             return Err("device replacement did not wait on its exact row lock".into());
         }
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        clock.advance(1_100).await?;
         gate.commit().await?;
         assert_eq!(
             delayed.await??,
@@ -271,6 +273,7 @@ async fn replacement_rebases_poll_delay_after_lock_wait_and_caller_skew() -> Tes
 async fn replacement_final_write_cannot_cross_expiry_during_statement_delay() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         let repository = PostgresLoginTransactionRepository::new(pool.clone(), keyring());
         let created_at = now();
         let transaction = LoginTransaction::new(
@@ -290,11 +293,25 @@ async fn replacement_final_write_cannot_cross_expiry_during_statement_delay() ->
             created_at.checked_add(2)?,
         )?;
         repository.create(transaction).await?;
+        let expires_at_ms: i64 =
+            sqlx::query_scalar("SELECT expires_at_ms FROM human_login_transactions WHERE id=$1")
+                .bind(Uuid::parse_str(LOGIN_ID)?)
+                .fetch_one(pool)
+                .await?;
+        clock
+            .set(
+                expires_at_ms
+                    .checked_sub(1)
+                    .expect("time immediately before login expiry"),
+            )
+            .await?;
         sqlx::query(
             r"
-            CREATE FUNCTION delay_login_replacement_update() RETURNS trigger AS $$
+            CREATE FUNCTION advance_login_replacement_test_clock() RETURNS trigger AS $$
             BEGIN
-                PERFORM pg_sleep(2.1);
+                UPDATE automata_test.__automata_test_clock
+                SET now_ms = now_ms + 2100
+                WHERE singleton;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql
@@ -304,9 +321,9 @@ async fn replacement_final_write_cannot_cross_expiry_during_statement_delay() ->
         .await?;
         sqlx::query(
             r"
-            CREATE TRIGGER delay_login_replacement_update
+            CREATE TRIGGER advance_login_replacement_test_clock
             BEFORE UPDATE ON human_login_transactions
-            FOR EACH STATEMENT EXECUTE FUNCTION delay_login_replacement_update()
+            FOR EACH STATEMENT EXECUTE FUNCTION advance_login_replacement_test_clock()
             ",
         )
         .execute(pool)

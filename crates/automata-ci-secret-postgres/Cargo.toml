@@ -21,6 +21,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 automata-ci-auth.workspace = true
+automata-ci-postgres-test-support.workspace = true
 static_assertions.workspace = true
 tokio.workspace = true
 

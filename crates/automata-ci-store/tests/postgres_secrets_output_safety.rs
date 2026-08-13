@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;

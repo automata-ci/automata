@@ -10,6 +10,8 @@ expected_version="${AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004}"
 server_version="$(
   psql \
     --dbname="$AUTOMATA_TEST_DATABASE_URL" \
+    --no-psqlrc \
+    --set=ON_ERROR_STOP=1 \
     --tuples-only \
     --no-align \
     --command='SHOW server_version_num'
@@ -21,4 +23,28 @@ if [[ "$server_version" != "$expected_version" ]]; then
   exit 1
 fi
 
-printf 'verified PostgreSQL server_version_num=%s\n' "$server_version"
+can_create_database="$(
+  psql \
+    --dbname="$AUTOMATA_TEST_DATABASE_URL" \
+    --no-psqlrc \
+    --set=ON_ERROR_STOP=1 \
+    --tuples-only \
+    --no-align \
+    --command="
+      SELECT COALESCE(
+        (
+          SELECT rolcreatedb OR rolsuper
+          FROM pg_catalog.pg_roles
+          WHERE rolname = CURRENT_USER
+        ),
+        FALSE
+      )
+    "
+)"
+if [[ "$can_create_database" != t ]]; then
+  printf 'PostgreSQL test role must have CREATEDB or SUPERUSER\n' >&2
+  exit 1
+fi
+
+printf 'verified PostgreSQL server_version_num=%s and database-create authority\n' \
+  "$server_version"

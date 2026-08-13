@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::{
     collections::BTreeMap,
@@ -69,7 +69,7 @@ use sha2::{Digest as _, Sha256};
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])
@@ -1104,6 +1104,7 @@ async fn insert_runtime_authority_candidate(
 
 async fn rebase_runtime_authority_lease_to_database_time(
     database: &TestDatabase,
+    clock: &TestClock,
     execution: GithubOidcExecutionIdentity,
 ) -> TestResult<GithubOidcExecutionIdentity> {
     let started_at: i64 =
@@ -1111,15 +1112,16 @@ async fn rebase_runtime_authority_lease_to_database_time(
             .bind(execution.attempt_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
-    let first_observation = database_now(database).await?.get();
+    let first_observation = clock.now().await?;
     if started_at > first_observation {
-        let wait_millis = u64::try_from(started_at - first_observation)?;
+        // The seed rounds the lease start up to the next whole second.
+        let wait_millis = started_at - first_observation;
         if wait_millis > 1_000 {
             return Err("OIDC attempt start is too far ahead of PostgreSQL time".into());
         }
-        tokio::time::sleep(Duration::from_millis(wait_millis.saturating_add(1))).await;
+        clock.advance(wait_millis).await?;
     }
-    let database_now = database_now(database).await?.get();
+    let database_now = clock.now().await?;
     if database_now < started_at {
         return Err("PostgreSQL time did not reach the OIDC attempt start".into());
     }
@@ -1585,7 +1587,17 @@ async fn concurrent_distinct_keys_cannot_overrun_the_per_use_bound() -> TestResu
         let mut observed_both_waiters = false;
         for _ in 0..200 {
             let waiters: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+                r"
+                SELECT count(*)
+                FROM pg_catalog.pg_locks
+                WHERE locktype = 'advisory'
+                  AND database = (
+                      SELECT oid
+                      FROM pg_catalog.pg_database
+                      WHERE datname = current_database()
+                  )
+                  AND NOT granted
+                ",
             )
             .fetch_one(database.pool())
             .await?;
@@ -2124,9 +2136,10 @@ async fn mint_slot_contention_crossing_lease_expiry_preserves_immutable_replay()
 async fn runtime_authority_insert_requires_exact_historical_standard_profile_and_pins() -> TestResult
 {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (execution, manifest) = seed_current_oidc_execution(&database, true).await?;
         let execution =
-            rebase_runtime_authority_lease_to_database_time(&database, execution).await?;
+            rebase_runtime_authority_lease_to_database_time(&database, &clock, execution).await?;
         let rotated_at = database_now(&database).await?;
         database
             .store()
@@ -2199,6 +2212,7 @@ async fn runtime_authority_insert_requires_exact_historical_standard_profile_and
 async fn runtime_authority_insert_rejects_credential_free_chain_without_key_occupancy() -> TestResult
 {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (execution, manifest) = seed_current_profiled_execution(
             &database,
             true,
@@ -2206,7 +2220,7 @@ async fn runtime_authority_insert_rejects_credential_free_chain_without_key_occu
         )
         .await?;
         let execution =
-            rebase_runtime_authority_lease_to_database_time(&database, execution).await?;
+            rebase_runtime_authority_lease_to_database_time(&database, &clock, execution).await?;
         assert_eq!(
             manifest.authority_profile(),
             automata_ci_core::JobAuthorityProfile::CredentialFree

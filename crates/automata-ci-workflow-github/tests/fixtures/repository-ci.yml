@@ -58,7 +58,7 @@ jobs:
       - name: Lint workflows and shell scripts
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
-          target/ci-tools/actionlint .github/workflows/*.yml
+          target/ci-tools/actionlint .ci/workflows/*.yml
           shellcheck -x \
             scripts/install.sh \
             scripts/ci/*.sh \
@@ -83,6 +83,7 @@ jobs:
           python3 scripts/ci/tests/release-handoff.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
+          python3 scripts/ci/tests/store-test-suites.test.py
 
       - name: Verify Prometheus metrics contract
         env:
@@ -105,6 +106,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
 
+      - name: Test workspace documentation
+        run: cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
@@ -115,31 +119,6 @@ jobs:
         run: |
           cargo deny --locked --workspace --all-features check advisories bans licenses sources
           crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
-
-  rust_tests:
-    name: Rust workspace tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Test Rust workspace
-        run: |
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          cargo test --workspace --exclude automata-ci-ui-renderer --all-targets --all-features --locked
-          cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
 
   rust_coverage:
     name: Rust ordinary coverage
@@ -207,14 +186,10 @@ jobs:
           cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked
           cargo test -p automata-ci-ui-renderer --doc --all-features --locked
 
-  postgres_store:
-    name: PostgreSQL Store invariants (${{ matrix.shard }}/4)
+  postgres:
+    name: PostgreSQL invariants
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
@@ -231,6 +206,7 @@ jobs:
           --health-retries 12
     env:
       AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
+      AUTOMATA_TEST_DATABASE_NAMESPACE: ci_${{ github.run_id }}_${{ github.run_attempt }}
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -254,60 +230,8 @@ jobs:
           PGPASSWORD: automata-ci-local-only
         run: ./scripts/ci/verify-postgres-version.sh
 
-      - name: Test Store PostgreSQL shard
-        run: ./scripts/ci/run-postgres-store-shard.sh "${{ matrix.shard }}" 4
-
-  postgres_integrations:
-    name: PostgreSQL integration invariants
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
-        env:
-          POSTGRES_DB: automata_ci
-          POSTGRES_PASSWORD: automata-ci-local-only
-          POSTGRES_USER: automata_ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready --dbname=automata_ci --username=automata_ci"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Verify PostgreSQL 18.4
-        env:
-          PGPASSWORD: automata-ci-local-only
-        run: ./scripts/ci/verify-postgres-version.sh
-
-      - name: Test PostgreSQL integrations
-        run: |
-          cargo test -p automata-ci-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-runner-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-secret-postgres --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-results-github --test postgres_cache --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci --test github_provider_end_to_end_matrix --all-features --locked -- --ignored --test-threads=1
+      - name: Test PostgreSQL suites
+        run: ./scripts/ci/run-postgres-tests.sh
 
   frontend:
     name: React SSR frontend
@@ -333,22 +257,18 @@ jobs:
         run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Install locked frontend dependencies
-        run: npm ci
-
-      - name: Install pinned Chromium
-        run: npx --no-install playwright install --with-deps chromium
+        run: npm ci --no-audit
 
       - name: Audit frontend dependencies
         run: npm audit --audit-level=low
 
-      - name: Test and build server-rendered frontend
-        run: npm run check
+      - name: Verify and build server-rendered frontend
+        run: |
+          npm run test:build-verifier
+          npm run build
 
       - name: Enforce frontend coverage thresholds
         run: npm run test:coverage
-
-      - name: Test the public UI demo and screenshots
-        run: npm run screenshots
 
       - name: Verify embedded renderer provenance
         working-directory: .
@@ -501,33 +421,39 @@ jobs:
 
   dist:
     name: Static Linux distribution
-    if: >-
-      ${{ !cancelled()
-          && needs.dist_build.result == 'success'
-          && needs.verify.result == 'success'
-          && needs.rust_tests.result == 'success'
-          && needs.rust_coverage.result == 'success'
-          && needs.renderer_tests.result == 'success'
-          && needs.postgres_store.result == 'success'
-          && needs.postgres_integrations.result == 'success'
-          && needs.frontend.result == 'success'
-          && (needs.renderer.result == 'success'
-              || (github.event_name == 'pull_request'
-                  && needs.renderer.result == 'skipped')) }}
+    if: ${{ !cancelled() }}
     needs:
       - dist_build
       - verify
-      - rust_tests
       - rust_coverage
       - renderer_tests
-      - postgres_store
-      - postgres_integrations
+      - postgres
       - frontend
       - renderer
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Admit the validated distribution candidate
+        env:
+          DIST_BUILD_RESULT: ${{ needs.dist_build.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          RUST_COVERAGE_RESULT: ${{ needs.rust_coverage.result }}
+          RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          RENDERER_RESULT: ${{ needs.renderer.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          [[ "$DIST_BUILD_RESULT" == success ]]
+          [[ "$VERIFY_RESULT" == success ]]
+          [[ "$RUST_COVERAGE_RESULT" == success ]]
+          [[ "$RENDERER_TESTS_RESULT" == success ]]
+          [[ "$POSTGRES_RESULT" == success ]]
+          [[ "$FRONTEND_RESULT" == success ]]
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            [[ "$RENDERER_RESULT" == success || "$RENDERER_RESULT" == skipped ]]
+          else
+            [[ "$RENDERER_RESULT" == success ]]
+          fi
           [[ "$AUTOMATA_EXPECTED_GIT_SHA" == "$GITHUB_SHA" ]]
           printf 'validated distribution candidate %s\n' "$GITHUB_SHA"

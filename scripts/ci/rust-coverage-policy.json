@@ -33,6 +33,7 @@
       ],
       "source_prefixes": [
         "crates/automata-ci-auth-postgres/src/",
+        "crates/automata-ci-postgres-test-support/src/",
         "crates/automata-ci-results-github/src/cache_postgres.rs",
         "crates/automata-ci-results-github/src/postgres.rs",
         "crates/automata-ci-runner-auth-postgres/src/",
@@ -77,6 +78,7 @@
     "directory_bundles": {
       "postgres": [
         "crates/automata-ci-auth-postgres/tests/",
+        "crates/automata-ci-postgres-test-support/tests/",
         "crates/automata-ci-runner-auth-postgres/tests/",
         "crates/automata-ci-secret-postgres/tests/",
         "crates/automata-ci-store/tests/"

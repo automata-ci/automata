@@ -12,6 +12,7 @@ use automata_ci_auth::{
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
+use automata_ci_postgres_test_support::TestClock;
 use automata_ci_protocol::SUPPORTED_PROTOCOL_RANGE;
 use automata_ci_runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
@@ -302,6 +303,7 @@ async fn corrupt_authority_rows_are_never_downgraded_to_unknown() -> TestResult 
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn database_expiry_dominates_a_slow_process_clock_after_query_lock_wait() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let tenant = insert_tenant(database.pool(), "database-expiry").await?;
         let runner = insert_runner(
             database.pool(),
@@ -333,19 +335,10 @@ async fn database_expiry_dominates_a_slow_process_clock_after_query_lock_wait() 
             "the fresh lookup must wait for its table read lock"
         );
 
-        let release_second: i64 = sqlx::query_scalar(
-            r"
-            SELECT floor(extract(epoch FROM clock_timestamp()))::bigint
-            FROM pg_sleep(GREATEST(
-                0::double precision,
-                $1::double precision + 0.05
-                    - extract(epoch FROM clock_timestamp())::double precision
-            ))
-            ",
-        )
-        .bind(expires_at)
-        .fetch_one(&mut *table_lock)
-        .await?;
+        clock
+            .set(expires_at.checked_mul(1_000).expect("expiry milliseconds"))
+            .await?;
+        let release_second = database_now_seconds(database.pool()).await?;
         assert_eq!(
             release_second, expires_at,
             "release the blocked lookup at the exact closed expiry second"

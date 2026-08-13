@@ -75,8 +75,11 @@ prerequisite and have a corresponding CI or documented manual lane.
 
 ### Opt-in test lanes
 
-The PostgreSQL CI jobs execute every database-only ignored target. The
-remaining ignored integration targets are explicit operator lanes:
+The PostgreSQL CI lane executes every database-only ignored target in one
+shared build environment. Current-schema tests clone one job-scoped,
+pre-migrated PostgreSQL template into an isolated database and run with bounded
+parallelism; the migration inventory contract stays in the ordinary Rust test
+lane. The remaining ignored integration targets are explicit operator lanes:
 
 ```console
 # Public GitHub compatibility.
@@ -272,6 +275,7 @@ Set the integration-test environment:
 
 ```console
 export AUTOMATA_TEST_DATABASE_URL='postgresql://automata:automata-local-only@127.0.0.1:5432/automata'
+export AUTOMATA_TEST_DATABASE_NAMESPACE="local_$(date +%s)_$$"
 export AUTOMATA_TEST_S3_ENDPOINT='http://127.0.0.1:9000/'
 export AUTOMATA_TEST_S3_BUCKET='automata-dev'
 export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
@@ -284,12 +288,14 @@ publication before other suites use it:
 
 ```console
 cargo test -p automata-ci-blob-s3 --test rustfs_contract --all-features --locked -- --ignored
-cargo test -p automata-ci-store --tests --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-runner-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-secret-postgres --tests --all-features --locked -- --ignored --test-threads=1
-cargo test -p automata-ci-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
+./scripts/ci/verify-postgres-version.sh
+./scripts/ci/run-postgres-tests.sh
 ```
+
+The runner always removes the exact namespace it owns. Use a fresh namespace
+for every invocation when a PostgreSQL service is reused. Individual tests may
+install the shared schema-local `TestClock` to advance lease and retry horizons
+without sleeping for wall time.
 
 These credentials are local-only. Stop the services with:
 

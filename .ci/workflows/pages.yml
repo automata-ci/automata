@@ -3,13 +3,13 @@ name: UI demo and screenshots
 on:
   pull_request:
     paths:
-      - ".github/workflows/pages.yml"
+      - ".ci/workflows/pages.yml"
       - "ui/**"
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/pages.yml"
+      - ".ci/workflows/pages.yml"
       - "ui/**"
   workflow_dispatch:
 
@@ -54,7 +54,7 @@ jobs:
         working-directory: ui
         env:
           TMPDIR: ${{ github.workspace }}/target/task-tmp/pages
-        run: npm ci
+        run: npm ci --no-audit
 
       - name: Install Chromium
         working-directory: ui

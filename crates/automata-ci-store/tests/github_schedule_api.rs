@@ -1,4 +1,4 @@
-mod github_manifest_fixture;
+use crate::github_manifest_fixture;
 
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_schedule::CronExpression;

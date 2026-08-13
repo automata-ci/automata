@@ -27,6 +27,7 @@ use automata_ci_auth::{
 use automata_ci_auth_postgres::{
     PostgresGithubMembershipRepository, PostgresRequestAuthenticationResolver,
 };
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -76,28 +77,6 @@ async fn database_now_seconds(pool: &PgPool) -> TestResult<u64> {
             .fetch_one(pool)
             .await?;
     Ok(u64::try_from(now)?)
-}
-
-async fn database_now_near_second_start(pool: &PgPool) -> TestResult<u64> {
-    for _ in 0..250 {
-        let (seconds, milliseconds): (i64, i64) = sqlx::query_as(
-            r"
-            WITH observed AS MATERIALIZED (
-                SELECT extract(epoch FROM clock_timestamp()) AS seconds
-            )
-            SELECT floor(seconds)::BIGINT,
-                   floor(seconds * 1000)::BIGINT % 1000
-            FROM observed
-            ",
-        )
-        .fetch_one(pool)
-        .await?;
-        if milliseconds < 100 {
-            return Ok(u64::try_from(seconds)?);
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    Err("database clock did not reach a deterministic skew-test window".into())
 }
 
 async fn seed_identity(pool: &PgPool) -> TestResult<Uuid> {
@@ -937,6 +916,9 @@ async fn request_auth_revalidates_discovered_tenant_after_the_authority_lock() -
 async fn request_auth_rejects_clock_skew_and_resamples_after_session_lock_wait() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
+        let database_now_ms = clock.now().await?;
+        clock.set(database_now_ms.div_euclid(1_000) * 1_000).await?;
         let principal = seed_identity(pool).await?;
         let revision = current_revision(pool, principal).await?;
         let session_id = Uuid::parse_str(SESSION_ID)?;
@@ -955,7 +937,7 @@ async fn request_auth_rejects_clock_skew_and_resamples_after_session_lock_wait()
         .await?;
         let resolver = PostgresRequestAuthenticationResolver::new(pool.clone());
 
-        let database_now = database_now_near_second_start(pool).await?;
+        let database_now = database_now_seconds(pool).await?;
         assert_eq!(
             resolver
                 .resolve(&request_at(11, SessionKind::Browser, database_now + 61,))
@@ -998,7 +980,7 @@ async fn request_auth_rejects_clock_skew_and_resamples_after_session_lock_wait()
             )
             .into());
         }
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        clock.advance(1_100).await?;
         gate.commit().await?;
 
         assert_eq!(

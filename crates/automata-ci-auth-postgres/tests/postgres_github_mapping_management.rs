@@ -19,6 +19,7 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_auth_postgres::PostgresGithubMappingManagementRepository;
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -517,6 +518,7 @@ async fn cli_actor_lifecycle_is_mapping_authority_for_reads_and_mutations() -> T
 async fn mutation_rechecks_expiring_permission_after_exact_target_lock_wait() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         seed_tenant(pool, "tenant-a").await?;
         let manager = uuid(0xaaaaaaaa_aaaa_4aaa_8aaa_aaaaaaaaaad1);
         let target = uuid(0xbbbbbbbb_bbbb_4bbb_8bbb_bbbbbbbbbbd1);
@@ -586,7 +588,7 @@ async fn mutation_rechecks_expiring_permission_after_exact_target_lock_wait() ->
             )
             .into());
         }
-        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        clock.advance(2_100).await?;
         gate.commit().await?;
 
         assert_eq!(mutation.await??, GithubMappingMutationOutcome::Forbidden);

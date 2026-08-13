@@ -1,5 +1,5 @@
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::time::Duration;
 

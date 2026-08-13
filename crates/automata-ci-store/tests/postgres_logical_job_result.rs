@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::collections::BTreeMap;
 
@@ -59,7 +59,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 #[derive(Clone)]
 struct Fixture {
@@ -87,7 +87,8 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
     run_with_database(|database| async move {
         const INSTANCE_RESULT_CLAIM_MILLIS: i64 = 60_000;
 
-        let idle_observed_at = database_now_ms(&database).await?;
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let idle_observed_at = clock.now().await?;
         let idle_request = ClaimNextLogicalJobResult::new(
             LogicalJobResultSelectionId::from_uuid(Uuid::from_u128(90_590))?,
             LogicalJobResultWorkerId::from_uuid(Uuid::from_u128(90_591))?,
@@ -220,7 +221,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             .is_err(),
             "the retained terminal ordinal counter cannot be removed"
         );
-        wait_until_database_after(&database, second_terminal_completed_at).await?;
+        clock.set(second_terminal_completed_at + 1).await?;
         seed_terminal_result(
             &database,
             &session,
@@ -505,7 +506,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
         .await?;
-        wait_until_database_after(&database, available_at).await?;
+        clock.set(available_at + 1).await?;
         let first_observed_at = database_now_ms(&database).await?;
         let first_expires_at = first_observed_at + 3_000;
         let first_request = ClaimNextLogicalJobResult::new(
@@ -565,7 +566,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             &fixture.plan,
             UnixMillis::new(first_observed_at + 200),
         )?;
-        wait_until_database_after(&database, first_expires_at).await?;
+        clock.set(first_expires_at + 1).await?;
         let takeover_observed_at = database_now_ms(&database).await?;
         let takeover = expect_job_result_claimed(
             database
@@ -826,11 +827,13 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
                 .await?,
             LogicalJobResultClaimNextOutcome::Idle
         ));
-        wait_until_database_after(
-            &database,
-            first_expires_at.max(short_idle_request.expires_at().get()),
-        )
-        .await?;
+        clock
+            .set(
+                first_expires_at
+                    .max(short_idle_request.expires_at().get())
+                    + 1,
+            )
+            .await?;
         let cleanup_observed_at = database_now_ms(&database).await?;
         assert!(matches!(
             database
@@ -892,7 +895,8 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> TestResult {
     run_with_database(|database| async move {
-        let database_now = database_now_ms(&database).await?;
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let database_now = clock.now().await?;
         let observed_at = database_now - 59_000;
         let request = ClaimNextLogicalJobResult::new(
             LogicalJobResultSelectionId::from_uuid(Uuid::from_u128(91_800))?,
@@ -923,7 +927,7 @@ async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> 
             "an ordinary statement cannot jump the trusted replay horizon"
         );
 
-        wait_until_database_after(&database, observed_at + 60_100).await?;
+        clock.set(observed_at + 60_101).await?;
         assert!(matches!(
             database
                 .store()
@@ -1022,6 +1026,7 @@ async fn zero_instance_publication_is_immediately_ready_and_skipped() -> TestRes
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn global_selection_quarantines_poisoned_oldest_and_continues_fairly() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let older = fixture("logical-job-result-fair-older", 92_000);
         let newer = fixture("logical-job-result-fair-newer", 93_000);
         let mut last_published_at = None;
@@ -1031,7 +1036,7 @@ async fn global_selection_quarantines_poisoned_oldest_and_continues_fairly() -> 
             let activation =
                 claim_activation(&database, fixture, 94_000 + u128::try_from(index)?).await?;
             if let Some(last_published_at) = last_published_at {
-                wait_until_database_after(&database, last_published_at).await?;
+                clock.set(last_published_at + 1).await?;
             }
             let published_at = database_now_ms(&database).await?;
             database
@@ -1280,22 +1285,6 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
             .fetch_one(database.pool())
             .await?,
     )
-}
-
-async fn wait_until_database_after(database: &TestDatabase, deadline_ms: i64) -> TestResult {
-    sqlx::query(
-        r"
-        SELECT pg_sleep(GREATEST(
-            0::double precision,
-            ($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + 1)
-                ::double precision / 1000
-        ))
-        ",
-    )
-    .bind(deadline_ms)
-    .execute(database.pool())
-    .await?;
-    Ok(())
 }
 
 fn fixture(tenant: &str, namespace: u128) -> Fixture {

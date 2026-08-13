@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     sqlx::query(
@@ -200,13 +200,6 @@ fn future_test_time(offset_millis: i64) -> UnixMillis {
     )
 }
 
-async fn sleep_through(timestamp: UnixMillis) {
-    let remaining = timestamp.get().saturating_sub(wall_time_millis());
-    if let Ok(remaining) = u64::try_from(remaining.saturating_add(5)) {
-        tokio::time::sleep(Duration::from_millis(remaining)).await;
-    }
-}
-
 async fn database_now(database: &TestDatabase) -> TestResult<i64> {
     Ok(
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
@@ -225,18 +218,6 @@ async fn database_time_after(
             .checked_add(offset_millis)
             .expect("future database timestamp is representable"),
     ))
-}
-
-async fn wait_until_database_time(database: &TestDatabase, target: UnixMillis) -> TestResult {
-    loop {
-        let remaining = target.get().saturating_sub(database_now(database).await?);
-        if remaining <= 0 {
-            return Ok(());
-        }
-        let sleep_millis = u64::try_from(remaining.min(100))
-            .expect("positive bounded database-time remainder fits u64");
-        tokio::time::sleep(Duration::from_millis(sleep_millis)).await;
-    }
 }
 
 fn claim(owner: ProviderDeliveryClaimOwnerId, requested_observed_at: i64) -> ClaimProviderDelivery {
@@ -350,7 +331,8 @@ async fn wait_for_renewal_lock_wait(
             SELECT EXISTS (
                 SELECT 1
                 FROM pg_stat_activity
-                WHERE pid <> $1
+                WHERE datname = current_database()
+                  AND pid <> $1
                   AND state = 'active'
                   AND $1 = ANY(pg_blocking_pids(pid))
                   AND query LIKE '%renewal_predecessor_expires_at_ms%'
@@ -738,6 +720,7 @@ async fn concurrent_accept_is_exact_and_changed_evidence_conflicts() -> TestResu
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn caller_clock_skew_cannot_issue_or_take_over_a_claim_horizon() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-claim-db-time").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         database
@@ -809,7 +792,7 @@ async fn caller_clock_skew_cannot_issue_or_take_over_a_claim_horizon() -> TestRe
         .await?;
         assert_eq!(after_rejected_clock, before_rejected_clock);
 
-        sleep_through(first.expires_at()).await;
+        clock.set(first.expires_at().get() + 1).await?;
         let takeover_database_before = database_now(&database).await?;
         let slow_takeover_observation = takeover_database_before - 50_000;
         let takeover_owner = owner();
@@ -839,6 +822,7 @@ async fn caller_clock_skew_cannot_issue_or_take_over_a_claim_horizon() -> TestRe
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-claim").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         database
@@ -873,7 +857,7 @@ async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() 
                 .await?
                 .is_none()
         );
-        sleep_through(first_claim.expires_at()).await;
+        clock.set(first_claim.expires_at().get() + 1).await?;
         let reclaimed = database
             .store()
             .claim_provider_delivery(claim(owner(), 1_110))
@@ -930,7 +914,7 @@ async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() 
                 .await?
                 .is_none()
         );
-        wait_until_database_time(&database, retry_at).await?;
+        clock.set(retry_at.get() + 1).await?;
         let second_attempt = database
             .store()
             .claim_provider_delivery(claim(owner(), 1_200))
@@ -947,6 +931,7 @@ async fn concurrent_claim_has_one_winner_and_expiry_reclaims_with_a_new_fence() 
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn claim_renewal_rotates_the_fence_and_is_exactly_idempotent() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-renew-basic").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         let claimed = accept_and_claim(
@@ -969,7 +954,7 @@ async fn claim_renewal_rotates_the_fence_and_is_exactly_idempotent() -> TestResu
             ),
             Err(ProviderDeliveryValueError::InvalidClaimInterval)
         ));
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        clock.advance(1).await?;
         let renewal_observed_at = claimed.claimed_at().get() + 500;
         let renewal = renewal_request(
             claimed.claim(),
@@ -1051,6 +1036,7 @@ async fn claim_renewal_rotates_the_fence_and_is_exactly_idempotent() -> TestResu
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn renewal_caller_clock_only_admits_a_database_time_extension() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-renew-clock-admission").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         database
@@ -1093,7 +1079,7 @@ async fn renewal_caller_clock_only_admits_a_database_time_extension() -> TestRes
             Err(ProviderDeliveryStoreError::ClaimRejected)
         ));
 
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        clock.advance(1).await?;
         let ordinary_observation = database_now(&database).await?;
         let ordinary = renewal_request(
             claimed.claim(),
@@ -1113,7 +1099,7 @@ async fn renewal_caller_clock_only_admits_a_database_time_extension() -> TestRes
         );
         assert_eq!(renewed.claim().fence(), claimed.claim().fence() + 1);
 
-        sleep_through(UnixMillis::new(claimed.claimed_at().get() + 50_001)).await;
+        clock.set(claimed.claimed_at().get() + 50_001).await?;
         let slow_database_now = database_now(&database).await?;
         let slow_observation = slow_database_now - 50_000;
         let slow_request = renewal_request(
@@ -1150,6 +1136,7 @@ async fn renewal_caller_clock_only_admits_a_database_time_extension() -> TestRes
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn renewal_issues_post_lock_database_time_and_exact_requested_duration() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-renew-post-lock-time").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         database
@@ -1173,7 +1160,7 @@ async fn renewal_issues_post_lock_database_time_and_exact_requested_duration() -
             .await?
             .expect("delivery claim");
 
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        clock.advance(1).await?;
         let mut blocker = database.pool().begin().await?;
         let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
@@ -1195,8 +1182,7 @@ async fn renewal_issues_post_lock_database_time_and_exact_requested_duration() -
         let renewal =
             tokio::spawn(async move { store.renew_provider_delivery_claim(request).await });
         wait_for_renewal_lock_wait(&database, blocking_backend_pid).await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let immediately_before_release = database_now(&database).await?;
+        let immediately_before_release = clock.advance(100).await?;
         blocker.commit().await?;
 
         let renewed = renewal.await??;
@@ -1638,6 +1624,7 @@ async fn renewal_observation_fences_older_claim_transitions() -> TestResult {
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn claim_renewal_total_lifetime_is_absolutely_bounded() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-renew-total").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         let total_claim = accept_and_claim(
@@ -1697,7 +1684,7 @@ async fn claim_renewal_total_lifetime_is_absolutely_bounded() -> TestResult {
                 database_now + 2_000,
             )?)
             .await?;
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        clock.advance(1_500).await?;
         let slow_observation = renewed.renewed_at().get() + 1;
         let over_horizon = renewal_request(
             renewed.claim(),
@@ -1731,6 +1718,7 @@ async fn claim_renewal_total_lifetime_is_absolutely_bounded() -> TestResult {
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn expired_or_reclaimed_fence_cannot_be_renewed() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-renew-expired").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         let expired_claim = accept_and_claim(
@@ -1754,7 +1742,7 @@ async fn expired_or_reclaimed_fence_cannot_be_renewed() -> TestResult {
             ),
             Err(ProviderDeliveryValueError::InvalidClaimInterval)
         ));
-        sleep_through(expired_claim.expires_at()).await;
+        clock.set(expired_claim.expires_at().get() + 1).await?;
         let reclaimed = database
             .store()
             .claim_provider_delivery(claim(owner(), expired_at))
@@ -2209,6 +2197,7 @@ async fn duplicate_outcomes_fail_before_io_and_transaction_errors_roll_back_comp
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn retry_attempt_limit_requires_terminal_rejection() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(&database, "delivery-retry-limit").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
         database
@@ -2240,7 +2229,7 @@ async fn retry_attempt_limit_requires_terminal_rejection() -> TestResult {
                     UnixMillis::new(retry_at),
                 )?)
                 .await?;
-            sleep_through(UnixMillis::new(retry_at)).await;
+            clock.set(retry_at + 1).await?;
             claimed = database
                 .store()
                 .claim_provider_delivery(claim(owner(), 110))
