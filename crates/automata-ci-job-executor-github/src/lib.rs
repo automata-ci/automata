@@ -17,6 +17,7 @@ mod output;
 mod port;
 mod prepared;
 mod secret;
+mod shell;
 
 pub use action::{
     CheckedOutLocalActionPreparer, LocalActionDefinitionPaths, LocalActionPreparationRequest,
@@ -29,9 +30,7 @@ pub use error::{
     ActionPreparationError, ActionPreparationErrorKind, ExecutorAdapterError, PortError,
     PortErrorKind,
 };
-pub use executor::{
-    GithubJobExecutor, GithubJobExecutorPorts, WindowsScriptShell, windows_script_arguments,
-};
+pub use executor::{GithubJobExecutor, GithubJobExecutorPorts};
 pub use port::{
     ActionPreparationPort, ActionPreparationRequest, ContextEnvironmentVariable,
     DeterministicOperationIds, ExecutionClock, ExecutionOperationIds, GithubContextPort,
@@ -51,3 +50,4 @@ pub use secret::{
     EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError,
     MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS,
 };
+pub use shell::{WindowsScriptShell, windows_script_arguments};
