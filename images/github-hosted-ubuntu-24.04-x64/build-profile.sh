@@ -26,11 +26,18 @@ readonly build_tag="${image_repository}:profile-build"
 podman build \
     --file "${script_directory}/Containerfile" \
     --format oci \
+    --no-cache \
     --pull=always \
     --squash-all \
     --timestamp 0 \
     --tag "${build_tag}" \
     "${script_directory}"
+
+local_layer_count="$(
+    podman image inspect "${build_tag}" --format '{{len .RootFS.Layers}}'
+)"
+[[ "${local_layer_count}" == 1 ]] || \
+    die "profile build did not produce exactly one squashed filesystem layer"
 
 local_image_digest="$(podman image inspect "${build_tag}" --format '{{.Digest}}')"
 [[ "${local_image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || \
