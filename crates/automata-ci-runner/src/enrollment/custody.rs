@@ -170,7 +170,11 @@ impl CredentialDestinations {
         remove_durable(&self.response_stage)
     }
 
-    pub(super) fn finish_interrupted_cleanup(&self, config: &RunnerProductConfig) -> Result<bool> {
+    pub(super) fn finish_interrupted_cleanup(
+        &self,
+        config: &RunnerProductConfig,
+        validation_time_seconds: i64,
+    ) -> Result<bool> {
         if read_bounded_file(&self.request_stage, MAX_STAGE_BYTES, true)?.is_some() {
             return Ok(false);
         }
@@ -179,7 +183,7 @@ impl CredentialDestinations {
         };
         let enrolled: RedeemResponse = serde_json::from_slice(&response)
             .context("runner enrollment completion receipt is invalid")?;
-        validate_response(config, &enrolled)?;
+        validate_response(config, &enrolled, validation_time_seconds)?;
         existing_file_matches(&self.server_roots, enrolled.server_ca_pem.as_bytes(), false)?;
         existing_file_matches(
             &self.certificate_chain,
@@ -193,6 +197,7 @@ impl CredentialDestinations {
             &enrolled,
             std::str::from_utf8(&private_key)
                 .context("runner enrollment completion has an invalid private key")?,
+            validation_time_seconds,
         )?;
         remove_durable(&self.response_stage)?;
         Ok(true)
@@ -282,11 +287,13 @@ impl EnrollmentStage {
         &self,
         config: &RunnerProductConfig,
         response: &RedeemResponse,
+        validation_time_seconds: i64,
     ) -> Result<()> {
         validate_certificate_response(
             config.runner_id().as_uuid(),
             response,
             self.private_key_pem.as_str(),
+            validation_time_seconds,
         )
     }
 }
@@ -295,6 +302,7 @@ fn validate_certificate_response(
     expected_runner_id: Uuid,
     response: &RedeemResponse,
     private_key_pem: &str,
+    validation_time_seconds: i64,
 ) -> Result<()> {
     let key = KeyPair::from_pem(private_key_pem)
         .context("runner enrollment response has an invalid private key")?;
@@ -354,6 +362,8 @@ fn validate_certificate_response(
         || leaf.public_key().subject_public_key.data.as_ref() != key.public_key_raw()
         || leaf.issuer() != issuer.subject()
         || leaf.validity().not_before >= leaf.validity().not_after
+        || leaf.validity().not_before.timestamp() > validation_time_seconds
+        || leaf.validity().not_after.timestamp() <= validation_time_seconds
         || leaf.validity().not_before < issuer.validity().not_before
         || leaf.validity().not_after > issuer.validity().not_after
         || leaf.validity().not_after.timestamp() != response.certificate_expires_at_seconds
@@ -376,6 +386,8 @@ fn validate_certificate_response(
             .context("runner enrollment response has invalid roots")?;
         if !remainder.is_empty()
             || root.validity().not_before >= root.validity().not_after
+            || root.validity().not_before.timestamp() > validation_time_seconds
+            || root.validity().not_after.timestamp() <= validation_time_seconds
             || !root
                 .basic_constraints()
                 .context("runner enrollment response has invalid root constraints")?
@@ -1070,26 +1082,59 @@ mod tests {
             server_ca_pem: issuer.pem(),
             certificate_expires_at_seconds: expires_at,
         };
-        validate_certificate_response(runner_id, &response, &runner_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect("matching fixed-profile leaf");
         let wrong_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("wrong key");
-        validate_certificate_response(runner_id, &response, &wrong_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &wrong_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect_err("different key must be rejected");
+
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at,
+        )
+        .expect_err("an expired persisted response must not install credentials");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(true, false, false).pem(), issuer.pem());
-        validate_certificate_response(runner_id, &response, &runner_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect_err("a second common name must be rejected");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(false, true, false).pem(), issuer.pem());
-        validate_certificate_response(runner_id, &response, &runner_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect_err("a subject alternative name must be rejected");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(false, false, false).pem(), issuer.pem());
         response.server_ca_pem = "not a PEM certificate".to_owned();
-        validate_certificate_response(runner_id, &response, &runner_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect_err("malformed server roots must be rejected");
 
         response.server_ca_pem = issuer.pem();
@@ -1098,7 +1143,12 @@ mod tests {
             issue_leaf(false, false, true).pem(),
             issuer.pem()
         );
-        validate_certificate_response(runner_id, &response, &runner_key.serialize_pem())
+        validate_certificate_response(
+            runner_id,
+            &response,
+            &runner_key.serialize_pem(),
+            expires_at - 1,
+        )
             .expect_err("an extra key usage must be rejected");
     }
 }
