@@ -6,6 +6,7 @@ use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{
     AttemptId, AttemptNumber, JobLifecycle, LeaseGuard, LeaseId, Sha256Digest, UnixMillis,
 };
+use automata_ci_postgres_test_support::TestClock;
 use automata_ci_results_github::{
     CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
     CacheKey, CachePermission, CacheRepository as _, CacheRepositoryErrorKind, CacheVersion,
@@ -588,6 +589,7 @@ async fn cache_retention_and_touch_use_database_time_under_caller_skew() -> Test
 #[allow(clippy::too_many_lines)] // One deterministic gate proves both the exact boundary and post-wait resample.
 async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
         let cache = cache_authority("automata/results-test", "refs/heads/main");
@@ -681,7 +683,7 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
                 .is_err(),
             "lookup must wait for the exact cache-entry lock"
         );
-        tokio::time::sleep(Duration::from_millis(10_200)).await;
+        clock.advance(10_000).await?;
         gate.commit().await?;
         assert!(lookup.await??.is_none());
         let last_accessed_after: i64 = sqlx::query_scalar(

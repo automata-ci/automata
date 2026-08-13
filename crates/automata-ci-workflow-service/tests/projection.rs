@@ -23,7 +23,7 @@ use automata_ci_store::{
     WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubEventMetadataV1, GithubWorkflowCompiler, GithubWorkflowFrontend,
+    CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler, GithubWorkflowFrontend,
     ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
@@ -377,7 +377,7 @@ jobs:
                 .with_commit_sha(support::REVISION)
                 .with_git_ref(support::GIT_REF),
         )
-        .with_event_metadata_v1(GithubEventMetadataV1::push(false)),
+        .with_event_metadata(GithubEventMetadata::push(false)),
     );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     let base_context = JobRuntimeContext::new_base(

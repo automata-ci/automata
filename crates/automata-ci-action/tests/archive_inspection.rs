@@ -517,8 +517,16 @@ fn subpaths_and_limit_construction_reject_ambiguous_inputs() {
 }
 
 #[test]
-fn bundle_limits_reject_values_above_supported_maxima() {
+fn bundle_limit_defaults_and_supported_maxima_are_exact() {
     const MIB: u64 = 1024 * 1024;
+    let limits = ActionBundleLimits::default();
+    assert_eq!(limits.compressed().maximum_bytes(), 16 * MIB);
+    assert_eq!(limits.maximum_entries(), 10_000);
+    assert_eq!(limits.maximum_expanded_bytes(), 256 * MIB);
+    assert_eq!(limits.maximum_definition_bytes(), MIB);
+    assert_eq!(limits.maximum_entry_path_bytes(), 4 * 1024);
+    assert_eq!(limits.maximum_path_index_bytes(), 16 * 1024 * 1024);
+
     assert!(
         ActionBundleLimits::new(
             ArchiveLimits::new(16 * MIB).unwrap(),

@@ -7,6 +7,8 @@ use automata_ci_github::{
 };
 use url::Url;
 
+const ENDPOINT_SOURCE: &str = include_str!("../src/endpoint.rs");
+
 #[test]
 fn production_configuration_requires_https_and_clean_bases() {
     let limits = GithubHttpLimits::default();
@@ -44,6 +46,40 @@ fn loopback_escape_hatch_rejects_non_loopback_http() {
     )
     .unwrap_err();
     assert_eq!(error, GithubHttpConfigurationError::InvalidOAuthOrigin);
+
+    for api_base in [
+        "http://different.invalid/api/v3/",
+        "http://automata-git.invalid:8088/api/v3/",
+    ] {
+        let error = GithubHttpEndpoint::new_for_mapped_emulator(
+            Url::parse("http://automata-git.invalid/").unwrap(),
+            Url::parse(api_base).unwrap(),
+            "automata-tests/0.1.0",
+            GithubHttpLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, GithubHttpConfigurationError::InvalidApiBase);
+    }
+}
+
+#[test]
+fn mapped_emulator_accepts_only_reserved_invalid_http() {
+    GithubHttpEndpoint::new_for_mapped_emulator(
+        Url::parse("http://automata-git.invalid/").unwrap(),
+        Url::parse("http://automata-git.invalid/api/v3/").unwrap(),
+        "automata-tests/0.1.0",
+        GithubHttpLimits::default(),
+    )
+    .expect("reserved mapped emulator host");
+
+    let error = GithubHttpEndpoint::new_for_mapped_emulator(
+        Url::parse("http://automata-git.test/").unwrap(),
+        Url::parse("http://automata-git.test/api/v3/").unwrap(),
+        "automata-tests/0.1.0",
+        GithubHttpLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error, GithubHttpConfigurationError::InvalidOAuthOrigin);
 }
 
 #[test]
@@ -67,5 +103,16 @@ fn limits_are_nonzero_bounded_and_coherent() {
         GithubHttpLimits::new(0, 2, 10, Duration::from_secs(1), Duration::from_secs(2))
             .unwrap_err(),
         GithubHttpConfigurationError::InvalidResponseByteLimit
+    );
+}
+
+#[test]
+fn client_explicitly_disables_reqwest_internal_retries() {
+    assert_eq!(
+        ENDPOINT_SOURCE
+            .matches(".retry(reqwest::retry::never())")
+            .count(),
+        1,
+        "the shared GitHub client must never retry behind a caller's durable state machine",
     );
 }

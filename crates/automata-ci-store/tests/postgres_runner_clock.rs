@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::{
     sync::{
@@ -36,7 +36,7 @@ use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
 use common::{
-    SeedData, TestDatabase, TestResult, run_with_database, seed_control_plane,
+    SeedData, TestClock, TestDatabase, TestResult, run_with_database, seed_control_plane,
     test_runner_payload_key_provider,
 };
 
@@ -613,6 +613,7 @@ async fn delayed_claim_lock_issues_a_full_database_time_lease() -> TestResult {
 #[allow(clippy::too_many_lines)]
 async fn lease_offer_horizon_closes_publication_acceptance_and_every_replay_path() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 30_000).await?;
         let fence = fixture.seed.session_fences[0];
         let attempt_id = fixture.lease.attempt_id();
@@ -633,7 +634,7 @@ async fn lease_offer_horizon_closes_publication_acceptance_and_every_replay_path
         let blocked_publish =
             tokio::spawn(async move { store.publish_lease_offer(blocked_offer).await });
         wait_for_database_lock(database.pool(), "FROM job_attempts AS attempt").await?;
-        wait_until_database_time(database.pool(), blocked_horizon).await?;
+        wait_until_database_time(&clock, blocked_horizon).await?;
         blocker.commit().await?;
         assert!(matches!(
             blocked_publish.await?,
@@ -809,7 +810,7 @@ async fn lease_offer_horizon_closes_publication_acceptance_and_every_replay_path
             1
         );
 
-        wait_until_database_time(database.pool(), live_horizon).await?;
+        wait_until_database_time(&clock, live_horizon).await?;
         let acceptance = CommitLeaseResponse::new(
             operation_request(fence, OperationId::new(), LEASE_RESPONSE_KIND, [41; 32])?,
             CommandCursor::initial(),
@@ -926,17 +927,15 @@ async fn lease_offer_horizon_closes_publication_acceptance_and_every_replay_path
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn direct_delivery_revocation_uses_locked_attempt_and_database_time() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 60_000).await?;
         let fence = fixture.seed.session_fences[0];
         database
             .store()
             .publish_lease_offer(offer(&fixture, OperationId::new())?)
             .await?;
-        wait_until_database_time(
-            database.pool(),
-            UnixMillis::new(fixture.lease.issued_at().get() + 1),
-        )
-        .await?;
+        wait_until_database_time(&clock, UnixMillis::new(fixture.lease.issued_at().get() + 1))
+            .await?;
         let before_takeover = database_now(database.pool()).await?;
         let mut takeover = database.pool().begin().await?;
         replace_locked_lease(&mut takeover, &fixture).await?;
@@ -981,6 +980,7 @@ async fn direct_delivery_revocation_uses_locked_attempt_and_database_time() -> T
 async fn lease_offer_receipt_completion_persists_successor_continuity_after_encryption()
 -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 10_000).await?;
         let horizon = UnixMillis::new(database_now(database.pool()).await?.get() + 2_000);
         let published = database
@@ -1040,7 +1040,7 @@ async fn lease_offer_receipt_completion_persists_successor_continuity_after_encr
                 .complete_lease_request(different_primary)
                 .await
         });
-        wait_until_database_time(database.pool(), horizon).await?;
+        wait_until_database_time(&clock, horizon).await?;
         provider.release();
 
         let winner = completion_task.await??;
@@ -1185,6 +1185,7 @@ async fn lease_offer_receipt_completion_persists_successor_continuity_after_encr
 )]
 async fn lease_offer_receipt_replay_resamples_horizon_after_decryption() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 10_000).await?;
         let horizon = UnixMillis::new(database_now(database.pool()).await?.get() + 3_000);
         let published = database
@@ -1273,7 +1274,7 @@ async fn lease_offer_receipt_replay_resamples_horizon_after_decryption() -> Test
             .with_runner_payload_encryption(provider.clone());
         let replay_task = tokio::spawn(async move { store.begin_lease_request(begin).await });
         provider.wait_until_blocked().await;
-        wait_until_database_time(database.pool(), horizon).await?;
+        wait_until_database_time(&clock, horizon).await?;
         provider.release();
 
         let replay = replay_task.await??;
@@ -1581,6 +1582,7 @@ async fn lease_offer_fallback_projection_corruption_fails_closed_before_replay()
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn command_replay_resamples_horizon_after_waiting_for_attempt_lock() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 30_000).await?;
         let fence = fixture.seed.session_fences[0];
         let horizon = UnixMillis::new(database_now(database.pool()).await?.get() + 500);
@@ -1614,7 +1616,7 @@ async fn command_replay_resamples_horizon_after_waiting_for_attempt_lock() -> Te
                 .await
         });
         wait_for_direct_database_blocker(database.pool(), blocker_pid).await?;
-        wait_until_database_time(database.pool(), horizon).await?;
+        wait_until_database_time(&clock, horizon).await?;
         blocker.commit().await?;
 
         let saturated = replay.await??;
@@ -1912,6 +1914,7 @@ async fn command_replay_bounds_stale_offer_inspection_and_preserves_progress() -
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn renewal_samples_database_time_after_waiting_for_runtime_authority_row() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         for commit in [false, true] {
             let (fixture, authority_ceiling) =
                 install_short_lived_runtime_authority(&database).await?;
@@ -1982,7 +1985,7 @@ async fn renewal_samples_database_time_after_waiting_for_runtime_authority_row()
                 }
             });
             wait_for_direct_database_blocker(database.pool(), blocker_pid).await?;
-            wait_until_database_time(database.pool(), authority_ceiling).await?;
+            wait_until_database_time(&clock, authority_ceiling).await?;
             blocker.commit().await?;
 
             let result = renewal.await?;
@@ -2010,6 +2013,7 @@ async fn renewal_samples_database_time_after_waiting_for_runtime_authority_row()
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn expired_lease_cannot_requeue_or_fail_from_a_stale_response() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 500).await?;
         let fence = fixture.seed.session_fences[0];
         let attempt_id = fixture.lease.attempt_id();
@@ -2017,7 +2021,7 @@ async fn expired_lease_cannot_requeue_or_fail_from_a_stale_response() -> TestRes
             .store()
             .publish_lease_offer(offer(&fixture, OperationId::new())?)
             .await?;
-        wait_until_database_time(database.pool(), fixture.lease.expires_at()).await?;
+        wait_until_database_time(&clock, fixture.lease.expires_at()).await?;
 
         for (action, body, digest) in [
             (
@@ -2063,8 +2067,9 @@ async fn expired_lease_cannot_requeue_or_fail_from_a_stale_response() -> TestRes
 async fn expired_attempt_requeue_samples_database_time_after_the_exact_attempt_lock() -> TestResult
 {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 500).await?;
-        wait_until_database_time(database.pool(), fixture.lease.expires_at()).await?;
+        wait_until_database_time(&clock, fixture.lease.expires_at()).await?;
 
         let mut blocker = database.pool().begin().await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -2078,6 +2083,7 @@ async fn expired_attempt_requeue_samples_database_time_after_the_exact_attempt_l
         let request = maintenance_request(database_now(database.pool()).await?, 60_000)?;
         let maintenance = tokio::spawn(async move { store.maintain_control_plane(request).await });
         wait_for_direct_database_blocker(database.pool(), blocker_pid).await?;
+        clock.advance(1).await?;
         let unlocked_at = database_now(database.pool()).await?;
         blocker.commit().await?;
 
@@ -2111,13 +2117,13 @@ async fn expired_attempt_requeue_samples_database_time_after_the_exact_attempt_l
 #[allow(clippy::too_many_lines)]
 async fn live_acceptance_and_renewal_replay_stop_after_expiry_and_takeover() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = claim_attempt(&database, 2_000).await?;
         let fence = fixture.seed.session_fences[0];
         database
             .store()
             .publish_lease_offer(offer(&fixture, OperationId::new())?)
             .await?;
-
         let acceptance_request =
             operation_request(fence, OperationId::new(), LEASE_RESPONSE_KIND, [31; 32])?;
         let acceptance = CommitLeaseResponse::new(
@@ -2168,7 +2174,7 @@ async fn live_acceptance_and_renewal_replay_stop_after_expiry_and_takeover() -> 
             .await?;
         assert!(!renewed.was_replayed());
 
-        wait_until_database_time(database.pool(), fixture.lease.expires_at()).await?;
+        wait_until_database_time(&clock, fixture.lease.expires_at()).await?;
         let replayed_acceptance = database
             .store()
             .commit_lease_response(CommitLeaseResponse::new(
@@ -2194,7 +2200,7 @@ async fn live_acceptance_and_renewal_replay_stop_after_expiry_and_takeover() -> 
             .await?;
         assert!(replayed_renewal.was_replayed());
 
-        expire_active_attempt(&database, fixture.lease.attempt_id()).await?;
+        expire_active_attempt(&database, &clock, fixture.lease.attempt_id()).await?;
         assert!(
             database
                 .store()
@@ -3009,13 +3015,12 @@ async fn database_now(pool: &PgPool) -> TestResult<UnixMillis> {
     ))
 }
 
-async fn wait_until_database_time(pool: &PgPool, deadline: UnixMillis) -> TestResult {
-    sqlx::query(
-        "SELECT pg_sleep(greatest(($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint)::double precision / 1000.0, 0.0))",
-    )
-    .bind(deadline.get() + 1)
-    .execute(pool)
-    .await?;
+async fn wait_until_database_time(clock: &TestClock, deadline: UnixMillis) -> TestResult {
+    let deadline = deadline
+        .get()
+        .checked_add(1)
+        .ok_or("runner clock deadline overflow")?;
+    clock.set(clock.now().await?.max(deadline)).await?;
     Ok(())
 }
 
@@ -3026,7 +3031,8 @@ async fn wait_for_database_lock(pool: &PgPool, query_fragment: &str) -> TestResu
             SELECT EXISTS (
                 SELECT 1
                 FROM pg_stat_activity
-                WHERE pid <> pg_backend_pid()
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
                   AND wait_event_type = 'Lock'
                   AND query LIKE '%' || $1 || '%'
             )
@@ -3050,7 +3056,8 @@ async fn wait_for_direct_database_blocker(pool: &PgPool, blocker_pid: i32) -> Te
             SELECT EXISTS (
                 SELECT 1
                 FROM pg_stat_activity AS activity
-                WHERE activity.pid <> pg_backend_pid()
+                WHERE activity.datname = current_database()
+                  AND activity.pid <> pg_backend_pid()
                   AND $1 = ANY(pg_blocking_pids(activity.pid))
             )
             ",
@@ -3066,7 +3073,11 @@ async fn wait_for_direct_database_blocker(pool: &PgPool, blocker_pid: i32) -> Te
     Err("timed out waiting for a direct PostgreSQL blocker edge".into())
 }
 
-async fn expire_active_attempt(database: &TestDatabase, attempt_id: AttemptId) -> TestResult {
+async fn expire_active_attempt(
+    database: &TestDatabase,
+    clock: &TestClock,
+    attempt_id: AttemptId,
+) -> TestResult {
     let expiry: i64 = sqlx::query_scalar(
         r"
         UPDATE job_attempts
@@ -3078,7 +3089,7 @@ async fn expire_active_attempt(database: &TestDatabase, attempt_id: AttemptId) -
     .bind(attempt_id.as_uuid())
     .fetch_one(database.pool())
     .await?;
-    wait_until_database_time(database.pool(), UnixMillis::new(expiry)).await
+    wait_until_database_time(clock, UnixMillis::new(expiry)).await
 }
 
 async fn set_session_heartbeat(

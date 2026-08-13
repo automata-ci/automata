@@ -132,3 +132,49 @@ pub enum PublicationRepositoryError {
     #[error("durable repository publication data violates an invariant")]
     CorruptData,
 }
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_auth::{
+        authorization::{OutputVisibility, RepositoryPublicationPolicy},
+        human::{PrincipalId, TenantId},
+        management::{ManagementActor, ManagementRevision},
+        session::SessionId,
+        time::UnixTimestamp,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn update_keeps_three_audiences_independent() {
+        let actor = ManagementActor::new(
+            TenantId::new("tenant-a").unwrap(),
+            PrincipalId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            SessionId::new("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            ManagementRevision::new(4).unwrap(),
+            None,
+            UnixTimestamp::from_seconds(10),
+        );
+        let policy = RepositoryPublicationPolicy::new(
+            OutputVisibility::Public,
+            OutputVisibility::Authenticated,
+            OutputVisibility::Private,
+        );
+        let request = UpdateRepositoryPublication::new(
+            actor,
+            RepositoryId::from_uuid(Uuid::new_v4()),
+            ManagementRevision::new(2).unwrap(),
+            policy,
+        );
+        assert_eq!(request.policy().dashboard(), OutputVisibility::Public);
+        assert_eq!(request.policy().logs(), OutputVisibility::Authenticated);
+        assert_eq!(request.policy().artifacts(), OutputVisibility::Private);
+    }
+
+    #[test]
+    fn repository_port_is_object_safe() {
+        fn accepts_repository_port(_: &dyn RepositoryPublicationRepository) {}
+        let _ = accepts_repository_port;
+    }
+}

@@ -28,6 +28,7 @@ use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresLoginTransactionRepository,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -282,6 +283,7 @@ async fn login_transactions_encrypt_cas_and_consume_exactly_once_across_replicas
 async fn setup_and_expired_login_transactions_preserve_purpose_and_tenant_boundaries() -> TestResult
 {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(database.pool(), "tenant-a").await?;
         let repository =
             PostgresLoginTransactionRepository::new(database.pool().clone(), keyring());
@@ -343,7 +345,13 @@ async fn setup_and_expired_login_transactions_preserve_purpose_and_tenant_bounda
         .fetch_one(database.pool())
         .await?;
         assert_eq!(forbidden_columns, 0);
-        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        let expires_at_ms: i64 = sqlx::query_scalar(
+            "SELECT expires_at_ms FROM human_login_transactions WHERE id=$1",
+        )
+        .bind(Uuid::parse_str(id)?)
+        .fetch_one(database.pool())
+        .await?;
+        clock.set(expires_at_ms).await?;
         assert!(matches!(
             repository
                 .load(&access, now())
@@ -488,6 +496,7 @@ fn durable_session(
 async fn touch_final_write_cannot_extend_a_session_expired_during_statement_delay() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         seed_tenant(pool, "tenant-a").await?;
         let principal = seed_human(pool, "tenant-a").await?;
         let repository = PostgresHumanSessionRepository::new(pool.clone());
@@ -514,11 +523,18 @@ async fn touch_final_write_cannot_extend_a_session_expired_during_statement_dela
                 .bind(Uuid::parse_str(session_id)?)
                 .fetch_one(pool)
                 .await?;
+        let idle_expires_at_ms: i64 =
+            sqlx::query_scalar("SELECT idle_expires_at_ms FROM human_sessions WHERE id=$1")
+                .bind(Uuid::parse_str(session_id)?)
+                .fetch_one(pool)
+                .await?;
         sqlx::query(
             r"
-            CREATE FUNCTION delay_session_touch_update() RETURNS trigger AS $$
+            CREATE FUNCTION advance_session_touch_test_clock() RETURNS trigger AS $$
             BEGIN
-                PERFORM pg_sleep(2.1);
+                UPDATE automata_test.__automata_test_clock
+                SET now_ms = now_ms + 2100
+                WHERE singleton;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql
@@ -528,14 +544,20 @@ async fn touch_final_write_cannot_extend_a_session_expired_during_statement_dela
         .await?;
         sqlx::query(
             r"
-            CREATE TRIGGER delay_session_touch_update
+            CREATE TRIGGER advance_session_touch_test_clock
             BEFORE UPDATE ON human_sessions
-            FOR EACH STATEMENT EXECUTE FUNCTION delay_session_touch_update()
+            FOR EACH STATEMENT EXECUTE FUNCTION advance_session_touch_test_clock()
             ",
         )
         .execute(pool)
         .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        clock
+            .set(
+                idle_expires_at_ms
+                    .checked_sub(1)
+                    .expect("time immediately before idle expiry"),
+            )
+            .await?;
         let observed_at = now();
         assert_eq!(
             repository
@@ -564,6 +586,7 @@ async fn touch_final_write_cannot_extend_a_session_expired_during_statement_dela
 #[allow(clippy::too_many_lines)]
 async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         seed_tenant(database.pool(), "tenant-a").await?;
         seed_tenant(database.pool(), "tenant-b").await?;
         let principal = seed_human(database.pool(), "tenant-a").await?;
@@ -624,7 +647,7 @@ async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() 
             .bind(Uuid::parse_str(first_id)?)
             .execute(database.pool())
             .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        clock.advance(1_100).await?;
         sqlx::query(
             r"
             UPDATE human_sessions
@@ -655,7 +678,7 @@ async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() 
                 durable_session(second_id, "tenant-a", principal, SessionKind::Browser, 2, 220),
             ))
             .await?;
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        clock.advance(1_100).await?;
         assert!(matches!(
             repository
                 .touch(&TouchSession::new(

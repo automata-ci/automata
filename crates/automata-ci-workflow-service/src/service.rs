@@ -45,7 +45,7 @@ use crate::{
     WorkflowDispatchAuthorization, WorkflowPlanVerificationError, WorkflowPlanVerifier,
     github_activation::context_to_github_value,
     github_dispatch::{
-        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, GithubWorkflowDispatchEvidenceV1,
+        AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, GithubWorkflowDispatchEvidence,
     },
 };
 
@@ -57,7 +57,7 @@ const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6: &[u8] =
 const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7: &[u8] =
     b"automata.workflow-admission.request.v7.scheduled-github\0";
 const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
-    b"automata.workflow-admission.provider-delivery.v2\0";
+    b"automata.workflow-admission.provider-delivery\0";
 const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
     "actor",
     "event",
@@ -361,7 +361,7 @@ impl WorkflowAdmissionService {
                     {
                         return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
                     }
-                    let evidence = GithubWorkflowDispatchEvidenceV1::decode(request.event())
+                    let evidence = GithubWorkflowDispatchEvidence::decode(request.event())
                         .map_err(|_| WorkflowAdmissionError::WorkflowDispatchEvidence)?;
                     if !evidence.matches_admission(&request)
                         || !evidence.authority_matches(authorization)
@@ -1628,10 +1628,8 @@ fn namespace_idempotency(
                 digest_field(&mut digest, field.as_bytes());
             }
             let digest = Sha256Digest::from_bytes(digest.finalize().into());
-            WorkflowAdmissionIdempotency::provider_delivery(format!(
-                "provider-delivery-v2:{digest}"
-            ))
-            .map_err(WorkflowAdmissionError::AdmissionValue)
+            WorkflowAdmissionIdempotency::provider_delivery(format!("provider-delivery:{digest}"))
+                .map_err(WorkflowAdmissionError::AdmissionValue)
         }
         WorkflowAdmissionIdempotency::Operation(operation_id) => {
             Ok(WorkflowAdmissionIdempotency::operation(*operation_id))

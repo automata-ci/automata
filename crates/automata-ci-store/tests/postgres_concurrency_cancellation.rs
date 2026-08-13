@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, QueuePolicy,

@@ -132,6 +132,12 @@ impl GithubLogicalActivationEvaluator {
     }
 
     #[must_use]
+    /// Returns the configured copyable expression evaluator.
+    pub const fn expression_evaluator(&self) -> GithubExpressionEvaluator {
+        self.evaluator
+    }
+
+    #[must_use]
     /// Returns the immutable provider context used for each activation.
     pub const fn github(&self) -> &GithubActivationContext {
         &self.github

@@ -1,5 +1,5 @@
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -69,7 +69,7 @@ use uuid::Uuid;
 
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 const INSERT_RENEWAL_RECEIPT: &str = r"
     INSERT INTO github_runtime_authority_lease_renewal_receipts (
@@ -229,52 +229,16 @@ async fn database_now(database: &TestDatabase) -> TestResult<UnixMillis> {
     Ok(UnixMillis::new(now))
 }
 
-async fn install_database_test_clock(database: &TestDatabase, now_ms: i64) -> TestResult {
-    sqlx::query(
-        r"
-        CREATE TABLE github_runtime_authority_test_clock (
-            singleton BOOLEAN PRIMARY KEY CHECK (singleton),
-            now_ms BIGINT NOT NULL CHECK (now_ms >= 0)
-        )
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "INSERT INTO github_runtime_authority_test_clock (singleton, now_ms) VALUES (TRUE, $1)",
-    )
-    .bind(now_ms)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        CREATE FUNCTION clock_timestamp()
-        RETURNS TIMESTAMPTZ
-        LANGUAGE SQL
-        VOLATILE
-        AS $automata_test$
-            SELECT TIMESTAMPTZ 'epoch' + now_ms * INTERVAL '1 millisecond'
-            FROM github_runtime_authority_test_clock
-            WHERE singleton
-        $automata_test$
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    set_database_test_clock(database, now_ms).await
+async fn install_database_test_clock(
+    database: &TestDatabase,
+    now_ms: i64,
+) -> TestResult<TestClock> {
+    TestClock::freeze(database.pool(), now_ms).await
 }
 
-async fn set_database_test_clock(database: &TestDatabase, now_ms: i64) -> TestResult {
-    let updated =
-        sqlx::query("UPDATE github_runtime_authority_test_clock SET now_ms = $1 WHERE singleton")
-            .bind(now_ms)
-            .execute(database.pool())
-            .await?;
-    if updated.rows_affected() != 1 {
-        return Err("runtime-authority test database clock is not installed".into());
-    }
-    let observed = database_now(database).await?;
-    if observed.get() != now_ms {
+async fn set_database_test_clock(clock: &TestClock, now_ms: i64) -> TestResult {
+    clock.set(now_ms).await?;
+    if clock.now().await? != now_ms {
         return Err("Store connection did not resolve the schema-local test clock".into());
     }
     Ok(())
@@ -1331,14 +1295,22 @@ async fn assert_pre_mint_terminal_transitions_rejected(
 
 async fn reclaim_and_begin_mint(
     database: &TestDatabase,
+    clock: &TestClock,
     fixture: &AuthorityFixture,
     stale_claim: ClaimedGithubRuntimeAuthorityMint,
 ) -> TestResult<ClaimedGithubRuntimeAuthorityMint> {
-    tokio::time::sleep(Duration::from_millis(3_100)).await;
+    clock
+        .set(
+            stale_claim
+                .expires_at()
+                .get()
+                .checked_add(1)
+                .ok_or("runtime-authority mint expiry clock overflow")?,
+        )
+        .await?;
     let observed_at = database_now(database).await?;
-    // This second claim proves takeover and mint-start fencing, not a short
-    // expiry boundary. Leave enough live time for a hosted PostgreSQL WAL
-    // checkpoint between the post-lock clock sample and the guarded update.
+    // This second claim proves takeover and mint-start fencing, not a wall-time
+    // boundary; the clock jump leaves a full live window for the guarded update.
     let reclaimed = database
         .store()
         .claim_github_runtime_authority_mint(fixture.claim_for_at(
@@ -1536,6 +1508,7 @@ async fn supersede_ready_authority(
 
 async fn race_retry_and_confirm_revocation(
     database: &TestDatabase,
+    clock: &TestClock,
     fixture: &AuthorityFixture,
 ) -> TestResult {
     let left_store = database.store().clone();
@@ -1572,7 +1545,15 @@ async fn race_retry_and_confirm_revocation(
     .await?;
     assert_eq!(retry_evidence.0, "applied");
     assert_eq!(retry_evidence.2, "revoke_pending");
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    clock
+        .set(
+            first_revoke
+                .claimed_at()
+                .get()
+                .checked_add(40)
+                .ok_or("runtime-authority retry clock overflow")?,
+        )
+        .await?;
 
     let second_revoke = database
         .store()
@@ -1651,7 +1632,7 @@ async fn migration_installs_and_retains_the_exact_v5_gate() -> TestResult {
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn mint_begin_persists_and_db_authorizes_the_exact_provider_window() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_000_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_000_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let mint = database
             .store()
@@ -1742,13 +1723,13 @@ async fn mint_begin_persists_and_db_authorizes_the_exact_provider_window() -> Te
 #[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let contention_fixture = seed_authority(&database).await?;
         claim_single_mint_winner(&database, &contention_fixture).await?;
         assert_pre_mint_terminal_transitions_rejected(&database, &contention_fixture).await?;
 
         // Keep the 32-way lock queue independent of the deliberately short
-        // expiry boundary below. Hosted PostgreSQL can legitimately take more
-        // than three seconds to serve every contender under checkpoint load.
+        // expiry boundary below; advance database time only after it drains.
         let expiry_fixture = seed_authority(&database).await?;
         let stale_claim = database
             .store()
@@ -1759,7 +1740,8 @@ async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> 
             ))
             .await?
             .expect("initial short claim");
-        let reclaimed = reclaim_and_begin_mint(&database, &expiry_fixture, stale_claim).await?;
+        let reclaimed =
+            reclaim_and_begin_mint(&database, &clock, &expiry_fixture, stale_claim).await?;
         assert_indeterminate_expiry(&database, &expiry_fixture, &reclaimed).await?;
         Ok(())
     })
@@ -1770,10 +1752,11 @@ async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> 
 #[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         supersede_ready_authority(&database, &fixture).await?;
-        race_retry_and_confirm_revocation(&database, &fixture).await?;
+        race_retry_and_confirm_revocation(&database, &clock, &fixture).await?;
         Ok(())
     })
     .await
@@ -1914,7 +1897,7 @@ async fn stale_commit_is_never_ready_and_cannot_be_erased_before_provider_expiry
 async fn database_time_authenticates_unprotected_erasure_and_terminal_first_mint_replay()
 -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_000_000_000_000).await?;
+        let clock = install_database_test_clock(&database, 2_000_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let mint = database
             .store()
@@ -1935,7 +1918,7 @@ async fn database_time_authenticates_unprotected_erasure_and_terminal_first_mint
             .await?;
         let authenticate = AuthenticateGithubRuntimeAuthorityUnprotectedErasure::new(&mint);
         let horizon = fixture.identity.conservative_expiry().get();
-        set_database_test_clock(&database, horizon - 1).await?;
+        set_database_test_clock(&clock, horizon - 1).await?;
         assert_eq!(
             database
                 .store()
@@ -1945,7 +1928,7 @@ async fn database_time_authenticates_unprotected_erasure_and_terminal_first_mint
             "caller custody is not erasable before locked PostgreSQL time reaches the horizon"
         );
 
-        set_database_test_clock(&database, horizon).await?;
+        set_database_test_clock(&clock, horizon).await?;
         let terminal = database
             .store()
             .authenticate_github_runtime_authority_unprotected_erasure(authenticate.clone())
@@ -2050,7 +2033,7 @@ async fn protected_authority_never_authenticates_unprotected_erasure() -> TestRe
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn quarantine_first_observed_after_terminal_erasure_is_permanent() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_100_000_000_000).await?;
+        let clock = install_database_test_clock(&database, 2_100_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let protected = fixture.protected();
         mint_ready_authority(&database, &fixture).await?;
@@ -2060,7 +2043,7 @@ async fn quarantine_first_observed_after_terminal_erasure_is_permanent() -> Test
             fixture.at(100),
         )?;
         let safe_erase_after = protected.metadata().safe_erase_after().get();
-        set_database_test_clock(&database, safe_erase_after).await?;
+        set_database_test_clock(&clock, safe_erase_after).await?;
         let report = database
             .store()
             .reconcile_github_runtime_authorities(ReconcileGithubRuntimeAuthorities::new(
@@ -2226,7 +2209,7 @@ async fn recovered_indeterminate_token_is_revocation_only() -> TestResult {
 #[allow(clippy::too_many_lines)]
 async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_300_000_000_000).await?;
+        let clock = install_database_test_clock(&database, 2_300_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         let first = database
             .store()
@@ -2352,7 +2335,7 @@ async fn definitive_no_token_retry_is_bounded_single_winner_and_sanitized() -> T
                 .await?
                 .is_none()
         );
-        set_database_test_clock(&database, retry_at.get()).await?;
+        set_database_test_clock(&clock, retry_at.get()).await?;
 
         let mut tasks = Vec::new();
         for ordinal in 0..32_u128 {
@@ -3268,7 +3251,7 @@ async fn concurrent_same_worker_calls_return_one_durable_revocation_claim() -> T
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn every_expired_takeover_consumes_budget_and_releases_exhausted_owner() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_200_000_000_000).await?;
+        let clock = install_database_test_clock(&database, 2_200_000_000_000).await?;
         let first = seed_authority(&database).await?;
         let second = seed_authority(&database).await?;
         for fixture in [&first, &second] {
@@ -3284,7 +3267,7 @@ async fn every_expired_takeover_consumes_budget_and_releases_exhausted_owner() -
         let exhausted_key = initial.key();
         let mut next_takeover_at = initial.expires_at().get();
         for expected_attempt in 2..=64_u16 {
-            set_database_test_clock(&database, next_takeover_at).await?;
+            set_database_test_clock(&clock, next_takeover_at).await?;
             let claim = database
                 .store()
                 .claim_github_runtime_authority_revocation(revocation_claim(owner, 250)?)
@@ -3295,7 +3278,7 @@ async fn every_expired_takeover_consumes_budget_and_releases_exhausted_owner() -
             next_takeover_at = claim.expires_at().get();
         }
 
-        set_database_test_clock(&database, next_takeover_at).await?;
+        set_database_test_clock(&clock, next_takeover_at).await?;
         let next = database
             .store()
             .claim_github_runtime_authority_revocation(revocation_claim(owner, 5_000)?)
@@ -3325,6 +3308,7 @@ async fn every_expired_takeover_consumes_budget_and_releases_exhausted_owner() -
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn stale_revocation_mutations_cannot_cross_a_takeover_fence() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         supersede_ready_authority(&database, &fixture).await?;
@@ -3342,7 +3326,15 @@ async fn stale_revocation_mutations_cannot_cross_a_takeover_fence() -> TestResul
             first.claimed_at(),
             UnixMillis::new(first.claimed_at().get() + 20),
         )?;
-        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        clock
+            .set(
+                first
+                    .expires_at()
+                    .get()
+                    .checked_add(1)
+                    .ok_or("runtime-authority takeover clock overflow")?,
+            )
+            .await?;
         let second = database
             .store()
             .claim_github_runtime_authority_revocation(revocation_claim(
@@ -3479,7 +3471,7 @@ async fn ready_authority_caps_renewal_and_revalidates_it_atomically() -> TestRes
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn ready_authority_allows_a_finalizing_heartbeat_without_renewal_evidence() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_900_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_900_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         sqlx::query("UPDATE job_attempts SET lifecycle = 'running' WHERE id = $1")
@@ -3535,7 +3527,7 @@ async fn ready_authority_allows_a_finalizing_heartbeat_without_renewal_evidence(
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn ready_authority_renewals_form_one_exact_e0_e1_e2_e3_chain() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_400_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_400_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         let e0 = fixture.identity.lease_expires_at();
@@ -3622,7 +3614,7 @@ async fn ready_authority_renewals_form_one_exact_e0_e1_e2_e3_chain() -> TestResu
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn exact_ceiling_replay_fails_without_root_or_tail_evidence() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_500_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_500_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         let ceiling = fixture.at(3_440_000);
@@ -3675,7 +3667,7 @@ async fn exact_ceiling_replay_fails_without_root_or_tail_evidence() -> TestResul
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn concurrent_same_horizon_renewals_have_one_durable_winner() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_600_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_600_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         let target = UnixMillis::new(fixture.identity.lease_expires_at().get() + 60_000);
@@ -3719,7 +3711,7 @@ async fn concurrent_same_horizon_renewals_have_one_durable_winner() -> TestResul
 #[allow(clippy::too_many_lines)] // One transaction matrix pins the complete renewal graph.
 async fn renewal_receipts_reject_expired_forks_orphans_rollbacks_and_mutation() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_700_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_700_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         let attempt_id = fixture.identity.key().attempt_id().as_uuid();
@@ -3841,7 +3833,7 @@ async fn renewal_receipts_reject_expired_forks_orphans_rollbacks_and_mutation() 
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn queued_renewal_precedes_reconciliation_without_lock_inversion() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_800_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_800_000_000_000).await?;
         let fixture = seed_authority(&database).await?;
         mint_ready_authority(&database, &fixture).await?;
         sqlx::query(
@@ -4259,7 +4251,8 @@ async fn wait_for_blocked_backends(
                 r"
                 SELECT pid
                 FROM pg_stat_activity
-                WHERE $1 = ANY(pg_blocking_pids(pid))
+                WHERE datname = current_database()
+                  AND $1 = ANY(pg_blocking_pids(pid))
                 ORDER BY query_start, pid
                 ",
             )

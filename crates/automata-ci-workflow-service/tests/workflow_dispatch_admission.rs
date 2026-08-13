@@ -22,9 +22,7 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError, ObjectKey,
     ResolveAuthenticatedWorkflowDispatchSource, TenantScope, WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::{
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
-};
+use automata_ci_workflow_github::{GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs};
 use automata_ci_workflow_service::{
     AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, AdmissionIdGenerator,
     AdmissionRepositoryCoordinates, DurableGithubWorkflowDispatchRequest,
@@ -111,7 +109,7 @@ async fn dispatch_request_debug_omits_private_source_and_subject_data() {
     assert!(!lookup_debug.contains(GIT_REF));
     assert!(!lookup_debug.contains(COMMIT_SHA));
 
-    let inputs = GithubWorkflowDispatchInputsV1::try_new([(
+    let inputs = GithubWorkflowDispatchInputs::try_new([(
         "note",
         GithubWorkflowDispatchInputValue::from("durable private marker"),
     )])
@@ -270,7 +268,7 @@ async fn mismatched_durable_workflow_target_fails_before_store_admission() {
 async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
     let harness = Harness::new();
     harness.seed_durable_source().await;
-    let inputs = GithubWorkflowDispatchInputsV1::try_new([
+    let inputs = GithubWorkflowDispatchInputs::try_new([
         ("target", GithubWorkflowDispatchInputValue::from("test")),
         ("dry_run", GithubWorkflowDispatchInputValue::Boolean(false)),
         (
@@ -332,10 +330,9 @@ async fn malformed_or_non_branch_tag_refs_fail_before_source_lookup() {
                 .expect("exact authority"),
             git_ref,
             COMMIT_SHA,
-            GithubWorkflowDispatchInputsV1::try_new(Vec::<(
-                String,
-                GithubWorkflowDispatchInputValue,
-            )>::new())
+            GithubWorkflowDispatchInputs::try_new(
+                Vec::<(String, GithubWorkflowDispatchInputValue)>::new(),
+            )
             .expect("empty inputs"),
             OperationId::from_uuid(Uuid::from_u128(0x200 + index as u128)),
         );
@@ -484,7 +481,7 @@ fn dispatch_request(
     dry_run: bool,
     note: &str,
 ) -> GithubWorkflowDispatchRequest {
-    let inputs = GithubWorkflowDispatchInputsV1::try_new([
+    let inputs = GithubWorkflowDispatchInputs::try_new([
         (
             "target",
             GithubWorkflowDispatchInputValue::String(target.to_owned()),

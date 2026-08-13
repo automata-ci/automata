@@ -8,7 +8,7 @@ use std::{
 
 use automata_ci_auth::{
     human::{AuthenticatedHuman, PrincipalId, ProviderId, ProviderSubject, TenantId},
-    secret::{RandomnessError, SecretBytes, SecureRandom},
+    secret::{CsrfToken, RandomnessError, SecretBytes, SecureRandom},
     session::{
         ActivateCliSession, ActivateCliSessionOutcome, CreateSession, CreateSessionOutcome,
         DurableSession, HumanSessionRepository, ResolveSession, ResolveSessionOutcome,
@@ -18,17 +18,29 @@ use automata_ci_auth::{
         TouchSessionOutcome,
     },
     session_credential::{
-        InvalidSessionCredential, MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS,
-        MAX_SESSION_CREDENTIAL_KEYS, SESSION_CREDENTIAL_SECRET_BYTES, SessionCredential,
-        SessionCredentialIssuance, SessionCredentialKey, SessionCredentialKeyring,
-        SessionCredentialKeyringError, SessionCredentialRequestError, SessionCredentialService,
-        SessionCredentialServiceError,
+        InvalidSessionCredential, IssuedSessionCredential, MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS,
+        MAX_SESSION_CREDENTIAL_KEYS, PreparedSessionCredential, SESSION_CREDENTIAL_SECRET_BYTES,
+        SessionCredential, SessionCredentialIssuance, SessionCredentialKey,
+        SessionCredentialKeyring, SessionCredentialKeyringError, SessionCredentialRequestError,
+        SessionCredentialService, SessionCredentialServiceError,
     },
+    sign_in::PendingSessionCandidate,
     time::UnixTimestamp,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::executor::block_on;
+use static_assertions::assert_not_impl_any;
+
 use support::{DeterministicRandom, FixedClock};
+
+assert_not_impl_any!(SessionCredential: Clone, serde::Serialize);
+assert_not_impl_any!(SessionCredentialKey: Clone, serde::Serialize);
+assert_not_impl_any!(SessionCredentialKeyring: Clone, serde::Serialize);
+assert_not_impl_any!(PreparedSessionCredential: Clone, serde::Serialize);
+assert_not_impl_any!(PendingSessionCandidate: Clone, serde::Serialize);
+assert_not_impl_any!(IssuedSessionCredential: Clone, serde::Serialize);
+assert_not_impl_any!(SessionCredentialService: Clone, serde::Serialize);
+assert_not_impl_any!(CsrfToken: Clone, serde::Serialize);
 
 const PRINCIPAL_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 

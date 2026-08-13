@@ -197,7 +197,15 @@ impl StandardGithubContext {
         authority
             .validate_for(request.job(), request.lease())
             .map_err(|_| invalid_data())?;
-        let expected_security = if self.github.allow_insecure_http() {
+        let expected_security = if self.github.allow_insecure_http()
+            && self
+                .github
+                .server_url()
+                .host_str()
+                .is_some_and(|host| host.to_ascii_lowercase().ends_with(".invalid"))
+        {
+            RuntimeAuthorityEndpointSecurity::TrustedPrivateDevelopment
+        } else if self.github.allow_insecure_http() {
             RuntimeAuthorityEndpointSecurity::LoopbackDevelopment
         } else {
             RuntimeAuthorityEndpointSecurity::Tls

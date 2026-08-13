@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -3662,7 +3662,8 @@ async fn wait_for_backend_blocked_by(pool: &PgPool, blocking_backend_pid: i32) -
             r"
             SELECT pid
             FROM pg_stat_activity
-            WHERE pid <> $1
+            WHERE datname = current_database()
+              AND pid <> $1
               AND $1 = ANY(pg_blocking_pids(pid))
             ORDER BY pid
             LIMIT 1

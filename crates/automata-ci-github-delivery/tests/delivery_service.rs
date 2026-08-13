@@ -15,14 +15,18 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryService,
-    GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
-    GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
+    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
-    GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome, GithubDeliveryWorkflowProcessor,
+    GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
+    GithubDeliveryWorkflowAdmissionProcessor, GithubDeliveryWorkflowProcessor,
     GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
-    GithubDeliveryWorkflowRequest, GithubServerServiceCredentialRelease,
+    GithubDeliveryWorkflowRequest, GithubPushChangedFilesAuthority, GithubPushChangedFilesError,
+    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubServerServiceCredentialRelease,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -30,23 +34,30 @@ use automata_ci_scm::{
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
-    ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery, GithubCheckHeadSha,
+    AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery,
+    ClaimedProviderDelivery, CompleteProviderDelivery, GithubCheckHeadSha,
     GithubServerServiceAction, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceHandoffId, GithubServerServiceRevision,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubWorkflowRunSubjectEvidence, MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
-    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    GithubWorkflowRunSubjectEvidence, LogicalWorkflowAdmissionReceipt,
+    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
+    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ManifestPinnedGithubDeliveryEvidence,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryFailureKind, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RejectProviderDelivery,
-    RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
-    RetryProviderDelivery, TenantScope,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
+    RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
+    RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
 };
+use automata_ci_workflow_github::GithubChangedFiles;
+use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
@@ -72,6 +83,7 @@ const INITIAL_NOW: i64 = 100;
 const CLAIM_MILLIS: i64 = 50;
 const RENEWED_NOW: i64 = 120;
 const AFTER_INITIAL_EXPIRY: i64 = 155;
+const PATH_FILTER_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
 
 #[derive(Debug)]
 struct ManualClock(AtomicI64);
@@ -293,6 +305,54 @@ impl GithubDeliveryWorkflowProcessor for StaticProcessor {
 }
 
 #[derive(Debug)]
+struct UnreachableLogicalAdmissions;
+
+#[async_trait]
+impl LogicalWorkflowAdmissionRepository for UnreachableLogicalAdmissions {
+    async fn admit_logical_workflow(
+        &self,
+        _command: AdmitLogicalWorkflowRun,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        panic!("the path-filter miss must not reach ordinary logical admission")
+    }
+
+    async fn admit_authenticated_github_delivery(
+        &self,
+        _command: AdmitLogicalWorkflowRun,
+        _claim: AuthenticatedGithubDeliveryClaim,
+        _observed_at: UnixMillis,
+    ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
+        panic!("the path-filter miss must not reach GitHub logical admission")
+    }
+}
+
+#[derive(Debug)]
+struct CountingWorkflowProcessor {
+    inner: GithubDeliveryWorkflowAdmissionProcessor,
+    calls: AtomicUsize,
+}
+
+impl CountingWorkflowProcessor {
+    fn new(inner: GithubDeliveryWorkflowAdmissionProcessor) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl GithubDeliveryWorkflowProcessor for CountingWorkflowProcessor {
+    async fn process_workflow(
+        &self,
+        request: GithubDeliveryWorkflowRequest<'_>,
+    ) -> GithubDeliveryWorkflowProcessorCompletion {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.process_workflow(request).await
+    }
+}
+
+#[derive(Debug)]
 struct SnapshotGateProcessor {
     calls: AtomicUsize,
     snapshots: Mutex<Vec<automata_ci_github_delivery::GithubDeliveryClaimSnapshot>>,
@@ -367,6 +427,7 @@ enum CredentialBehavior {
     WrongInstallation,
     WrongRepository,
     WrongOwner,
+    WrongOwnerChangedFilesDuringRenewalApply,
     WrongRoute,
     WrongFence,
     WrongAttempt,
@@ -377,6 +438,7 @@ enum CredentialBehavior {
     RenewDuringAcquire,
     RejectDuringRenewalApply,
     ReleaseDuringRenewalApply,
+    ReleaseChangedFilesDuringRenewalApply,
 }
 
 #[derive(Debug)]
@@ -450,6 +512,71 @@ impl RenewalApplyGate {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RacingChangedFilesObservation {
+    claim: ProviderDeliveryClaimFence,
+    private_authority: bool,
+}
+
+#[derive(Debug)]
+struct RenewalRacingChangedFiles {
+    first_error: Option<GithubPushChangedFilesError>,
+    calls: AtomicUsize,
+    observations: Mutex<Vec<RacingChangedFilesObservation>>,
+    renewal_apply_gate: Arc<RenewalApplyGate>,
+}
+
+impl RenewalRacingChangedFiles {
+    fn new(
+        first_error: GithubPushChangedFilesError,
+        renewal_apply_gate: Arc<RenewalApplyGate>,
+    ) -> Self {
+        Self {
+            first_error: Some(first_error),
+            calls: AtomicUsize::new(0),
+            observations: Mutex::new(Vec::new()),
+            renewal_apply_gate,
+        }
+    }
+
+    fn path_miss(renewal_apply_gate: Arc<RenewalApplyGate>) -> Self {
+        Self {
+            first_error: None,
+            calls: AtomicUsize::new(0),
+            observations: Mutex::new(Vec::new()),
+            renewal_apply_gate,
+        }
+    }
+}
+
+#[async_trait]
+impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
+    async fn changed_files(
+        &self,
+        request: GithubPushChangedFilesRequest<'_>,
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.observations
+            .lock()
+            .expect("changed-files observations lock")
+            .push(RacingChangedFilesObservation {
+                claim: request.snapshot().claim(),
+                private_authority: matches!(
+                    request.authority(),
+                    GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(_)
+                ),
+            });
+        if call == 0
+            && let Some(first_error) = self.first_error
+        {
+            self.renewal_apply_gate.wait_committed().await;
+            self.renewal_apply_gate.mark_downstream_result_ready();
+            return Err(first_error);
+        }
+        Ok(GithubChangedFiles::complete(["README.md"]))
+    }
+}
+
 struct RenewalFutureGuard<'a> {
     dropped: &'a AtomicBool,
     completed: bool,
@@ -486,6 +613,7 @@ struct CredentialObservation {
     repository_id: ProviderRepositoryId,
     claim: ProviderDeliveryClaimFence,
     attempt: u16,
+    action: GithubDeliveryPrivateRepositoryAction,
     authority_selector: GithubServerServiceAuthoritySelector,
     consumer: GithubServerServiceConsumerClaim,
     observed_at: UnixMillis,
@@ -568,7 +696,13 @@ impl RecordingCredentialProvider {
         &self,
         request: &GithubDeliverySourceCredentialRequest<'_>,
     ) -> ProviderRepositoryOwnerId {
-        if self.behavior == CredentialBehavior::WrongOwner {
+        let wrong_during_predecessor_changed_files = self.behavior
+            == CredentialBehavior::WrongOwnerChangedFilesDuringRenewalApply
+            && request.action()
+                == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+            && request.snapshot().claim().fence() == 7;
+        if self.behavior == CredentialBehavior::WrongOwner || wrong_during_predecessor_changed_files
+        {
             ProviderRepositoryOwnerId::new(request.repository_owner_id().get() + 1)
                 .expect("wrong owner remains structurally valid")
         } else {
@@ -590,7 +724,14 @@ impl RecordingCredentialProvider {
             requested.fence()
         };
         let action = if self.behavior == CredentialBehavior::WrongAction {
-            GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+            match request.action() {
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
+                    GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                }
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
+                    GithubServerServiceAction::FetchPrivateRepositoryRevision
+                }
+            }
         } else {
             requested.action()
         };
@@ -661,9 +802,17 @@ impl RecordingCredentialProvider {
             conservative_expires_at,
             Box::new(ReleaseProbe {
                 calls: Arc::clone(&self.releases),
-                renewal_apply_gate: (self.behavior
-                    == CredentialBehavior::ReleaseDuringRenewalApply)
-                    .then(|| Arc::clone(&self.renewal_apply_gate)),
+                renewal_apply_gate: match (self.behavior, request.action()) {
+                    (
+                        CredentialBehavior::ReleaseDuringRenewalApply,
+                        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+                    )
+                    | (
+                        CredentialBehavior::ReleaseChangedFilesDuringRenewalApply,
+                        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+                    ) => Some(Arc::clone(&self.renewal_apply_gate)),
+                    _ => None,
+                },
             }),
         )
         .map_err(|_| GithubDeliverySourceCredentialProviderError::InvariantViolation)
@@ -704,6 +853,7 @@ impl GithubDeliverySourceCredentialProvider for RecordingCredentialProvider {
                 repository_id: identity.repository_id(),
                 claim: request.snapshot().claim(),
                 attempt: request.snapshot().attempt(),
+                action: request.action(),
                 authority_selector: request.authority_selector().clone(),
                 consumer: request.consumer_claim().expect("valid consumer claim"),
                 observed_at: request.observed_at(),
@@ -718,6 +868,16 @@ impl GithubDeliverySourceCredentialProvider for RecordingCredentialProvider {
                 8
             );
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
+        }
+        if self.behavior == CredentialBehavior::WrongOwnerChangedFilesDuringRenewalApply
+            && request.action()
+                == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+            && request.snapshot().claim().fence() == 7
+        {
+            self.renewal_apply_gate.wait_committed().await;
+            let credential = self.credential_for(request);
+            self.renewal_apply_gate.mark_downstream_result_ready();
+            return credential;
         }
         if call == 0
             && let Some(gate) = &self.gate
@@ -777,6 +937,8 @@ struct RecordingRepository {
     completions: Mutex<Vec<CompleteProviderDelivery>>,
     retries: Mutex<Vec<RetryProviderDelivery>>,
     rejections: Mutex<Vec<RejectProviderDelivery>>,
+    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
+    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
     terminal_entered: Notify,
     terminal_release: CancellationToken,
     renewal_apply_gate: Arc<RenewalApplyGate>,
@@ -888,6 +1050,56 @@ impl ProviderDeliveryRepository for RecordingRepository {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
         Ok(self.receipt(ProviderDeliveryState::Completed))
+    }
+
+    async fn register_provider_delivery_workflow_inventory(
+        &self,
+        request: RegisterProviderDeliveryWorkflowInventory,
+    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
+        let mut inventory = self.inventory.lock().expect("inventory lock");
+        match inventory.as_ref() {
+            Some(existing) if existing != request.inventory() => {
+                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+            }
+            Some(_) => {}
+            None => *inventory = Some(request.inventory().clone()),
+        }
+        ProviderDeliveryWorkflowInventoryReceipt::new(
+            inventory.as_ref().expect("inventory initialized").clone(),
+            self.progress.lock().expect("progress lock").clone(),
+        )
+        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+    }
+
+    async fn record_provider_delivery_workflow_progress(
+        &self,
+        request: RecordProviderDeliveryWorkflowProgress,
+    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
+        let inventory = self.inventory.lock().expect("inventory lock");
+        let Some(inventory) = inventory.as_ref() else {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        };
+        if inventory.digest() != request.inventory_digest()
+            || !inventory
+                .entries()
+                .iter()
+                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
+        {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+        let mut progress = self.progress.lock().expect("progress lock");
+        if let Some(existing) = progress
+            .iter()
+            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
+        {
+            return if existing == request.outcome() {
+                Ok(existing.clone())
+            } else {
+                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
+            };
+        }
+        progress.push(request.outcome().clone());
+        Ok(request.outcome().clone())
     }
 
     async fn retry_provider_delivery(
@@ -1100,6 +1312,8 @@ fn blocking_clock_harness(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate,
@@ -1224,6 +1438,8 @@ fn harness_with_stored_visibility(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1317,6 +1533,8 @@ fn snapshot_processor_harness_with_config(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1376,6 +1594,113 @@ fn snapshot_processor_harness_with_config(
     )
 }
 
+fn changed_files_renewal_harness(
+    visibility: ProviderRepositoryVisibility,
+    credential_behavior: CredentialBehavior,
+    first_error: Option<GithubPushChangedFilesError>,
+) -> (
+    Harness,
+    Arc<CountingWorkflowProcessor>,
+    Arc<RenewalRacingChangedFiles>,
+) {
+    let (template, descriptor, body) = delivery_template(visibility, visibility, false);
+    let renewal_apply_gate = Arc::new(RenewalApplyGate::new());
+    let repository = Arc::new(RecordingRepository {
+        template,
+        renewal_behavior: RenewalBehavior::BlockCommittedThenSucceed,
+        terminal_behavior: TerminalBehavior::Succeed,
+        claim_calls: Mutex::new(Vec::new()),
+        claim_count: AtomicUsize::new(0),
+        reclaim_enabled: AtomicBool::new(false),
+        claimed_at: Mutex::new(None),
+        renewals: Mutex::new(Vec::new()),
+        renewal_called: Notify::new(),
+        completions: Mutex::new(Vec::new()),
+        retries: Mutex::new(Vec::new()),
+        rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
+        terminal_entered: Notify::new(),
+        terminal_release: CancellationToken::new(),
+        renewal_apply_gate: renewal_apply_gate.clone(),
+    });
+    let credentials = Arc::new(RecordingCredentialProvider::new(
+        credential_behavior,
+        renewal_apply_gate.clone(),
+    ));
+    let source = RepositorySource::from_bytes(
+        ScmProviderId::new("github").expect("provider"),
+        ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
+        ExactRevision::new(AFTER).expect("revision"),
+        ArchiveFormat::TarGzip,
+        archive(BTreeMap::from([(
+            ".ci/workflows/ci.yml",
+            PATH_FILTER_WORKFLOW.to_vec(),
+        )])),
+    );
+    let source = Arc::new(RecordingSourcePort::new(source, None));
+    let clock = Arc::new(ManualClock::new(INITIAL_NOW));
+    let worker_id =
+        ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
+    let objects = Arc::new(FixtureBlobStore {
+        descriptor,
+        bytes: body,
+        reads: AtomicUsize::new(0),
+    });
+    let changed_files = Arc::new(match first_error {
+        Some(error) => RenewalRacingChangedFiles::new(error, renewal_apply_gate.clone()),
+        None => RenewalRacingChangedFiles::path_miss(renewal_apply_gate.clone()),
+    });
+    let admission = WorkflowAdmissionService::with_system_ports(
+        objects.clone(),
+        Arc::new(UnreachableLogicalAdmissions),
+        Arc::new(GithubWorkflowPlanVerifier::new()),
+    );
+    let processor = Arc::new(CountingWorkflowProcessor::new(
+        GithubDeliveryWorkflowAdmissionProcessor::new(admission)
+            .with_changed_files_provider(changed_files.clone()),
+    ));
+    let service = if visibility == ProviderRepositoryVisibility::Private {
+        GithubDeliveryService::new_with_private_source_credentials(
+            objects.clone(),
+            source.clone(),
+            processor.clone(),
+            repository.clone(),
+            credentials.clone(),
+            clock.clone(),
+            worker_id,
+            GithubDeliveryWorkerConfig::default(),
+            service_config(),
+        )
+    } else {
+        GithubDeliveryService::new_public_only(
+            objects.clone(),
+            source.clone(),
+            processor.clone(),
+            repository.clone(),
+            clock.clone(),
+            worker_id,
+            GithubDeliveryWorkerConfig::default(),
+            service_config(),
+        )
+    }
+    .expect("delivery service");
+    (
+        Harness {
+            service: Arc::new(service),
+            objects,
+            repository,
+            credentials,
+            source,
+            clock,
+            worker_id,
+            renewal_apply_gate,
+        },
+        processor,
+        changed_files,
+    )
+}
+
 fn service_config() -> GithubDeliveryServiceConfig {
     GithubDeliveryServiceConfig::new(CLAIM_MILLIS, 2, 10).expect("service config")
 }
@@ -1392,6 +1717,39 @@ async fn wait_for_renewal_count(repository: &RecordingRepository, expected: usiz
     })
     .await
     .expect("expected claim renewal count");
+}
+
+fn assert_single_skipped_completion(harness: &Harness, fence: u64) {
+    let completions = harness
+        .repository
+        .completions
+        .lock()
+        .expect("completions lock");
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].claim().fence(), fence);
+    assert_eq!(completions[0].outcomes().len(), 1);
+    assert!(matches!(
+        completions[0].outcomes()[0].conclusion(),
+        ProviderDeliveryWorkflowConclusion::Skipped { reason }
+            if reason.as_str() == "github.workflow.event_filters_not_matched"
+    ));
+    drop(completions);
+    assert!(
+        harness
+            .repository
+            .retries
+            .lock()
+            .expect("retries lock")
+            .is_empty()
+    );
+    assert!(
+        harness
+            .repository
+            .rejections
+            .lock()
+            .expect("rejections lock")
+            .is_empty()
+    );
 }
 
 async fn advance_successful_renewals(
@@ -1450,7 +1808,7 @@ fn delivery_template(
         u64::try_from(body.len()).expect("body length"),
         MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
-    let raw_event = AdmissionObject::new_event(
+    let raw_event = AdmissionObject::new(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
@@ -1610,6 +1968,10 @@ async fn success_uses_one_stable_worker_and_exact_request_scoped_credential() {
         assert_eq!(observations[0].consumer.fence().get(), 7);
         assert_eq!(observations[0].consumer.revision().get(), 1);
         assert_eq!(
+            observations[0].action,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+        );
+        assert_eq!(
             observations[0].required_through,
             UnixMillis::new(
                 INITIAL_NOW + CLAIM_MILLIS + MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
@@ -1757,7 +2119,7 @@ async fn public_only_service_rehydrates_private_identity_before_applying_source_
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_push"
+        "github.raw_event.invalid_event"
     );
 }
 
@@ -1794,7 +2156,7 @@ async fn public_only_service_rejects_private_payload_before_anonymous_source() {
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_push"
+        "github.raw_event.invalid_event"
     );
 }
 
@@ -1993,6 +2355,65 @@ async fn renewal_during_revision_release_reuses_the_completed_source() {
         .expect("completions lock");
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].claim().fence(), 8);
+}
+
+#[tokio::test]
+async fn renewal_during_changed_files_release_reuses_the_completed_provider_result() {
+    let (harness, processor, changed_files) = changed_files_renewal_harness(
+        ProviderRepositoryVisibility::Private,
+        CredentialBehavior::ReleaseChangedFilesDuringRenewalApply,
+        None,
+    );
+    let task = tokio::spawn(run_once(harness.service.clone(), CancellationToken::new()));
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.renewal_apply_gate.wait_downstream_result_ready(),
+    )
+    .await
+    .expect("changed-files credential release started after the provider result");
+    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(changed_files.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.repository.transition_count(), 0);
+
+    harness.clock.set(RENEWED_NOW);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.renewal_apply_gate.wait_committed(),
+    )
+    .await
+    .expect("renewal committed while the changed-files release was pending");
+    harness.renewal_apply_gate.release.cancel();
+
+    assert!(matches!(
+        task.await
+            .expect("service task")
+            .expect("successor-safe completion after changed-files release"),
+        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
+    ));
+    assert_eq!(processor.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(changed_files.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 2);
+    let credential_observations = harness
+        .credentials
+        .observations
+        .lock()
+        .expect("credential observations lock");
+    assert_eq!(
+        credential_observations
+            .iter()
+            .map(|observation| observation.action)
+            .collect::<Vec<_>>(),
+        [
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+        ]
+    );
+    drop(credential_observations);
+    assert_single_skipped_completion(&harness, 8);
 }
 
 #[tokio::test]
@@ -2292,11 +2713,10 @@ async fn renewal_during_credential_acquisition_reacquires_for_the_latest_horizon
     );
     assert_eq!(observations[0].claim.fence(), 7);
     assert_eq!(observations[1].claim.fence(), 8);
-    assert!(
-        observations
-            .iter()
-            .all(|observation| observation.attempt == 1)
-    );
+    assert!(observations.iter().all(|observation| {
+        observation.action == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+            && observation.attempt == 1
+    }));
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 2);
 }
@@ -2345,6 +2765,163 @@ async fn authority_error_waits_for_committed_renewal_to_reach_the_live_snapshot(
     assert_eq!(observations[0].claim.fence(), 7);
     assert_eq!(observations[1].claim.fence(), 8);
     assert_eq!(harness.repository.transition_count(), 1);
+}
+
+#[tokio::test]
+async fn stale_changed_files_failures_wait_for_renewal_and_replay_on_the_successor() {
+    for visibility in [
+        ProviderRepositoryVisibility::Public,
+        ProviderRepositoryVisibility::Private,
+    ] {
+        for first_error in [
+            GithubPushChangedFilesError::InvalidEvidence,
+            GithubPushChangedFilesError::Unavailable,
+        ] {
+            let (harness, processor, changed_files) = changed_files_renewal_harness(
+                visibility,
+                CredentialBehavior::Exact,
+                Some(first_error),
+            );
+            let task = tokio::spawn(run_once(harness.service.clone(), CancellationToken::new()));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while changed_files.calls.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fence-7 changed-files request");
+            harness.clock.set(RENEWED_NOW);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                harness.renewal_apply_gate.wait_committed(),
+            )
+            .await
+            .expect("renewal committed before its response was applied");
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                harness.renewal_apply_gate.wait_downstream_result_ready(),
+            )
+            .await
+            .expect("stale changed-files failure became ready");
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            assert_eq!(harness.repository.transition_count(), 0);
+
+            harness.renewal_apply_gate.release.cancel();
+            assert!(matches!(
+                task.await
+                    .expect("service task")
+                    .expect("successor changed-files replay completes"),
+                GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
+            ));
+            assert_eq!(processor.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(changed_files.calls.load(Ordering::SeqCst), 2);
+            let observations = changed_files
+                .observations
+                .lock()
+                .expect("changed-files observations lock");
+            assert_eq!(observations.len(), 2);
+            assert_eq!(observations[0].claim.fence(), 7);
+            assert_eq!(observations[1].claim.fence(), 8);
+            assert!(observations.iter().all(|observation| {
+                observation.private_authority
+                    == (visibility == ProviderRepositoryVisibility::Private)
+            }));
+            drop(observations);
+            assert_single_skipped_completion(&harness, 8);
+        }
+    }
+}
+
+#[tokio::test]
+async fn stale_malformed_changed_files_credential_reacquires_on_the_successor() {
+    let (harness, processor, changed_files) = changed_files_renewal_harness(
+        ProviderRepositoryVisibility::Private,
+        CredentialBehavior::WrongOwnerChangedFilesDuringRenewalApply,
+        None,
+    );
+    let task = tokio::spawn(run_once(harness.service.clone(), CancellationToken::new()));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let observed_changed_files = harness
+                .credentials
+                .observations
+                .lock()
+                .expect("credential observations lock")
+                .iter()
+                .any(|observation| {
+                    observation.action
+                        == GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+                });
+            if observed_changed_files {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fence-7 changed-files credential request");
+    harness.clock.set(RENEWED_NOW);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.renewal_apply_gate.wait_committed(),
+    )
+    .await
+    .expect("renewal committed before its response was applied");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.renewal_apply_gate.wait_downstream_result_ready(),
+    )
+    .await
+    .expect("stale malformed credential became ready");
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished());
+    assert_eq!(harness.repository.transition_count(), 0);
+
+    harness.renewal_apply_gate.release.cancel();
+    assert!(matches!(
+        task.await
+            .expect("service task")
+            .expect("successor credential replay completes"),
+        GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Completed(_))
+    ));
+    assert_eq!(processor.calls.load(Ordering::SeqCst), 2);
+    let credential_observations = harness
+        .credentials
+        .observations
+        .lock()
+        .expect("credential observations lock");
+    assert_eq!(credential_observations.len(), 3);
+    assert_eq!(
+        credential_observations
+            .iter()
+            .map(|observation| (observation.action, observation.claim.fence()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
+                7,
+            ),
+            (
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+                7,
+            ),
+            (
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+                8,
+            ),
+        ]
+    );
+    drop(credential_observations);
+    let changed_files_observations = changed_files
+        .observations
+        .lock()
+        .expect("changed-files observations lock");
+    assert_eq!(changed_files_observations.len(), 1);
+    assert_eq!(changed_files_observations[0].claim.fence(), 8);
+    assert!(changed_files_observations[0].private_authority);
+    drop(changed_files_observations);
+    assert_single_skipped_completion(&harness, 8);
 }
 
 #[tokio::test(start_paused = true)]

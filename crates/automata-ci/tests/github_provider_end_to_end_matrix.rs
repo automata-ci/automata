@@ -4,7 +4,6 @@ use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    str::FromStr as _,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -26,12 +25,15 @@ use automata_ci_github::{
     GithubWebhookVerifier, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_github_delivery::{
-    GithubDeliveryClock, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction, GithubDeliveryService,
+    GithubDeliveryServiceConfig, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
     GithubDeliveryWorkflowAdmissionProcessor, GithubServerServiceCredentialRelease,
+};
+use automata_ci_postgres_test_support::{
+    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_scm::{
@@ -64,21 +66,19 @@ use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
 use ring::hmac;
 use serde_json::{Value, json};
-use sqlx::{
-    AssertSqlSafe, PgPool, Row as _,
-    postgres::{PgConnectOptions, PgPoolOptions, PgRow},
-};
+use sqlx::{PgPool, Row as _, postgres::PgRow};
 use tar::{Builder, EntryType, Header};
-use tokio::time::Instant;
+use tokio::{sync::OnceCell, time::Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
 const WEBHOOK_SECRET: &[u8] = b"automata-provider-matrix-webhook-secret";
 const SOURCE_TOKEN: &str = "automata-provider-matrix-private-source-token";
 const BEFORE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
+
+static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
 
 const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
     SELECT repository.owner, repository.name, job.id AS logical_job_id,
@@ -160,7 +160,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24.04"},
     "selector":"Ubuntu-24.04"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
+  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 #[derive(Clone, Copy, Debug)]
@@ -756,6 +756,10 @@ fn assert_source_authentication(
         let case = case_for_repository(&observation.repository);
         assert_eq!(case.visibility, ProviderRepositoryVisibility::Private);
         assert_eq!(
+            observation.action,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+        );
+        assert_eq!(
             observation.authority_id,
             Uuid::from_u128(
                 case.private_source_authority_id
@@ -1319,6 +1323,7 @@ impl RepositorySourcePort for MatrixRepositorySource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CredentialObservation {
     repository: String,
+    action: GithubDeliveryPrivateRepositoryAction,
     authority_id: Uuid,
     policy_revision: u64,
 }
@@ -1354,6 +1359,7 @@ impl GithubDeliverySourceCredentialProvider for MatrixSourceCredentials {
             .expect("credential observations lock")
             .push(CredentialObservation {
                 repository: repository.clone(),
+                action: request.action(),
                 authority_id: request.authority_selector().authority_id().as_uuid(),
                 policy_revision: request.authority_selector().policy_revision().get(),
             });
@@ -1478,65 +1484,26 @@ fn append_archive_entry(
 
 #[derive(Debug)]
 struct TestDatabase {
-    schema: String,
-    admin: PgPool,
+    database: IsolatedTestDatabase,
     store: Arc<PostgresStore>,
 }
 
 impl TestDatabase {
     async fn create() -> TestResult<Self> {
-        let database_url = std::env::var(DATABASE_URL_ENVIRONMENT).map_err(|_| {
-            std::io::Error::other(format!(
-                "set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL test server URL"
-            ))
-        })?;
-        let admin = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        let schema = format!("automata_test_{}", Uuid::new_v4().simple());
-        let quoted_schema = quote_identifier(&admin, &schema).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {quoted_schema}")))
-            .execute(&admin)
-            .await?;
-        let connection_schema = schema.clone();
-        let options = PgConnectOptions::from_str(&database_url)?;
-        let pool = match PgPoolOptions::new()
-            .max_connections(16)
-            .after_connect(move |connection, _metadata| {
-                let schema = connection_schema.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        .bind(format!("{schema}, pg_catalog"))
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
+        let harness = PostgresTestHarness::from_environment()?;
+        let template = PREPARED_TEMPLATE
+            .get_or_try_init(|| async {
+                harness
+                    .prepare_template(|pool| async move {
+                        PostgresStore::from_postgres_pool(pool).migrate().await?;
+                        Ok(())
+                    })
+                    .await
             })
-            .connect_with(options)
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => {
-                let cleanup = drop_schema(&admin, &schema).await;
-                admin.close().await;
-                cleanup?;
-                return Err(error.into());
-            }
-        };
-        let store = Arc::new(PostgresStore::from_postgres_pool(pool));
-        if let Err(error) = store.migrate().await {
-            store.postgres_pool().close().await;
-            let cleanup = drop_schema(&admin, &schema).await;
-            admin.close().await;
-            cleanup?;
-            return Err(error.into());
-        }
-        Ok(Self {
-            schema,
-            admin,
-            store,
-        })
+            .await?;
+        let database = template.create_database().await?;
+        let store = Arc::new(PostgresStore::from_postgres_pool(database.pool().clone()));
+        Ok(Self { database, store })
     }
 
     fn store(&self) -> Arc<PostgresStore> {
@@ -1549,9 +1516,7 @@ impl TestDatabase {
 
     async fn cleanup(&self) -> TestResult {
         self.store.postgres_pool().close().await;
-        drop_schema(&self.admin, &self.schema).await?;
-        self.admin.close().await;
-        Ok(())
+        self.database.cleanup().await
     }
 }
 
@@ -1576,21 +1541,4 @@ where
             Err(join_error.into())
         }
     }
-}
-
-async fn quote_identifier(pool: &PgPool, identifier: &str) -> TestResult<String> {
-    Ok(sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
-        .bind(identifier)
-        .fetch_one(pool)
-        .await?)
-}
-
-async fn drop_schema(pool: &PgPool, schema: &str) -> TestResult {
-    let quoted_schema = quote_identifier(pool, schema).await?;
-    sqlx::query(AssertSqlSafe(format!(
-        "DROP SCHEMA {quoted_schema} CASCADE"
-    )))
-    .execute(pool)
-    .await?;
-    Ok(())
 }

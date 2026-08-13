@@ -41,7 +41,7 @@ pub use activation::{
     ValidatedLogicalJob, ValidatedLogicalPlan,
 };
 pub use automata_ci_workflow_github::{
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
 };
 pub use autonomous_workflow::{
     AUTONOMOUS_WORKFLOW_AUTHORITY_SAFETY_MILLIS, AutonomousActivationLease,
@@ -60,14 +60,14 @@ pub use github_activation::{
 pub use github_autonomous::GithubAutonomousWorkflowPhaseExecutor;
 pub use github_dispatch::{
     AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE, DurableGithubWorkflowDispatchRequest,
-    GithubWorkflowDispatchError, GithubWorkflowDispatchEvidenceError,
-    GithubWorkflowDispatchEvidenceV1, GithubWorkflowDispatchRequest,
+    GithubWorkflowDispatchError, GithubWorkflowDispatchEvidence,
+    GithubWorkflowDispatchEvidenceError, GithubWorkflowDispatchRequest,
     GithubWorkflowDispatchRequestError, GithubWorkflowDispatchService,
     WorkflowDispatchAuthorization,
 };
 pub use github_schedule::{
-    AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, GithubScheduleEvidenceError,
-    GithubScheduleEvidenceV1,
+    AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, GithubScheduleEvidence,
+    GithubScheduleEvidenceError,
 };
 pub use id::{Sha256AdmissionIdGenerator, SystemAdmissionClock};
 pub use logical_projection::{

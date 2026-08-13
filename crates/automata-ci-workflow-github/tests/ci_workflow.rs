@@ -33,7 +33,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 10);
+    assert_eq!(plan.workflow().jobs().len(), 8);
     assert_eq!(
         plan.workflow()
             .jobs()
@@ -42,11 +42,9 @@ fn repository_ci_produces_an_accepted_source_plan() {
             .collect::<Vec<_>>(),
         [
             "verify",
-            "rust_tests",
             "rust_coverage",
             "renderer_tests",
-            "postgres_store",
-            "postgres_integrations",
+            "postgres",
             "frontend",
             "renderer",
             "dist_build",
@@ -93,18 +91,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
             .condition()
             .expect("distribution condition")
             .value(),
-        r"${{ !cancelled()
-    && needs.dist_build.result == 'success'
-    && needs.verify.result == 'success'
-    && needs.rust_tests.result == 'success'
-    && needs.rust_coverage.result == 'success'
-    && needs.renderer_tests.result == 'success'
-    && needs.postgres_store.result == 'success'
-    && needs.postgres_integrations.result == 'success'
-    && needs.frontend.result == 'success'
-    && (needs.renderer.result == 'success'
-        || (github.event_name == 'pull_request'
-            && needs.renderer.result == 'skipped')) }}"
+        r"${{ !cancelled() }}"
     );
 
     let triggers = plan.workflow().triggers().expect("on is required");

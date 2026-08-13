@@ -45,6 +45,7 @@ use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, WrappedDataKey,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
+use automata_ci_postgres_test_support::TestClock;
 use support::{TestResult, run_with_database};
 use uuid::Uuid;
 
@@ -444,6 +445,7 @@ async fn database_now_minus_sixty_rolls_back_expired_bootstrap_authority() -> Te
 async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         let encryption = keyring();
         let installation =
             PostgresInstallationRepository::new(pool.clone(), encryption.clone());
@@ -456,15 +458,38 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
                 ProviderSubject::new("424242")?,
                 scenario_time(150),
                 scenario_time(152),
-            )?)
-            .await?;
+        )?)
+        .await?;
         let (transaction, _) = login_transaction(LOGIN_ID, 0x4a, 150, 152);
         login.create(transaction).await?;
+        let final_deadline_ms: i64 = sqlx::query_scalar(
+            r"
+            SELECT LEAST(
+                installation.challenge_expires_at_ms,
+                login.expires_at_ms
+            )
+            FROM human_auth_installation_state AS installation
+            JOIN human_login_transactions AS login ON login.id=$1
+            WHERE installation.singleton
+            ",
+        )
+        .bind(Uuid::parse_str(LOGIN_ID)?)
+        .fetch_one(pool)
+        .await?;
+        clock
+            .set(
+                final_deadline_ms
+                    .checked_sub(1)
+                    .expect("time immediately before binding expiry"),
+            )
+            .await?;
         sqlx::query(
             r"
-            CREATE FUNCTION delay_installation_binding_update() RETURNS trigger AS $$
+            CREATE FUNCTION advance_installation_binding_test_clock() RETURNS trigger AS $$
             BEGIN
-                PERFORM pg_sleep(2.1);
+                UPDATE automata_test.__automata_test_clock
+                SET now_ms = now_ms + 2100
+                WHERE singleton;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql
@@ -474,9 +499,9 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
         .await?;
         sqlx::query(
             r"
-            CREATE TRIGGER delay_installation_binding_update
+            CREATE TRIGGER advance_installation_binding_test_clock
             BEFORE UPDATE ON human_auth_installation_state
-            FOR EACH STATEMENT EXECUTE FUNCTION delay_installation_binding_update()
+            FOR EACH STATEMENT EXECUTE FUNCTION advance_installation_binding_test_clock()
             ",
         )
         .execute(pool)
@@ -659,6 +684,7 @@ async fn exact_bound_login_replays_after_restart_and_a_different_login_fails_clo
 #[allow(clippy::too_many_lines)]
 async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let keyring = keyring();
         let installation = Arc::new(PostgresInstallationRepository::new(
             database.pool().clone(),
@@ -677,7 +703,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
         let (too_early, _) =
             login_transaction("dddddddd-dddd-4ddd-8ddd-dddddddddddd", 0x21, 90, 500);
         login.create(too_early).await.expect("create pre-arm login");
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        clock.advance(1_100).await?;
 
         let armed = installation
             .arm(ArmInstallationSetup::new(

@@ -1277,7 +1277,7 @@ fn write_runner_config(
         fs::create_dir_all(path).expect("create runner support directory");
     }
     let config = json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "runner_id": runner_id.to_string(),
         "control_endpoint": format!("https://{control_address}/"),
         "state": {

@@ -8,9 +8,11 @@ use automata_ci_key_management::{
     AES_256_GCM_KEY_BYTES, ENVELOPE_SCHEMA_V1, EncryptedEnvelope, EnvelopeCodec, EnvelopeError,
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId, KeyPurpose,
     LocalAes256GcmKeyring, LocalKeyMaterial, LocalKeyringConfigurationError,
-    MAX_ENVELOPE_CIPHERTEXT_BYTES, MAX_ENVELOPE_PLAINTEXT_BYTES, SecretBytes, WrappedDataKey,
+    MAX_ENVELOPE_CIPHERTEXT_BYTES, MAX_ENVELOPE_PLAINTEXT_BYTES, PreparedEnvelope, SecretBytes,
+    WrappedDataKey,
 };
 use futures::executor::block_on;
+use static_assertions::assert_not_impl_any;
 
 fn key_id(value: &str) -> KeyId {
     KeyId::new(value).expect("key ID")
@@ -50,6 +52,8 @@ fn context(tenant: &str, purpose: &str, record: &str) -> KeyEncryptionContext {
 fn plaintext() -> SecretBytes {
     SecretBytes::from_utf8("provider refresh token and metadata".to_owned()).expect("plaintext")
 }
+
+assert_not_impl_any!(PreparedEnvelope: Clone, Copy);
 
 fn rebuild(
     schema: u16,

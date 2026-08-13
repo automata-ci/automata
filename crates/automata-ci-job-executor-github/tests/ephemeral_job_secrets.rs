@@ -1,9 +1,15 @@
-use automata_ci_auth::secret::SecretString;
+use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::SecretBinding;
 use automata_ci_job_executor_github::{
     EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError, MAX_EPHEMERAL_JOB_SECRETS,
     NoSecrets, PortErrorKind, SecretPort,
 };
+use static_assertions::assert_not_impl_any;
+
+assert_not_impl_any!(EphemeralJobSecret: Clone);
+assert_not_impl_any!(EphemeralJobSecrets: Clone);
+assert_not_impl_any!(SharedSensitiveString: Into<String>, std::fmt::Display);
+
 fn entry(binding: &str, version: &str, value: String) -> EphemeralJobSecret {
     let binding = SecretBinding::new(binding)
         .unwrap()

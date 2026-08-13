@@ -326,8 +326,11 @@ owner-only regular files and cannot be symlinks.
 
 The required `transport` selects one closed origin policy. Use
 `{"mode":"github_dot_com"}` in production. The integration suite can select
-`loopback_emulator` with one exact `http://...localhost:PORT/api/v3/` base;
-that mode is rejected for non-loopback hosts and has no GitHub.com fallback.
+`loopback_emulator` with an exact `http://...localhost:PORT/api/v3/` control
+base and a separate `http://...invalid:PORT/` job-runtime origin. The ports
+must match. The mapped origin is carried only into job repository authority;
+the control plane continues to use loopback. Invalid origin pairs are rejected
+and emulator mode has no GitHub.com fallback.
 
 Each repository entry binds one existing tenant to stable numeric GitHub App
 installation, repository, and owner IDs, an exact `owner/name`, its canonical

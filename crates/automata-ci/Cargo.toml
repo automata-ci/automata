@@ -81,6 +81,7 @@ rustix.workspace = true
 automata-ci-build-support.workspace = true
 
 [dev-dependencies]
+automata-ci-postgres-test-support.workspace = true
 automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true

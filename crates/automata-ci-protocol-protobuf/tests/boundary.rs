@@ -14,6 +14,7 @@ use automata_ci_protocol_protobuf::{
 };
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
+use static_assertions::assert_impl_all;
 use uuid::Uuid;
 
 #[allow(clippy::all, clippy::pedantic, dead_code)]
@@ -1142,4 +1143,10 @@ fn encoding_applies_domain_validation_and_size_budget() {
         encode_runner_frame(&valid, &tiny),
         Err(EncodeError::FrameTooLarge { maximum: 1, .. })
     ));
+}
+
+#[test]
+fn public_error_types_are_thread_safe_and_have_sanitized_displays() {
+    assert_impl_all!(DecodeError: Send, Sync);
+    assert_impl_all!(EncodeError: Send, Sync);
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "runner_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
@@ -122,9 +122,9 @@
   },
   "github": {
     "user_agent": "automata-runner/0.1.0",
-    "server_url": "http://automata-git.localhost:8088/",
-    "api_url": "http://automata-git.localhost:8088/api/v3/",
-    "graphql_url": "http://automata-git.localhost:8088/api/graphql",
+    "server_url": "http://automata-git.invalid:8088/",
+    "api_url": "http://automata-git.invalid:8088/api/v3/",
+    "graphql_url": "http://automata-git.invalid:8088/api/graphql",
     "allow_insecure_http": true
   },
   "metrics": {

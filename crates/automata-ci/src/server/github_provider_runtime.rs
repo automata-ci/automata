@@ -45,8 +45,10 @@ use automata_ci_github_delivery::{
     GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceError,
     GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
-    GithubDeliveryWorkflowProcessor, GithubScheduleClock, GithubSchedulePrivateSourceAuthorities,
-    GithubScheduleService, GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
+    GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
+    GithubRestPushChangedFilesProvider, GithubScheduleClock,
+    GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
+    GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
     GithubScheduleSourceCredentialProvider,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
@@ -327,6 +329,13 @@ impl GithubProviderRuntimeBuilder {
         self
     }
 
+    /// Replaces the bounded idle and release policy.
+    #[must_use]
+    pub fn with_policy(mut self, policy: GithubProviderRuntimePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Converges bootstrap state and builds the live aggregate.
     ///
     /// The App PEM and webhook bytes are consumed by this builder and dropped
@@ -505,7 +514,7 @@ impl GithubProviderRuntimeBuilder {
                         )
                     }
                     GithubProviderTransport::LoopbackEmulator { .. } => {
-                        GithubRepositoryRuntimeAuthorityIssuer::new_for_loopback_emulator(
+                        GithubRepositoryRuntimeAuthorityIssuer::new_for_mapped_emulator(
                             identity_resolver.clone(),
                             coordinator,
                             job_authority_repository.clone(),
@@ -659,8 +668,12 @@ impl GithubProviderRuntimeBuilder {
             }
         }
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
-        let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> =
-            Arc::new(GithubDeliveryWorkflowAdmissionProcessor::new(admission));
+        let changed_files: Arc<dyn GithubPushChangedFilesProvider> =
+            Arc::new(GithubRestPushChangedFilesProvider::new(endpoint.clone()));
+        let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> = Arc::new(
+            GithubDeliveryWorkflowAdmissionProcessor::new(admission)
+                .with_changed_files_provider(changed_files),
+        );
         let repository_source = Arc::new(endpoint.clone());
         let repository_dispatch_resolver = Arc::new(endpoint.clone());
         let repository_dispatch_evidence: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
@@ -764,7 +777,7 @@ fn provider_credential_config(
         GithubProviderTransport::GithubDotCom => {
             GithubAppCredentialConfig::github_dot_com(issuer, installation, GITHUB_HTTP_USER_AGENT)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
+        GithubProviderTransport::LoopbackEmulator { api_base, .. } => {
             GithubAppCredentialConfig::new_for_loopback_emulator(
                 api_base.clone(),
                 issuer,
@@ -784,7 +797,7 @@ fn provider_http_endpoint(
         GithubProviderTransport::GithubDotCom => {
             GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
+        GithubProviderTransport::LoopbackEmulator { api_base, .. } => {
             let mut server_origin = api_base.clone();
             server_origin.set_path("/");
             server_origin.set_query(None);
@@ -807,13 +820,9 @@ fn provider_runtime_authority_endpoint(
         GithubProviderTransport::GithubDotCom => {
             RuntimeAuthorityEndpoint::new(GITHUB_PROVIDER_WEB_ORIGIN)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
-            let mut server_origin = api_base.clone();
-            server_origin.set_path("/");
-            server_origin.set_query(None);
-            server_origin.set_fragment(None);
-            RuntimeAuthorityEndpoint::loopback_development(server_origin.as_str())
-        }
+        GithubProviderTransport::LoopbackEmulator {
+            job_runtime_origin, ..
+        } => RuntimeAuthorityEndpoint::trusted_private_development(job_runtime_origin.as_str()),
     }
     .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)
 }

@@ -25,6 +25,7 @@ members = [
     "crates/automata-ci-oidc-github",
     "crates/automata-ci-oidc-github-control",
     "crates/automata-ci-output-policy",
+    "crates/automata-ci-postgres-test-support",
     "crates/automata-ci-protocol",
     "crates/automata-ci-protocol-protobuf",
     "crates/automata-ci-results-github",
@@ -97,6 +98,7 @@ automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
 automata-ci-oidc-github-control = { path = "crates/automata-ci-oidc-github-control", version = "0.1.0" }
 automata-ci-output-policy = { path = "crates/automata-ci-output-policy", version = "0.1.0" }
+automata-ci-postgres-test-support = { path = "crates/automata-ci-postgres-test-support" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
@@ -150,6 +152,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.143", features = ["raw_value"] }
 sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
+static_assertions = "1.1.0"
 subtle = "2.6.1"
 thiserror = "2.0.16"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }

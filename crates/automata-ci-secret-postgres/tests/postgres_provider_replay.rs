@@ -13,6 +13,7 @@ use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring,
     LocalKeyMaterial, SecretBytes, WrappedDataKey,
 };
+use automata_ci_postgres_test_support::TestClock;
 use automata_ci_secret::{
     CreateSecretVersionRequest, CreatedSecretVersion, ExistingSecretVersion, ProviderCapability,
     ProviderErrorKind, ProviderOperationContext, ProviderRequestId, ProviderSecretLocator,
@@ -589,6 +590,7 @@ async fn reconciliation_waits_for_the_exact_concurrent_create_commit() -> TestRe
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn expired_reservations_and_staged_replays_never_wrap_new_material() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let expired = seed_fixture_with_deadline_margin(database.pool(), 0).await?;
         let expired_keys = Arc::new(OneShotKeyProvider::new());
         let expired_provider = PostgresSecretProvider::new(
@@ -625,8 +627,11 @@ async fn expired_reservations_and_staged_replays_never_wrap_new_material() -> Te
         .bind(staged.mutation)
         .fetch_one(database.pool())
         .await?;
-        let wait_ms = u64::try_from(deadline_ms.saturating_sub(now_ms).saturating_add(25).max(1))?;
-        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        let advance_ms = deadline_ms
+            .checked_sub(now_ms)
+            .filter(|advance_ms| *advance_ms > 0)
+            .ok_or("staged mutation must begin before its confirmation deadline")?;
+        assert_eq!(clock.advance(advance_ms).await?, deadline_ms);
         let replay_error = staged_provider
             .create_version(staged.request(&request_id, SECOND_VALUE))
             .await

@@ -8,13 +8,20 @@ use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppHttpLimits, GithubInstallationTokenIndeterminateReason,
     GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
     GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
+    GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
 };
 use axum::http::StatusCode;
+use static_assertions::assert_not_impl_any;
 use support::{
     EXPIRATION, FixtureServer, NOW, REPOSITORY_ID, ResponseSpec, request, token_response,
 };
 
 const SENTINEL: &str = "ghs_revocation_sentinel_never_render_me";
+
+assert_not_impl_any!(GithubInstallationTokenRevocationCandidate: Clone, serde::Serialize);
+assert_not_impl_any!(GithubReadyInstallationToken: Clone, serde::Serialize);
+assert_not_impl_any!(GithubInstallationTokenRevokePending: Clone, serde::Serialize);
+assert_not_impl_any!(GithubInstallationTokenMintOutcome: Clone, serde::Serialize);
 
 #[tokio::test]
 async fn semantic_or_malformed_201_with_a_unique_token_retains_a_candidate() {

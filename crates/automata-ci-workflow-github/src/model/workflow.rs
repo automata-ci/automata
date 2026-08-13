@@ -6,23 +6,6 @@ use crate::{
 /// Current and only supported GitHub source-plan schema version.
 pub const SOURCE_PLAN_SCHEMA_VERSION: u16 = 1;
 
-/// Closed version tag for a parsed GitHub source plan.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum SourcePlanVersion {
-    /// Current loss-aware GitHub source model.
-    V1,
-}
-
-impl SourcePlanVersion {
-    /// Returns the numeric schema version persisted with source-plan evidence.
-    pub const fn as_u16(self) -> u16 {
-        match self {
-            Self::V1 => SOURCE_PLAN_SCHEMA_VERSION,
-        }
-    }
-}
-
 /// Complete GitHub workflow model decoded from one exact YAML document.
 ///
 /// Values and expressions remain source-level. This type is not scheduler IR;
@@ -94,22 +77,16 @@ impl GithubWorkflow {
     }
 }
 
-/// Versioned source-level output. It deliberately is not scheduler or runner IR.
+/// Source-level output. It deliberately is not scheduler or runner IR.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct GithubWorkflowSourcePlan {
-    pub(crate) version: SourcePlanVersion,
     pub(crate) source: SourceFile,
     pub(crate) document: YamlDocument,
     pub(crate) workflow: GithubWorkflow,
 }
 
 impl GithubWorkflowSourcePlan {
-    /// Returns the current-only source-plan schema version.
-    pub const fn version(&self) -> SourcePlanVersion {
-        self.version
-    }
-
     /// Returns the exact immutable source text and origin evidence.
     pub const fn source(&self) -> &SourceFile {
         &self.source

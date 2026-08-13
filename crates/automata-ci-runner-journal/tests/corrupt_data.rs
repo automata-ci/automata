@@ -73,12 +73,12 @@ fn unsupported_schema_is_identified_before_current_shape_decode() {
     let (scratch, fixture) = initialized();
     let root = scratch.state_root();
     let path = journal_file(root.as_path());
-    fs::write(path, br#"{"schema_version":1}"#).expect("unsupported schema probe");
+    fs::write(path, br#"{"schema_version":2}"#).expect("unsupported schema probe");
     assert!(matches!(
         FileJournal::open(root, fixture.runner_id),
         Err(JournalError::UnsupportedSchema {
             supported: RUNNER_JOURNAL_SCHEMA_VERSION,
-            received: 1
+            received: 2
         })
     ));
 }

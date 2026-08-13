@@ -60,10 +60,32 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
         WHEN 'provider_delivery' THEN EXISTS (
             SELECT 1
             FROM github_provider_delivery_evidence AS delivery_evidence
-            WHERE delivery_evidence.github_check_subject_id = subject.id
-              AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
+            WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
               AND delivery_evidence.tenant_id = subject.tenant_id
               AND delivery_evidence.repository_id = subject.repository_id
+              AND (
+                delivery_evidence.github_check_subject_id = subject.id
+                OR EXISTS (
+                    SELECT 1
+                    FROM github_workflow_run_subject_evidence AS run_evidence
+                    WHERE run_evidence.github_check_subject_id = subject.id
+                      AND run_evidence.provider_delivery_id =
+                          subject.provider_delivery_id
+                      AND run_evidence.tenant_id = subject.tenant_id
+                      AND run_evidence.repository_id = subject.repository_id
+                      AND run_evidence.workflow_path = subject.subject_key
+                      AND run_evidence.run_id = subject.workflow_run_id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM provider_delivery_workflow_progress AS progress
+                    WHERE progress.inbox_id = subject.provider_delivery_id
+                      AND progress.tenant_id = subject.tenant_id
+                      AND progress.workflow_path = subject.subject_key
+                      AND progress.outcome_kind = 'failed'
+                      AND subject.workflow_run_id IS NULL
+                )
+              )
         )
         WHEN 'scheduled_fire' THEN EXISTS (
             SELECT 1
@@ -145,10 +167,31 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
       AND subject.origin_kind = 'provider_delivery'
       AND subject.schedule_fire_id IS NULL
       AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = subject.id
       AND evidence.provider_delivery_id = subject.provider_delivery_id
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
+      AND (
+        evidence.github_check_subject_id = subject.id
+        OR EXISTS (
+            SELECT 1
+            FROM github_workflow_run_subject_evidence AS run_evidence
+            WHERE run_evidence.github_check_subject_id = subject.id
+              AND run_evidence.provider_delivery_id = subject.provider_delivery_id
+              AND run_evidence.tenant_id = subject.tenant_id
+              AND run_evidence.repository_id = subject.repository_id
+              AND run_evidence.workflow_path = subject.subject_key
+              AND run_evidence.run_id = subject.workflow_run_id
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM provider_delivery_workflow_progress AS progress
+            WHERE progress.inbox_id = subject.provider_delivery_id
+              AND progress.tenant_id = subject.tenant_id
+              AND progress.workflow_path = subject.subject_key
+              AND progress.outcome_kind = 'failed'
+              AND subject.workflow_run_id IS NULL
+        )
+      )
       AND outbox.claim_fence < 9223372036854775807
       AND (
         outbox.attempted_revision IS DISTINCT FROM subject.desired_revision
@@ -1640,10 +1683,32 @@ async fn projection_fence_exhausted(
                 WHEN 'provider_delivery' THEN EXISTS (
                     SELECT 1
                     FROM github_provider_delivery_evidence AS delivery_evidence
-                    WHERE delivery_evidence.github_check_subject_id = subject.id
-                      AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
+                    WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
                       AND delivery_evidence.tenant_id = subject.tenant_id
                       AND delivery_evidence.repository_id = subject.repository_id
+                      AND (
+                        delivery_evidence.github_check_subject_id = subject.id
+                        OR EXISTS (
+                            SELECT 1
+                            FROM github_workflow_run_subject_evidence AS run_evidence
+                            WHERE run_evidence.github_check_subject_id = subject.id
+                              AND run_evidence.provider_delivery_id =
+                                  subject.provider_delivery_id
+                              AND run_evidence.tenant_id = subject.tenant_id
+                              AND run_evidence.repository_id = subject.repository_id
+                              AND run_evidence.workflow_path = subject.subject_key
+                              AND run_evidence.run_id = subject.workflow_run_id
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM provider_delivery_workflow_progress AS progress
+                            WHERE progress.inbox_id = subject.provider_delivery_id
+                              AND progress.tenant_id = subject.tenant_id
+                              AND progress.workflow_path = subject.subject_key
+                              AND progress.outcome_kind = 'failed'
+                              AND subject.workflow_run_id IS NULL
+                        )
+                      )
                 )
                 WHEN 'scheduled_fire' THEN EXISTS (
                     SELECT 1
@@ -1709,10 +1774,32 @@ async fn block_exhausted_candidates(
             WHEN 'provider_delivery' THEN EXISTS (
                 SELECT 1
                 FROM github_provider_delivery_evidence AS delivery_evidence
-                WHERE delivery_evidence.github_check_subject_id = subject.id
-                  AND delivery_evidence.provider_delivery_id = subject.provider_delivery_id
+                WHERE delivery_evidence.provider_delivery_id = subject.provider_delivery_id
                   AND delivery_evidence.tenant_id = subject.tenant_id
                   AND delivery_evidence.repository_id = subject.repository_id
+                  AND (
+                    delivery_evidence.github_check_subject_id = subject.id
+                    OR EXISTS (
+                        SELECT 1
+                        FROM github_workflow_run_subject_evidence AS run_evidence
+                        WHERE run_evidence.github_check_subject_id = subject.id
+                          AND run_evidence.provider_delivery_id =
+                              subject.provider_delivery_id
+                          AND run_evidence.tenant_id = subject.tenant_id
+                          AND run_evidence.repository_id = subject.repository_id
+                          AND run_evidence.workflow_path = subject.subject_key
+                          AND run_evidence.run_id = subject.workflow_run_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM provider_delivery_workflow_progress AS progress
+                        WHERE progress.inbox_id = subject.provider_delivery_id
+                          AND progress.tenant_id = subject.tenant_id
+                          AND progress.workflow_path = subject.subject_key
+                          AND progress.outcome_kind = 'failed'
+                          AND subject.workflow_run_id IS NULL
+                    )
+                  )
             )
             WHEN 'scheduled_fire' THEN EXISTS (
                 SELECT 1

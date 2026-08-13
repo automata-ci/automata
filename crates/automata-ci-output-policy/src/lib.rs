@@ -184,9 +184,4 @@ impl SecretExposureClass {
 pub enum RawLogDisposition {
     /// Runner-redacted user-controlled standard output and error may be persisted.
     Persist,
-    /// Raw user-controlled output must not enter persistent log storage.
-    ///
-    /// Retained for immutable legacy snapshots and explicit fail-closed
-    /// admission decisions.
-    SuppressUserOutput,
 }

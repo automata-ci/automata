@@ -71,6 +71,30 @@ impl TransportLimits {
         Ok(self)
     }
 
+    /// Changes the HTTP/2 header, per-stream send-buffer, and stream ceilings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigurationError`] if a value is zero or the send buffer
+    /// cannot be represented by the HTTP/2 implementation.
+    pub fn with_http2_limits(
+        mut self,
+        header_list_bytes: u32,
+        send_buffer_bytes: usize,
+        concurrent_streams_per_connection: u32,
+    ) -> Result<Self, ConfigurationError> {
+        require_nonzero(&header_list_bytes)?;
+        require_nonzero(&send_buffer_bytes)?;
+        require_nonzero(&concurrent_streams_per_connection)?;
+        if send_buffer_bytes > u32::MAX as usize {
+            return Err(ConfigurationError::InvalidLimit);
+        }
+        self.header_list_bytes = header_list_bytes;
+        self.send_buffer_bytes = send_buffer_bytes;
+        self.concurrent_streams_per_connection = concurrent_streams_per_connection;
+        Ok(self)
+    }
+
     /// Changes connection-level and request-level admission ceilings.
     ///
     /// # Errors

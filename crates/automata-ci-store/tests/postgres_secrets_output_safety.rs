@@ -1,15 +1,62 @@
-mod common;
+use crate::common;
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use common::{SeedData, TestResult, run_with_database, seed_control_plane};
 
+const SECRETS_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+
 #[derive(Clone, Copy)]
 struct SeededHuman {
     principal_id: Uuid,
     session_id: Uuid,
     authorization_revision: i64,
+}
+
+#[test]
+fn secrets_migration_is_ciphertext_only_and_fail_private() {
+    let normalized = SECRETS_MIGRATION.to_ascii_lowercase();
+    for table in [
+        "secret_providers",
+        "secret_provider_configuration_envelopes",
+        "repository_environments",
+        "protected_environment_approval_requests",
+        "secrets",
+        "secret_versions",
+        "secret_provider_locator_envelopes",
+        "secret_provider_version_envelopes",
+        "secret_version_envelopes",
+        "secret_policies",
+        "secret_repository_access",
+        "secret_workload_grants",
+        "secret_provider_leases",
+        "secret_provider_lease_envelopes",
+        "secret_cleanup_outbox",
+        "secret_key_rotations",
+    ] {
+        assert!(
+            normalized.contains(&format!("create table {table}")),
+            "missing durable table {table}"
+        );
+    }
+    assert!(normalized.contains("octet_length(nonce) = 12"));
+    assert!(normalized.contains("wrapped_data_key bytea not null"));
+    assert!(normalized.contains("default 'readable_secret'::text"));
+    assert!(normalized.contains("default 'persist'::text"));
+    assert!(!normalized.contains("provider_locator text"));
+    assert!(!normalized.contains("provider_version_id text"));
+    assert!(!normalized.contains("provider_lease_id text"));
+    assert!(!normalized.contains("public_configuration jsonb"));
+    assert!(!normalized.contains("credential_source_label text"));
+    assert!(normalized.contains("protected_environment_approval_requests_status_shape"));
+    assert!(normalized.contains("secret_provider_leases_revocation_shape"));
+    assert!(normalized.contains("secret_cleanup_outbox_failure_kind"));
+    assert!(normalized.contains("resolution_reason = any (array["));
+    assert!(normalized.contains("revocation_reason = any (array["));
+    assert!(normalized.contains("last_failure_kind = any (array["));
+    assert!(normalized.contains("create_request_id text not null"));
+    assert!(normalized.contains("secret_version_id uuid not null"));
 }
 
 #[tokio::test]
@@ -696,7 +743,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 effective_log_visibility, output_safety_reason, classified_at_ms
             ) VALUES (
                 $1, $2, 1, 'succeeded', 7, 1, 2, 'readable_secret',
-                'suppress_user_output', 'public', 'public',
+                'persist', 'public', 'public',
                 'repository_policy', 1
             )
             ",
@@ -737,7 +784,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 effective_log_visibility, output_safety_reason, classified_at_ms
             ) VALUES (
                 $1, $2, 2, 'succeeded', 8, 1, 2, 'readable_secret',
-                'suppress_user_output', 'public', 'private',
+                'persist', 'public', 'private',
                 'secret_exposure', 1
             )
             ",

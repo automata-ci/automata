@@ -21,7 +21,7 @@ pub use job::{
     JobResources, Needs, ReusableWorkflowCall, ReusableWorkflowInputs, ReusableWorkflowSecretMap,
     ReusableWorkflowSecrets, RunnerSelection, WorkflowJob,
 };
-pub use provider_event::{GithubChangedFilesV1, GithubEventMetadataV1};
+pub use provider_event::{GithubChangedFiles, GithubEventMetadata};
 pub use step::{ActionStep, RunStep, Step, StepExecution, StepId};
 pub use strategy::{
     JobStrategy, MatrixConfiguration, MatrixConfigurations, MatrixDimension, MatrixDimensionValues,
@@ -32,13 +32,11 @@ pub use value::{
     EnvironmentVariables, PermissionEntry, PermissionLevel, Permissions, PreservedField,
     RunDefaults, ScalarValue, ValueMap, ValueMapEntry,
 };
-pub use workflow::{
-    GithubWorkflow, GithubWorkflowSourcePlan, SOURCE_PLAN_SCHEMA_VERSION, SourcePlanVersion,
-};
+pub use workflow::{GithubWorkflow, GithubWorkflowSourcePlan, SOURCE_PLAN_SCHEMA_VERSION};
 pub use workflow_dispatch::{
     GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
     GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsError,
-    GithubWorkflowDispatchInputsV1, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
+    GithubWorkflowDispatchInputsError, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
 };

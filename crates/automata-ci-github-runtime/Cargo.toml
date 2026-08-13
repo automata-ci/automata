@@ -20,3 +20,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+static_assertions.workspace = true

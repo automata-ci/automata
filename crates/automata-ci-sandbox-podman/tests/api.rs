@@ -12,8 +12,13 @@ use automata_ci_sandbox_podman::{
     PodmanHostGatewayAlias,
 };
 use automata_ci_sandbox_podman::{PodmanCommandExecutor, RootlessPodmanProvider};
+use static_assertions::{assert_impl_all, assert_obj_safe};
+
 #[cfg(target_os = "linux")]
 use support::{FakePodman, ScratchRoot, options};
+
+assert_impl_all!(RootlessPodmanProvider: Send, Sync);
+assert_obj_safe!(PodmanCommandExecutor);
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -160,11 +165,13 @@ fn buildkit_capability_rejects_missing_mismatched_or_unprobeable_runtimes() {
 
 #[test]
 fn host_gateway_alias_accepts_only_explicit_dns_hostnames() {
-    let alias = PodmanHostGatewayAlias::new("automata-git.localhost").expect("valid DNS alias");
-    assert_eq!(alias.as_str(), "automata-git.localhost");
+    let alias = PodmanHostGatewayAlias::new("automata-git.invalid", 8088).expect("valid DNS alias");
+    assert_eq!(alias.as_str(), "automata-git.invalid");
+    assert_eq!(alias.port(), 8088);
 
     for invalid in [
         "localhost",
+        "automata-git.localhost",
         "127.0.0.1",
         "::1",
         "*.localhost",
@@ -176,9 +183,13 @@ fn host_gateway_alias_accepts_only_explicit_dns_hostnames() {
         "automata-git.localhost.",
     ] {
         assert_eq!(
-            PodmanHostGatewayAlias::new(invalid),
+            PodmanHostGatewayAlias::new(invalid, 8088),
             Err(PodmanConfigurationError::InvalidHostGatewayAlias),
             "{invalid:?} must be rejected"
         );
     }
+    assert_eq!(
+        PodmanHostGatewayAlias::new("automata-git.invalid", 0),
+        Err(PodmanConfigurationError::InvalidHostGatewayAlias)
+    );
 }

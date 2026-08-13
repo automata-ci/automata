@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_auth::authorization::{
     AuthorizationContext, AuthorizationRequest, AuthorizationScope, OutputVisibility, Permission,
@@ -1046,7 +1046,8 @@ async fn workflow_authorization_and_rows_share_one_repeatable_read_snapshot() ->
                 SELECT EXISTS (
                     SELECT 1
                     FROM pg_stat_activity AS activity
-                    WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
                 )
                 ",
             )

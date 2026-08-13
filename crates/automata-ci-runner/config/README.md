@@ -18,7 +18,7 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v2 accepts exactly one sandbox provider. Host runners use the
+Product schema 1 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
 `state.podman`, `state.windows_native`, and `state.macos_native` and use a
 top-level `kubernetes` object. Native Windows and macOS runners use their
@@ -175,14 +175,15 @@ The three `runner.local-N.example.json` files assume:
 - a control-plane runner listener reachable at the configured HTTPS URL;
 - the same RustFS bucket and prefix used by the server;
 - the pinned Ubuntu 24.04 OCI image is available by its exact digest; and
-- a firewall-protected smart-Git bridge is available for the local repository
-  snapshot.
+- the isolated GitHub emulator is started by the integration harness on the
+  exact mapped origin configured below.
 
 Copy all three examples to ignored, host-specific paths. Update, at minimum,
 the three `runner_id` values, `control_endpoint`, account paths, runtime UID,
-resources, and Git bridge URLs. Do not edit the checked-in examples with
-machine credentials and never reuse an ID, client key, or spool key between
-instances.
+resources, and GitHub context origins. Keep the server, API, and GraphQL
+origins identical and change their port together with the emulator mapping.
+Do not edit the checked-in examples with machine credentials and never reuse
+an ID, client key, or spool key between instances.
 
 `control_endpoint` is also the only managed-secret delivery origin. Values are
 fetched after lease acceptance through its direct mTLS connection, retained
@@ -440,61 +441,29 @@ early fails closed with an unavailable-key error; the runner never tries other
 keys or falls back to plaintext. Once the old ID is no longer referenced,
 remove its decrypt-only entry and securely retire the external key file.
 
-## 3. Prepare the local repository bridge
+## 3. Start the isolated GitHub emulator
 
-The integration configuration points GitHub context URLs at a read-only smart HTTP
-server on `automata-git.ghe.com:8088`. A static file server is insufficient
-because Git's dumb HTTP transport cannot honor the workflow's shallow checkout.
+The checked Linux examples are integration-test configurations. Their three
+GitHub context URLs use the same reserved authority,
+`http://automata-git.invalid:8088`, and explicitly enable
+`map_github_server_to_host_gateway`. They therefore require the isolated
+GitHub emulator from
+[`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests),
+not the standalone development Git bridge.
 
-Review the exact repository paths needed by the integration run and stage them
-in the default Git index before creating the immutable snapshot. The snapshot
-script uses that index as-is; it rejects `GIT_INDEX_FILE`, unstaged tracked
-changes, and every nonignored untracked path before it creates an object or
-publishes the bare repository. Never stage credentials just to make the check
-pass. A failed snapshot leaves its requested output path absent.
+The emulator binds port 8088 on host loopback and serves the closed fixture
+catalog's GitHub API, archives, and read-only smart Git transport. The runner
+adds only `automata-git.invalid` to each job's hosts file and configures Pasta
+with `--tcp-ns 8088`, forwarding that one namespace port to the matching host
+loopback listener. It does not expose any other host-loopback port. The
+reserved `.invalid` name fails DNS closed when either the typed runner opt-in
+or the generated network configuration is absent.
 
-Create the snapshot and a separate bridge scratch directory:
-
-```console
-git status --short
-git add -- PATHS_REVIEWED_FOR_THE_INTEGRATION_RUN
-git diff --cached --check
-git diff --cached
-./scripts/dev/create-integration-snapshot.sh target/integration/source
-install -d -m 0700 target/runner-local/git-http-scratch
-```
-
-The bridge binds one exact RFC 1918 host address. Render, review, apply, and
-audit its independent firewall policy before starting the listener:
-
-```console
-./scripts/dev/git-bridge-firewall.sh render \
-  --config deploy/dev/git-bridge-firewall.env.example
-sudo ./scripts/dev/git-bridge-firewall.sh apply \
-  --config deploy/dev/git-bridge-firewall.env.example
-sudo ./scripts/dev/git-bridge-firewall.sh audit \
-  --config deploy/dev/git-bridge-firewall.env.example
-```
-
-Then start the bounded read-only CGI bridge:
-
-```console
-python3 scripts/dev/git-http-server.py \
-  --project-root "$(realpath target/integration/source)" \
-  --scratch-directory "$(realpath target/runner-local/git-http-scratch)" \
-  --git-http-backend "$(realpath "$(git --exec-path)/git-http-backend")" \
-  --listen-address 192.168.0.8 \
-  --port 8088
-```
-
-The URL format is `http://HOST:PORT/OWNER/REPOSITORY`. The server accepts only
-smart read endpoints for `git-upload-pack`; it cannot push or invoke arbitrary
-CGI paths.
-
-The `.ghe.com` suffix is intentional: the official artifact client recognizes
-it, while `.localhost` is forced to container loopback by the resolver. The
-typed Podman option maps exactly the configured GitHub hostname to the host
-gateway; production configurations add no such mapping by default.
+Run these examples through the integration harness, which reserves the port,
+starts the emulator, and verifies its fixture and binary provenance. If the
+emulator port changes, update the server, API, and GraphQL URLs together; the
+runner rejects mixed authorities. Normal production configurations use HTTPS
+GitHub origins and must leave `map_github_server_to_host_gateway` disabled.
 
 ## 4. Start the runner
 

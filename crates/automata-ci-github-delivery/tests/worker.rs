@@ -702,20 +702,20 @@ impl FixtureSubjectEvidence {
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
-        let legacy = Self::from_claimed(claimed, check_head_sha).0;
+        let base = Self::from_claimed(claimed, check_head_sha).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
         let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            legacy.delivery_id(),
-            legacy.repository_owner_id(),
-            legacy.manifest().clone(),
-            legacy.authenticated_webhook_verifier_fingerprint(),
-            legacy.authenticated_webhook_verifier_revision(),
-            legacy.checks_authority().clone(),
-            legacy.private_source_authority().cloned(),
-            legacy.check_subject_id(),
-            legacy.check_head_sha(),
+            base.delivery_id(),
+            base.repository_owner_id(),
+            base.manifest().clone(),
+            base.authenticated_webhook_verifier_fingerprint(),
+            base.authenticated_webhook_verifier_revision(),
+            base.checks_authority().clone(),
+            base.private_source_authority().cloned(),
+            base.check_subject_id(),
+            base.check_head_sha(),
             event,
-            legacy.accepted_at(),
+            base.accepted_at(),
         )
         .expect("authenticated event evidence");
         Self(evidence)
@@ -907,7 +907,7 @@ fn claimed_fixture_with_visibility(
         u64::try_from(body.len()).expect("body length"),
         MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
-    let raw_event = AdmissionObject::new_event(
+    let raw_event = AdmissionObject::new(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
@@ -1094,21 +1094,21 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
 fn pending_repository_dispatch_evidence(
     fixture: &ClaimedFixture,
 ) -> PendingGithubRepositoryDispatchEvidence {
-    let legacy = FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha).0;
+    let base = FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha).0;
     PendingGithubRepositoryDispatchEvidence::from_durable_parts(
-        legacy.delivery_id(),
-        legacy.repository_owner_id(),
-        legacy.manifest().clone(),
-        legacy.authenticated_webhook_verifier_fingerprint(),
-        legacy.authenticated_webhook_verifier_revision(),
-        legacy.checks_authority().clone(),
-        legacy.private_source_authority().cloned(),
+        base.delivery_id(),
+        base.repository_owner_id(),
+        base.manifest().clone(),
+        base.authenticated_webhook_verifier_fingerprint(),
+        base.authenticated_webhook_verifier_revision(),
+        base.checks_authority().clone(),
+        base.private_source_authority().cloned(),
         GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
         )
         .expect("dispatch coordinates"),
-        legacy.accepted_at(),
+        base.accepted_at(),
     )
     .expect("pending repository dispatch")
 }
@@ -1265,7 +1265,7 @@ fn append_archive_entry(
 }
 
 #[tokio::test]
-async fn exact_source_and_only_the_manifest_pinned_workflow_complete_deterministically() {
+async fn exact_source_and_all_direct_workflows_complete_deterministically() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let workflow_marker = b"private-workflow-marker\n".to_vec();
     let archive = archive(BTreeMap::from([
@@ -1295,6 +1295,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             fixture.claimed.clone(),
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1304,6 +1305,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1329,12 +1331,15 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
         .collect::<Vec<_>>();
     assert_eq!(
         observed_paths,
-        [".ci/workflows/ci.yml", ".ci/workflows/ci.yml"]
+        [
+            ".ci/workflows/a.yml",
+            ".ci/workflows/ci.yml",
+            ".ci/workflows/large.yaml",
+        ]
     );
     assert!(workflow_observations.iter().all(|observation| {
         observation.ref_kind == GithubPushRefKind::Branch
             && observation.revision == AFTER
-            && observation.source_bytes == b"private-workflow-marker\n".len()
             && observation.manifest_revision == 1
             && observation.private_source_authority_present
             && !observation.debug.contains("private-workflow-marker")
@@ -1350,7 +1355,12 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             .iter()
             .map(automata_ci_store::ProviderDeliveryWorkflowOutcome::workflow_path)
             .collect::<Vec<_>>(),
-        [".ci/workflows/ci.yml"]
+        [
+            ".ci/workflows/a.yml",
+            ".ci/workflows/ci.yml",
+            ".ci/workflows/empty.yml",
+            ".ci/workflows/large.yaml",
+        ]
     );
 }
 
@@ -1389,14 +1399,15 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             fixture.claimed.clone(),
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
         .expect("second workflow schedules a durable retry");
-    assert!(matches!(
-        first,
-        GithubDeliveryWorkerOutcome::RetryScheduled(_)
-    ));
+    assert!(
+        matches!(first, GithubDeliveryWorkerOutcome::RetryScheduled(_)),
+        "unexpected first outcome: {first:?}"
+    );
     assert!(
         deliveries
             .completions
@@ -1411,6 +1422,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1480,6 +1492,7 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1537,6 +1550,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
                     claimed,
                     GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                         credential: &credential,
+                        changed_files_credentials: None,
                     },
                 )
                 .await
@@ -1570,7 +1584,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
     assert_eq!(source_observations[0].revision, AFTER);
     assert!(source_observations[0].credential_matches);
     let workflow_observations = processor.event_observations();
-    assert_eq!(workflow_observations.len(), 2);
+    assert_eq!(workflow_observations.len(), 1);
     assert!(workflow_observations.iter().all(|observation| {
         observation.event_name == "repository_dispatch"
             && observation.git_ref == "refs/heads/main"
@@ -1663,6 +1677,7 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1688,7 +1703,7 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
 }
 
 #[tokio::test]
-async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
+async fn no_direct_workflows_completes_with_an_empty_outcome_set() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
         BTreeMap::from([("README.md", b"no workflow here\n".to_vec())]),
@@ -1708,6 +1723,7 @@ async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1718,13 +1734,7 @@ async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
     let completions = deliveries.completions.lock().expect("completions lock");
     assert_eq!(completions.len(), 1);
     let outcomes = completions[0].outcomes();
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(outcomes[0].workflow_path(), ".ci/workflows/ci.yml");
-    let ProviderDeliveryWorkflowConclusion::Failed { failure_kind } = outcomes[0].conclusion()
-    else {
-        panic!("missing configured workflow must fail its Check subject");
-    };
-    assert_eq!(failure_kind.as_str(), "github.workflow.missing");
+    assert!(outcomes.is_empty());
 }
 
 #[tokio::test]
@@ -1770,6 +1780,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
                     claimed,
                     GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                         credential: &credential,
+                        changed_files_credentials: None,
                     },
                 )
                 .await
@@ -1779,7 +1790,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
     }
 
     let observations = processor.observations();
-    assert_eq!(observations.len(), 2);
+    assert_eq!(observations.len(), 1);
     assert!(observations.iter().all(|observation| {
         observation.manifest_revision == 2 && observation.private_source_authority_present
     }));
@@ -1855,6 +1866,7 @@ async fn historical_manifest_uses_pinned_limits_below_a_wider_local_ceiling() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1901,6 +1913,7 @@ async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1939,6 +1952,7 @@ async fn deleted_pinned_branch_completes_without_source_authority_or_processing(
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1976,6 +1990,7 @@ async fn non_pinned_git_ref_rejects_before_source_or_workflow_processing() {
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2048,6 +2063,7 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -2112,6 +2128,7 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2151,6 +2168,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2187,6 +2205,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await,
@@ -2224,6 +2243,7 @@ async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         ),
     )

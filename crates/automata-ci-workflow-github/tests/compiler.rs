@@ -2,7 +2,7 @@ mod support;
 
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompileWorkflowRequest, DiagnosticKind, GithubEventMetadataV1,
+    CompilationDisposition, CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata,
     GithubWorkflowCompiler, WorkflowCompiler, WorkflowNotSelectedReason,
 };
 
@@ -20,9 +20,9 @@ fn compile(source: &str, event_name: &str) -> automata_ci_workflow_github::Compi
         event(event_name),
     );
     let request = match event_name {
-        "push" => request.with_event_metadata_v1(GithubEventMetadataV1::push(false)),
+        "push" => request.with_event_metadata(GithubEventMetadata::push(false)),
         "pull_request" => {
-            request.with_event_metadata_v1(GithubEventMetadataV1::pull_request("opened", "main"))
+            request.with_event_metadata(GithubEventMetadata::pull_request("opened", "main"))
         }
         _ => request,
     };

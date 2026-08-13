@@ -2,9 +2,9 @@ use automata_ci_auth::{
     authorization::{AuthorizationScope, RoleName},
     github_mapping_management::{
         CreateGithubMapping, GITHUB_MAPPING_OPTION_LIMIT, GithubMappingCursor,
-        GithubMappingOptions, GithubMappingPage, GithubMappingPageSize, GithubMappingRecord,
-        GithubMappingStatus, GithubMappingValueError, ListGithubMappings,
-        ManagedGithubMappingSource,
+        GithubMappingManagementRepository, GithubMappingOptions, GithubMappingPage,
+        GithubMappingPageSize, GithubMappingRecord, GithubMappingStatus, GithubMappingValueError,
+        ListGithubMappings, ManagedGithubMappingSource,
     },
     human::{PrincipalId, TenantId},
     management::{
@@ -14,6 +14,7 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
+use static_assertions::assert_impl_all;
 use uuid::Uuid;
 
 fn mapping_id(value: u128) -> ProviderRoleMappingId {
@@ -204,4 +205,13 @@ fn pages_and_options_reject_oversized_duplicate_or_unordered_results() {
         GithubMappingOptions::new(revision(1), oversized, Vec::new(), Vec::new()),
         Err(GithubMappingValueError::OversizedOptions)
     );
+}
+
+#[test]
+fn mapping_management_port_is_object_safe_and_thread_safe() {
+    #[allow(dead_code)]
+    fn accepts_object(_: &dyn GithubMappingManagementRepository) {}
+
+    assert_impl_all!(GithubMappingPage: Send, Sync);
+    assert_impl_all!(CreateGithubMapping: Send, Sync);
 }

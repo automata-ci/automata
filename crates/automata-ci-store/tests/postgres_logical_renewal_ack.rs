@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::collections::BTreeMap;
 
@@ -52,7 +52,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 const INITIAL_SELECTION_MILLIS: i64 = 2_000;
 const FIRST_RENEWAL_MILLIS: i64 = 60_000;
@@ -502,6 +502,7 @@ async fn materialization_generation_poison_is_locked_exact_and_does_not_starve_n
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn legacy_null_preparation_origin_rejects_live_consume_and_allows_takeover() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let mut preparation = fixture(&database, "legacy-null-preparation", 760_000, 0).await?;
         seed_tenant(&database, &preparation.tenant).await?;
         admit_authenticated_fixture(&database, &mut preparation).await?;
@@ -522,7 +523,7 @@ async fn legacy_null_preparation_origin_rejects_live_consume_and_allows_takeover
             consume_orchestration(&database, first_preparation.selected.clone()).await,
             Err(LogicalWorkSelectionStoreError::SelectionExpired)
         ));
-        expire_preparation_claim(&database, preparation.jobs[0]).await?;
+        expire_preparation_claim(&database, &clock, preparation.jobs[0]).await?;
         let preparation_takeover =
             select_orchestration(&database, &preparation, preparation.jobs[0], 31_002, 41_002)
                 .await?;
@@ -561,6 +562,7 @@ async fn legacy_null_preparation_origin_rejects_live_consume_and_allows_takeover
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn legacy_null_activation_origin_rejects_live_consume_and_allows_takeover() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let mut activation = fixture(&database, "legacy-null-activation", 770_000, 0).await?;
         seed_tenant(&database, &activation.tenant).await?;
         admit_authenticated_fixture(&database, &mut activation).await?;
@@ -583,7 +585,7 @@ async fn legacy_null_activation_origin_rejects_live_consume_and_allows_takeover(
             consume_orchestration(&database, first_activation.selected.clone()).await,
             Err(LogicalWorkSelectionStoreError::SelectionExpired)
         ));
-        expire_activation_claim(&database, activation.jobs[0]).await?;
+        expire_activation_claim(&database, &clock, activation.jobs[0]).await?;
         let legacy: (String, Option<Uuid>, i64, i64, bool) = sqlx::query_as(
             r"
             SELECT job.state, job.activation_origin_selection_id,
@@ -649,6 +651,7 @@ async fn legacy_null_activation_origin_rejects_live_consume_and_allows_takeover(
 async fn legacy_null_materialization_origin_rejects_live_consume_and_allows_takeover() -> TestResult
 {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let mut materialization =
             fixture(&database, "legacy-null-materialization", 780_000, 0).await?;
         seed_tenant(&database, &materialization.tenant).await?;
@@ -682,7 +685,7 @@ async fn legacy_null_materialization_origin_rejects_live_consume_and_allows_take
             consume_materialization(&database, first_materialization.selected.clone()).await,
             Err(LogicalWorkSelectionStoreError::SelectionExpired)
         ));
-        expire_materialization_claim(&database, instance.activated.id()).await?;
+        expire_materialization_claim(&database, &clock, instance.activated.id()).await?;
         let materialization_takeover = select_materialization(
             &database,
             &materialization,
@@ -754,11 +757,13 @@ async fn clear_preparation_origin(
 
 async fn expire_preparation_claim(
     database: &TestDatabase,
+    clock: &TestClock,
     logical_job_id: LogicalWorkflowJobId,
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_activation_preparation_claims WHERE logical_job_id = $1",
+        clock,
+        "SELECT expires_at_ms FROM logical_workflow_activation_preparation_claims WHERE logical_job_id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -778,11 +783,13 @@ async fn clear_activation_origin(
 
 async fn expire_activation_claim(
     database: &TestDatabase,
+    clock: &TestClock,
     logical_job_id: LogicalWorkflowJobId,
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (activation_expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_jobs WHERE id = $1",
+        clock,
+        "SELECT activation_expires_at_ms FROM logical_workflow_jobs WHERE id = $1",
         logical_job_id.as_uuid(),
     )
     .await
@@ -802,11 +809,13 @@ async fn clear_materialization_origin(
 
 async fn expire_materialization_claim(
     database: &TestDatabase,
+    clock: &TestClock,
     instance_id: automata_ci_store::LogicalWorkflowInstanceId,
 ) -> TestResult {
     wait_for_database_expiry(
         database,
-        "SELECT pg_sleep(GREATEST(0.0, (expires_at_ms - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT + 50)::DOUBLE PRECISION / 1000.0)) FROM logical_workflow_materialization_claims WHERE instance_id = $1",
+        clock,
+        "SELECT expires_at_ms FROM logical_workflow_materialization_claims WHERE instance_id = $1",
         instance_id.as_uuid(),
     )
     .await
@@ -814,12 +823,20 @@ async fn expire_materialization_claim(
 
 async fn wait_for_database_expiry(
     database: &TestDatabase,
+    clock: &TestClock,
     statement: &'static str,
     id: Uuid,
 ) -> TestResult {
-    sqlx::query(statement)
+    let expires_at: i64 = sqlx::query_scalar(statement)
         .bind(id)
         .fetch_one(database.pool())
+        .await?;
+    clock
+        .set(
+            expires_at
+                .checked_add(50)
+                .ok_or("logical claim expiry clock overflow")?,
+        )
         .await?;
     Ok(())
 }

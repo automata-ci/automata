@@ -11,7 +11,10 @@ use automata_ci_auth::{
     time::UnixTimestamp,
     vault::TokenVersion,
 };
+use static_assertions::assert_obj_safe;
 use uuid::Uuid;
+
+assert_obj_safe!(GithubMembershipRepository);
 
 fn memberships() -> GithubMembershipSnapshot {
     let organization_id = GithubOrganizationId::new(10).expect("organization ID");

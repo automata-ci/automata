@@ -438,14 +438,46 @@ async fn issuer_constructors_enforce_the_selected_transport_security() {
     assert!(
         GithubRepositoryRuntimeAuthorityIssuer::new_for_loopback_emulator(
             Arc::new(ExactIdentityResolver {
+                identity: fixture.identity.clone(),
+            }),
+            Arc::clone(&coordinator),
+            Arc::clone(&repository),
+            Arc::clone(&codec),
+            Arc::clone(&clock),
+            RuntimeAuthorityEndpoint::loopback_development("http://127.0.0.1/")
+                .expect("loopback endpoint"),
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        GithubRepositoryRuntimeAuthorityIssuer::new_for_mapped_emulator(
+            Arc::new(ExactIdentityResolver {
+                identity: fixture.identity.clone(),
+            }),
+            Arc::clone(&coordinator),
+            Arc::clone(&repository),
+            Arc::clone(&codec),
+            Arc::clone(&clock),
+            RuntimeAuthorityEndpoint::trusted_private_development(
+                "http://github.example.test:18088/",
+            )
+            .expect("private endpoint"),
+        ),
+        Err(GithubRuntimeAuthorityIssuerConfigurationError::InvalidEndpointSecurity)
+    ));
+    assert!(
+        GithubRepositoryRuntimeAuthorityIssuer::new_for_mapped_emulator(
+            Arc::new(ExactIdentityResolver {
                 identity: fixture.identity,
             }),
             coordinator,
             repository,
             codec,
             clock,
-            RuntimeAuthorityEndpoint::loopback_development("http://127.0.0.1/")
-                .expect("loopback endpoint"),
+            RuntimeAuthorityEndpoint::trusted_private_development(
+                "http://automata-git.invalid:18088/",
+            )
+            .expect("mapped endpoint"),
         )
         .is_ok()
     );

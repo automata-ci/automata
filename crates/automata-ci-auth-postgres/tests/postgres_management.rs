@@ -25,6 +25,7 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_auth_postgres::PostgresHumanRbacManagementRepository;
+use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -611,6 +612,7 @@ async fn finite_grants_rebase_both_accepted_clock_skews_without_extending_lifeti
 async fn finite_grant_expiring_while_waiting_for_target_lock_is_rejected() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         let manager = uuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa94");
         let target = uuid("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb94");
         let manager_role = uuid("10000000-0000-4000-8000-000000000094");
@@ -660,7 +662,7 @@ async fn finite_grant_expiring_while_waiting_for_target_lock_is_rejected() -> Te
             gate.rollback().await?;
             return Err("grant did not wait on its exact target membership lock".into());
         }
-        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        clock.advance(2_100).await?;
         gate.commit().await?;
         assert_eq!(
             mutation
@@ -788,6 +790,7 @@ async fn sign_in_and_management_share_a_deadlock_free_principal_identity_members
 async fn mutation_resamples_database_time_after_exact_lock_wait() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         seed_tenant(pool, "tenant-a").await?;
         let manager = uuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9");
         let target = uuid("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb9");
@@ -861,7 +864,7 @@ async fn mutation_resamples_database_time_after_exact_lock_wait() -> TestResult 
             )
             .into());
         }
-        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        clock.advance(2_100).await?;
         gate.commit().await?;
 
         assert_eq!(mutation.await??, ManagementMutationOutcome::Forbidden);
@@ -882,6 +885,7 @@ async fn mutation_resamples_database_time_after_exact_lock_wait() -> TestResult 
 async fn mutation_rechecks_expiring_permission_after_exact_target_lock_wait() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
         seed_tenant(pool, "tenant-a").await?;
         let manager = uuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7");
         let target = uuid("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb7");
@@ -949,7 +953,7 @@ async fn mutation_rechecks_expiring_permission_after_exact_target_lock_wait() ->
             )
             .into());
         }
-        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        clock.advance(2_100).await?;
         gate.commit().await?;
 
         assert_eq!(mutation.await??, ManagementMutationOutcome::Forbidden);

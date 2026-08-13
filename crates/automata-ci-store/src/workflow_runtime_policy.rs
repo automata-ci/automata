@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Current immutable runner-policy schema.
-pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 2;
+pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 1;
 /// Current schema of the independently versioned workspace section.
 pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA: u16 = 1;
 /// Current pure workspace derivation contract.
@@ -1178,9 +1178,9 @@ mod tests {
           "requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":536870912,"cpu_millis":500}
         }
       },
-      "schema":2
+      "schema":1
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":2,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -1228,7 +1228,7 @@ mod tests {
             Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
         );
 
-        for unsupported in [0, 1, 3, u16::MAX] {
+        for unsupported in [0, 2, 3, u16::MAX] {
             let mut document = current.clone();
             document["schema"] = serde_json::json!(unsupported);
             assert_eq!(
@@ -1251,11 +1251,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "fb010d9d689b375ee94a910fa4ceb6f798465dd0602fd5e76aaf7dd0fb27dc4c"
+            "967c02c427c4c09798377cdfdedf9a48d29bf4138b697d13fcf8a011d45b187f"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "fd71583e3ec5d867b16a7244e521d90a5d99f29ab45fc9a8995b4c0de8d660b9"
+            "53a71408ff50d313265e4739196838c06acf9e1430957a2dfadc65f120e3abf7"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -1323,7 +1323,7 @@ mod tests {
     fn duplicate_raw_object_fields_are_rejected_even_when_values_are_equal() {
         let canonical = std::str::from_utf8(CANONICAL_POLICY).expect("UTF-8 canonical policy");
         let duplicate_top_schema =
-            canonical.replacen(r#""schema":2"#, r#""schema":2,"schema":2"#, 1);
+            canonical.replacen(r#""schema":1"#, r#""schema":1,"schema":1"#, 1);
         let duplicate_workspace_schema = canonical.replacen(
             r#""workspace":{"schema":1"#,
             r#""workspace":{"schema":1,"schema":1"#,

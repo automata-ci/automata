@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use std::{sync::Arc, time::Duration};
 
@@ -4019,7 +4019,8 @@ async fn wait_for_backend_blocked_by(
             r"
             SELECT pid
             FROM pg_stat_activity
-            WHERE pid <> $1
+            WHERE datname = current_database()
+              AND pid <> $1
               AND $1 = ANY(pg_blocking_pids(pid))
               AND query LIKE '%' || $2 || '%'
             ORDER BY pid

@@ -22,6 +22,7 @@ automata-ci-github.workspace = true
 automata-ci-scm.workspace = true
 bytes.workspace = true
 flate2.workspace = true
+static_assertions.workspace = true
 tar.workspace = true
 tokio.workspace = true
 url.workspace = true

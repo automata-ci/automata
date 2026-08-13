@@ -1,6 +1,4 @@
-mod common;
-
-use sqlx::postgres::PgPoolOptions;
+use crate::common;
 
 use automata_ci_core::{
     Architecture, AttemptId, AttemptNumber, JobId, JobIrVersion, JobLifecycle, LeaseId,
@@ -25,8 +23,8 @@ use automata_ci_store::{
 };
 
 use common::{
-    DATABASE_URL_ENVIRONMENT, TestDatabase, TestResult, run_with_database,
-    runner_capability_document, seed_control_plane, test_runner_payload_key_provider,
+    TestClock, TestDatabase, TestResult, run_with_database, runner_capability_document,
+    seed_control_plane, test_runner_payload_key_provider,
 };
 
 const TEST_LEASE_DURATION_MILLIS: i64 = 120_000;
@@ -335,6 +333,7 @@ async fn command_replay_is_bounded_by_rows_and_aggregate_payload_bytes() -> Test
 #[allow(clippy::too_many_lines)]
 async fn claim_receipts_bind_one_based_slots_and_cancellation_delivery() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let seed = seed_control_plane(database.pool(), 1).await?;
         let fence = seed.session_fences[0];
         let attempt_id = insert_attempt(database.store(), seed.job_id, 1, 10).await?;
@@ -535,7 +534,7 @@ async fn claim_receipts_bind_one_based_slots_and_cancellation_delivery() -> Test
         .await?;
         assert_eq!(disabled_state_after, disabled_state);
 
-        expire_attempt_leases(&database, &[attempt_id]).await?;
+        expire_attempt_leases(&database, &clock, &[attempt_id]).await?;
         let expired = database
             .store()
             .requeue_expired(database_now(&database).await?, 10, 10)
@@ -1620,6 +1619,7 @@ async fn claims_intersect_registered_and_observed_machine_capabilities() -> Test
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn expiry_only_requeues_work_that_never_started_running() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let seed = seed_control_plane(database.pool(), 1).await?;
         let fence = seed.session_fences[0];
         let mut attempts = Vec::new();
@@ -1679,7 +1679,8 @@ async fn expiry_only_requeues_work_that_never_started_running() -> TestResult {
         )
         .await?;
 
-        let processed = requeue_at_exact_database_expiry(&database, &attempts, 10, 10).await?;
+        let processed =
+            requeue_at_exact_database_expiry(&database, &clock, &attempts, 10, 10).await?;
         assert_eq!(processed.len(), 5);
         for attempt in &attempts[..2] {
             assert_eq!(
@@ -2604,6 +2605,7 @@ fn checked_add_millis(base: UnixMillis, duration_millis: i64) -> TestResult<Unix
 
 async fn requeue_at_exact_database_expiry(
     database: &TestDatabase,
+    clock: &TestClock,
     attempt_ids: &[AttemptId],
     maximum_failures: u32,
     limit: u32,
@@ -2630,7 +2632,7 @@ async fn requeue_at_exact_database_expiry(
         "every exact-boundary fixture must retain an active lease"
     );
 
-    let exact_clock_pool = exact_database_clock_pool(database, exact_expiry).await?;
+    let exact_clock_pool = exact_database_clock_pool(database, clock, exact_expiry).await?;
     let exact_clock_store = PostgresStore::from_postgres_pool(exact_clock_pool.clone())
         .with_runner_payload_encryption(test_runner_payload_key_provider());
     let processed = exact_clock_store
@@ -2657,59 +2659,12 @@ async fn requeue_at_exact_database_expiry(
 
 async fn exact_database_clock_pool(
     database: &TestDatabase,
+    clock: &TestClock,
     exact_now: UnixMillis,
 ) -> TestResult<sqlx::PgPool> {
-    sqlx::query(
-        r"
-        CREATE TABLE automata_test_exact_clock (
-            singleton BOOLEAN PRIMARY KEY CHECK (singleton),
-            observed_at_ms BIGINT NOT NULL
-        )
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "INSERT INTO automata_test_exact_clock (singleton, observed_at_ms) VALUES (TRUE, $1)",
-    )
-    .bind(exact_now.get())
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        CREATE FUNCTION clock_timestamp()
-        RETURNS TIMESTAMPTZ
-        LANGUAGE sql
-        VOLATILE
-        AS $automata_test$
-            SELECT TIMESTAMPTZ 'epoch'
-                 + observed_at_ms * INTERVAL '1 millisecond'
-            FROM automata_test_exact_clock
-            WHERE singleton
-        $automata_test$
-        ",
-    )
-    .execute(database.pool())
-    .await?;
+    clock.set(exact_now.get()).await?;
 
-    let schema: String = sqlx::query_scalar("SELECT current_schema()")
-        .fetch_one(database.pool())
-        .await?;
-    let search_path = format!("{schema}, pg_catalog");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .after_connect(move |connection, _metadata| {
-            let search_path = search_path.clone();
-            Box::pin(async move {
-                sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                    .bind(search_path)
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&std::env::var(DATABASE_URL_ENVIRONMENT)?)
-        .await?;
+    let pool = database.connect_pool(1).await?;
     let fixed_now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
             .fetch_one(&pool)
@@ -2722,7 +2677,11 @@ async fn exact_database_clock_pool(
     Ok(pool)
 }
 
-async fn expire_attempt_leases(database: &TestDatabase, attempt_ids: &[AttemptId]) -> TestResult {
+async fn expire_attempt_leases(
+    database: &TestDatabase,
+    clock: &TestClock,
+    attempt_ids: &[AttemptId],
+) -> TestResult {
     let mut latest_expiry = None;
     for attempt_id in attempt_ids {
         let expiry: i64 = sqlx::query_scalar(
@@ -2739,22 +2698,13 @@ async fn expire_attempt_leases(database: &TestDatabase, attempt_ids: &[AttemptId
         latest_expiry = Some(latest_expiry.map_or(expiry, |current: i64| current.max(expiry)));
     }
     let latest_expiry = latest_expiry.ok_or("at least one active attempt must be expired")?;
-    sqlx::query(
-        r"
-        SELECT pg_sleep(greatest(
-            ($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT)::DOUBLE PRECISION
-                / 1000.0,
-            0.0
-        ))
-        ",
-    )
-    .bind(
-        latest_expiry
-            .checked_add(1)
-            .ok_or("test expiry wait deadline overflow")?,
-    )
-    .execute(database.pool())
-    .await?;
+    clock
+        .set(
+            latest_expiry
+                .checked_add(1)
+                .ok_or("test expiry clock deadline overflow")?,
+        )
+        .await?;
     Ok(())
 }
 

@@ -9,16 +9,17 @@ use automata_ci_auth::{
     management::{
         ChangeMemberStatus, CreateRole, DirectBindingGrantOptions, DirectBindingPrincipalOption,
         DirectBindingRepositoryOption, DirectBindingRoleOption, DirectBindingRunnerGroupOption,
-        GrantRole, ListManagementRoleBindings, ManagedPrincipalId, ManagementActor,
-        ManagementMutationCapabilities, ManagementPage, ManagementPageSize, ManagementRequestId,
-        ManagementRevision, ManagementRoleBindingCursor, ManagementValueError, MemberRecord,
-        MemberStatus, ProviderRoleMappingId, ReadDirectBindingGrantOptions,
+        GrantRole, HumanRbacManagementRepository, ListManagementRoleBindings, ManagedPrincipalId,
+        ManagementActor, ManagementMutationCapabilities, ManagementPage, ManagementPageSize,
+        ManagementRequestId, ManagementRevision, ManagementRoleBindingCursor, ManagementValueError,
+        MemberRecord, MemberStatus, ProviderRoleMappingId, ReadDirectBindingGrantOptions,
         ReadManagementMutationCapabilities, RoleBindingId, RoleDetailRecord, RoleId, RoleKind,
         RolePermissionRecord, RoleRecord,
     },
     session::SessionId,
     time::UnixTimestamp,
 };
+use static_assertions::assert_obj_safe;
 use uuid::Uuid;
 
 fn tenant(value: &str) -> TenantId {
@@ -482,3 +483,5 @@ fn direct_binding_grant_options_are_complete_ordered_and_debug_redacted() {
         Err(ManagementValueError::OversizedGrantOptions)
     );
 }
+
+assert_obj_safe!(HumanRbacManagementRepository);

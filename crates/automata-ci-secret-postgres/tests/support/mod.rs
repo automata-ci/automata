@@ -1,15 +1,16 @@
-use std::{error::Error, future::Future, str::FromStr as _, sync::Arc};
+use std::{error::Error, future::Future, sync::Arc};
 
-use automata_ci_store::PostgresStore;
-use sqlx::{
-    AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
+use automata_ci_postgres_test_support::{
+    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
 };
-use uuid::Uuid;
+use automata_ci_store::PostgresStore;
+use sqlx::PgPool;
+use tokio::sync::OnceCell;
 
-pub const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
 pub type TestError = Box<dyn Error + Send + Sync>;
 pub type TestResult<T = ()> = Result<T, TestError>;
+
+static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
 
 pub async fn run_with_database<Test, TestFuture>(test: Test) -> TestResult
 where
@@ -36,53 +37,26 @@ where
 
 #[derive(Debug)]
 pub struct TestDatabase {
-    schema: String,
-    admin: PgPool,
+    database: IsolatedTestDatabase,
     pool: PgPool,
 }
 
 impl TestDatabase {
     async fn create() -> TestResult<Self> {
-        let database_url = std::env::var(DATABASE_URL_ENVIRONMENT).map_err(|_| {
-            format!("set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL test server URL")
-        })?;
-        let admin = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        let schema = format!("automata_secret_provider_{}", Uuid::new_v4().simple());
-        let quoted_schema: String = sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
-            .bind(&schema)
-            .fetch_one(&admin)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {quoted_schema}")))
-            .execute(&admin)
-            .await?;
-
-        let connection_schema = schema.clone();
-        let options = PgConnectOptions::from_str(&database_url)?;
-        let pool = PgPoolOptions::new()
-            .max_connections(12)
-            .after_connect(move |connection, _metadata| {
-                let schema = connection_schema.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        .bind(schema)
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
+        let harness = PostgresTestHarness::from_environment()?;
+        let template = PREPARED_TEMPLATE
+            .get_or_try_init(|| async {
+                harness
+                    .prepare_template(|pool| async move {
+                        PostgresStore::from_postgres_pool(pool).migrate().await?;
+                        Ok(())
+                    })
+                    .await
             })
-            .connect_with(options)
             .await?;
-        PostgresStore::from_postgres_pool(pool.clone())
-            .migrate()
-            .await?;
-        Ok(Self {
-            schema,
-            admin,
-            pool,
-        })
+        let database = template.create_database().await?;
+        let pool = database.pool().clone();
+        Ok(Self { database, pool })
     }
 
     pub const fn pool(&self) -> &PgPool {
@@ -91,16 +65,6 @@ impl TestDatabase {
 
     async fn cleanup(&self) -> TestResult {
         self.pool.close().await;
-        let quoted_schema: String = sqlx::query_scalar("SELECT pg_catalog.quote_ident($1)")
-            .bind(&self.schema)
-            .fetch_one(&self.admin)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {quoted_schema} CASCADE"
-        )))
-        .execute(&self.admin)
-        .await?;
-        self.admin.close().await;
-        Ok(())
+        self.database.cleanup().await
     }
 }

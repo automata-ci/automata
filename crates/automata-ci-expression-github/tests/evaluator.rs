@@ -368,3 +368,9 @@ fn enforces_runtime_value_limits_and_redacts_debug() {
     );
     assert!(!format!("{context:?}").contains("super-secret-value"));
 }
+
+#[test]
+fn context_and_public_ports_are_object_safe() {
+    static_assertions::assert_obj_safe!(GithubExpressionFunctionProvider);
+    let _: &dyn automata_ci_expression_github::GithubEvaluationContext = &context([]);
+}

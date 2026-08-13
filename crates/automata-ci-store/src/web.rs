@@ -576,8 +576,6 @@ pub struct HumanOutputPublication {
 pub enum HumanRawLogDisposition {
     /// Runner-redacted user-controlled log frames may be durably persisted.
     Persist,
-    /// User-controlled output must be suppressed for this stream.
-    SuppressUserOutput,
 }
 
 /// Latest durable attempt for one job.

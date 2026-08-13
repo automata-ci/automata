@@ -287,14 +287,19 @@ separately creates, inspects, and destroys every configured profile through the
 provider before constructing advertised inventory; supply-chain and complete
 hosted-image conformance remain separate operator boundaries.
 
-## Local smart-Git bridge firewall
+## Optional standalone smart-Git bridge firewall
 
-Local integration jobs fetch an immutable snapshot from the bounded smart-HTTP Git
-bridge on the host. A rootless job reaches the host gateway, so a loopback-only
-listener is insufficient. Bind the bridge to one exact RFC 1918 address
-(`192.168.0.8:8088` in the development example), never `0.0.0.0`. Exact binding
-prevents the process from also listening on Tailscale and any other host
-address, but the private LAN address still needs an ingress guard.
+The checked integration runner examples do not use this bridge. They use the
+isolated harness's `.invalid` emulator authority and one Pasta-forwarded host
+loopback port, as documented in the runner configuration guide. This section
+instead preserves the separate standalone development bridge for operators
+who deliberately serve an immutable local snapshot without that harness.
+
+A rootless job reaches the host gateway, so a standalone bridge cannot rely on
+a loopback-only listener. Bind it to one exact RFC 1918 address
+(`192.168.0.8:8088` in the development example), never `0.0.0.0`. Exact
+binding prevents the process from also listening on Tailscale and any other
+host address, but the private LAN address still needs an ingress guard.
 
 [`scripts/dev/git-bridge-firewall.sh`](../../scripts/dev/git-bridge-firewall.sh)
 owns the independent `inet automata_git_bridge_guard` table. Its input base

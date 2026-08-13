@@ -1,6 +1,6 @@
 #[allow(dead_code)]
-mod common;
-mod github_manifest_fixture;
+use crate::common;
+use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -59,7 +59,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database};
+use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
@@ -253,49 +253,16 @@ async fn database_now(database: &TestDatabase) -> TestResult<UnixMillis> {
     Ok(UnixMillis::new(now))
 }
 
-async fn install_database_test_clock(database: &TestDatabase, now_ms: i64) -> TestResult {
-    sqlx::query(
-        r"
-        CREATE TABLE github_job_runtime_authority_test_clock (
-            singleton BOOLEAN PRIMARY KEY CHECK (singleton),
-            now_ms BIGINT NOT NULL CHECK (now_ms >= 0)
-        )
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "INSERT INTO github_job_runtime_authority_test_clock (singleton, now_ms) VALUES (TRUE, $1)",
-    )
-    .bind(now_ms)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        CREATE FUNCTION clock_timestamp()
-        RETURNS TIMESTAMPTZ
-        LANGUAGE SQL
-        VOLATILE
-        AS $automata_test$
-            SELECT TIMESTAMPTZ 'epoch' + now_ms * INTERVAL '1 millisecond'
-            FROM github_job_runtime_authority_test_clock
-            WHERE singleton
-        $automata_test$
-        ",
-    )
-    .execute(database.pool())
-    .await?;
-    set_database_test_clock(database, now_ms).await
+async fn install_database_test_clock(
+    database: &TestDatabase,
+    now_ms: i64,
+) -> TestResult<TestClock> {
+    TestClock::freeze(database.pool(), now_ms).await
 }
 
-async fn set_database_test_clock(database: &TestDatabase, now_ms: i64) -> TestResult {
-    let updated = sqlx::query(
-        "UPDATE github_job_runtime_authority_test_clock SET now_ms = $1 WHERE singleton",
-    )
-    .bind(now_ms)
-    .execute(database.pool())
-    .await?;
-    if updated.rows_affected() != 1 || database_now(database).await?.get() != now_ms {
+async fn set_database_test_clock(clock: &TestClock, now_ms: i64) -> TestResult {
+    clock.set(now_ms).await?;
+    if clock.now().await? != now_ms {
         return Err("job-runtime-authority test database clock is inconsistent".into());
     }
     Ok(())
@@ -1820,6 +1787,7 @@ async fn current_manifest_rotation_cannot_reinterpret_historical_standard_author
 async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_stale_fence()
 -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (execution, manifest) =
             seed_execution(&database, 350_000, ProviderRepositoryVisibility::Public).await?;
         let resolution = database
@@ -1882,7 +1850,6 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
             )?)
             .await?;
         assert_eq!(receipt.state(), GithubRuntimeAuthorityState::RevokePending);
-
         let first_owner = GithubRuntimeAuthorityWorkerId::from_uuid(Uuid::new_v4())?;
         let first_claim = database
             .store()
@@ -1908,6 +1875,9 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
         assert!(immediate.provider_call_authorized());
 
         let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query(
             r"
             SELECT attempt_id
@@ -1921,18 +1891,22 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
         .fetch_one(&mut *blocker)
         .await?;
         let store = database.store().clone();
-        let mut delayed = tokio::spawn(async move {
+        let delayed = tokio::spawn(async move {
             store
                 .revalidate_github_runtime_authority_revocation(first_revalidation)
                 .await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(75), &mut delayed)
-                .await
-                .is_err(),
-            "revocation revalidation must wait for the issuance-row lock"
-        );
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        wait_for_direct_database_blocker(database.pool(), blocker_pid).await?;
+        assert!(!delayed.is_finished(), "revalidation must remain blocked");
+        clock
+            .set(
+                first_claim
+                    .expires_at()
+                    .get()
+                    .checked_add(1)
+                    .ok_or("runtime-authority revocation expiry clock overflow")?,
+            )
+            .await?;
         blocker.commit().await?;
         assert!(
             delayed.await??.is_none(),
@@ -1977,13 +1951,40 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
     .await
 }
 
+async fn wait_for_direct_database_blocker(pool: &sqlx::PgPool, blocker_pid: i32) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_catalog.pg_blocking_pids(activity.pid))
+                )
+                ",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "runtime-authority revalidation did not reach its issuance-row lock")??;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)] // Direct-SQL evidence guards form one fail-closed matrix.
 async fn runtime_authority_direct_sql_guards_fail_closed() -> TestResult {
     run_with_database(|database| async move {
         const FROZEN_NOW: i64 = 2_400_000_000_000;
-        install_database_test_clock(&database, FROZEN_NOW).await?;
+        let clock = install_database_test_clock(&database, FROZEN_NOW).await?;
         let (execution, manifest) =
             seed_execution(&database, 400_000, ProviderRepositoryVisibility::Public).await?;
         let resolution = database
@@ -2136,7 +2137,7 @@ async fn runtime_authority_direct_sql_guards_fail_closed() -> TestResult {
             );
         }
 
-        set_database_test_clock(&database, FROZEN_NOW + 300).await?;
+        set_database_test_clock(&clock, FROZEN_NOW + 300).await?;
         let backdated_begin = sqlx::query(
             r"
             UPDATE github_runtime_authority_issuances
@@ -2326,7 +2327,7 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn runtime_authority_locks_attempt_runner_session_and_historical_manifest() -> TestResult {
     run_with_database(|database| async move {
-        install_database_test_clock(&database, 2_500_000_000_000).await?;
+        let _clock = install_database_test_clock(&database, 2_500_000_000_000).await?;
         let (execution, manifest) =
             seed_execution(&database, 500_000, ProviderRepositoryVisibility::Public).await?;
         let resolution = database

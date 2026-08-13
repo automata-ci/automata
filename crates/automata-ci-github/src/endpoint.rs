@@ -110,6 +110,27 @@ impl GithubHttpEndpoint {
         Self::build(trusted, archive_origin)
     }
 
+    /// Builds an isolated emulator client for a container-mapped `.invalid` host.
+    ///
+    /// Reserved `.invalid` names fail DNS closed when the explicit runtime host
+    /// mapping is absent. Redirects and ambient proxy discovery remain disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless both URLs are HTTP URLs beneath `.invalid` and
+    /// satisfy the same origin/base invariants as production configuration.
+    pub fn new_for_mapped_emulator(
+        oauth_origin: Url,
+        api_base: Url,
+        user_agent: &str,
+        limits: GithubHttpLimits,
+    ) -> Result<Self, GithubHttpConfigurationError> {
+        let trusted =
+            GithubTrustedOrigins::mapped_emulator(oauth_origin, api_base, user_agent, limits)?;
+        let archive_origin = default_archive_origin(&trusted)?;
+        Self::build(trusted, archive_origin)
+    }
+
     /// Returns the validated origin and resource-limit policy used by this client.
     pub fn trusted_origins(&self) -> &GithubTrustedOrigins {
         &self.trusted

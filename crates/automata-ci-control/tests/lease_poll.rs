@@ -3,8 +3,8 @@ use std::{sync::Mutex, time::Duration};
 use async_trait::async_trait;
 use automata_ci_control::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig,
-    LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollService, LeaseTimeToLive,
-    RunnableAttemptGate, RunnableAttemptGateDisposition,
+    LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
+    LeasePollService, LeaseTimeToLive, RunnableAttemptGate, RunnableAttemptGateDisposition,
 };
 use automata_ci_control_plane::DeterministicScheduler;
 use automata_ci_core::{
@@ -687,4 +687,11 @@ async fn observer_separates_physical_replay_from_one_new_claim_transition() {
             .expect("queue-wait observations"),
         [Duration::from_millis(960)]
     );
+}
+
+#[test]
+fn application_repository_remains_object_safe() {
+    fn require_object_safe(_: &dyn LeasePollRepository) {}
+    let fixture = fixture(RunnerSlotAvailability::Available, false);
+    require_object_safe(&fixture.repository);
 }

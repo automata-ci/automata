@@ -1119,16 +1119,9 @@ pub(crate) struct JobLogPage {
     pub(crate) previous_navigation_job_id: Option<JobId>,
     pub(crate) next_navigation_job_id: Option<JobId>,
     pub(crate) job: JobSummary,
-    pub(crate) output_visibility: LogOutputVisibility,
     pub(crate) lines: Vec<LogLine>,
     pub(crate) previous_cursor: Option<String>,
     pub(crate) next_cursor: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LogOutputVisibility {
-    Full,
-    SystemOnly,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

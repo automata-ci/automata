@@ -221,11 +221,11 @@ impl Error for GithubWorkflowDispatchInputsError {}
 /// construct this type only from integrity-verified provider evidence.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
-pub struct GithubWorkflowDispatchInputsV1 {
+pub struct GithubWorkflowDispatchInputs {
     values: BTreeMap<WorkflowInputKey, GithubWorkflowDispatchInputValue>,
 }
 
-impl GithubWorkflowDispatchInputsV1 {
+impl GithubWorkflowDispatchInputs {
     /// Creates bounded, deterministically ordered provider input evidence.
     ///
     /// # Errors
@@ -305,10 +305,10 @@ impl GithubWorkflowDispatchInputValue {
     }
 }
 
-impl fmt::Debug for GithubWorkflowDispatchInputsV1 {
+impl fmt::Debug for GithubWorkflowDispatchInputs {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GithubWorkflowDispatchInputsV1")
+            .debug_struct("GithubWorkflowDispatchInputs")
             .field("input_count", &self.values.len())
             .finish_non_exhaustive()
     }

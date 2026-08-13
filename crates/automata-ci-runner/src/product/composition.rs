@@ -780,7 +780,7 @@ fn build_podman_options(config: &RunnerProductConfig) -> Result<PodmanOptions, R
     )?
     .with_job_container_engine(podman.job_container_engine());
     if let Some(alias) = podman.github_server_host_gateway_alias() {
-        podman_options = podman_options.with_host_gateway_alias(alias.clone());
+        podman_options = podman_options.with_host_gateway_alias(alias.clone())?;
     }
     if let Some(image) = podman.service_proxy_image() {
         podman_options = podman_options.with_service_proxy_image(image.clone());

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
 use automata_ci_core::{
@@ -27,7 +27,7 @@ use automata_ci_store::{
 };
 
 use common::{
-    SeedData, TestDatabase, TestResult, run_with_database, runner_capability_document,
+    SeedData, TestClock, TestDatabase, TestResult, run_with_database, runner_capability_document,
     seed_control_plane,
 };
 
@@ -35,6 +35,30 @@ const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
 const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
 const EXPIRING_LEASE_DURATION_MILLIS: i64 = 2_000;
+const OFFER_HORIZON_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+
+#[test]
+fn offer_receipt_migration_requires_a_complete_supported_fallback_projection() {
+    for required in [
+        "lease_offer_response_disposition IS NOT NULL",
+        "lease_offer_primary_response_schema IS NOT NULL",
+        "lease_offer_primary_response_digest IS NOT NULL",
+        "lease_offer_fallback_version IS NOT NULL",
+        "lease_offer_fallback_operation_id IS NOT NULL",
+        "lease_offer_fallback_retry_after_millis IS NOT NULL",
+        "lease_offer_fallback_response_schema IS NOT NULL",
+        "lease_offer_fallback_response_digest IS NOT NULL",
+        "lease_offer_fallback_version = 1",
+        "lease_offer_response_disposition = 'primary'",
+        "lease_offer_response_disposition = 'revoked_fallback'",
+    ] {
+        assert!(
+            OFFER_HORIZON_MIGRATION.contains(required),
+            "0045 is missing fallback shape contract: {required}"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn lease_request_chains_bound_retry_state_per_live_slot() -> TestResult {
@@ -1008,6 +1032,7 @@ async fn lease_offer_command_resolution_is_exact_optional_and_bounded() -> TestR
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn reaped_claim_completes_no_work_and_evicts_without_offer_publication() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (seed, lease, metadata, slot, request_operation_id, request_digest) =
             active_lease_with_duration(&database, EXPIRING_LEASE_DURATION_MILLIS).await?;
         let fence = seed.session_fences[0];
@@ -1023,7 +1048,7 @@ async fn reaped_claim_completes_no_work_and_evicts_without_offer_publication() -
         let claim = publication.claim().clone();
         let late_publication = publication.clone();
 
-        wait_until_database_time(&database, lease.expires_at()).await?;
+        wait_until_database_time(&clock, lease.expires_at()).await?;
         let maintenance = database
             .store()
             .maintain_control_plane(maintenance_request(&database).await?)
@@ -1102,6 +1127,7 @@ async fn reaped_claim_completes_no_work_and_evicts_without_offer_publication() -
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn durable_publication_is_retained_but_not_live_after_claim_reaping() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (seed, lease, metadata, slot, request_operation_id, request_digest) =
             active_lease_with_duration(&database, EXPIRING_LEASE_DURATION_MILLIS).await?;
         let fence = seed.session_fences[0];
@@ -1122,7 +1148,7 @@ async fn durable_publication_is_retained_but_not_live_after_claim_reaping() -> T
             committed.command().request().operation_id(),
             committed.command().sequence(),
         );
-        wait_until_database_time(&database, lease.expires_at()).await?;
+        wait_until_database_time(&clock, lease.expires_at()).await?;
         database
             .store()
             .maintain_control_plane(maintenance_request(&database).await?)
@@ -1147,6 +1173,7 @@ async fn durable_publication_is_retained_but_not_live_after_claim_reaping() -> T
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn concurrent_expired_publish_and_reap_leave_no_partial_offer() -> TestResult {
     run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (seed, lease, metadata, slot, request_operation_id, request_digest) =
             active_lease_with_duration(&database, EXPIRING_LEASE_DURATION_MILLIS).await?;
         let fence = seed.session_fences[0];
@@ -1160,7 +1187,7 @@ async fn concurrent_expired_publish_and_reap_leave_no_partial_offer() -> TestRes
             OperationId::new(),
         )?;
         let claim = publication.claim().clone();
-        wait_until_database_time(&database, lease.expires_at()).await?;
+        wait_until_database_time(&clock, lease.expires_at()).await?;
         let maintenance_request = maintenance_request(&database).await?;
         let publishing_store = database.store().clone();
         let reaper = database.store().clone();
@@ -2223,13 +2250,15 @@ async fn database_now(database: &TestDatabase) -> TestResult<UnixMillis> {
     )
 }
 
-async fn wait_until_database_time(database: &TestDatabase, target: UnixMillis) -> TestResult {
-    sqlx::query(
-        "SELECT pg_sleep(greatest(($1 - floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint)::double precision / 1000.0, 0.0))",
-    )
-    .bind(target.get() + 1)
-    .execute(database.pool())
-    .await?;
+async fn wait_until_database_time(clock: &TestClock, target: UnixMillis) -> TestResult {
+    clock
+        .set(
+            target
+                .get()
+                .checked_add(1)
+                .ok_or("runner-control expiry clock overflow")?,
+        )
+        .await?;
     Ok(())
 }
 

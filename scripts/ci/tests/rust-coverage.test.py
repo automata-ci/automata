@@ -17,6 +17,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "ci" / "check-rust-coverage.py"
 RUN = ROOT / "ci" / "run-rust-coverage.sh"
+POSTGRES_RUN = ROOT / "ci" / "run-postgres-tests.sh"
+POSTGRES_ENVIRONMENT = ROOT / "ci" / "postgres-test-environment.sh"
+VERIFY_POSTGRES = ROOT / "ci" / "verify-postgres-version.sh"
 CHECK_IGNORED = ROOT / "ci" / "check-ignored-test-list.py"
 FINGERPRINT = ROOT / "ci" / "fingerprint-workspace.py"
 
@@ -621,6 +624,8 @@ mod outside_filter {
             "check-ignored-test-list.py",
             "check-rust-coverage.py",
             "fingerprint-workspace.py",
+            "postgres-test-environment.sh",
+            "run-postgres-tests.sh",
             "run-rust-coverage.sh",
             "rust-coverage-policy.json",
             "validate-rust-coverage-failure.py",
@@ -1116,15 +1121,12 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 19, planned.stdout
+        assert len(commands) == 16, planned.stdout
         expected_inventory = [
             "cargo test --workspace",
-            "-p automata-ci-store --tests",
-            "-p automata-ci-auth-postgres --tests",
-            "-p automata-ci-runner-auth-postgres --tests",
-            "-p automata-ci-secret-postgres --tests",
-            "--test postgres_artifacts",
-            "--test postgres_cache",
+            "-p automata-ci-store --test store_postgres_execution",
+            "-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --tests",
+            "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test rustfs_contract",
             "--test live_github_rustfs",
@@ -1141,6 +1143,12 @@ exit 99
         for expected, command in zip(expected_inventory, commands, strict=True):
             assert expected in command, command
         assert all("--ignored" in command for command in commands[1:])
+        assert "--test-threads=4" in commands[1]
+        assert "--tests" not in commands[1]
+        assert sum(
+            command.count("-p automata-ci-postgres-test-support")
+            for command in commands
+        ) == 1
         unknown_plan = subprocess.run(
             [str(RUN), "--plan", str(scratch / "unknown-plan"), "ordinary", "policy-only"],
             cwd=ROOT.parent,
@@ -1150,6 +1158,27 @@ exit 99
         )
         assert unknown_plan.returncode == 2
         runner_source = RUN.read_text(encoding="utf-8")
+        postgres_runner_source = POSTGRES_RUN.read_text(encoding="utf-8")
+        postgres_environment_source = POSTGRES_ENVIRONMENT.read_text(
+            encoding="utf-8"
+        )
+        postgres_verifier_source = VERIFY_POSTGRES.read_text(encoding="utf-8")
+        assert not (ROOT / "ci" / "run-postgres-store-shard.sh").exists()
+        assert "run-postgres-tests.sh --defer-cleanup" in runner_source
+        assert postgres_runner_source.count("-p automata-ci-store") == 1
+        assert "--test store_contracts" not in postgres_runner_source
+        assert "--test store_migration_contracts" not in postgres_runner_source
+        assert "--example postgres-test-cleanup" in postgres_environment_source
+        assert "LLVM_PROFILE_FILE=/dev/null cargo run" in postgres_environment_source
+        assert "^[a-z0-9_]{1,27}$" in postgres_environment_source
+        assert runner_source.count("cleanup_postgres_namespace_once") == 3
+        assert "selected[postgres]" in runner_source
+        assert "selected[s3]" in runner_source
+        assert "trap cleanup_postgres_tests EXIT" in postgres_runner_source
+        assert "--defer-cleanup requires an explicit" in postgres_runner_source
+        assert "rolcreatedb OR rolsuper" in postgres_verifier_source
+        assert postgres_verifier_source.count("--set=ON_ERROR_STOP=1") == 2
+        assert postgres_verifier_source.count("--no-psqlrc") == 2
         assert "check-ignored-test-list.py" in runner_source
         assert (
             "--inventory-source podman "

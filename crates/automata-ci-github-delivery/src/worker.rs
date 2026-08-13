@@ -56,7 +56,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::GithubDeliveryClock;
+use crate::{GithubDeliveryClock, GithubDeliverySourceCredentialProvider};
 
 const GITHUB_PROVIDER: &str = "github";
 const DEFAULT_RETRY_BACKOFF_MILLIS: i64 = 30_000;
@@ -145,7 +145,9 @@ pub enum GithubDeliveryWorkerPrerequisite {
 ///
 /// The private variant borrows a caller-owned installation token whose mint
 /// policy is exactly one repository and `contents: read`. The token is never
-/// retained by the worker.
+/// retained by the worker. An optional reference to the same least-authority
+/// broker permits the workflow processor to request a separate changed-files
+/// handoff only if typed compilation demands it.
 #[derive(Clone, Copy)]
 pub enum GithubDeliverySourceAuthority<'credential> {
     /// Fetch the exact public repository revision anonymously.
@@ -155,7 +157,21 @@ pub enum GithubDeliverySourceAuthority<'credential> {
     PrivateInstallationContentsRead {
         /// Request-scoped credential for the exact revision archive.
         credential: &'credential SecretString,
+        /// Broker for a distinct changed-files handoff, when configured.
+        changed_files_credentials: Option<&'credential dyn GithubDeliverySourceCredentialProvider>,
     },
+}
+
+impl GithubDeliverySourceAuthority<'_> {
+    fn changed_files_credentials(&self) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
+        match self {
+            Self::PublicAnonymous => None,
+            Self::PrivateInstallationContentsRead {
+                changed_files_credentials,
+                ..
+            } => *changed_files_credentials,
+        }
+    }
 }
 
 impl fmt::Debug for GithubDeliverySourceAuthority<'_> {
@@ -203,6 +219,7 @@ pub struct GithubDeliveryWorkflowRequest<'a> {
     snapshot: GithubDeliveryClaimSnapshot,
     lease: &'a GithubDeliveryClaimLease,
     clock: &'a dyn GithubDeliveryClock,
+    private_credentials: Option<&'a dyn GithubDeliverySourceCredentialProvider>,
 }
 
 impl GithubDeliveryWorkflowRequest<'_> {
@@ -281,6 +298,12 @@ impl GithubDeliveryWorkflowRequest<'_> {
         self.clock
     }
 
+    pub(crate) const fn private_credentials(
+        &self,
+    ) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
+        self.private_credentials
+    }
+
     /// Transfers one completed processor result together with the exact live
     /// lease-operation guard that validated it.
     pub async fn finish(
@@ -330,6 +353,10 @@ impl fmt::Debug for GithubDeliveryWorkflowRequest<'_> {
             .field("workflow_source_bytes", &self.workflow_source.len())
             .field("manifest_pinned_evidence", &"[redacted]")
             .field("snapshot", &self.snapshot)
+            .field(
+                "private_credentials",
+                &self.private_credentials.map(|_| "[credential broker]"),
+            )
             .finish()
     }
 }
@@ -1030,11 +1057,12 @@ impl GithubDeliveryWorker {
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
         self.require_live(lease)?;
         let claimed = lease.initial();
+        let private_credentials = source_authority.changed_files_credentials();
         let source = match self.fetch_source(claimed, prepared, source_authority).await {
             Ok(source) => source,
             Err(failure) => return self.finish_failure(lease, failure).await,
         };
-        self.process_fetched_source_leased(lease, prepared, &source)
+        self.process_fetched_source_leased(lease, prepared, &source, private_credentials)
             .await
     }
 
@@ -1043,6 +1071,7 @@ impl GithubDeliveryWorker {
         lease: &GithubDeliveryClaimLease,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySource,
+        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, GithubDeliveryWorkerError> {
         self.require_live(lease)?;
         let claimed = lease.initial();
@@ -1056,7 +1085,7 @@ impl GithubDeliveryWorker {
             prepared
         };
         match self
-            .workflow_outcomes(lease, claimed, prepared, source)
+            .workflow_outcomes(lease, claimed, prepared, source, private_credentials)
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -1367,6 +1396,7 @@ impl GithubDeliveryWorker {
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySource,
+        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
             ProcessingFailure::reject("github.repository_dispatch.unresolved_source")
@@ -1376,8 +1406,15 @@ impl GithubDeliveryWorker {
             manifest_discovery_limits(evidence.manifest())?,
         )
         .map_err(|error| ProcessingFailure::reject(discovery_failure_kind(error)))?;
-        self.all_direct_workflow_outcomes(lease, claimed, prepared, source, workflows)
-            .await
+        self.all_direct_workflow_outcomes(
+            lease,
+            claimed,
+            prepared,
+            source,
+            private_credentials,
+            workflows,
+        )
+        .await
     }
 
     async fn all_direct_workflow_outcomes(
@@ -1386,6 +1423,7 @@ impl GithubDeliveryWorker {
         claimed: &ClaimedProviderDelivery,
         prepared: &PreparedGithubDelivery,
         source: &RepositorySource,
+        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
         workflows: Vec<RepositoryWorkflowDiscoveryOutcome>,
     ) -> Result<GithubDeliveryWorkerOutcome, WorkerInterruption> {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
@@ -1416,6 +1454,7 @@ impl GithubDeliveryWorker {
                             prepared,
                             source,
                             (&path, &workflow_source),
+                            private_credentials,
                         )
                         .await?;
                     let (result, operation) = match completion.into_parts() {
@@ -1551,6 +1590,7 @@ impl GithubDeliveryWorker {
         prepared: &PreparedGithubDelivery,
         source: &RepositorySource,
         workflow: (&str, &[u8]),
+        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkflowProcessorCompletion, WorkerInterruption> {
         let snapshot = lease
             .require_live_at(self.clock.now())
@@ -1578,6 +1618,7 @@ impl GithubDeliveryWorker {
                     snapshot,
                     lease,
                     clock: self.clock.as_ref(),
+                    private_credentials,
                 })
                 .await),
             _ => Err(

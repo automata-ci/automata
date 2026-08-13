@@ -1,4 +1,4 @@
-mod github_manifest_fixture;
+use crate::github_manifest_fixture;
 
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
 use automata_ci_store::{
@@ -7,10 +7,11 @@ use automata_ci_store::{
     GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
     GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceStoreError,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
+    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, ProviderConnectionId, ProviderDeliveryClaimFence,
@@ -136,7 +137,7 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
         run_id,
         invocation_id,
         delivery_id,
-        "provider-delivery-v2:api-run",
+        "provider-delivery:api-run",
         admission_claim(delivery_id, 400, 600),
         GithubCheckHeadSha::new([9; 20]).expect("head"),
         GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("path"),
@@ -172,7 +173,7 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
             run_id,
             invocation_id,
             delivery_id,
-            "provider-delivery-v2:api-run",
+            "provider-delivery:api-run",
             admission_claim(delivery_id, 400, 600),
             GithubCheckHeadSha::new([9; 20]).expect("head"),
             GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("path"),
@@ -188,8 +189,13 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
     ));
 }
 
+fn accepts_repository(_: &dyn GithubSubjectEvidenceRepository) {}
+fn accepts_repository_dispatch(_: &dyn GithubRepositoryDispatchEvidenceRepository) {}
+
 #[test]
-fn store_errors_do_not_expose_backend_details() {
+fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() {
+    let _ = accepts_repository;
+    let _ = accepts_repository_dispatch;
     for error in [
         GithubSubjectEvidenceStoreError::AuthorityRejected,
         GithubSubjectEvidenceStoreError::ReplayConflict,
@@ -201,6 +207,12 @@ fn store_errors_do_not_expose_backend_details() {
         assert!(!rendered.contains("delivery-api"));
         assert!(!rendered.contains("github/events"));
     }
+    let source = include_str!("../src/github_subject_evidence.rs");
+    let trait_source = source
+        .split("pub trait GithubSubjectEvidenceRepository")
+        .nth(1)
+        .expect("repository trait");
+    assert!(!trait_source.contains("record_github_workflow_run_subject_evidence("));
 }
 
 #[test]
@@ -395,7 +407,7 @@ fn run_request(
         RunId::from_uuid(Uuid::from_u128(0x323)),
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(0x324)).expect("invocation"),
         delivery_id,
-        "provider-delivery-v2:external-adapter",
+        "provider-delivery:external-adapter",
         admission_claim(delivery_id, 100, 300),
         GithubCheckHeadSha::new([9; 20]).expect("head"),
         GithubCheckSubjectKey::new(manifest.workflow_path()).expect("path"),

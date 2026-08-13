@@ -469,14 +469,27 @@ fn explicit_host_gateway_alias_is_one_create_argument_and_changes_spec_fingerpri
         .provider
         .create(&spec, &NeverCancelled)
         .expect("baseline create");
-    let alias = PodmanHostGatewayAlias::new("automata-git.localhost").expect("valid alias");
+    let alias = PodmanHostGatewayAlias::new("automata-git.invalid", 8088).expect("valid alias");
     let mapped = Fixture::new_with_options("host-gateway-mapped", |options| {
-        options.with_host_gateway_alias(alias)
+        options
+            .with_host_gateway_alias(alias)
+            .expect("host gateway configuration")
+    });
+    let other_port_alias =
+        PodmanHostGatewayAlias::new("automata-git.invalid", 8089).expect("valid alias");
+    let other_port = Fixture::new_with_options("host-gateway-other-port", |options| {
+        options
+            .with_host_gateway_alias(other_port_alias)
+            .expect("host gateway configuration")
     });
     mapped
         .provider
         .create(&spec, &NeverCancelled)
         .expect("mapped create");
+    other_port
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("other-port create");
 
     let baseline_commands = baseline.fake.commands();
     assert!(baseline_commands.iter().all(|command| {
@@ -485,13 +498,14 @@ fn explicit_host_gateway_alias_is_one_create_argument_and_changes_spec_fingerpri
             .any(|argument| argument.starts_with("--add-host"))
     }));
     let mapped_commands = mapped.fake.commands();
+    let other_port_commands = other_port.fake.commands();
     let pod_create = mapped_commands
         .iter()
         .find(|command| {
             semantic_starts_with(command, &["pod", "create"])
                 && command
                     .iter()
-                    .any(|argument| argument == "--add-host=automata-git.localhost:host-gateway")
+                    .any(|argument| argument == "--add-host=automata-git.invalid:host-gateway")
         })
         .expect("pod create must carry the exact host-gateway alias");
     assert_eq!(
@@ -503,10 +517,72 @@ fn explicit_host_gateway_alias_is_one_create_argument_and_changes_spec_fingerpri
     );
     assert!(!pod_create.iter().any(|argument| argument == "--add-host"));
 
+    let baseline_configuration = std::fs::read_to_string(
+        baseline
+            .scratch
+            .path()
+            .join("podman-system-config/containers.conf"),
+    )
+    .expect("baseline containers.conf");
+    let mapped_configuration = std::fs::read_to_string(
+        mapped
+            .scratch
+            .path()
+            .join("podman-system-config/containers.conf"),
+    )
+    .expect("mapped containers.conf");
+    assert!(!baseline_configuration.contains("pasta_options"));
+    assert!(mapped_configuration.contains("pasta_options = [\"--tcp-ns\", \"8088\"]"));
+
     assert_ne!(
         spec_fingerprint(&baseline_commands),
         spec_fingerprint(&mapped_commands),
         "provider-owned replay fingerprint must cover the alias"
+    );
+    assert_ne!(
+        spec_fingerprint(&mapped_commands),
+        spec_fingerprint(&other_port_commands),
+        "provider-owned replay fingerprint must cover the forwarded port"
+    );
+}
+
+#[test]
+fn explicit_host_gateway_alias_rejects_disabled_network_before_podman_or_filesystem_work() {
+    let alias = PodmanHostGatewayAlias::new("automata-git.invalid", 8088).expect("valid alias");
+    let fixture = Fixture::new_with_options("host-gateway-disabled-network", |options| {
+        options
+            .with_host_gateway_alias(alias)
+            .expect("host gateway configuration")
+    });
+    assert!(
+        !fixture
+            .provider
+            .capabilities()
+            .supports(SandboxCapability::NetworkDisabled),
+        "mapped providers must not advertise disabled-network support"
+    );
+    let spec = sample_spec_with(
+        OperationId::new(),
+        "automata.dev/archlinux-x86-64-v1",
+        NetworkPolicy::Disabled,
+    );
+
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("disabled networking must reject the provider-wide host mapping");
+    assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+    assert_eq!(
+        error.stage(),
+        automata_ci_execution::ProviderStage::Validate
+    );
+    assert!(fixture.fake.commands().is_empty());
+    assert!(
+        std::fs::read_dir(fixture.scratch.path().join("workspaces"))
+            .expect("workspace root")
+            .next()
+            .is_none(),
+        "validation must run before dynamic workspace creation"
     );
 }
 

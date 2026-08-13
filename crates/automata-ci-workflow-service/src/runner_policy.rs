@@ -155,7 +155,7 @@ mod tests {
         "minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},
         "maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}
       },
-      "schema":2
+      "schema":1
     }"#;
 
     #[test]
