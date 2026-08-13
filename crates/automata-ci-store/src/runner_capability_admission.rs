@@ -3,8 +3,6 @@ use thiserror::Error;
 
 use crate::RepositoryOperationError;
 
-pub use automata_ci_core::MAX_REGISTERED_RUNNERS;
-
 /// Failures from the narrow runner-capability admission boundary.
 #[derive(Debug, Error)]
 pub enum RunnerCapabilityAdmissionError {

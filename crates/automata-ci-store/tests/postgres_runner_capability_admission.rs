@@ -1,10 +1,10 @@
 use automata_ci_core::{
-    Architecture, OperatingSystem, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId,
-    RunnerLabel, RunnerPlatform,
+    Architecture, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerFeature,
+    RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
 };
 use automata_ci_store::{
-    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError,
-    RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness,
+    RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository as _,
+    RunnerCapabilityReadiness,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
