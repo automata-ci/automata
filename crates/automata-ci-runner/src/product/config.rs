@@ -32,7 +32,7 @@ use super::files::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -474,8 +474,8 @@ impl PodmanProductConfig {
         self.job_container_engine
     }
 
-    /// Exact `github.server_url` hostname mapped to the Podman host gateway
-    /// when the deployment explicitly opts into local-host routing.
+    /// Exact `github.server_url` hostname and port mapped to the Podman host
+    /// gateway when the deployment explicitly opts into local-host routing.
     #[must_use]
     pub const fn github_server_host_gateway_alias(
         &self,
@@ -821,6 +821,18 @@ impl GithubProductConfig {
 
     pub(crate) fn http_endpoint(&self) -> Result<GithubHttpEndpoint, GithubHttpConfigurationError> {
         if self.allow_insecure_http {
+            if self
+                .server_url
+                .host_str()
+                .is_some_and(|host| host.to_ascii_lowercase().ends_with(".invalid"))
+            {
+                return GithubHttpEndpoint::new_for_mapped_emulator(
+                    self.server_url.clone(),
+                    self.api_url.clone(),
+                    &self.user_agent,
+                    GithubHttpLimits::default(),
+                );
+            }
             return GithubHttpEndpoint::new_for_loopback_emulator(
                 self.server_url.clone(),
                 self.api_url.clone(),
@@ -965,6 +977,15 @@ impl RawRunnerProductConfig {
             }
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
+        let mapped_github_transport = is_mapped_github_transport(github.server_url());
+        let podman_gateway_enabled = matches!(
+            &provider,
+            RunnerProviderConfig::Podman(podman)
+                if podman.github_server_host_gateway_alias().is_some()
+        );
+        if mapped_github_transport != podman_gateway_enabled {
+            return Err(RunnerProductConfigError::InvalidGithub);
+        }
         if let RunnerProviderConfig::Podman(podman) = &provider {
             let required_podman_state = required_podman_state_root(podman.runtime_directory());
             if state.podman().is_none_or(|configured| {
@@ -1752,7 +1773,10 @@ impl RawPodmanProductConfig {
                 let hostname = github_server_url
                     .host_str()
                     .ok_or(RunnerProductConfigError::InvalidPodman)?;
-                automata_ci_sandbox_podman::PodmanHostGatewayAlias::new(hostname)
+                let port = github_server_url
+                    .port_or_known_default()
+                    .ok_or(RunnerProductConfigError::InvalidPodman)?;
+                automata_ci_sandbox_podman::PodmanHostGatewayAlias::new(hostname, port)
                     .map_err(|_| RunnerProductConfigError::InvalidPodman)
             })
             .transpose()?;
@@ -2289,6 +2313,12 @@ impl RawGithubProductConfig {
         let api_url = validate_github_context_url(&self.api_url, self.allow_insecure_http, false)?;
         let graphql_url =
             validate_github_context_url(&self.graphql_url, self.allow_insecure_http, false)?;
+        if is_mapped_github_transport(&server_url)
+            && (!same_url_origin(&server_url, &api_url)
+                || !same_url_origin(&server_url, &graphql_url))
+        {
+            return Err(RunnerProductConfigError::InvalidGithub);
+        }
         let config = GithubProductConfig {
             user_agent: self.user_agent,
             server_url,
@@ -2301,6 +2331,19 @@ impl RawGithubProductConfig {
             .map_err(|_| RunnerProductConfigError::InvalidGithub)?;
         Ok(config)
     }
+}
+
+fn is_mapped_github_transport(url: &Url) -> bool {
+    url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|host| host.to_ascii_lowercase().ends_with(".invalid"))
+}
+
+fn same_url_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn validate_github_context_url(

@@ -46,6 +46,40 @@ fn loopback_escape_hatch_rejects_non_loopback_http() {
     )
     .unwrap_err();
     assert_eq!(error, GithubHttpConfigurationError::InvalidOAuthOrigin);
+
+    for api_base in [
+        "http://different.invalid/api/v3/",
+        "http://automata-git.invalid:8088/api/v3/",
+    ] {
+        let error = GithubHttpEndpoint::new_for_mapped_emulator(
+            Url::parse("http://automata-git.invalid/").unwrap(),
+            Url::parse(api_base).unwrap(),
+            "automata-tests/0.1.0",
+            GithubHttpLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, GithubHttpConfigurationError::InvalidApiBase);
+    }
+}
+
+#[test]
+fn mapped_emulator_accepts_only_reserved_invalid_http() {
+    GithubHttpEndpoint::new_for_mapped_emulator(
+        Url::parse("http://automata-git.invalid/").unwrap(),
+        Url::parse("http://automata-git.invalid/api/v3/").unwrap(),
+        "automata-tests/0.1.0",
+        GithubHttpLimits::default(),
+    )
+    .expect("reserved mapped emulator host");
+
+    let error = GithubHttpEndpoint::new_for_mapped_emulator(
+        Url::parse("http://automata-git.test/").unwrap(),
+        Url::parse("http://automata-git.test/api/v3/").unwrap(),
+        "automata-tests/0.1.0",
+        GithubHttpLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error, GithubHttpConfigurationError::InvalidOAuthOrigin);
 }
 
 #[test]

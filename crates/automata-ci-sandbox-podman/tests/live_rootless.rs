@@ -384,9 +384,13 @@ fn opt_in_host_gateway_alias_reaches_local_git_without_a_host_socket() {
     let image = live_image();
     let scratch = ScratchRoot::new("live-host-gateway-alias");
     let (options, _, _) = live_options(scratch.path());
-    let alias = PodmanHostGatewayAlias::new("automata-git.ghe.com").expect("valid alias");
-    let provider = RootlessPodmanProvider::open(options.with_host_gateway_alias(alias))
-        .expect("open live provider with explicit host alias");
+    let alias = PodmanHostGatewayAlias::new("automata-git.ghe.com", 8088).expect("valid alias");
+    let provider = RootlessPodmanProvider::open(
+        options
+            .with_host_gateway_alias(alias)
+            .expect("host gateway configuration"),
+    )
+    .expect("open live provider with explicit host alias");
     let generation = SandboxGeneration::new(1).expect("generation");
     let spec = live_spec_with_network(
         OperationId::new(),

@@ -110,12 +110,16 @@ impl BuildKitRuntime {
     }
 }
 
-/// An explicit DNS hostname mapped to Podman's host gateway inside a job.
+/// An explicit DNS hostname and port mapped to Podman's host gateway inside a job.
 ///
-/// This is intentionally hostname-only: IP addresses, wildcard names, bare
-/// `localhost`, ports, paths, and control characters are rejected.
+/// The hostname is intentionally DNS-only: IP addresses, wildcard names, bare
+/// `localhost` names, embedded ports, paths, and control characters are
+/// rejected. The separate forwarded port must be nonzero.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PodmanHostGatewayAlias(String);
+pub struct PodmanHostGatewayAlias {
+    hostname: String,
+    port: u16,
+}
 
 impl PodmanHostGatewayAlias {
     /// Validates a DNS hostname suitable for the left-hand side of Podman's
@@ -123,9 +127,9 @@ impl PodmanHostGatewayAlias {
     ///
     /// # Errors
     ///
-    /// Rejects non-DNS values, IP addresses, wildcard names, bare `localhost`,
-    /// and hostnames without a dot.
-    pub fn new(hostname: impl Into<String>) -> Result<Self, PodmanConfigurationError> {
+    /// Rejects a zero port, non-DNS values, IP addresses, wildcard names,
+    /// `localhost` names, and hostnames without a dot.
+    pub fn new(hostname: impl Into<String>, port: u16) -> Result<Self, PodmanConfigurationError> {
         let hostname = hostname.into();
         let labels_valid = hostname.len() <= 253
             && hostname.contains('.')
@@ -144,20 +148,28 @@ impl PodmanHostGatewayAlias {
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             });
-        let valid = labels_valid
+        let valid = port != 0
+            && labels_valid
             && hostname.is_ascii()
             && !hostname.eq_ignore_ascii_case("localhost")
+            && !hostname.to_ascii_lowercase().ends_with(".localhost")
             && hostname.parse::<IpAddr>().is_err()
             && hostname.bytes().any(|byte| byte.is_ascii_alphabetic());
         valid
-            .then_some(Self(hostname))
+            .then_some(Self { hostname, port })
             .ok_or(PodmanConfigurationError::InvalidHostGatewayAlias)
     }
 
     /// Returns the validated hostname without the Podman mapping suffix.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.hostname
+    }
+
+    /// Returns the one host port forwarded into the job network namespace.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
     }
 }
 
@@ -321,12 +333,17 @@ impl PodmanOptions {
         self
     }
 
-    /// Maps one explicitly validated hostname to Podman's host gateway inside
-    /// the job container. No alias is installed by default.
+    /// Maps one explicitly validated hostname to Podman's host gateway and
+    /// forwards only its exact port. No mapping is installed by default.
     #[must_use]
-    pub fn with_host_gateway_alias(mut self, alias: PodmanHostGatewayAlias) -> Self {
+    pub fn with_host_gateway_alias(
+        mut self,
+        alias: PodmanHostGatewayAlias,
+    ) -> Result<Self, PodmanConfigurationError> {
+        self.process_environment
+            .enable_host_gateway_port(alias.port())?;
         self.host_gateway_alias = Some(alias);
-        self
+        Ok(self)
     }
 
     /// Configures the locally preloaded immutable helper used to realize
@@ -481,7 +498,7 @@ impl PodmanOptions {
         self.job_container_engine
     }
 
-    /// Returns the optional validated hostname mapped to the host gateway.
+    /// Returns the optional validated hostname and port mapped to the host gateway.
     #[must_use]
     pub const fn host_gateway_alias(&self) -> Option<&PodmanHostGatewayAlias> {
         self.host_gateway_alias.as_ref()

@@ -141,6 +141,7 @@ impl PodmanProcessEnvironment {
             &seccomp_profile_path,
             &empty_hooks_directory,
             &empty_cdi_directory,
+            None,
         )?;
         #[cfg(not(unix))]
         let _ = containers_conf_contents;
@@ -261,6 +262,26 @@ impl PodmanProcessEnvironment {
     #[must_use]
     pub fn auth_file_path(&self) -> &Path {
         &self.auth_file_path
+    }
+
+    pub(crate) fn enable_host_gateway_port(
+        &mut self,
+        port: u16,
+    ) -> Result<(), PodmanConfigurationError> {
+        #[cfg(unix)]
+        {
+            self.containers_conf_contents = containers_conf_document(
+                &self.approved_helper_directory,
+                &self.conmon_path,
+                &self.oci_runtime_path,
+                &self.init_path,
+                &self.seccomp_profile_path,
+                &self.empty_hooks_directory,
+                &self.empty_cdi_directory,
+                Some(port),
+            )?;
+        }
+        Ok(())
     }
 
     /// Returns the exact empty hooks directory.
@@ -394,6 +415,7 @@ fn containers_conf_document(
     seccomp_profile_path: &Path,
     empty_hooks_directory: &Path,
     empty_cdi_directory: &Path,
+    host_gateway_port: Option<u16>,
 ) -> Result<Vec<u8>, PodmanConfigurationError> {
     let values = [
         approved_helper_directory,
@@ -416,8 +438,15 @@ fn containers_conf_document(
         .map(|directory| format!("PATH={directory}"))
         .and_then(|value| toml_string(&value))
         .ok_or(PodmanConfigurationError::InvalidProcessEnvironment)?;
+    let pasta_options = match host_gateway_port {
+        Some(port) if port != 0 => {
+            format!("pasta_options = [\"--tcp-ns\", \"{port}\"]\n")
+        }
+        Some(_) => return Err(PodmanConfigurationError::InvalidProcessEnvironment),
+        None => String::new(),
+    };
     Ok(format!(
-        "[containers]\ninit_path = {init}\nlog_driver = \"k8s-file\"\nseccomp_profile = {seccomp}\n\n[engine]\ncdi_spec_dirs = [{cdi}]\ncompat_api_enforce_docker_hub = true\nconmon_env_vars = [{conmon_environment}]\nconmon_path = [{conmon}]\ndatabase_backend = \"sqlite\"\nevents_logger = \"none\"\nhelper_binaries_dir = [{helper}]\nhooks_dir = [{hooks}]\nruntime = {runtime}\n\n[network]\ndefault_rootless_network_cmd = \"pasta\"\nfirewall_driver = \"nftables\"\nnetavark_plugin_dirs = []\nnetwork_backend = \"netavark\"\nrootless_port_forwarder = \"rootlessport\"\n"
+        "[containers]\ninit_path = {init}\nlog_driver = \"k8s-file\"\nseccomp_profile = {seccomp}\n\n[engine]\ncdi_spec_dirs = [{cdi}]\ncompat_api_enforce_docker_hub = true\nconmon_env_vars = [{conmon_environment}]\nconmon_path = [{conmon}]\ndatabase_backend = \"sqlite\"\nevents_logger = \"none\"\nhelper_binaries_dir = [{helper}]\nhooks_dir = [{hooks}]\nruntime = {runtime}\n\n[network]\ndefault_rootless_network_cmd = \"pasta\"\nfirewall_driver = \"nftables\"\nnetavark_plugin_dirs = []\nnetwork_backend = \"netavark\"\n{pasta_options}rootless_port_forwarder = \"rootlessport\"\n"
     )
     .into_bytes())
 }

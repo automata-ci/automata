@@ -4331,6 +4331,7 @@ fn spec_fingerprint(
         Some(alias) => {
             hash_field(&mut hasher, &[1]);
             hash_field(&mut hasher, alias.as_str().as_bytes());
+            hash_field(&mut hasher, &alias.port().to_be_bytes());
         }
         None => hash_field(&mut hasher, &[0]),
     }

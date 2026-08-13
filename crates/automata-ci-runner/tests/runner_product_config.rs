@@ -69,7 +69,7 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
     );
     assert_eq!(
         config.github().server_url().host_str(),
-        Some("automata-git.localhost")
+        Some("automata-git.invalid")
     );
     assert_eq!(
         config
@@ -78,7 +78,7 @@ fn checked_in_local_dogfood_configuration_is_valid_and_pinned() {
             .github_server_host_gateway_alias()
             .expect("local dogfood config must opt into its exact GitHub hostname")
             .as_str(),
-        "automata-git.localhost"
+        "automata-git.invalid"
     );
     assert_eq!(
         config
@@ -763,11 +763,11 @@ fn github_host_gateway_opt_in_derives_only_the_exact_validated_server_hostname()
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     value["podman"]["map_github_server_to_host_gateway"] = serde_json::Value::Bool(true);
     value["github"]["server_url"] =
-        serde_json::Value::String("http://automata-git.localhost:8088/".to_owned());
+        serde_json::Value::String("http://automata-git.invalid:8088/".to_owned());
     value["github"]["api_url"] =
-        serde_json::Value::String("http://automata-git.localhost:8088/api/v3/".to_owned());
+        serde_json::Value::String("http://automata-git.invalid:8088/api/v3/".to_owned());
     value["github"]["graphql_url"] =
-        serde_json::Value::String("http://automata-git.localhost:8088/api/graphql".to_owned());
+        serde_json::Value::String("http://automata-git.invalid:8088/api/graphql".to_owned());
     value["github"]["allow_insecure_http"] = serde_json::Value::Bool(true);
 
     let config = parse_value(&value).expect("explicit local hostname mapping must validate");
@@ -784,9 +784,76 @@ fn github_host_gateway_opt_in_derives_only_the_exact_validated_server_hostname()
             .host_str()
             .expect("validated GitHub hostname")
     );
+    assert_eq!(
+        config
+            .podman()
+            .expect("Linux fixture selects Podman")
+            .github_server_host_gateway_alias()
+            .expect("mapping")
+            .port(),
+        8088
+    );
 
-    for invalid_server_url in ["http://localhost:8088/", "http://127.0.0.1:8088/"] {
+    value["podman"]["map_github_server_to_host_gateway"] = serde_json::Value::Bool(false);
+    assert_eq!(
+        parse_value(&value).expect_err("mapped HTTP requires the explicit Podman gateway opt-in"),
+        RunnerProductConfigError::InvalidGithub
+    );
+    value["podman"]["map_github_server_to_host_gateway"] = serde_json::Value::Bool(true);
+
+    value["github"]["api_url"] =
+        serde_json::Value::String("http://different.invalid:8088/api/v3/".to_owned());
+    assert_eq!(
+        parse_value(&value).expect_err("mapped emulator authorities must agree"),
+        RunnerProductConfigError::InvalidGithub
+    );
+    value["github"]["api_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8088/api/v3/".to_owned());
+
+    value["github"]["graphql_url"] =
+        serde_json::Value::String("https://automata-git.invalid:8088/api/graphql".to_owned());
+    assert_eq!(
+        parse_value(&value).expect_err("mapped emulator schemes must agree"),
+        RunnerProductConfigError::InvalidGithub
+    );
+
+    value["github"]["graphql_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8089/api/graphql".to_owned());
+    assert_eq!(
+        parse_value(&value).expect_err("mapped emulator ports must agree"),
+        RunnerProductConfigError::InvalidGithub
+    );
+    value["github"]["graphql_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8088/api/graphql".to_owned());
+
+    value["github"]["server_url"] = serde_json::Value::String("https://github.com/".to_owned());
+    value["github"]["api_url"] = serde_json::Value::String("https://api.github.com/".to_owned());
+    value["github"]["graphql_url"] =
+        serde_json::Value::String("https://api.github.com/graphql".to_owned());
+    value["github"]["allow_insecure_http"] = serde_json::Value::Bool(false);
+    assert_eq!(
+        parse_value(&value).expect_err("gateway opt-in is exclusive to mapped emulator HTTP"),
+        RunnerProductConfigError::InvalidGithub
+    );
+
+    value["github"]["server_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8088/".to_owned());
+    value["github"]["api_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8088/api/v3/".to_owned());
+    value["github"]["graphql_url"] =
+        serde_json::Value::String("http://automata-git.invalid:8088/api/graphql".to_owned());
+    value["github"]["allow_insecure_http"] = serde_json::Value::Bool(true);
+
+    for invalid_server_url in [
+        "http://localhost:8088/",
+        "http://automata-git.localhost:8088/",
+        "http://127.0.0.1:8088/",
+    ] {
         value["github"]["server_url"] = serde_json::Value::String(invalid_server_url.to_owned());
+        value["github"]["api_url"] =
+            serde_json::Value::String(format!("{invalid_server_url}api/v3/"));
+        value["github"]["graphql_url"] =
+            serde_json::Value::String(format!("{invalid_server_url}api/graphql"));
         assert_eq!(
             parse_value(&value).expect_err("non-DNS alias must fail closed"),
             RunnerProductConfigError::InvalidPodman

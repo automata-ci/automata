@@ -167,6 +167,21 @@ impl GithubTrustedOrigins {
         )
     }
 
+    pub(crate) fn mapped_emulator(
+        oauth_origin: Url,
+        api_base: Url,
+        user_agent: &str,
+        limits: GithubHttpLimits,
+    ) -> Result<Self, GithubHttpConfigurationError> {
+        Self::validated(
+            oauth_origin,
+            api_base,
+            user_agent,
+            limits,
+            TransportSecurity::MappedHttp,
+        )
+    }
+
     fn validated(
         oauth_origin: Url,
         api_base: Url,
@@ -176,6 +191,11 @@ impl GithubTrustedOrigins {
     ) -> Result<Self, GithubHttpConfigurationError> {
         validate_oauth_origin(&oauth_origin, transport_security)?;
         validate_api_base(&api_base, transport_security)?;
+        if transport_security == TransportSecurity::MappedHttp
+            && !same_origin(&oauth_origin, &api_base)
+        {
+            return Err(GithubHttpConfigurationError::InvalidApiBase);
+        }
         let user_agent = validate_user_agent(user_agent)?;
         Ok(Self {
             oauth_origin,
@@ -234,6 +254,7 @@ impl fmt::Debug for GithubTrustedOrigins {
 pub(crate) enum TransportSecurity {
     HttpsOnly,
     LoopbackHttp,
+    MappedHttp,
 }
 
 fn validate_oauth_origin(
@@ -270,12 +291,29 @@ fn valid_endpoint(endpoint: &Url, security: TransportSecurity) -> bool {
                     .as_ref()
                     .is_some_and(|host| is_loopback_host(host))
         }
+        TransportSecurity::MappedHttp => {
+            endpoint.scheme() == "http"
+                && endpoint
+                    .host()
+                    .as_ref()
+                    .is_some_and(|host| is_mapped_emulator_host(host))
+        }
     };
     valid_scheme
         && endpoint.host_str().is_some()
         && endpoint.username().is_empty()
         && endpoint.password().is_none()
         && endpoint.fragment().is_none()
+}
+
+fn is_mapped_emulator_host(host: &Host<&str>) -> bool {
+    match host {
+        Host::Domain(domain) => domain
+            .to_ascii_lowercase()
+            .strip_suffix(".invalid")
+            .is_some_and(|prefix| !prefix.is_empty()),
+        Host::Ipv4(_) | Host::Ipv6(_) => false,
+    }
 }
 
 fn is_loopback_host(host: &Host<&str>) -> bool {
