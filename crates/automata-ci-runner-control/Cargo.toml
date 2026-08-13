@@ -33,7 +33,6 @@ tokio-util.workspace = true
 zeroize = "1.8.1"
 
 [dev-dependencies]
-static_assertions.workspace = true
 tokio.workspace = true
 
 [lints]

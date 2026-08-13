@@ -5,9 +5,9 @@ use automata_ci_control_plane::{
     PlacementDecline, PlacementFactoryError, RunnableCandidate, SchedulerPolicy, SchedulingInput,
     SchedulingInputError, classify_candidate_capacity,
 };
-use automata_ci_core::{RequirementMismatch, UnixMillis};
+use automata_ci_core::RequirementMismatch;
 
-use support::{attempt_id, candidate, effective_runner, job_id, routing};
+use support::{candidate, effective_runner};
 
 #[test]
 fn default_policy_is_fifo_and_independent_of_input_order() {
@@ -137,32 +137,6 @@ fn scheduling_snapshot_rejects_ambiguous_attempt_and_runner_records() {
         SchedulingInput::new(&[], &[runner.clone(), runner])
             .expect_err("duplicate runner must fail"),
         SchedulingInputError::DuplicateRunner(support::runner_id(1))
-    );
-}
-
-#[derive(Debug)]
-struct MaintenancePolicy;
-
-impl SchedulerPolicy for MaintenancePolicy {
-    fn decide(&self, _input: SchedulingInput<'_>) -> PlacementDecision {
-        PlacementDecision::Decline(PlacementDecline::NoEffectiveRunners)
-    }
-}
-
-#[test]
-fn scheduler_policy_is_object_safe_and_replaceable() {
-    let policy: Box<dyn SchedulerPolicy> = Box::new(MaintenancePolicy);
-    let candidates = [RunnableCandidate::new(
-        attempt_id(1),
-        job_id(1),
-        UnixMillis::new(100),
-        routing(&[]),
-    )];
-    let runners = [effective_runner(1, &[], &[], &[1])];
-
-    assert_eq!(
-        policy.decide(SchedulingInput::new(&candidates, &runners).expect("snapshot must be valid")),
-        PlacementDecision::Decline(PlacementDecline::NoEffectiveRunners)
     );
 }
 

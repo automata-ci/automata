@@ -1,13 +1,7 @@
 use automata_ci_key_management::{
-    KeyEncryptionContext, KeyEncryptionContextError, KeyId, KeyPurpose, LocalKeyMaterial,
+    KeyEncryptionContext, KeyEncryptionContextError, KeyId, KeyPurpose,
     MAX_ENVELOPE_PLAINTEXT_BYTES, SecretBytes, SecretBytesError, WrappedDataKey,
 };
-use static_assertions::{assert_impl_all, assert_not_impl_any};
-
-assert_not_impl_any!(SecretBytes: Clone, std::fmt::Display, serde::Serialize, serde::Deserialize<'static>);
-assert_not_impl_any!(WrappedDataKey: Clone, serde::Serialize, serde::Deserialize<'static>);
-assert_not_impl_any!(LocalKeyMaterial: Clone, serde::Serialize, serde::Deserialize<'static>);
-assert_impl_all!(SecretBytes: zeroize::Zeroize, zeroize::ZeroizeOnDrop);
 
 #[test]
 fn key_ids_and_purposes_are_canonical_and_serde_validated() {

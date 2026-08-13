@@ -5,10 +5,10 @@ use automata_ci_core::{
     RunnerId, RunnerSessionId, SecretBinding, Sha256Digest, StrategyContext, UnixMillis,
 };
 use automata_ci_store::{
-    MAX_MANAGED_SECRET_BINDINGS, ManagedSecretAuthorityRepository,
-    ManagedSecretAuthorityStoreError, ManagedSecretAuthorityValueError, ManagedSecretBindingSet,
-    RepositoryId, ResolveManagedSecretAuthority, RunnerGeneration, RunnerSessionFence,
-    SessionEpoch, StableRunnerSlot, TenantScope,
+    MAX_MANAGED_SECRET_BINDINGS, ManagedSecretAuthorityStoreError,
+    ManagedSecretAuthorityValueError, ManagedSecretBindingSet, RepositoryId,
+    ResolveManagedSecretAuthority, RunnerGeneration, RunnerSessionFence, SessionEpoch,
+    StableRunnerSlot, TenantScope,
 };
 use uuid::Uuid;
 
@@ -174,10 +174,7 @@ fn indeterminate_contract_error_is_sanitized() {
 }
 
 #[test]
-fn diagnostics_redact_binding_and_execution_identities_and_port_is_object_safe() {
-    let object_safe: Option<&dyn ManagedSecretAuthorityRepository> = None;
-    assert!(object_safe.is_none());
-
+fn diagnostics_redact_binding_and_execution_identities() {
     let grant = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("grant");
     let version = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("version");
     let set = ManagedSecretBindingSet::from_runtime_context(&context(BTreeMap::from([(

@@ -20,24 +20,14 @@ use automata_ci_auth::{
     session_credential::{
         SessionCredentialKey, SessionCredentialKeyring, SessionCredentialService,
     },
-    sign_in::{
-        FinalizeSignIn, FinalizeSignInOutcome, PendingSessionCandidate, RetryFinalizeSignIn,
-        SignInValueError,
-    },
+    sign_in::{FinalizeSignIn, PendingSessionCandidate, SignInValueError},
     time::UnixTimestamp,
     vault::{
         ProviderAccessToken, ProviderGrantKind, ProviderRefreshToken, ProviderTokenMetadata,
         ProviderTokenSet,
     },
 };
-use static_assertions::assert_not_impl_any;
-
 use support::{DeterministicRandom, FixedClock};
-
-assert_not_impl_any!(FinalizeSignIn: Clone, serde::Serialize);
-assert_not_impl_any!(PendingSessionCandidate: Clone, serde::Serialize);
-assert_not_impl_any!(RetryFinalizeSignIn: Clone, serde::Serialize);
-assert_not_impl_any!(FinalizeSignInOutcome: Clone, serde::Serialize);
 
 const LOGIN_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 

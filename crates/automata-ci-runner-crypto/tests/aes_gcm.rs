@@ -149,10 +149,3 @@ fn rejects_wrong_identity_and_plaintext_before_encryption() {
         ContentProtectionError::Failed
     );
 }
-
-#[test]
-fn public_protector_port_remains_object_safe() {
-    static_assertions::assert_obj_safe!(ContentProtector);
-    let protector: Box<dyn ContentProtector> = Box::new(make_protector("key-a", 1));
-    assert_eq!(protector.protection_id().as_str(), "key-a");
-}

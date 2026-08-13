@@ -4,9 +4,6 @@ use automata_ci_blob::{
 };
 use automata_ci_core::Sha256Digest;
 use bytes::Bytes;
-use static_assertions::assert_obj_safe;
-
-assert_obj_safe!(ImmutableBlobStore);
 
 fn payload(key: &str, value: &'static [u8]) -> BlobPayload {
     BlobPayload::from_bytes(

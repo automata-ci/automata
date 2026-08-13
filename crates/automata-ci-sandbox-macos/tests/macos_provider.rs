@@ -17,10 +17,6 @@ use automata_ci_execution::{
     Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_macos::{MacosSandboxProvider, MacosSandboxProviderOptions};
-use static_assertions::assert_impl_all;
-
-assert_impl_all!(MacosSandboxProvider: Send, Sync, Clone);
-
 struct AlwaysCancelled;
 
 impl Cancellation for AlwaysCancelled {

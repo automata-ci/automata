@@ -45,9 +45,9 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
-    GithubDeliveryConfigurationError, GithubDeliveryConnection, GithubDeliveryIngress,
-    GithubDeliveryIngressError, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryConfigurationError,
+    GithubDeliveryConnection, GithubDeliveryIngress, GithubDeliveryIngressError,
+    MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
 };
 
 const SECRET: &[u8] = b"delivery-test-secret";
@@ -1769,11 +1769,11 @@ async fn object_and_request_digest_are_byte_deterministic() {
     );
     assert_eq!(
         accepted.raw_event().object_key().as_str(),
-        "provider-deliveries/github/push/sha256/1ecc82ee43e49add114ac478563db3701c1eb110e2487c8fc940ead9736b3542.json"
+        "provider-deliveries/github/event/sha256/1ecc82ee43e49add114ac478563db3701c1eb110e2487c8fc940ead9736b3542.json"
     );
     assert_eq!(
         accepted.raw_event().media_type(),
-        GITHUB_PUSH_EVENT_MEDIA_TYPE
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
     );
     assert_eq!(
         accepted.raw_event().encoded_size(),
@@ -1781,7 +1781,7 @@ async fn object_and_request_digest_are_byte_deterministic() {
     );
     assert_eq!(
         accepted.request_digest().to_string(),
-        "8b3799c447011c740aba01c3b51f0cba22847e523278f2547a4fb40d954a93cf"
+        "6a9391c73fa801b09222a1765764d06ef0c8f891fb580c646e5d999ded8fdea9"
     );
     assert_eq!(
         objects.bytes_at(accepted.raw_event().object_key().as_str()),

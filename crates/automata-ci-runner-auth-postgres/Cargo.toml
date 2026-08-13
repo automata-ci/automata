@@ -24,7 +24,6 @@ uuid.workspace = true
 [dev-dependencies]
 automata-ci-protocol.workspace = true
 sha2.workspace = true
-static_assertions.workspace = true
 tokio.workspace = true
 
 [lints]

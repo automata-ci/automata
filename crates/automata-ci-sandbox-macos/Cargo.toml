@@ -26,5 +26,4 @@ sha2.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-static_assertions.workspace = true
 uuid.workspace = true

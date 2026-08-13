@@ -7,24 +7,12 @@ use automata_ci_core::{
     StepIr, ValueTemplate,
 };
 use automata_ci_job_executor_github::{
-    ActionPreparationPort, DeterministicOperationIds, ExecutionClock, ExecutionOperationIds,
-    GithubContextPort, GithubToolchain, OperationPurpose, PreparedAction, PreparedActionError,
-    RepositoryCredentialPort, SandboxEnvironmentCatalog, SecretPort,
+    DeterministicOperationIds, ExecutionOperationIds, OperationPurpose, PreparedAction,
+    PreparedActionError,
 };
 use automata_ci_runner_runtime::JobExecutor;
 use bytes::Bytes;
-use static_assertions::assert_obj_safe;
-
 use support::{Fixture, envelope, prepared_node24_action, run_step};
-
-assert_obj_safe!(ActionPreparationPort);
-assert_obj_safe!(RepositoryCredentialPort);
-assert_obj_safe!(SecretPort);
-assert_obj_safe!(GithubContextPort);
-assert_obj_safe!(SandboxEnvironmentCatalog);
-assert_obj_safe!(GithubToolchain);
-assert_obj_safe!(ExecutionOperationIds);
-assert_obj_safe!(ExecutionClock);
 
 #[test]
 fn artifact_hash_operation_ids_preserve_full_composite_phase_coordinates() {

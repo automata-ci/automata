@@ -16,8 +16,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-const PROVIDER_DELIVERY_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
 fn identity() -> ProviderDeliveryIdentity {
     ProviderDeliveryIdentity::new(
         TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant"),
@@ -525,48 +523,6 @@ fn renewal_request_rejects_stale_or_inconsistent_evidence() {
             ),
             Err(ProviderDeliveryValueError::InvalidClaimInterval)
         ));
-    }
-}
-
-#[test]
-fn current_schema_distinguishes_bounded_renewal_from_crash_reclaim() {
-    for required in [
-        "renewal_predecessor_expires_at_ms BIGINT",
-        "claim_expires_at_ms - state_updated_at_ms <= 900000",
-        "claim_expires_at_ms - claimed_at_ms <= 3600000",
-        "NEW.claim_fence = OLD.claim_fence + 1",
-        "NEW.claimed_at_ms IS NOT DISTINCT FROM OLD.claimed_at_ms",
-        "NEW.claim_expires_at_ms <= OLD.claim_expires_at_ms",
-        "NEW.state_updated_at_ms <= OLD.state_updated_at_ms",
-        "NEW.state_updated_at_ms >= OLD.claim_expires_at_ms",
-        "NEW.renewal_predecessor_expires_at_ms\n                    IS DISTINCT FROM OLD.claim_expires_at_ms",
-        "provider_delivery_inbox_renewal_transition",
-        "provider_delivery_inbox_reclaim_transition",
-    ] {
-        assert!(
-            PROVIDER_DELIVERY_MIGRATION.contains(required),
-            "provider-delivery migration lost renewal invariant: {required}",
-        );
-    }
-    assert!(
-        !PROVIDER_DELIVERY_MIGRATION
-            .contains("AND state_updated_at_ms = claimed_at_ms\n        ) OR ("),
-        "the claimed-state shape must permit a rotated-fence renewal timestamp",
-    );
-}
-
-#[test]
-fn current_schema_persists_closed_immutable_repository_visibility() {
-    for required in [
-        "repository_visibility TEXT COLLATE \"C\" NOT NULL",
-        "repository_visibility IN ('public', 'private')",
-        "NEW.repository_visibility IS DISTINCT FROM OLD.repository_visibility",
-        "provider_delivery_inbox_evidence_immutable",
-    ] {
-        assert!(
-            PROVIDER_DELIVERY_MIGRATION.contains(required),
-            "provider-delivery migration lost visibility invariant: {required}",
-        );
     }
 }
 

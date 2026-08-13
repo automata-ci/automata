@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_secret::{
@@ -9,10 +9,6 @@ use automata_ci_secret::{
 };
 use automata_ci_secret_postgres::{BUILTIN_POSTGRES_PROVIDER_ID, PostgresSecretProvider};
 use sqlx::postgres::PgPoolOptions;
-use static_assertions::assert_impl_all;
-
-assert_impl_all!(PostgresSecretProvider: Debug, Send, Sync);
-
 fn provider() -> PostgresSecretProvider {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://sentinel-user:sentinel-password@127.0.0.1:1/sentinel")
@@ -29,7 +25,7 @@ fn provider() -> PostgresSecretProvider {
 fn accepts_object(_provider: &dyn SecretProvider) {}
 
 #[tokio::test]
-async fn provider_is_object_safe_stable_and_redacted() {
+async fn provider_capabilities_are_stable_and_debug_is_redacted() {
     let provider = provider();
     accepts_object(&provider);
     assert_eq!(

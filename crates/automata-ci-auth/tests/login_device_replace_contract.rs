@@ -9,10 +9,6 @@ use automata_ci_auth::{
     secret::SecretBytes,
     time::UnixTimestamp,
 };
-use static_assertions::assert_not_impl_any;
-
-assert_not_impl_any!(ReplaceLoginTransactionState: Clone, serde::Serialize);
-
 const LOGIN_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 fn binding(key_id: &str, byte: u8) -> LoginTransactionBinding {

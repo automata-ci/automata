@@ -22,7 +22,6 @@ subtle.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-static_assertions.workspace = true
 tokio.workspace = true
 
 [lints]

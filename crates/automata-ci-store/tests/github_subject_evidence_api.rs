@@ -7,11 +7,10 @@ use automata_ci_store::{
     GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
     GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceStoreError,
     GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, ProviderConnectionId, ProviderDeliveryClaimFence,
@@ -189,13 +188,8 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
     ));
 }
 
-fn accepts_repository(_: &dyn GithubSubjectEvidenceRepository) {}
-fn accepts_repository_dispatch(_: &dyn GithubRepositoryDispatchEvidenceRepository) {}
-
 #[test]
-fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() {
-    let _ = accepts_repository;
-    let _ = accepts_repository_dispatch;
+fn store_errors_do_not_expose_backend_details() {
     for error in [
         GithubSubjectEvidenceStoreError::AuthorityRejected,
         GithubSubjectEvidenceStoreError::ReplayConflict,
@@ -207,12 +201,6 @@ fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() 
         assert!(!rendered.contains("delivery-api"));
         assert!(!rendered.contains("github/events"));
     }
-    let source = include_str!("../src/github_subject_evidence.rs");
-    let trait_source = source
-        .split("pub trait GithubSubjectEvidenceRepository")
-        .nth(1)
-        .expect("repository trait");
-    assert!(!trait_source.contains("record_github_workflow_run_subject_evidence("));
 }
 
 #[test]

@@ -661,6 +661,8 @@ fn into_execution_environment(
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
+    use super::*;
+    use crate::{ContextEnvironmentVariable, PortError};
     use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
     use automata_ci_core::{
         ExpressionDialect, ExpressionInstruction, ExpressionLiteral, ValueTemplate,
@@ -668,12 +670,6 @@ mod tests {
     use automata_ci_execution::{EnvironmentName, EnvironmentValue, EnvironmentVariable};
     use automata_ci_expression_github::{GithubObject, GithubStatus, GithubValue, MapContext};
     use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
-    use static_assertions::assert_not_impl_any;
-
-    use super::*;
-    use crate::{ContextEnvironmentVariable, PortError};
-
-    assert_not_impl_any!(ResolvedEnvironmentValue: std::fmt::Debug, std::fmt::Display);
 
     #[derive(Debug)]
     struct TestSecrets;

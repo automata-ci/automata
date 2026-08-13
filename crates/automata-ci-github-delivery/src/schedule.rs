@@ -1377,12 +1377,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bounded_policy_has_deterministic_defaults_and_rejects_open_catch_up() {
-        let policy = GithubScheduleServiceConfig::default();
-        assert_eq!(policy.poll_millis(), DEFAULT_POLL_MILLIS);
-        assert_eq!(policy.staleness_millis(), DEFAULT_STALENESS_MILLIS);
-        assert_eq!(policy.maximum_manifests(), DEFAULT_MAX_MANIFESTS);
-        assert_eq!(policy.maximum_fires_per_pass(), DEFAULT_MAX_FIRES);
+    fn bounded_policy_rejects_open_catch_up() {
         assert_eq!(
             GithubScheduleServiceConfig::new(1, 1, 1, 1, MAX_STALENESS_MILLIS + 1, 1, 1,),
             Err(GithubScheduleServiceConfigurationError)

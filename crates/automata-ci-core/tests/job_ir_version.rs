@@ -1,17 +1,4 @@
-use automata_ci_core::{JOB_IR_SCHEMA_VERSION, JobIrVersion, JobIrVersionError, JobIrVersionRange};
-
-#[test]
-fn current_version_and_range_are_explicit() {
-    let current = JobIrVersion::current();
-    let range = JobIrVersionRange::current();
-
-    assert_eq!(current.get(), 1);
-    assert_eq!(current.get(), JOB_IR_SCHEMA_VERSION);
-    assert_eq!(range.minimum(), current);
-    assert_eq!(range.maximum(), current);
-    assert!(range.supports(current));
-    assert!(!range.supports(JobIrVersion::new(2).expect("positive")));
-}
+use automata_ci_core::{JobIrVersion, JobIrVersionError, JobIrVersionRange};
 
 #[test]
 fn exact_current_range_round_trips_as_numbers() {

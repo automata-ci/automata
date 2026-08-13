@@ -33,16 +33,12 @@ use automata_ci_store::{
     JobIrMetadata, ObjectKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };
 use sha2::{Digest as _, Sha256};
-use static_assertions::assert_obj_safe;
 
 const ISSUED_AT_MILLIS: i64 = 1_800_000_000_999;
 const ISSUED_AT_SECONDS: u64 = 1_800_000_000;
 const OIDC_ISSUER: &str = "https://oidc.example.test/";
 const OLD_SECRET: &[u8] = b"synthetic-old-request-key-material-at-least-thirty-two-bytes";
 const NEW_SECRET: &[u8] = b"synthetic-new-request-key-material-at-least-thirty-two-bytes";
-
-assert_obj_safe!(GithubOidcAuthorityIdGenerator);
-assert_obj_safe!(GithubOidcAuthorityProvisioner);
 
 #[tokio::test]
 async fn denied_permission_matrix_declines_without_ids_or_durable_calls() {

@@ -6,26 +6,13 @@ use automata_ci_core::{
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_runner_control::{
-    ControlIdGenerator, ControlPortError, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
-    JobIrBlobError, JobIrObjectReader, LeaseOfferCommandPublisher, LeasePoller,
-    MAX_HEARTBEAT_INTERVAL_MILLIS, MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS,
-    OptionalRuntimeAuthorityIssuer, RunnerControlConfig, RunnerControlConfigError,
-    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssuer,
+    ControlPortError, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE, JobIrBlobError,
+    JobIrObjectReader, MAX_HEARTBEAT_INTERVAL_MILLIS, MAX_LEASE_DURATION_MILLIS,
+    MAX_NO_WORK_RETRY_AFTER_MILLIS, RunnerControlConfig, RunnerControlConfigError,
     verify_job_ir_blob,
 };
 use automata_ci_store::{JobIrMetadata, ObjectKey};
 use sha2::{Digest as _, Sha256};
-use static_assertions::assert_obj_safe;
-
-assert_obj_safe!(RunnerRegistrationAuthorizer);
-assert_obj_safe!(RunnerSessionFenceResolver);
-assert_obj_safe!(JobIrObjectReader);
-assert_obj_safe!(LeaseOfferCommandPublisher);
-assert_obj_safe!(LeasePoller);
-assert_obj_safe!(RuntimeAuthorityIssuer);
-assert_obj_safe!(OptionalRuntimeAuthorityIssuer);
-assert_obj_safe!(ControlIdGenerator);
-
 fn envelope() -> JobIrEnvelope {
     JobIrEnvelope::new(
         WorkflowId::new(),

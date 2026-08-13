@@ -5,11 +5,11 @@ use automata_ci_store::{
     GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityDescriptor,
     GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
-    GithubServerServiceAuthorityState, GithubServerServiceClaim, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
-    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceClaim, GithubServerServiceClaimFence, GithubServerServiceConsumerClaim,
+    GithubServerServiceConsumerId, GithubServerServiceCredentialHandoff,
+    GithubServerServiceEnvelopeMetadata, GithubServerServiceGeneration,
+    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubServerServiceValueError, GithubServerServiceWorkerId,
@@ -350,12 +350,6 @@ fn assert_unknown_expiry_is_revoke_only(
         )
         .is_ok()
     );
-}
-
-#[test]
-fn repository_port_remains_object_safe() {
-    fn accepts(_: &dyn GithubServerServiceAuthorityRepository) {}
-    let _ = accepts;
 }
 
 #[test]

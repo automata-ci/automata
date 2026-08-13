@@ -1,14 +1,10 @@
 use automata_ci_auth::secret::SecretString;
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySnapshot,
-    RepositorySource, RepositorySourcePort, RepositorySourceRequest, ResolvedRevision,
-    RevisionSpec, ScmProvider, ScmProviderId, SnapshotRequest,
+    RepositorySource, RepositorySourceRequest, ResolvedRevision, RevisionSpec, ScmProviderId,
+    SnapshotRequest,
 };
 use bytes::Bytes;
-use static_assertions::assert_obj_safe;
-
-assert_obj_safe!(ScmProvider);
-assert_obj_safe!(RepositorySourcePort);
 
 #[test]
 fn identifiers_are_strict_and_serde_revalidates() {

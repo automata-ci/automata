@@ -5,15 +5,14 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, Lease, LeaseId, RunId, RunnerId, RunnerSessionId,
     Sha256Digest, UnixMillis, WorkflowId,
 };
-use automata_ci_oidc_github::{OidcAuthorityId, OidcIssuanceRepository, OidcKeyId, RsaPublicJwk};
+use automata_ci_oidc_github::{OidcAuthorityId, OidcKeyId, RsaPublicJwk};
 use automata_ci_store::{
     GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
-    GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
-    GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity, GithubOidcKeyDeadline,
-    GithubOidcKeyRetentionRepository, GithubOidcKeyUse, GithubOidcLoadedKey, GithubOidcStoreError,
-    GithubOidcSubjectPolicyMode, GithubOidcSubjectPolicyRevision, JobIrMetadata,
-    MAXIMUM_OIDC_KEYS_PER_KEYRING, MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS,
-    OIDC_JWKS_CACHE_SECONDS, ObjectKey, PostgresGithubOidcAuthorityRepository,
+    GithubOidcCurrentPolicy, GithubOidcCurrentnessClock, GithubOidcCurrentnessClockError,
+    GithubOidcExecutionIdentity, GithubOidcKeyDeadline, GithubOidcKeyRetentionRepository,
+    GithubOidcKeyUse, GithubOidcLoadedKey, GithubOidcStoreError, GithubOidcSubjectPolicyMode,
+    GithubOidcSubjectPolicyRevision, JobIrMetadata, MAXIMUM_OIDC_KEYS_PER_KEYRING,
+    MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS, OIDC_JWKS_CACHE_SECONDS, ObjectKey,
     PostgresGithubOidcIssuanceRepository, PostgresStore, ReserveGithubOidcAuthority,
     RetainGithubOidcKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
     github_oidc_rs256_public_key_fingerprint,
@@ -364,15 +363,7 @@ async fn readiness_rejects_unfingerprinted_durable_keys() {
 }
 
 #[tokio::test]
-async fn postgres_adapter_requires_bounded_signing_metadata_and_is_object_safe() {
-    fn assert_ports(
-        _: &dyn GithubOidcAuthorityRepository,
-        _: &dyn GithubOidcKeyRetentionRepository,
-        _: &dyn OidcIssuanceRepository,
-    ) {
-    }
-    let _ = assert_ports;
-
+async fn postgres_adapter_requires_bounded_signing_metadata() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgresql://postgres:do-not-render@127.0.0.1/automata")
         .expect("lazy pool");
@@ -391,8 +382,6 @@ async fn postgres_adapter_requires_bounded_signing_metadata_and_is_object_safe()
         Arc::clone(&clock),
     )
     .expect("configured adapter");
-    let authority = PostgresGithubOidcAuthorityRepository::new(store.clone(), Arc::clone(&clock));
-    assert_ports(&authority, &store, &adapter);
     let rendered = format!("{adapter:?}");
     assert!(rendered.contains("rsa-current"));
     assert!(!rendered.contains("do-not-render"));

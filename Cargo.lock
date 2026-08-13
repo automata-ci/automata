@@ -292,7 +292,6 @@ dependencies = [
  "bytes",
  "flate2",
  "sha2 0.11.0",
- "static_assertions",
  "tar",
  "thiserror",
  "tokio",
@@ -310,7 +309,6 @@ dependencies = [
  "bytes",
  "flate2",
  "saphyr-parser",
- "static_assertions",
  "tar",
  "thiserror",
  "tokio",
@@ -329,7 +327,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "subtle",
  "thiserror",
  "url",
@@ -348,7 +345,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "static_assertions",
  "tokio",
  "uuid",
 ]
@@ -361,7 +357,6 @@ dependencies = [
  "automata-ci-core",
  "bytes",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "tokio",
 ]
@@ -431,7 +426,6 @@ dependencies = [
  "async-trait",
  "automata-ci-auth",
  "automata-ci-scm",
- "static_assertions",
  "thiserror",
 ]
 
@@ -458,7 +452,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "time",
  "tokio",
@@ -473,7 +466,6 @@ name = "automata-ci-execution"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
- "static_assertions",
  "thiserror",
 ]
 
@@ -485,7 +477,6 @@ dependencies = [
  "automata-ci-workflow-github",
  "serde",
  "serde_json",
- "static_assertions",
  "thiserror",
 ]
 
@@ -540,7 +531,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "static_assertions",
  "thiserror",
 ]
 
@@ -570,7 +560,6 @@ dependencies = [
  "bytes",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -587,7 +576,6 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "static_assertions",
  "thiserror",
  "zeroize",
 ]
@@ -639,7 +627,6 @@ dependencies = [
  "automata-ci-runner-control",
  "automata-ci-store",
  "sha2 0.11.0",
- "static_assertions",
  "subtle",
  "thiserror",
  "tokio",
@@ -676,7 +663,6 @@ dependencies = [
  "automata-ci-protocol",
  "prost",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "uuid",
  "zeroize",
@@ -780,7 +766,6 @@ dependencies = [
  "automata-ci-runner-control",
  "automata-ci-store",
  "sha2 0.11.0",
- "static_assertions",
  "subtle",
  "thiserror",
  "tokio",
@@ -799,7 +784,6 @@ dependencies = [
  "automata-ci-store",
  "sha2 0.11.0",
  "sqlx",
- "static_assertions",
  "tokio",
  "uuid",
 ]
@@ -822,7 +806,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "subtle",
  "thiserror",
  "tokio",
@@ -838,7 +821,6 @@ dependencies = [
  "automata-ci-runner-spool",
  "ring",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "zeroize",
 ]
@@ -854,7 +836,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
 ]
 
@@ -870,7 +851,6 @@ dependencies = [
  "automata-ci-runner-spool",
  "automata-ci-runner-transport",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -887,7 +867,6 @@ dependencies = [
  "rustix",
  "serde",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
 ]
 
@@ -907,7 +886,6 @@ dependencies = [
  "hyper-util",
  "rcgen",
  "rustls",
- "static_assertions",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -961,7 +939,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "tokio",
  "uuid",
 ]
@@ -975,7 +952,6 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "tar",
  "thiserror",
 ]
@@ -989,7 +965,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "tokio",
 ]
 
@@ -1013,7 +988,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "thiserror",
 ]
 
@@ -1023,7 +997,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde",
- "static_assertions",
  "thiserror",
  "zeroize",
 ]
@@ -1038,7 +1011,6 @@ dependencies = [
  "automata-ci-secret",
  "automata-ci-store",
  "sqlx",
- "static_assertions",
  "tokio",
  "uuid",
 ]
@@ -4710,12 +4682,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stringprep"

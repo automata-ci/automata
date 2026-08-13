@@ -208,26 +208,6 @@ impl Fixture {
         }
     }
 
-    pub fn with_custody_acknowledger(
-        self,
-        acknowledger: Arc<dyn SecretCustodyAcknowledger>,
-    ) -> Self {
-        let Self {
-            executor,
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        } = self;
-        Self {
-            executor: executor.with_secret_custody(Arc::new(FakeSecrets), acknowledger),
-            provider,
-            endpoint_state,
-            events,
-            environment,
-        }
-    }
-
     pub fn with_managed_secret_custody(
         self,
         acknowledger: Arc<dyn SecretCustodyAcknowledger>,

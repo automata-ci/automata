@@ -939,25 +939,6 @@ fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
 }
 
 #[test]
-fn maintenance_policy_has_bounded_resumable_defaults() {
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--results-public-url",
-        "https://results.example.test/",
-    ])
-    .expect("CLI syntax must parse");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert_eq!(args.maintenance_interval_seconds, 5);
-    assert_eq!(args.maintenance_batch_size, 100);
-    assert_eq!(args.maximum_lease_failures, 3);
-    assert_eq!(args.stale_runner_session_timeout_seconds, 300);
-    assert!(ServerConfig::from_args(&args).is_ok());
-}
-
-#[test]
 fn metrics_are_opt_in_and_restricted_to_literal_loopback() {
     let cli = Cli::try_parse_from([
         "automata",

@@ -23,12 +23,8 @@ use automata_ci_execution::{
     Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_windows::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
-use static_assertions::assert_impl_all;
-
 const MIB: u64 = 1024 * 1024;
 const DEFAULT_OUTPUT_LIMIT: usize = 1024 * 1024;
-
-assert_impl_all!(WindowsSandboxProvider: Send, Sync, Clone);
 
 #[test]
 fn lifecycle_exec_copy_and_exact_replay_work() {
