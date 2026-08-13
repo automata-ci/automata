@@ -153,9 +153,9 @@ Current design foundation:
 - [x] The first target is Apple Silicon on macOS 15 or newer, with Bash and
   `sh` as the required shell surface and configured Python or PowerShell Core
   optional.
-- [x] Delivery is staged as trusted native execution, hosted `macos-15`
-  validation, and then Virtualization.framework isolation on physical Apple
-  Silicon.
+- [x] Delivery is staged as trusted native execution, repository-scoped
+  self-hosted validation, and then Virtualization.framework isolation on
+  physical Apple Silicon. Paid GitHub-hosted macOS execution remains disabled.
 
 Remaining tasks:
 
@@ -165,8 +165,9 @@ Remaining tasks:
   dedicated account and runner-only Keychain inputs, owned process supervisor,
   descriptor-relative workspace access, durable recovery, and explicit
   host-shared zero-resource policy.
-- [ ] Add the ARM64-only hosted `macos-15` build, provider, product-config,
-  shell, cancellation, recovery, and shipped-runner differential lane.
+- [ ] Add an ARM64-only, repository-scoped self-hosted macOS 15 build,
+  provider, product-config, shell, cancellation, recovery, and shipped-runner
+  differential lane when dedicated capacity is available.
 - [ ] Implement the `macos_virtualization` provider with an attested macOS 15
   ARM64 template, private guest protocol, APFS clone cleanup, resource
   enforcement, and self-hosted physical-machine acceptance.
@@ -179,7 +180,7 @@ Acceptance:
 - [ ] The shipped native runner on Apple Silicon macOS 15 reports
   `runner.os=macOS` and `runner.arch=ARM64`, completes zero-resource Bash and
   `sh` jobs, and rejects actions, services, and containers before launch.
-- [ ] Hosted `macos-15` differential fixtures cover stable environment,
+- [ ] Self-hosted macOS 15 differential fixtures cover stable environment,
   working-directory, command-file, output, timeout, cancellation, and
   conclusion behavior.
 - [ ] Physical Apple Silicon acceptance proves VM template identity,

@@ -33,7 +33,7 @@ fn repository_ci_produces_an_accepted_source_plan() {
         plan.workflow().name().map(|name| name.value().as_str()),
         Some("CI")
     );
-    assert_eq!(plan.workflow().jobs().len(), 11);
+    assert_eq!(plan.workflow().jobs().len(), 10);
     assert_eq!(
         plan.workflow()
             .jobs()
@@ -47,7 +47,6 @@ fn repository_ci_produces_an_accepted_source_plan() {
             "renderer_tests",
             "postgres_store",
             "postgres_integrations",
-            "macos",
             "frontend",
             "renderer",
             "dist_build",
@@ -102,7 +101,6 @@ fn repository_ci_produces_an_accepted_source_plan() {
     && needs.renderer_tests.result == 'success'
     && needs.postgres_store.result == 'success'
     && needs.postgres_integrations.result == 'success'
-    && needs.macos.result == 'success'
     && needs.frontend.result == 'success'
     && (needs.renderer.result == 'success'
         || (github.event_name == 'pull_request'

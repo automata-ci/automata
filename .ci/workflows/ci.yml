@@ -309,91 +309,6 @@ jobs:
           cargo test -p automata-ci-results-github --test postgres_cache --all-features --locked -- --ignored --test-threads=1
           cargo test -p automata-ci --test github_provider_end_to_end_matrix --all-features --locked -- --ignored --test-threads=1
 
-  macos:
-    name: macOS native runner
-    runs-on: macos-15
-    timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Require pinned Apple Silicon toolchain
-        run: |
-          install -d -m 0700 -- "$TMPDIR"
-          rustc --version --verbose
-          cargo --version --verbose
-          host_triple="$(rustc --version --verbose | sed -n 's/^host: //p')"
-          test "$host_triple" = "aarch64-apple-darwin"
-          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 15
-
-      - name: Check shipped macOS binaries
-        run: cargo check --locked --bin automata --bin automata-runner
-
-      - name: Lint macOS provider, executor, and runner
-        run: >-
-          cargo clippy
-          --locked
-          -p automata-ci-metrics
-          -p automata-ci-sandbox-macos
-          -p automata-ci-job-executor-github
-          -p automata-ci-runner
-          --all-targets
-          --no-deps
-          --
-          -D warnings
-
-      - name: Record GitHub-hosted Bash shell reference
-        id: macos_shell_reference
-        shell: bash
-        run: |
-          reference="$RUNNER_TEMP/automata-macos-shell-reference.txt"
-          printf 'differential.bash=ok\n' > "$reference"
-          printf 'AUTOMATA_MACOS_DIFFERENTIAL_REFERENCE=%s\n' "$reference" >> "$GITHUB_ENV"
-          printf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\n' >> "$GITHUB_ENV"
-          printf 'fixture=native-output\n' >> "$GITHUB_OUTPUT"
-
-      - name: Record GitHub-hosted sh shell reference
-        shell: sh
-        env:
-          FROM_OUTPUT: ${{ steps.macos_shell_reference.outputs.fixture }}
-        run: |
-          test "$AUTOMATA_DIFFERENTIAL_ENV" = command-file
-          test "$FROM_OUTPUT" = native-output
-          test "$PWD" = "$GITHUB_WORKSPACE"
-          {
-            printf 'differential.sh=ok\n'
-            printf 'differential.environment=%s\n' "$AUTOMATA_DIFFERENTIAL_ENV"
-            printf 'differential.output=%s\n' "$FROM_OUTPUT"
-            printf 'differential.workspace=true\n'
-            printf 'differential.conclusion=success\n'
-          } >> "$AUTOMATA_MACOS_DIFFERENTIAL_REFERENCE"
-
-      - name: Test macOS execution contracts
-        run: |
-          cargo test --locked -p automata-ci-execution
-          cargo test --locked -p automata-ci-job-executor-github --all-targets
-          cargo test --locked -p automata-ci-sandbox-macos --all-targets
-          cargo test --locked -p automata-ci-runner --lib
-          cargo test --locked -p automata-ci-runner --test product_context
-          cargo test --locked -p automata-ci-runner --test runner_product_config_macos
-          cargo test --locked -p automata-ci-runner --test capabilities_cli --test cli
-
-      - name: Test shipped macOS runner process
-        run: cargo test --locked -p automata-ci-runner --test native_runner_process_e2e -- --nocapture
-
-      - name: Exercise hidden shipped-binary supervisor
-        run: |
-          cargo build --locked --bin automata-runner
-          python3 scripts/ci/tests/macos-supervisor-smoke.py \
-            target/debug/automata-runner
-
   frontend:
     name: React SSR frontend
     runs-on: ubuntu-24.04
@@ -595,7 +510,6 @@ jobs:
           && needs.renderer_tests.result == 'success'
           && needs.postgres_store.result == 'success'
           && needs.postgres_integrations.result == 'success'
-          && needs.macos.result == 'success'
           && needs.frontend.result == 'success'
           && (needs.renderer.result == 'success'
               || (github.event_name == 'pull_request'
@@ -608,7 +522,6 @@ jobs:
       - renderer_tests
       - postgres_store
       - postgres_integrations
-      - macos
       - frontend
       - renderer
     runs-on: ubuntu-24.04

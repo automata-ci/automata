@@ -1185,8 +1185,8 @@ Windows CI is disabled on the current baseline.
 ### macOS
 
 - [x] Select and document the staged macOS direction: Apple Silicon macOS 15+
-  trusted-native Bash/sh first, then hosted `macos-15` validation, followed by
-  Virtualization.framework isolation.
+  trusted-native Bash/sh first, then repository-scoped self-hosted validation,
+  followed by Virtualization.framework isolation.
 
 - [ ] Add a macOS provider.
 - [ ] Report `runner.os=macOS`, not Linux.

@@ -1,8 +1,10 @@
 # macOS runner implementation plan
 
 This page records the accepted implementation order for macOS runner support.
-The trusted-native slice described in stages 1 and 2 is experimental. The
-Virtualization.framework isolation boundary in stage 3 remains planned.
+The trusted-native slice described in stage 1 is experimental. Native macOS
+validation is deferred until repository-scoped self-hosted capacity is
+available, and the Virtualization.framework boundary in stage 3 remains
+planned.
 
 The first supported host is Apple Silicon running macOS 15 or newer. Workflow
 syntax does not change: the first slice executes GitHub-compatible `run:` steps
@@ -36,18 +38,24 @@ Runner-only secrets may be loaded from an exact macOS Keychain service/account
 pair without authentication UI. This source is limited to runner mTLS, spool,
 and object-store inputs and is never made available through a job-secret port.
 
-## Stage 2: hosted macOS validation
+## Stage 2: self-hosted macOS validation (deferred)
 
-Add an explicit GitHub-hosted `macos-15` lane and fail closed unless Rust's host
-triple is `aarch64-apple-darwin`. It builds the shipped binaries and exercises
-the macOS provider, product configuration, context, Keychain, shell executor,
-durable state, supervisor cleanup, and a shipped-runner process smoke test.
-The lane uses system tools and pinned actions; it requires neither Homebrew nor
-repository secrets.
+The GitHub-hosted `macos-15` lane is intentionally absent because its recurring
+cost is not justified during the project's current stage. The macOS provider,
+configuration, platform-specific tests, differential support, and supervisor
+smoke script remain in the repository so validation can resume without
+reimplementing the runner.
 
-A deterministic differential fixture runs the same Bash and `sh` cases under
-GitHub Actions and Automata and compares stable environment, working-directory,
-command-file, output, timeout, cancellation, and conclusion behavior.
+When repository-scoped self-hosted Apple Silicon capacity is available, add an
+explicitly labeled macOS 15 lane and fail closed unless Rust's host triple is
+`aarch64-apple-darwin`. It should build the shipped binaries and exercise the
+macOS provider, product configuration, context, Keychain, shell executor,
+durable state, supervisor cleanup, and shipped-runner process smoke test.
+
+A deterministic differential fixture should run the same Bash and `sh` cases
+under the self-hosted workflow and Automata and compare stable environment,
+working-directory, command-file, output, timeout, cancellation, and conclusion
+behavior.
 
 ## Stage 3: Virtualization.framework isolation
 
@@ -62,10 +70,10 @@ omits the virtual NIC, while private egress uses provider-owned NAT. Runner or
 helper failure stops the VM and removes the clone through replay-safe provider
 recovery.
 
-GitHub-hosted ARM64 macOS runners do not provide nested virtualization. Unit,
-protocol, build, and fake-helper tests run in hosted CI; boot, isolation,
-resource, crash-recovery, and repeated-clean-job tests require a repository-
-scoped self-hosted Apple Silicon runner.
+GitHub-hosted ARM64 macOS runners do not provide nested virtualization. macOS-
+specific build, Keychain, shell-differential, native-process, boot, isolation,
+resource, crash-recovery, and repeated-clean-job coverage requires repository-
+scoped self-hosted Apple Silicon capacity.
 
 ## Contract changes
 
@@ -86,6 +94,8 @@ scoped self-hosted Apple Silicon runner.
 
 - Existing Linux and Windows provider, executor, configuration, and workflow
   tests remain unchanged and green.
+- Repository workflows do not schedule paid GitHub-hosted macOS runners while
+  self-hosted Apple Silicon capacity is unavailable.
 - Native configuration rejects the wrong OS/architecture, macOS below 15,
   parallel slots, overlapping roots, nonzero ephemeral-disk or GPU capacity,
   unsupported network/filesystem/privilege policies, and unsupported workflow
