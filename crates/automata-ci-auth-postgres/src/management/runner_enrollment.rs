@@ -479,11 +479,7 @@ impl PostgresHumanRbacManagementRepository {
         let Some(row) = row else {
             return Ok(RunnerEnrollmentPrepareOutcome::Rejected);
         };
-        if let Some(response) = row.replay(
-            request.operation_id,
-            &request.request_sha256,
-            now_ms,
-        )? {
+        if let Some(response) = row.replay(request.operation_id, &request.request_sha256, now_ms)? {
             return Ok(RunnerEnrollmentPrepareOutcome::Replayed(response));
         }
         if row.consumed_at_ms.is_some() || row.expires_at_ms <= now_ms {
@@ -581,8 +577,8 @@ impl PostgresHumanRbacManagementRepository {
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_database_error)?;
-        let runner_count = usize::try_from(runner_count)
-            .map_err(|_| ManagementRepositoryError::CorruptData)?;
+        let runner_count =
+            usize::try_from(runner_count).map_err(|_| ManagementRepositoryError::CorruptData)?;
         if runner_count >= MAX_REGISTERED_RUNNERS {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::CapacityExhausted);

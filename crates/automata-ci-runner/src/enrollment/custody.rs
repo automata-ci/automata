@@ -18,9 +18,7 @@ use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
-use super::{
-    RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_response, validate_token,
-};
+use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_response, validate_token};
 use crate::product::{RunnerProductConfig, SecretSource};
 
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
@@ -138,11 +136,9 @@ impl CredentialDestinations {
             sync_parent(&self.response_stage)?;
             return Ok(Some(response));
         }
-        let Some(response) = read_bounded_temporary(
-            &self.response_stage,
-            MAX_RESPONSE_BYTES,
-            true,
-        )? else {
+        let Some(response) =
+            read_bounded_temporary(&self.response_stage, MAX_RESPONSE_BYTES, true)?
+        else {
             return Ok(None);
         };
         if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
@@ -339,9 +335,7 @@ fn validate_certificate_response(
         .context("runner enrollment response issuer has no key usage")?;
     let expected_common_name = expected_runner_id.hyphenated().to_string();
     let mut common_names = leaf.subject().iter_common_name();
-    let common_name = common_names
-        .next()
-        .and_then(|name| name.as_str().ok());
+    let common_name = common_names.next().and_then(|name| name.as_str().ok());
     let has_subject_alternative_name = leaf
         .subject_alternative_name()
         .context("runner enrollment response has an invalid subject alternative name")?
@@ -570,7 +564,8 @@ fn prepare_destination(path: &Path) -> Result<PreparedDestination> {
 fn require_trusted_directory(directory: &rustix::fd::OwnedFd) -> Result<()> {
     use rustix::fs::{FileType, fstat};
 
-    let metadata = fstat(directory).context("runner enrollment directory could not be inspected")?;
+    let metadata =
+        fstat(directory).context("runner enrollment directory could not be inspected")?;
     let effective_user = rustix::process::geteuid().as_raw();
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
         || (!matches!(metadata.st_uid, 0) && metadata.st_uid != effective_user)
@@ -838,11 +833,7 @@ fn remove_durable(path: &Path) -> Result<()> {
 
     remove_temporary_durable(path)?;
     let destination = prepare_destination(path)?;
-    match unlinkat(
-        &destination.parent,
-        &destination.name,
-        AtFlags::empty(),
-    ) {
+    match unlinkat(&destination.parent, &destination.name, AtFlags::empty()) {
         Ok(()) => rustix::fs::fsync(&destination.parent)
             .context("runner enrollment directory could not be synchronized"),
         Err(rustix::io::Errno::NOENT) => Ok(()),
@@ -870,8 +861,8 @@ mod tests {
 
     use super::{
         CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, acquire_enrollment_lock,
-        persist_exact_file, persist_new, prepare_destination, same_destination,
-        temporary_path, validate_certificate_response, validate_destination_set,
+        persist_exact_file, persist_new, prepare_destination, same_destination, temporary_path,
+        validate_certificate_response, validate_destination_set,
     };
     use crate::enrollment::RedeemResponse;
 
@@ -922,7 +913,10 @@ mod tests {
         fs::write(&destination, b"existing").expect("existing destination");
         persist_new(&destination, b"replacement", true)
             .expect_err("publication must not replace an existing destination");
-        assert_eq!(fs::read(&destination).expect("existing contents"), b"existing");
+        assert_eq!(
+            fs::read(&destination).expect("existing contents"),
+            b"existing"
+        );
         assert_eq!(
             fs::read_dir(&root).expect("test directory").count(),
             1,
@@ -964,8 +958,7 @@ mod tests {
         fs::create_dir(&root).expect("test root");
         let first = prepare_destination(&root.join("credential.pem")).expect("first destination");
         let alias = prepare_destination(&root.join("credential.pem")).expect("aliased destination");
-        let distinct =
-            prepare_destination(&root.join("other.pem")).expect("distinct destination");
+        let distinct = prepare_destination(&root.join("other.pem")).expect("distinct destination");
         assert!(same_destination(&first, &alias).expect("compare aliases"));
         assert!(!same_destination(&first, &distinct).expect("compare destinations"));
         drop((first, alias, distinct));
@@ -977,11 +970,18 @@ mod tests {
     fn configured_final_cannot_alias_an_internal_staging_destination() {
         let root = std::env::current_dir()
             .expect("current directory")
-            .join(format!(".automata-enroll-config-alias-test-{}", Uuid::new_v4()));
+            .join(format!(
+                ".automata-enroll-config-alias-test-{}",
+                Uuid::new_v4()
+            ));
         fs::create_dir(&root).expect("test root");
         let request = root.join("runner-key.pem.automata-enrollment-request");
         let configured_server_roots = temporary_path(&request).expect("request staging path");
-        let final_paths = [configured_server_roots, root.join("runner-key.pem"), request];
+        let final_paths = [
+            configured_server_roots,
+            root.join("runner-key.pem"),
+            request,
+        ];
         let mut paths = final_paths.to_vec();
         for path in &final_paths {
             paths.push(temporary_path(path).expect("internal staging path"));
@@ -1040,36 +1040,35 @@ mod tests {
         let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
         let expires_at = 1_900_000_000;
         let runner_id = Uuid::new_v4();
-        let issue_leaf = |second_common_name: bool,
-                          subject_alternative_name: bool,
-                          extra_key_usage: bool| {
-            let mut leaf_params = CertificateParams::default();
-            leaf_params
-                .distinguished_name
-                .push(DnType::CommonName, runner_id.to_string());
-            if second_common_name {
+        let issue_leaf =
+            |second_common_name: bool, subject_alternative_name: bool, extra_key_usage: bool| {
+                let mut leaf_params = CertificateParams::default();
                 leaf_params
                     .distinguished_name
                     .push(DnType::CommonName, runner_id.to_string());
-            }
-            if subject_alternative_name {
-                leaf_params.subject_alt_names.push(SanType::DnsName(
-                    "runner.example.test".try_into().expect("DNS name"),
-                ));
-            }
-            leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-            if extra_key_usage {
+                if second_common_name {
+                    leaf_params
+                        .distinguished_name
+                        .push(DnType::CommonName, runner_id.to_string());
+                }
+                if subject_alternative_name {
+                    leaf_params.subject_alt_names.push(SanType::DnsName(
+                        "runner.example.test".try_into().expect("DNS name"),
+                    ));
+                }
+                leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+                if extra_key_usage {
+                    leaf_params
+                        .key_usages
+                        .push(KeyUsagePurpose::ContentCommitment);
+                }
+                leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+                leaf_params.not_after =
+                    time::OffsetDateTime::from_unix_timestamp(expires_at).expect("expiry");
                 leaf_params
-                    .key_usages
-                    .push(KeyUsagePurpose::ContentCommitment);
-            }
-            leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-            leaf_params.not_after =
-                time::OffsetDateTime::from_unix_timestamp(expires_at).expect("expiry");
-            leaf_params
-                .signed_by(&runner_key, &issuer)
-                .expect("runner leaf")
-        };
+                    .signed_by(&runner_key, &issuer)
+                    .expect("runner leaf")
+            };
         let mut response = RedeemResponse {
             runner_id,
             runner_group: "default".to_owned(),
@@ -1088,7 +1087,7 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect("matching fixed-profile leaf");
+        .expect("matching fixed-profile leaf");
         let wrong_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("wrong key");
         validate_certificate_response(
             runner_id,
@@ -1096,7 +1095,7 @@ mod tests {
             &wrong_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect_err("different key must be rejected");
+        .expect_err("different key must be rejected");
 
         validate_certificate_response(
             runner_id,
@@ -1114,7 +1113,7 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect_err("a second common name must be rejected");
+        .expect_err("a second common name must be rejected");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(false, true, false).pem(), issuer.pem());
@@ -1124,7 +1123,7 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect_err("a subject alternative name must be rejected");
+        .expect_err("a subject alternative name must be rejected");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(false, false, false).pem(), issuer.pem());
@@ -1135,20 +1134,17 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect_err("malformed server roots must be rejected");
+        .expect_err("malformed server roots must be rejected");
 
         response.server_ca_pem = issuer.pem();
-        response.certificate_chain_pem = format!(
-            "{}{}",
-            issue_leaf(false, false, true).pem(),
-            issuer.pem()
-        );
+        response.certificate_chain_pem =
+            format!("{}{}", issue_leaf(false, false, true).pem(), issuer.pem());
         validate_certificate_response(
             runner_id,
             &response,
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-            .expect_err("an extra key usage must be rejected");
+        .expect_err("an extra key usage must be rejected");
     }
 }
