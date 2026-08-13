@@ -52,6 +52,8 @@ if not isinstance(inspected, list) or len(inspected) != 1:
     fail("Podman did not return exactly one inspected image")
 image = inspected[0]
 config = image.get("Config") or {}
+rootfs = image.get("RootFS") or {}
+layers = rootfs.get("Layers")
 profile_id = manifest.get("profile_id")
 platform = manifest.get("platform") or {}
 execution = manifest.get("execution") or {}
@@ -73,6 +75,8 @@ if config.get("WorkingDir") != execution.get("workspace"):
     fail("image working directory differs from the profile manifest")
 if config.get("Cmd") != execution.get("keepalive"):
     fail("image command differs from the profile manifest")
+if not isinstance(layers, list) or len(layers) != 1:
+    fail("image must contain exactly one squashed filesystem layer")
 
 labels = config.get("Labels") or {}
 required_labels = {

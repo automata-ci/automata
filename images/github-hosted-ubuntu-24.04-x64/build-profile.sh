@@ -27,6 +27,7 @@ podman build \
     --file "${script_directory}/Containerfile" \
     --format oci \
     --pull=always \
+    --squash-all \
     --timestamp 0 \
     --tag "${build_tag}" \
     "${script_directory}"
