@@ -6,11 +6,14 @@ use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobK
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
-    AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, ClaimGithubCheckProjection,
-    ClaimProviderDelivery, CompleteProviderDelivery, EnsureGithubServerServiceAuthority,
-    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
-    GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubProviderManifest,
+    AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, ClaimGithubCheckProjection, ClaimProviderDelivery,
+    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, CompleteProviderDelivery,
+    EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
+    GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunId, GithubCheckSubjectRepository as _, GithubCheckSubjectTarget,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRepository as _,
     GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -71,6 +74,11 @@ struct CheckProjectionState {
     attempt_count: i16,
     claim_fence: i64,
     projected_revision: i64,
+    external_suite_id: Option<i64>,
+    external_run_id: Option<i64>,
+    provider_state: Option<String>,
+    provider_conclusion: Option<String>,
+    provider_observed_at_ms: Option<i64>,
     state_updated_at_ms: i64,
 }
 
@@ -750,6 +758,26 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
             "workflow_failure",
         )
         .await?;
+        let failed_subject_id: Uuid = sqlx::query_scalar(
+            r"
+            SELECT id
+            FROM github_check_subjects
+            WHERE provider_delivery_id = $1
+              AND subject_key = $2
+            ",
+        )
+        .bind(accepted.delivery_id().as_uuid())
+        .bind(BROKEN_PATH)
+        .fetch_one(database.pool())
+        .await?;
+        assert_pre_admission_terminal_check(
+            &database,
+            failed_subject_id,
+            claim.claimed_at(),
+            "failure",
+            "workflow_failure",
+        )
+        .await?;
         let checks: Vec<(String, Option<Uuid>, String, Option<String>)> = sqlx::query_as(
             r"
             SELECT subject_key, workflow_run_id, desired_state, desired_conclusion
@@ -810,6 +838,7 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
         let observed_at = database_now(database.pool()).await?;
         let expires_at = checked_add_millis(observed_at, 30_000)?;
         let mut claimed = std::collections::BTreeSet::new();
+        let mut projections = Vec::new();
         for _ in 0..expected_claimable.len() {
             let projection = database
                 .store()
@@ -822,8 +851,22 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
                 .await?
                 .expect("every sealed delivery Check must be claimable");
             claimed.insert(projection.claim().subject_id().as_uuid());
+            projections.push(projection);
         }
         assert_eq!(claimed, expected_claimable);
+        let failed_projection_index = projections
+            .iter()
+            .position(|projection| projection.claim().subject_id().as_uuid() == failed_subject_id)
+            .expect("failed workflow Check claim");
+        let failed_projection = projections.swap_remove(failed_projection_index);
+        let delivered =
+            deliver_terminal_check_projection(&database, fixture.connection, failed_projection)
+                .await?;
+        assert_eq!(delivered.outbox_state, "delivered");
+        assert_eq!(delivered.projected_revision, 2);
+        assert_eq!(delivered.provider_state.as_deref(), Some("completed"));
+        assert_eq!(delivered.provider_conclusion.as_deref(), Some("failure"));
+        assert!(delivered.provider_observed_at_ms.is_some());
         assert!(
             database
                 .store()
@@ -1487,6 +1530,9 @@ async fn load_check_projection(
                subject.desired_updated_at_ms, outbox.state AS outbox_state,
                outbox.attempted_revision, outbox.attempt_count,
                outbox.claim_fence, outbox.projected_revision,
+               outbox.external_suite_id, outbox.external_run_id,
+               outbox.provider_state, outbox.provider_conclusion,
+               outbox.provider_observed_at_ms,
                outbox.state_updated_at_ms
         FROM github_check_subjects AS subject
         JOIN github_check_projection_outbox AS outbox
@@ -1519,8 +1565,109 @@ async fn assert_pre_admission_terminal_check(
     assert_eq!(state.attempt_count, 0);
     assert_eq!(state.claim_fence, 0);
     assert_eq!(state.projected_revision, 0);
+    assert_eq!(state.external_suite_id, None);
+    assert_eq!(state.external_run_id, None);
+    assert_eq!(state.provider_state, None);
+    assert_eq!(state.provider_conclusion, None);
+    assert_eq!(state.provider_observed_at_ms, None);
     assert_eq!(state.state_updated_at_ms, terminal_at.get());
     Ok(state)
+}
+
+async fn claim_check_projection(
+    database: &TestDatabase,
+    connection_id: ProviderConnectionId,
+) -> TestResult<ClaimedGithubCheckProjection> {
+    let observed_at = database_now(database.pool()).await?;
+    let expires_at = checked_add_millis(observed_at, 30_000)?;
+    Ok(database
+        .store()
+        .claim_github_check_projection(ClaimGithubCheckProjection::new(
+            connection_id,
+            GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())?,
+            observed_at,
+            expires_at,
+        )?)
+        .await?
+        .expect("failed workflow Check must remain claimable through delivery"))
+}
+
+async fn deliver_terminal_check_projection(
+    database: &TestDatabase,
+    connection_id: ProviderConnectionId,
+    ensure_suite: ClaimedGithubCheckProjection,
+) -> TestResult<CheckProjectionState> {
+    let expected =
+        GithubCheckDesiredProjection::terminal(GithubCheckTerminalCause::WorkflowFailure);
+    let subject_id = ensure_suite.claim().subject_id().as_uuid();
+    assert_eq!(
+        ensure_suite.action(),
+        GithubCheckProjectionAction::EnsureSuite
+    );
+    assert_eq!(ensure_suite.desired(), expected);
+    assert_eq!(ensure_suite.desired_revision(), 2);
+
+    let suite_id = GithubCheckSuiteId::new(70_001)?;
+    database
+        .store()
+        .bind_github_check_suite(BindGithubCheckSuite::new(
+            ensure_suite.claim(),
+            suite_id,
+            ensure_suite.claimed_at(),
+        )?)
+        .await?;
+
+    let create = claim_check_projection(database, connection_id).await?;
+    assert_eq!(create.claim().subject_id().as_uuid(), subject_id);
+    assert_eq!(
+        create.action(),
+        GithubCheckProjectionAction::PrepareRunCreate
+    );
+    assert_eq!(create.desired(), expected);
+    assert_eq!(create.desired_revision(), 2);
+    let reconcile_not_before = checked_add_millis(create.expires_at(), 1)?;
+    let create_fence = database
+        .store()
+        .begin_github_check_run_create(BeginGithubCheckRunCreate::new(
+            &create,
+            create.claimed_at(),
+            reconcile_not_before,
+        )?)
+        .await?;
+
+    let run_id = GithubCheckRunId::new(80_001)?;
+    database
+        .store()
+        .bind_github_check_run(BindGithubCheckRun::new(
+            GithubCheckRunBindingFence::Create(create_fence),
+            suite_id,
+            run_id,
+            create.claimed_at(),
+        )?)
+        .await?;
+
+    let publish = claim_check_projection(database, connection_id).await?;
+    assert_eq!(publish.claim().subject_id().as_uuid(), subject_id);
+    assert_eq!(publish.action(), GithubCheckProjectionAction::Publish);
+    assert_eq!(publish.suite_id(), Some(suite_id));
+    assert_eq!(publish.run_id(), Some(run_id));
+    assert_eq!(publish.desired(), expected);
+    assert_eq!(publish.desired_revision(), 2);
+    let delivered_at = publish.claimed_at();
+    database
+        .store()
+        .complete_github_check_projection(CompleteGithubCheckProjection::new(
+            publish.claim(),
+            publish.desired(),
+            delivered_at,
+        )?)
+        .await?;
+
+    let delivered = load_check_projection(database, subject_id).await?;
+    assert_eq!(delivered.external_suite_id, Some(70_001));
+    assert_eq!(delivered.external_run_id, Some(80_001));
+    assert_eq!(delivered.provider_observed_at_ms, Some(delivered_at.get()));
+    Ok(delivered)
 }
 
 async fn assert_fanout_evidence_is_sealed_after_completion(

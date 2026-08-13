@@ -794,6 +794,14 @@ fn github_host_gateway_opt_in_derives_only_the_exact_validated_server_hostname()
         8088
     );
 
+    value["executor"]["network"] = serde_json::json!("disabled");
+    assert_eq!(
+        parse_value(&value)
+            .expect_err("disabled networking must not expose the mapped GitHub transport"),
+        RunnerProductConfigError::InvalidGithub
+    );
+    value["executor"]["network"] = serde_json::json!("private_egress");
+
     value["podman"]["map_github_server_to_host_gateway"] = serde_json::Value::Bool(false);
     assert_eq!(
         parse_value(&value).expect_err("mapped HTTP requires the explicit Podman gateway opt-in"),

@@ -986,6 +986,9 @@ impl RawRunnerProductConfig {
         if mapped_github_transport != podman_gateway_enabled {
             return Err(RunnerProductConfigError::InvalidGithub);
         }
+        if mapped_github_transport && executor.network() == NetworkPolicy::Disabled {
+            return Err(RunnerProductConfigError::InvalidGithub);
+        }
         if let RunnerProviderConfig::Podman(podman) = &provider {
             let required_podman_state = required_podman_state_root(podman.runtime_directory());
             if state.podman().is_none_or(|configured| {
