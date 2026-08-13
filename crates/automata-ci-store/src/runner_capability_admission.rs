@@ -1,36 +1,11 @@
 use async_trait::async_trait;
-use automata_ci_core::UnixMillis;
 use thiserror::Error;
 
-use crate::{RepositoryOperationError, TenantScope};
+use crate::RepositoryOperationError;
 
-/// Idempotent request to make an authenticated tenant scope durable.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnsureTenant {
-    tenant: TenantScope,
-    created_at: UnixMillis,
-}
-
-impl EnsureTenant {
-    #[must_use]
-    pub const fn new(tenant: TenantScope, created_at: UnixMillis) -> Self {
-        Self { tenant, created_at }
-    }
-
-    #[must_use]
-    pub const fn tenant(&self) -> &TenantScope {
-        &self.tenant
-    }
-
-    #[must_use]
-    pub const fn created_at(&self) -> UnixMillis {
-        self.created_at
-    }
-}
-
-/// Failures from the narrow product-readiness storage boundary.
+/// Failures from the narrow runner-capability admission boundary.
 #[derive(Debug, Error)]
-pub enum ProductBootstrapStoreError {
+pub enum RunnerCapabilityAdmissionError {
     #[error(transparent)]
     Operation(#[from] RepositoryOperationError),
     #[error("durable runner inventory conflicts with current {resource}")]
@@ -39,7 +14,7 @@ pub enum ProductBootstrapStoreError {
     CorruptData,
 }
 
-impl ProductBootstrapStoreError {
+impl RunnerCapabilityAdmissionError {
     #[must_use]
     pub fn operation(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         RepositoryOperationError::from_source(source).into()
@@ -78,21 +53,12 @@ impl RunnerCapabilityReadiness {
     }
 }
 
-/// Startup persistence and readiness checks that are independent of enrollment.
+/// Startup admission check for durable capability-bearing runner inventory.
 #[async_trait]
-pub trait ProductBootstrapRepository: Send + Sync {
-    /// Verifies durable runner capabilities with all optional products unavailable.
-    async fn verify_runner_capability_admission(&self) -> Result<(), ProductBootstrapStoreError> {
-        self.verify_runner_capability_readiness(RunnerCapabilityReadiness::unavailable())
-            .await
-    }
-
+pub trait RunnerCapabilityAdmissionRepository: Send + Sync {
     /// Verifies durable runner capabilities against products ready on this replica.
     async fn verify_runner_capability_readiness(
         &self,
         readiness: RunnerCapabilityReadiness,
-    ) -> Result<(), ProductBootstrapStoreError>;
-
-    /// Creates the tenant when absent and otherwise leaves it unchanged.
-    async fn ensure_tenant(&self, request: EnsureTenant) -> Result<(), ProductBootstrapStoreError>;
+    ) -> Result<(), RunnerCapabilityAdmissionError>;
 }

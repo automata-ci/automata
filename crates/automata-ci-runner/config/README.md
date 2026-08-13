@@ -86,9 +86,10 @@ replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
 or kubelet verification.
 
 > [!WARNING]
-> Runner enrollment and certificate lifecycle are not yet a turnkey user flow.
-> This guide is for contributors integrating the G1 end-to-end path, not for a
-> production runner installation.
+> Initial enrollment is available through `automata runner token` and
+> `automata-runner enroll` on Unix hosts. Automated certificate rotation and
+> runner disable/drain/delete lifecycle operations remain planned work; account
+> for that operational gap before a production deployment.
 
 Start with the
 [control-plane setup](https://github.com/automata-ci/automata/blob/main/docs/deployment.md),

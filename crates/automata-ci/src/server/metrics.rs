@@ -61,6 +61,7 @@ use crate::{
             REPOSITORY_SECRET_DELETE_PATH, REPOSITORY_SECRET_PROVIDER_ACTIVATE_PATH,
             REPOSITORY_SECRET_REPLACE_PATH, REPOSITORY_SECRETS_SETTINGS_PATH,
         },
+        runner_enrollment_api::{RUNNER_ENROLLMENT_REDEEM_PATH, RUNNER_ENROLLMENTS_PATH},
         secret_api::{
             BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH, BUILTIN_SECRET_PROVIDER_PATH,
             GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH, REPOSITORY_SECRET_BY_NAME_PATH,
@@ -101,7 +102,7 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 41] = [
+const HTTP_ROUTE_LABELS: [&str; 43] = [
     "/healthz",
     "/readyz",
     "/",
@@ -141,6 +142,8 @@ const HTTP_ROUTE_LABELS: [&str; 41] = [
     REPOSITORY_SECRET_BY_NAME_PATH,
     BUILTIN_SECRET_PROVIDER_PATH,
     BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH,
+    RUNNER_ENROLLMENTS_PATH,
+    RUNNER_ENROLLMENT_REDEEM_PATH,
     "other",
     "unmatched",
 ];
@@ -1837,6 +1840,8 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
         Some(REPOSITORY_SECRET_BY_NAME_PATH) => REPOSITORY_SECRET_BY_NAME_PATH,
         Some(BUILTIN_SECRET_PROVIDER_PATH) => BUILTIN_SECRET_PROVIDER_PATH,
         Some(BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH) => BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH,
+        Some(RUNNER_ENROLLMENTS_PATH) => RUNNER_ENROLLMENTS_PATH,
+        Some(RUNNER_ENROLLMENT_REDEEM_PATH) => RUNNER_ENROLLMENT_REDEEM_PATH,
         Some(_) => "other",
         None => "unmatched",
     }
@@ -2541,6 +2546,8 @@ mod tests {
             REPOSITORY_SECRET_BY_NAME_PATH,
             BUILTIN_SECRET_PROVIDER_PATH,
             BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH,
+            RUNNER_ENROLLMENTS_PATH,
+            RUNNER_ENROLLMENT_REDEEM_PATH,
         ];
 
         for route in operational_routes {

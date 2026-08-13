@@ -23,7 +23,6 @@ use crate::{
 };
 
 mod admission;
-mod bootstrap;
 mod conformance;
 mod g1;
 mod github_checks;
@@ -49,6 +48,7 @@ mod provider_delivery;
 mod publication;
 mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
+mod runner_capability_admission;
 mod runtime_authority;
 mod secret_custody;
 mod secret_management;

@@ -55,6 +55,8 @@ mod provider_delivery_api;
 mod provider_delivery_receipt;
 #[path = "reusable_workflow_admission_api.rs"]
 mod reusable_workflow_admission_api;
+#[path = "runner_capability_admission_api.rs"]
+mod runner_capability_admission_api;
 #[path = "runner_payload_tombstone_api.rs"]
 mod runner_payload_tombstone_api;
 #[path = "runtime_authority_api.rs"]

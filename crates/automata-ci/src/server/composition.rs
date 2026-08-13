@@ -58,9 +58,9 @@ use automata_ci_store::{
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
     ManagedSecretAuthorityRepository, PostgresSecretCustodyRepository,
     PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
-    ProductBootstrapRepository as _, ProtectedEnvironmentRepository,
-    RepositoryPublicationRepository, RepositorySecretManagementReadRepository,
-    RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository,
+    ProtectedEnvironmentRepository, RepositoryPublicationRepository,
+    RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
+    ReusableWorkflowRuntimeRepository, RunnerCapabilityAdmissionRepository as _,
     RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
     RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
     RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
@@ -300,7 +300,7 @@ impl ProductionComponents {
         } else {
             RunnerCapabilityReadiness::unavailable()
         };
-        apply_product_bootstrap(config, store.as_ref(), capability_readiness).await?;
+        verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -338,6 +338,7 @@ impl ProductionComponents {
             secret_management.as_ref(),
             repository_secret_web.clone(),
             fallback_tenant,
+            capability_readiness,
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
@@ -543,8 +544,7 @@ impl ProductionComponents {
     }
 }
 
-async fn apply_product_bootstrap(
-    _config: &ServerConfig,
+async fn verify_runner_capability_readiness(
     store: &PostgresStore,
     readiness: RunnerCapabilityReadiness,
 ) -> Result<(), ServerCompositionError> {
@@ -553,7 +553,7 @@ async fn apply_product_bootstrap(
     store
         .verify_runner_capability_readiness(readiness)
         .await
-        .map_err(|_| ServerCompositionError::ProductBootstrap)?;
+        .map_err(|_| ServerCompositionError::RunnerCapabilityAdmission)?;
     Ok(())
 }
 
@@ -1440,6 +1440,7 @@ async fn build_human_api(
     secret_management: Option<&SecretManagementComposition>,
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
+    capability_readiness: RunnerCapabilityReadiness,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
@@ -1596,6 +1597,7 @@ async fn build_human_api(
         Arc::clone(&management),
         enrollment_issuer.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
         Arc::clone(runtime.clock()),
+        capability_readiness,
     ));
     let management_api_repository: Arc<
         dyn automata_ci_auth::management::HumanRbacManagementRepository,
@@ -1894,9 +1896,9 @@ pub enum ServerCompositionError {
     /// Installation setup could not be armed from the exact operator configuration.
     #[error("human authentication installation setup could not be armed")]
     HumanAuthenticationSetup,
-    /// Validated product bootstrap state could not be applied transactionally.
-    #[error("product bootstrap state could not be applied")]
-    ProductBootstrap,
+    /// Durable runner capabilities do not match products ready on this replica.
+    #[error("runner capability admission failed")]
+    RunnerCapabilityAdmission,
     /// A fresh process-local run-finalization worker identity was invalid.
     #[error("logical run-finalization worker identity is invalid")]
     InvalidLogicalRunFinalizationWorker,

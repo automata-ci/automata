@@ -71,14 +71,14 @@ provider admission happens on `automata-runner run`.
 Before advertising capacity, startup creates, inspects, and destroys a sandbox
 for each configured environment profile. The observed provider, profile,
 generation, and running state must match the configuration, and cleanup must
-finish. Scheduling sees the intersection of this live inventory and the
-server's static registration ceiling.
+finish. Scheduling sees the intersection of this live inventory and the exact
+capabilities admitted during one-time enrollment.
 
 Service containers are opt-in on Linux. `podman.service_proxy_image` must
 contain one registry-qualified immutable reference of the form
 `repository@sha256:<64 lowercase hex>` that is already in the runner's local
-Podman store. Configuration adds the feature to the registration ceiling;
-successful image inspection adds it to the live inventory. A missing value
+Podman store. Configuration requests the feature for enrollment; successful
+image inspection adds it to the live inventory. A missing value
 disables the feature, and an invalid or unavailable configured image stops
 startup. Mutable tags are rejected.
 

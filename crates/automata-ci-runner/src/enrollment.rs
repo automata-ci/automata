@@ -1,17 +1,20 @@
 //! Secure runner-side enrollment and local TLS credential custody.
 
-use std::{
-    fs::{self, OpenOptions},
-    io::{Read as _, Write as _},
-    path::{Path, PathBuf},
-};
+use std::{io::Read as _, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
-use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
-use reqwest::{Client, StatusCode, Url, header};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
+use reqwest::{Client, StatusCode, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
+
+mod custody;
+mod transport;
+
+use custody::CredentialDestinations;
+use transport::read_bounded_response;
 
 use crate::{
     cli::EnrollArgs,
@@ -19,75 +22,88 @@ use crate::{
 };
 
 const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
-const MAX_TOKEN_BYTES: usize = 128;
-const MAX_RESPONSE_BYTES: u64 = 512 * 1_024;
+const TOKEN_PREFIX: &str = "atm_re_";
+const TOKEN_BYTES: usize = 32;
+const TOKEN_ENCODED_BYTES: usize = 43;
+const MAX_TOKEN_BYTES: usize = TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     validate_name(&args.name)?;
     let config = RunnerProductConfig::load(&args.config)
         .context("runner enrollment could not load the product configuration")?;
     let destinations = CredentialDestinations::from_config(&config)?;
-    destinations.require_absent()?;
-    let token = load_token(args)?;
     let origin = enrollment_origin(&args.server)?;
-    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .context("runner enrollment could not generate the local private key")?;
-    let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(DnType::CommonName, config.runner_id().to_string());
-    let mut parameters = CertificateParams::default();
-    parameters.distinguished_name = distinguished_name;
-    let csr = parameters
-        .serialize_request(&key)
-        .context("runner enrollment could not create a certificate request")?
-        .pem()
-        .context("runner enrollment could not encode the certificate request")?;
-    let endpoint = origin
-        .join(REDEEM_PATH)
-        .context("runner enrollment endpoint is invalid")?;
-    let body = RedeemRequest {
-        token: token.as_str(),
-        runner_name: &args.name,
-        capabilities: config.inventory(),
-        csr_pem: &csr,
+    if destinations.finish_interrupted_cleanup(&config)? {
+        println!("runner enrollment was already completed");
+        return Ok(());
+    }
+    let stage = match destinations.load_stage(&config, &origin, &args.name)? {
+        Some(stage) => stage,
+        None => destinations.create_stage(
+            &config,
+            &origin,
+            &args.name,
+            load_token(args)?,
+        )?,
     };
-    let client = Client::builder()
-        .https_only(origin.scheme() == "https")
-        .build()
-        .context("runner enrollment HTTP client could not be configured")?;
-    let response = client
-        .post(endpoint)
-        .header(header::CONTENT_TYPE, "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(reqwest::Error::without_url)
-        .context("runner enrollment request failed")?;
-    if response.status() != StatusCode::CREATED {
-        let status = response.status();
-        bail!("runner enrollment was rejected with HTTP {status}");
-    }
-    if response
-        .content_length()
-        .is_some_and(|size| size > MAX_RESPONSE_BYTES)
-    {
-        bail!("runner enrollment response exceeded its size limit");
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(reqwest::Error::without_url)
-        .context("runner enrollment response could not be read")?;
-    if bytes.len() > usize::try_from(MAX_RESPONSE_BYTES).expect("response limit fits usize") {
-        bail!("runner enrollment response exceeded its size limit");
-    }
+    let bytes = if let Some(bytes) = destinations.load_response()? {
+        bytes
+    } else {
+        let endpoint = origin
+            .join(REDEEM_PATH)
+            .context("runner enrollment endpoint is invalid")?;
+        let body = RedeemRequest {
+            operation_id: stage.operation_id,
+            token: stage.token.as_str(),
+            runner_name: &stage.runner_name,
+            capabilities: &stage.capabilities,
+            csr_pem: &stage.csr_pem,
+        };
+        let client = Client::builder()
+            .https_only(origin.scheme() == "https")
+            .redirect(Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .retry(reqwest::retry::never())
+            .no_proxy()
+            .build()
+            .context("runner enrollment HTTP client could not be configured")?;
+        let request_body = Zeroizing::new(
+            serde_json::to_vec(&body).context("runner enrollment request could not be encoded")?,
+        );
+        let response = client
+            .post(endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Bytes::from_owner(request_body))
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("runner enrollment request failed")?;
+        if response.status() != StatusCode::CREATED {
+            let status = response.status();
+            bail!("runner enrollment was rejected with HTTP {status}");
+        }
+        if !response.headers().get_all(header::CONTENT_TYPE).iter().eq([
+            &header::HeaderValue::from_static("application/json; charset=utf-8"),
+        ]) {
+            bail!("runner enrollment response has an invalid content type");
+        }
+        let bytes = Zeroizing::new(read_bounded_response(response).await?);
+        destinations.persist_response(&bytes)?;
+        bytes
+    };
     let enrolled: RedeemResponse =
         serde_json::from_slice(&bytes).context("runner enrollment returned an invalid response")?;
     validate_response(&config, &enrolled)?;
-    destinations.persist(
+    stage.validate_certificate(&config, &enrolled)?;
+    destinations.persist_exact(
         enrolled.server_ca_pem.as_bytes(),
         enrolled.certificate_chain_pem.as_bytes(),
-        key.serialize_pem().as_bytes(),
+        stage.private_key_pem.as_bytes(),
     )?;
+    destinations.complete()?;
     println!(
         "enrolled runner {} in group {} (certificate expires at {})",
         enrolled.runner_id, enrolled.runner_group, enrolled.certificate_expires_at_seconds
@@ -120,15 +136,11 @@ fn load_token(args: &EnrollArgs) -> Result<Zeroizing<String>> {
         }
         bytes
     };
-    if bytes.is_empty()
-        || bytes.len() > MAX_TOKEN_BYTES
-        || bytes.iter().any(u8::is_ascii_whitespace)
-    {
-        bail!("runner enrollment token is invalid");
-    }
-    String::from_utf8(Vec::from(bytes.as_slice()))
+    let token = String::from_utf8(Vec::from(bytes.as_slice()))
         .map(Zeroizing::new)
-        .context("runner enrollment token is invalid")
+        .context("runner enrollment token is invalid")?;
+    validate_token(token.as_str())?;
+    Ok(token)
 }
 
 fn enrollment_origin(value: &str) -> Result<Url> {
@@ -164,9 +176,11 @@ fn validate_name(value: &str) -> Result<()> {
 }
 
 fn validate_response(config: &RunnerProductConfig, response: &RedeemResponse) -> Result<()> {
+    let expected_group = automata_ci_core::RunnerGroup::new(&response.runner_group)
+        .context("runner enrollment returned an invalid group")?;
     if response.runner_id != config.runner_id().as_uuid()
         || response.control_endpoint != config.control_endpoint().to_string()
-        || response.runner_group.is_empty()
+        || config.inventory().groups() != &std::collections::BTreeSet::from([expected_group])
         || response.certificate_chain_pem.is_empty()
         || response.server_ca_pem.is_empty()
         || response.certificate_expires_at_seconds <= 0
@@ -176,100 +190,27 @@ fn validate_response(config: &RunnerProductConfig, response: &RedeemResponse) ->
     Ok(())
 }
 
-struct CredentialDestinations {
-    server_roots: PathBuf,
-    certificate_chain: PathBuf,
-    private_key: PathBuf,
-}
-
-impl CredentialDestinations {
-    fn from_config(config: &RunnerProductConfig) -> Result<Self> {
-        fn file(source: &SecretSource) -> Result<PathBuf> {
-            let SecretSource::File { path } = source else {
-                bail!("runner enrollment requires file-backed TLS credential destinations");
-            };
-            Ok(path.clone())
-        }
-        Ok(Self {
-            server_roots: file(config.tls().server_roots())?,
-            certificate_chain: file(config.tls().certificate_chain())?,
-            private_key: file(config.tls().private_key())?,
-        })
+fn validate_token(value: &str) -> Result<()> {
+    let decoded = value
+        .strip_prefix(TOKEN_PREFIX)
+        .filter(|encoded| encoded.len() == TOKEN_ENCODED_BYTES)
+        .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok());
+    if decoded.is_none_or(|decoded| decoded.len() != TOKEN_BYTES) {
+        bail!("runner enrollment token is invalid");
     }
-
-    fn require_absent(&self) -> Result<()> {
-        if [
-            &self.server_roots,
-            &self.certificate_chain,
-            &self.private_key,
-        ]
-        .into_iter()
-        .any(|path| path.exists())
-        {
-            bail!("runner TLS credential destination already exists");
-        }
-        Ok(())
-    }
-
-    fn persist(&self, roots: &[u8], chain: &[u8], key: &[u8]) -> Result<()> {
-        persist_new(&self.server_roots, roots, false)?;
-        if let Err(error) = persist_new(&self.certificate_chain, chain, false) {
-            remove_created(&self.server_roots);
-            return Err(error);
-        }
-        if let Err(error) = persist_new(&self.private_key, key, true) {
-            remove_created(&self.certificate_chain);
-            remove_created(&self.server_roots);
-            return Err(error);
-        }
-        Ok(())
-    }
-}
-
-fn remove_created(path: &Path) {
-    let _ignored = fs::remove_file(path);
-}
-
-fn persist_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .context("runner credential path has no parent")?;
-    fs::create_dir_all(parent).context("runner credential directory could not be created")?;
-    let temporary = parent.join(format!(".automata-enroll-{}.tmp", Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(if private { 0o600 } else { 0o644 });
-        }
-        let mut file = options
-            .open(&temporary)
-            .context("temporary runner credential could not be created")?;
-        file.write_all(bytes)
-            .context("runner credential could not be written")?;
-        file.sync_all()
-            .context("runner credential could not be synchronized")?;
-        drop(file);
-        fs::hard_link(&temporary, path)
-            .context("runner credential destination already exists or is unavailable")?;
-        Ok(())
-    })();
-    let _ignored = fs::remove_file(&temporary);
-    result
+    Ok(())
 }
 
 #[derive(Serialize)]
 struct RedeemRequest<'a> {
+    operation_id: Uuid,
     token: &'a str,
     runner_name: &'a str,
     capabilities: &'a automata_ci_core::RunnerCapabilities,
     csr_pem: &'a str,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RedeemResponse {
     runner_id: Uuid,
@@ -282,7 +223,9 @@ struct RedeemResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::enrollment_origin;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    use super::{TOKEN_PREFIX, enrollment_origin, validate_token};
 
     #[test]
     fn enrollment_origin_requires_tls_except_for_literal_loopback() {
@@ -292,5 +235,14 @@ mod tests {
         assert!(enrollment_origin("http://localhost:8080").is_err());
         assert!(enrollment_origin("http://ci.example.test").is_err());
         assert!(enrollment_origin("https://ci.example.test/path").is_err());
+    }
+
+    #[test]
+    fn enrollment_token_requires_the_one_canonical_generated_shape() {
+        let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
+        validate_token(&token).expect("canonical token");
+        assert!(validate_token("plain-secret").is_err());
+        assert!(validate_token(&format!("{token}A")).is_err());
+        assert!(validate_token(&format!("{token}\n")).is_err());
     }
 }

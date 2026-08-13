@@ -591,9 +591,8 @@ rotation mechanism.
 For an offline development host, upgrade the complete Arch system with
 `pacman -Syu`, reboot after kernel or container-stack changes, and rerun the
 module and active Podman checks before starting a runner. If the capability
-snapshot changes, the current static bootstrap refuses registration drift;
-provision a fresh runner identity and reviewed bootstrap record instead of
-editing durable registration state by hand.
+snapshot changes, provision a fresh runner identity and enrollment token
+instead of editing durable registration state by hand.
 
 `automata-runner run` fails before starting any listener or opening a control
 session when a required networking module is neither loaded nor available from

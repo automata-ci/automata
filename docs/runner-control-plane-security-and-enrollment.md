@@ -27,26 +27,42 @@ are independent of transport TLS.
 ## Enrollment flow implemented here
 
 1. An authenticated operator runs `automata runner token --group GROUP`. The client generates
-   256 bits of entropy; the server stores only a domain-separated SHA-256 digest.
+   256 bits of entropy; the server stores only a domain-separated SHA-256 digest. The client
+   retains an owner-only pending receipt until it has printed the token, so an ambiguous create
+   is retried with the exact operation ID and token rather than creating a second credential.
+   This receipt uses the private `XDG_RUNTIME_DIR` and guarantees process-restart recovery within
+   the current login session; it is not a persistent host-reboot credential store.
 2. Token creation is transactionally reauthorized from current durable `runners:enroll` grants.
    The token is tenant/group scoped, defaults to 15 minutes (one-hour maximum), and is audited.
 3. The token is transferred once through a protected operator channel. It is never accepted in
    runner argv. `automata-runner enroll` reads an owner-only file, a dedicated environment value,
    or redirected stdin.
 4. The runner loads its strict configuration, generates an ECDSA P-256 key locally, and sends
-   only a signed CSR, canonical capabilities, runner name, and token to the human HTTPS listener.
+   only a signed CSR, canonical capabilities, runner name, stable operation ID, and token to the
+   human HTTPS listener. It durably stages the operation, one-time token, and local key in one
+   owner-only receipt before sending, so a committed response lost across process exit is
+   retryable without a second token source.
 5. The server validates the CSR, replaces all requested certificate extensions with a fixed
-   client-auth-only profile, then locks and rechecks the token. Runner identity, exact
-   capabilities/labels/slots, leaf digest, consumption marker, and audit event commit atomically.
+   client-auth-only profile whose validity is derived from PostgreSQL time, then locks the token
+   and samples PostgreSQL time again. Runner identity, exact capabilities/labels/slots, leaf
+   digest, consumption marker, exact response receipt, and audit event commit atomically.
 6. The runner verifies the response against local identity/configuration and creates new
-   file-backed roots, chain, and private-key destinations without overwriting existing material.
-   The private key never crosses the runner boundary.
+   file-backed roots, chain, and private-key destinations without overwriting different material.
+   Matching partial publication is resumed after a crash, and the durable request stage is removed
+   only after all credential files and directory entries are synchronized. The private key never
+   crosses the runner boundary.
 
-Absent, expired, and consumed tokens return the same error. Concurrent redemption has one winner.
-A certificate from a losing race is unusable because its digest is not registered. Static fleet
-bootstrap and manually supplied runner leaves are not interfaces. Enrollment serializes the
-capacity boundary and currently admits at most 64 registered runners, matching the bounded
-control-plane capacity snapshot.
+Absent, expired, and mismatched consumed tokens return the same error. A matching retry receives
+the byte-exact response committed by the first operation, including after an ambiguous HTTP
+outcome; a concurrent different operation has one winner. A certificate from a losing race is
+unusable because its digest is not registered. Manually supplied runner leaves are not an
+interface. Enrollment serializes the capacity boundary and currently admits at
+most 64 registered runners, matching the bounded control-plane capacity snapshot.
+
+If a pending operator-side create is permanently rejected, rerun the exact group and lifetime
+while recovery is still possible. Discard it only after a definitive non-ambiguous rejection or
+after its original lifetime has elapsed, using `automata runner token --discard-pending`; that
+command removes the local receipt and exits without issuing a replacement token.
 
 ## Deployment key separation
 
@@ -66,7 +82,9 @@ or the control-plane/spool envelope keys.
 - [x] One-time short-lived tokens with digest-only storage and tenant/group scope.
 - [x] Fresh `runners:enroll` authorization plus human and system audit events.
 - [x] Runner-local key generation and fixed-profile CSR signing.
-- [x] Atomic capability/certificate registration and replay rejection.
+- [x] Atomic capability/certificate registration with exact idempotent response replay.
+- [x] PostgreSQL-clock certificate validity and post-token-lock expiry revalidation.
+- [x] Bounded response streaming and crash-reconcilable local credential publication.
 - [x] Operator and runner CLIs with no token/private-key argv values.
 - [x] Explicit client/server CA roles and removal of static server registration.
 - [x] TLS 1.3, HTTP/2, direct mTLS, and AES-256-GCM-SHA384 pinning.

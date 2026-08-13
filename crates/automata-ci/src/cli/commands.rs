@@ -70,6 +70,9 @@ pub enum RunnerCommand {
 #[derive(Debug, Args)]
 /// Scope and lifetime for a new one-use enrollment token.
 pub struct RunnerTokenArgs {
+    /// Discard the pending local create receipt and exit without issuing a token.
+    #[arg(long)]
+    pub discard_pending: bool,
     /// Canonical runner group to create or select.
     #[arg(long, default_value = "default")]
     pub group: String,
