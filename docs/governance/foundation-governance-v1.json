@@ -174,7 +174,7 @@
       "tests": [
         {
           "contains": "assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(1, 1));",
-          "function": "current_protocol_is_exactly_v1_without_legacy_downgrade",
+          "function": "current_protocol_is_exactly_v1_and_rejects_forward_skew",
           "path": "crates/automata-ci-protocol/tests/protocol_negotiation.rs"
         }
       ],
