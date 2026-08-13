@@ -3,7 +3,9 @@ use serde_json::Value;
 use sqlx::Row as _;
 use uuid::Uuid;
 
-use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerFeature};
+use automata_ci_core::{
+    MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerFeature,
+};
 
 use crate::{
     RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
