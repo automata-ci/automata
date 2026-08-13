@@ -14,7 +14,7 @@ use common::{TestResult, run_with_database};
 
 #[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 struct ProjectionRow {
-    workflow_name: Option<String>,
+    workflow_name: String,
     git_ref: Option<String>,
     actor: Option<String>,
     display_title: Option<String>,
@@ -98,7 +98,7 @@ async fn admission_persists_human_projection_and_requested_run_attempt() -> Test
         assert_eq!(
             persisted,
             ProjectionRow {
-                workflow_name: Some("CI".into()),
+                workflow_name: "CI".into(),
                 git_ref: Some("refs/heads/main".into()),
                 actor: Some("octocat".into()),
                 display_title: Some("Keep admission metadata durable".into()),

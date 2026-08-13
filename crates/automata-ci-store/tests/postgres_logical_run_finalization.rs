@@ -618,11 +618,15 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, run_attempt,
             event_name, event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-            concurrency_group_key, concurrency_queue_policy, runner_requirements_schema
+            concurrency_group_key, concurrency_queue_policy, runner_requirements_schema,
+            event_digest, event_size_bytes, event_media_type, plan_digest,
+            plan_object_key, plan_size_bytes, plan_media_type, plan_schema, workflow_name
         )
         SELECT $2, repository_id, workflow_id, snapshot_id, run_number + 1, 1,
                event_name, event_object_key, head_sha, 'queued', $3, $3,
-               concurrency_group_key, concurrency_queue_policy, runner_requirements_schema
+               concurrency_group_key, concurrency_queue_policy, runner_requirements_schema,
+               event_digest, event_size_bytes, event_media_type, plan_digest,
+               plan_object_key, plan_size_bytes, plan_media_type, plan_schema, workflow_name
         FROM workflow_runs
         WHERE id = $1
         ",

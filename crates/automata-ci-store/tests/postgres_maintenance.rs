@@ -794,11 +794,15 @@ async fn insert_pending_concurrency_run(
         INSERT INTO workflow_runs (
             id, repository_id, workflow_id, snapshot_id, run_number, event_name,
             event_object_key, head_sha, status, created_at_ms, updated_at_ms,
-            concurrency_group_key, concurrency_queue_policy, runner_requirements_schema
+            concurrency_group_key, concurrency_queue_policy, runner_requirements_schema,
+            event_digest, event_size_bytes, event_media_type, plan_digest,
+            plan_object_key, plan_size_bytes, plan_media_type, plan_schema, workflow_name
         )
         SELECT $1, repository_id, workflow_id, snapshot_id, 2, event_name,
                event_object_key, head_sha, 'queued', 70, 70, 'dogfood', 'single',
-               runner_requirements_schema
+               runner_requirements_schema, event_digest, event_size_bytes,
+               event_media_type, plan_digest, plan_object_key, plan_size_bytes,
+               plan_media_type, plan_schema, workflow_name
         FROM workflow_runs WHERE id = $2
         ",
     )

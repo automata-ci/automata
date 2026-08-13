@@ -96,14 +96,11 @@ selection is unavailable when any source job has multiple matrix instances;
 the entire workflow can still be rerun. Sources using workflow-level
 concurrency currently fail closed because rerun admission does not yet retain
 an immutable pre-transition witness proving queue replacement or cancellation
-semantics. Legacy sources without the complete Admission V2 base runtime
-context also fail closed; rerun admission does not synthesize a new context or
-change the source activation semantics. Requests
+semantics. Sources without the complete current base runtime context also fail
+closed; rerun admission does not synthesize a new context or change the source
+activation semantics. Requests
 outside those boundaries fail closed as conflicts instead of constructing a
-best-effort graph. Schema-valid runs created before durable rerun lineage was
-introduced with an attempt number greater than one cannot be grouped safely;
-they also fail closed as an unsupported-selection conflict rather than being
-treated as corrupt data.
+best-effort graph.
 
 The PostgreSQL integration tests cover complete reruns, partial and nested
 reruns, exact replay, carry-forward, Check projection claims, terminal Check

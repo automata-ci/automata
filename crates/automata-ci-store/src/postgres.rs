@@ -620,17 +620,14 @@ async fn output_safety_for_queued_attempt(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    // Preserve the historical missing-job behavior: the caller's insert still
-    // reaches the foreign-key boundary. This fallback is never durable.
+    let job = job.ok_or_else(|| {
+        AttemptStoreError::corrupt_data("queued attempt references a missing workflow job")
+    })?;
     let requested_log_visibility = job
-        .as_ref()
-        .map(|row| row.try_get::<String, _>("requested_log_visibility"))
-        .transpose()
-        .map_err(operation_error)?
-        .unwrap_or_else(|| "private".to_owned());
-    let prior = if job.is_some() {
-        sqlx::query(
-            r"
+        .try_get::<String, _>("requested_log_visibility")
+        .map_err(operation_error)?;
+    let prior = sqlx::query(
+        r"
             SELECT secret_exposure_class, raw_log_disposition,
                    requested_log_visibility, effective_log_visibility,
                    output_safety_reason, output_safety_schema,
@@ -638,14 +635,11 @@ async fn output_safety_for_queued_attempt(
             FROM job_attempts
             WHERE job_id = $1 AND attempt_number = 1
             ",
-        )
-        .bind(attempt.job_id.as_uuid())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-    } else {
-        None
-    };
+    )
+    .bind(attempt.job_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
     let Some(row) = prior else {
         let safety =
             CurrentAttemptOutputSafety::readable(&requested_log_visibility).ok_or_else(|| {
