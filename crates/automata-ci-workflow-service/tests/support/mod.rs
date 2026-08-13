@@ -82,6 +82,25 @@ pub fn compile_ci_at_path(
     GithubWorkflowCompiler::new().compile(request)
 }
 
+pub fn recompile_preselected(request: &WorkflowAdmissionRequest) -> CompilationReport {
+    let source = std::str::from_utf8(request.source()).expect("fixture source is UTF-8");
+    let provenance = SourceProvenance::new(
+        SourceId::new(request.workflow_path()),
+        SourceOrigin::Repository {
+            repository: Arc::from(request.repository().slug()),
+            revision: Arc::from(request.commit_sha()),
+            path: Arc::from(request.workflow_path()),
+        },
+    );
+    let parsed =
+        GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, source));
+    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_preselected_event(
+        parsed.plan().expect("source plan"),
+        request.plan().event().clone(),
+    ))
+}
+
 fn request_from_compilation(
     tenant: &str,
     workflow_path: &str,

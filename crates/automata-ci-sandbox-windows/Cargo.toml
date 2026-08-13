@@ -25,3 +25,4 @@ sha2.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
+static_assertions.workspace = true

@@ -682,6 +682,15 @@ impl LoginTransactionProof {
             Self::Device { .. } => None,
         }
     }
+
+    #[must_use]
+    /// Returns the device-poll proof when device-based.
+    pub const fn device_poll_proof(&self) -> Option<&LoginTransactionBinding> {
+        match self {
+            Self::Browser { .. } => None,
+            Self::Device { poll_proof } => Some(poll_proof),
+        }
+    }
 }
 
 /// Exact non-secret identity, purpose, provider, and proof tuple for lookup.

@@ -164,6 +164,22 @@ impl BegunLeaseRequest {
         }
     }
 
+    /// Builds an exact retry result whose previously committed offer is no longer live.
+    #[must_use]
+    pub const fn revoked_offer(
+        request: BeginLeaseRequest,
+        offer_operation_id: OperationId,
+        fallback: RevokedLeaseOfferFallback,
+    ) -> Self {
+        Self::completed(
+            request,
+            LeaseRequestCompletion::RevokedLeaseOffer {
+                offer_operation_id,
+                fallback,
+            },
+        )
+    }
+
     #[must_use]
     pub const fn request(&self) -> BeginLeaseRequest {
         self.request

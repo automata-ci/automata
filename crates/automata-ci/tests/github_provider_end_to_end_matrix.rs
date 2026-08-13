@@ -26,8 +26,8 @@ use automata_ci_github::{
     GithubWebhookVerifier, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_github_delivery::{
-    GithubDeliveryClock, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction, GithubDeliveryService,
+    GithubDeliveryServiceConfig, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
@@ -756,6 +756,10 @@ fn assert_source_authentication(
         let case = case_for_repository(&observation.repository);
         assert_eq!(case.visibility, ProviderRepositoryVisibility::Private);
         assert_eq!(
+            observation.action,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+        );
+        assert_eq!(
             observation.authority_id,
             Uuid::from_u128(
                 case.private_source_authority_id
@@ -1319,6 +1323,7 @@ impl RepositorySourcePort for MatrixRepositorySource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CredentialObservation {
     repository: String,
+    action: GithubDeliveryPrivateRepositoryAction,
     authority_id: Uuid,
     policy_revision: u64,
 }
@@ -1354,6 +1359,7 @@ impl GithubDeliverySourceCredentialProvider for MatrixSourceCredentials {
             .expect("credential observations lock")
             .push(CredentialObservation {
                 repository: repository.clone(),
+                action: request.action(),
                 authority_id: request.authority_selector().authority_id().as_uuid(),
                 policy_revision: request.authority_selector().policy_revision().get(),
             });

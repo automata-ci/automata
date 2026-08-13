@@ -16,7 +16,12 @@ use automata_ci_runner::doctor::{
 };
 
 #[test]
-fn server_policy_rejects_zero_limits() {
+fn server_policy_has_bounded_defaults_and_rejects_zero_limits() {
+    let policy = ServerHttpPolicy::default();
+    assert_eq!(policy.connect_timeout(), Duration::from_secs(5));
+    assert_eq!(policy.request_timeout(), Duration::from_secs(10));
+    assert_eq!(policy.max_response_bytes(), 64 * 1024);
+
     assert_eq!(
         ServerHttpPolicy::new(Duration::ZERO, Duration::from_secs(1), 1),
         Err(ServerHttpPolicyError::ZeroConnectTimeout)

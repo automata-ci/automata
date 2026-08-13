@@ -4,9 +4,17 @@ use automata_ci_secret::{
     ProviderErrorKind, ProviderLeaseId, ProviderOperationContext, ProviderRequestId,
     ProviderSecretLocator, ProviderVersionId, ReconcileCreateSecretVersionOutcome,
     ReconcileCreateSecretVersionRequest, RenewProviderLeaseRequest, RepositoryScopeId,
-    ResolveSecretVersionRequest, SecretAtRestProtection, SecretDescriptor, SecretId, SecretName,
-    SecretProviderId, SecretScope, SecretValue, TenantScopeId, WorkloadContext, WorkloadId,
+    ResolveSecretVersionRequest, ResolvedSecretVersion, SecretAtRestProtection, SecretDescriptor,
+    SecretId, SecretName, SecretProviderId, SecretScope, SecretValue, TenantScopeId,
+    WorkloadContext, WorkloadId,
 };
+use static_assertions::assert_not_impl_any;
+
+assert_not_impl_any!(SecretValue: Clone, std::fmt::Display, serde::Serialize, serde::Deserialize<'static>);
+assert_not_impl_any!(ResolvedSecretVersion: Clone, serde::Serialize, serde::Deserialize<'static>);
+assert_not_impl_any!(ReconcileCreateSecretVersionRequest: Clone, serde::Serialize, serde::Deserialize<'static>);
+assert_not_impl_any!(ReconcileCreateSecretVersionOutcome: Clone, serde::Serialize, serde::Deserialize<'static>);
+static_assertions::assert_impl_all!(SecretValue: zeroize::Zeroize, zeroize::ZeroizeOnDrop);
 
 fn tenant(value: &str) -> TenantScopeId {
     TenantScopeId::new(value).expect("tenant")

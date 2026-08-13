@@ -12,9 +12,9 @@ use automata_ci_store::{
     LogicalInstanceMaterializationDescriptor, LogicalInstanceMaterializationTarget,
     LogicalJobOrchestrationAuthorityKind, LogicalMaterializationClaimFence,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkQuarantineKind,
-    LogicalWorkSelectionGeneration, LogicalWorkSelectionId, LogicalWorkSelectionValueError,
-    LogicalWorkflowInstanceId, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS,
+    LogicalWorkSelectionGeneration, LogicalWorkSelectionId, LogicalWorkSelectionRepository,
+    LogicalWorkSelectionValueError, LogicalWorkflowInstanceId, LogicalWorkflowInvocationId,
+    LogicalWorkflowJobId, LogicalWorkflowJobKind, MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS,
     MIN_LOGICAL_WORK_SELECTION_REQUEST_MILLIS, ObjectKey, QuarantineLogicalInstanceMaterialization,
     QuarantineLogicalJobOrchestration, RepositoryId, SelectedLogicalInstanceMaterialization,
     SelectedLogicalJobOrchestration, TenantScope, WorkflowRuntimePolicyPin,
@@ -333,4 +333,10 @@ fn claimed_materialization(
     .expect("materialization fence");
     ClaimedLogicalInstanceMaterialization::new(descriptor.clone(), fence, false)
         .expect("claimed materialization")
+}
+
+#[test]
+fn repository_port_is_object_safe() {
+    fn accepts_repository_object(_: Option<&dyn LogicalWorkSelectionRepository>) {}
+    accepts_repository_object(None);
 }

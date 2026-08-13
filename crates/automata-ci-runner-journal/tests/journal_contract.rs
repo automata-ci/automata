@@ -10,7 +10,10 @@ use automata_ci_runner_journal::{
     ProviderName, ProviderOperation, ProviderOperationKind, ProviderOperationOutcome,
     RunnerJournal, SandboxHandle, SandboxIdentity,
 };
+use static_assertions::assert_obj_safe;
 use support::{Fixture, Scratch, record_and_ack_terminal};
+
+assert_obj_safe!(RunnerJournal);
 
 fn acknowledge_log_head(
     journal: &dyn RunnerJournal,

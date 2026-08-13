@@ -168,6 +168,12 @@ impl LogFrame {
     pub const fn is_end_of_stream(&self) -> bool {
         self.end_of_stream
     }
+
+    /// Consumes the frame and returns its raw payload bytes.
+    #[must_use]
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
 }
 
 /// Acknowledges every sequence from zero through `contiguous_through`.

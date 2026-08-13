@@ -1806,6 +1806,7 @@ impl JobExecutor for CleanupIsolationExecutor {
 #[derive(Debug)]
 pub struct BurstLogExecutor {
     data_frames: usize,
+    payload_bytes: Option<usize>,
     conclusion: JobConclusion,
 }
 
@@ -1877,6 +1878,15 @@ impl BurstLogExecutor {
     pub const fn new(data_frames: usize) -> Self {
         Self {
             data_frames,
+            payload_bytes: None,
+            conclusion: JobConclusion::Success,
+        }
+    }
+
+    pub const fn with_payload_bytes(data_frames: usize, payload_bytes: usize) -> Self {
+        Self {
+            data_frames,
+            payload_bytes: Some(payload_bytes),
             conclusion: JobConclusion::Success,
         }
     }
@@ -1884,6 +1894,7 @@ impl BurstLogExecutor {
     pub const fn with_conclusion(data_frames: usize, conclusion: JobConclusion) -> Self {
         Self {
             data_frames,
+            payload_bytes: None,
             conclusion,
         }
     }
@@ -2061,7 +2072,10 @@ impl JobExecutor for BurstLogExecutor {
                     .transition(JobLifecycle::Running)
                     .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
                 for index in 0..self.data_frames {
-                    let payload = format!("frame-{index:04}").into_bytes();
+                    let payload = self.payload_bytes.map_or_else(
+                        || format!("frame-{index:04}").into_bytes(),
+                        |bytes| vec![b'x'; bytes],
+                    );
                     events
                         .emit_log(LogEvent::new(LogChannel::Stdout, payload))
                         .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;

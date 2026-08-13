@@ -138,6 +138,7 @@ pub struct GithubAppConfig {
     callback_uri: Url,
     endpoints: GithubEndpoints,
     web_transaction_ttl_seconds: u64,
+    allow_signup: bool,
 }
 
 impl GithubAppConfig {
@@ -166,7 +167,15 @@ impl GithubAppConfig {
             callback_uri,
             endpoints,
             web_transaction_ttl_seconds,
+            allow_signup: false,
         })
+    }
+
+    #[must_use]
+    /// Sets whether GitHub may offer account creation during authorization.
+    pub fn with_signup(mut self, allow_signup: bool) -> Self {
+        self.allow_signup = allow_signup;
+        self
     }
 
     /// Returns the provider identity associated with this GitHub App.
@@ -197,6 +206,11 @@ impl GithubAppConfig {
     pub const fn web_transaction_ttl_seconds(&self) -> u64 {
         self.web_transaction_ttl_seconds
     }
+
+    /// Reports whether GitHub may offer account creation during authorization.
+    pub const fn allow_signup(&self) -> bool {
+        self.allow_signup
+    }
 }
 
 impl fmt::Debug for GithubAppConfig {
@@ -212,6 +226,7 @@ impl fmt::Debug for GithubAppConfig {
                 "web_transaction_ttl_seconds",
                 &self.web_transaction_ttl_seconds,
             )
+            .field("allow_signup", &self.allow_signup)
             .finish()
     }
 }
@@ -516,6 +531,13 @@ pub(crate) fn append_web_authorization_query(
         .append_pair("state", state.expose_secret())
         .append_pair("code_challenge", challenge.as_str())
         .append_pair("code_challenge_method", "S256")
-        .append_pair("allow_signup", "false");
+        .append_pair(
+            "allow_signup",
+            if config.allow_signup() {
+                "true"
+            } else {
+                "false"
+            },
+        );
     endpoint
 }

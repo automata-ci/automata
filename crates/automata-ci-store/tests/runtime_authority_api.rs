@@ -12,7 +12,7 @@ use automata_ci_store::{
     GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityEnvelopeMetadata,
     GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityMaterializationSelectionTail,
     GithubRuntimeAuthorityNamespace, GithubRuntimeAuthorityPreparationSelectionTail,
-    GithubRuntimeAuthorityReceipt, GithubRuntimeAuthorityState,
+    GithubRuntimeAuthorityReceipt, GithubRuntimeAuthorityRepository, GithubRuntimeAuthorityState,
     GithubRuntimeAuthorityTerminalReason, GithubRuntimeAuthorityValueError,
     GithubRuntimeAuthorityWorkerId, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, LogicalActivationGeneration,
@@ -25,6 +25,10 @@ use automata_ci_store::{
     TenantScope,
 };
 use uuid::Uuid;
+
+const BASE_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const DATABASE_TIME_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[derive(Clone, Copy)]
 struct IdentityInputs {
@@ -490,7 +494,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
 }
 
 #[test]
-fn repository_and_namespace_shapes_reject_ambiguous_names() {
+fn repository_and_namespace_shapes_match_the_sql_boundary() {
     assert_eq!(
         GithubRuntimeAuthorityNamespace::new("a")
             .expect("single-byte namespace")
@@ -508,6 +512,58 @@ fn repository_and_namespace_shapes_reject_ambiguous_names() {
             valid
         );
     }
+    assert!(BASE_MIGRATION.contains("authority_namespace ~ '^[a-z0-9]([a-z0-9._:/-]*[a-z0-9])?$'"));
+    assert!(BASE_MIGRATION.contains("NOT IN ('.', '..')"));
+    assert!(BASE_MIGRATION.contains("NOT LIKE '%.git'"));
+}
+
+#[test]
+fn schema_is_ciphertext_only_current_and_one_way_guarded() {
+    assert!(BASE_MIGRATION.contains("job_ir_schema = 1"));
+    assert!(!BASE_MIGRATION.contains("job_ir_schema = 4"));
+    assert!(BASE_MIGRATION.contains("wrapped_data_key BYTEA"));
+    assert!(BASE_MIGRATION.contains("ciphertext BYTEA"));
+    assert!(!BASE_MIGRATION.contains("access_token TEXT"));
+    assert!(!BASE_MIGRATION.contains("token_plaintext"));
+    assert!(MIGRATION.contains("github_runtime_authority_lifecycle_guard"));
+    assert!(BASE_MIGRATION.contains("github_runtime_authority_no_delete"));
+    assert!(BASE_MIGRATION.contains("github_runtime_authority_no_truncate"));
+    assert!(MIGRATION.contains("OLD.state IN ('minting', 'indeterminate')"));
+    assert!(BASE_MIGRATION.contains("github_runtime_authority_revoke_owner_unique"));
+    assert!(BASE_MIGRATION.contains("runner.generation = authority.runner_generation"));
+    assert!(BASE_MIGRATION.contains("runner.session_epoch = authority.runner_session_epoch"));
+    assert!(BASE_MIGRATION.contains("runner.status = 'online'"));
+    assert!(BASE_MIGRATION.contains("runner.desired_state IN ('active', 'draining')"));
+    assert!(MIGRATION.contains("NEW.revoke_attempt_count <> OLD.revoke_attempt_count + 1"));
+    assert!(BASE_MIGRATION.contains("claim_budget_exhausted"));
+    assert!(DATABASE_TIME_MIGRATION.contains("policy_digest = job_ir_digest"));
+    assert!(DATABASE_TIME_MIGRATION.contains("github_app_jwt_issuer_value"));
+    assert!(DATABASE_TIME_MIGRATION.contains("github_runtime_authority_operation_receipts"));
+    assert!(DATABASE_TIME_MIGRATION.contains("github_runtime_authority_mint_claims"));
+    assert!(DATABASE_TIME_MIGRATION.contains("github_runtime_authority_revocation_claims"));
+    assert!(DATABASE_TIME_MIGRATION.contains("github_runtime_authority_operation_transitions"));
+    assert!(DATABASE_TIME_MIGRATION.contains("'terminal_erasable'"));
+    assert!(
+        DATABASE_TIME_MIGRATION
+            .contains("GitHub runtime-authority operation evidence is immutable")
+    );
+    assert!(
+        !DATABASE_TIME_MIGRATION
+            .contains("DELETE FROM github_runtime_authority_operation_receipts AS receipt")
+    );
+    assert!(!DATABASE_TIME_MIGRATION.contains("retain_until_ms"));
+    assert!(!DATABASE_TIME_MIGRATION.contains("86400000"));
+    assert!(DATABASE_TIME_MIGRATION.contains("DEFERRABLE INITIALLY DEFERRED"));
+    assert!(DATABASE_TIME_MIGRATION.contains("receipt lacks its canonical transition"));
+    assert!(DATABASE_TIME_MIGRATION.contains("transition lacks its exact receipt"));
+    assert!(DATABASE_TIME_MIGRATION.contains("BEFORE TRUNCATE"));
+    assert!(DATABASE_TIME_MIGRATION.contains("OLD.state IN ('minting', 'indeterminate') AND ("));
+    assert!(
+        DATABASE_TIME_MIGRATION.contains("OR OLD.state = 'ready' AND NEW.state = 'revoke_pending'")
+    );
+    assert!(
+        !DATABASE_TIME_MIGRATION.contains("OLD.state IN ('minting', 'indeterminate', 'ready')")
+    );
 }
 
 #[test]
@@ -819,7 +875,10 @@ fn ready_repository_parts_require_deliverable_live_exact_lease_time() {
 }
 
 #[test]
-fn claim_identity_is_exact() {
+fn repository_port_is_object_safe_and_claim_identity_is_exact() {
+    fn assert_object_safe(_: Option<&dyn GithubRuntimeAuthorityRepository>) {}
+    assert_object_safe(None);
+
     let identity = identity_with(14, 15, 1, JobIrVersion::current()).expect("identity");
     let owner = GithubRuntimeAuthorityWorkerId::from_uuid(Uuid::from_u128(20)).expect("owner");
     let request = ClaimGithubRuntimeAuthorityMint::new(

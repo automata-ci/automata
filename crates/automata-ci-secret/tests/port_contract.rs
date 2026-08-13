@@ -17,6 +17,8 @@ use automata_ci_secret::{
     SecretProvider, SecretProviderId, SecretScope, TenantScopeId,
 };
 
+static_assertions::assert_obj_safe!(SecretProvider);
+
 #[derive(Debug)]
 struct DefaultReconciliationProvider {
     id: SecretProviderId,
@@ -108,6 +110,12 @@ fn reconciliation_request() -> ReconcileCreateSecretVersionRequest {
         )),
     )
     .expect("reconciliation request")
+}
+
+#[test]
+fn secret_provider_is_object_safe() {
+    fn accepts(_: &dyn SecretProvider) {}
+    let _ = accepts;
 }
 
 #[test]

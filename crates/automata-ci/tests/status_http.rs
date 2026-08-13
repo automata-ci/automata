@@ -11,7 +11,12 @@ use automata_ci::cli::{
 };
 
 #[test]
-fn status_policy_rejects_zero_limits() {
+fn status_policy_has_bounded_defaults_and_rejects_zero_limits() {
+    let policy = StatusHttpPolicy::default();
+    assert_eq!(policy.connect_timeout(), Duration::from_secs(5));
+    assert_eq!(policy.request_timeout(), Duration::from_secs(10));
+    assert_eq!(policy.max_response_bytes(), 64 * 1024);
+
     assert_eq!(
         StatusHttpPolicy::new(Duration::ZERO, Duration::from_secs(1), 1),
         Err(StatusHttpPolicyError::ZeroConnectTimeout)

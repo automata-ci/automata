@@ -12,6 +12,19 @@ use automata_ci_auth_postgres::{
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use static_assertions::assert_impl_all;
+
+assert_impl_all!(PostgresLoginTransactionRepository: LoginTransactionRepository, Clone, Send, Sync);
+assert_impl_all!(PostgresHumanSessionRepository: HumanSessionRepository, Clone, Send, Sync);
+assert_impl_all!(PostgresProviderTokenVault: ProviderTokenVault, Clone, Send, Sync);
+assert_impl_all!(PostgresInstallationRepository: InstallationRepository, Clone, Send, Sync);
+assert_impl_all!(
+    PostgresRequestAuthenticationResolver: RequestAuthenticationResolver,
+    Clone,
+    Send,
+    Sync
+);
+
 const KEY_MATERIAL: &[u8; 32] = b"auth-postgres-key-material-12345";
 const KEY_MATERIAL_BASE64: &str = "YXV0aC1wb3N0Z3Jlcy1rZXktbWF0ZXJpYWwtMTIzNDU";
 

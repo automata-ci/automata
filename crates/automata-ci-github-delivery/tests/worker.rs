@@ -15,11 +15,12 @@ use automata_ci_blob::{
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::GithubPushRefKind;
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
-    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
-    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
-    GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliverySourceAuthority, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
+    GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome,
+    GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
+    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
+    GithubDeliveryWorkflowRequest,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySnapshot,
@@ -900,18 +901,18 @@ fn claimed_fixture_with_visibility(
     let after = if deleted { ZERO } else { AFTER };
     let body = push_body(git_ref, after, deleted, visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
+    let key_text = format!("provider-deliveries/github/push/sha256/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
         u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
+        MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE).expect("media type"),
     );
-    let raw_event = AdmissionObject::new_event(
+    let raw_event = AdmissionObject::new(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        GITHUB_PUSH_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery id");
@@ -1295,6 +1296,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             fixture.claimed.clone(),
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1304,6 +1306,7 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1389,6 +1392,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             fixture.claimed.clone(),
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1411,6 +1415,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1480,6 +1485,7 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1537,6 +1543,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
                     claimed,
                     GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                         credential: &credential,
+                        changed_files_credentials: None,
                     },
                 )
                 .await
@@ -1663,6 +1670,7 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1708,6 +1716,7 @@ async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1770,6 +1779,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
                     claimed,
                     GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                         credential: &credential,
+                        changed_files_credentials: None,
                     },
                 )
                 .await
@@ -1855,6 +1865,7 @@ async fn historical_manifest_uses_pinned_limits_below_a_wider_local_ceiling() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1901,6 +1912,7 @@ async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1939,6 +1951,7 @@ async fn deleted_pinned_branch_completes_without_source_authority_or_processing(
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                changed_files_credentials: None,
             },
         )
         .await
@@ -1976,6 +1989,7 @@ async fn non_pinned_git_ref_rejects_before_source_or_workflow_processing() {
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2048,6 +2062,7 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         )
         .await
@@ -2112,6 +2127,7 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2151,6 +2167,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await
@@ -2187,6 +2204,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
                 fixture.claimed,
                 GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                     credential: &credential,
+                    changed_files_credentials: None,
                 },
             )
             .await,
@@ -2224,6 +2242,7 @@ async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
             fixture.claimed,
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &credential,
+                changed_files_credentials: None,
             },
         ),
     )

@@ -12,8 +12,13 @@ use automata_ci_sandbox_podman::{
     PodmanHostGatewayAlias,
 };
 use automata_ci_sandbox_podman::{PodmanCommandExecutor, RootlessPodmanProvider};
+use static_assertions::{assert_impl_all, assert_obj_safe};
+
 #[cfg(target_os = "linux")]
 use support::{FakePodman, ScratchRoot, options};
+
+assert_impl_all!(RootlessPodmanProvider: Send, Sync);
+assert_obj_safe!(PodmanCommandExecutor);
 
 #[cfg(target_os = "linux")]
 #[test]

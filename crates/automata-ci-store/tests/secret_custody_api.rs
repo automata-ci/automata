@@ -1,7 +1,7 @@
 use automata_ci_key_management::KeyId;
 use automata_ci_store::{
-    MAX_SECRET_CUSTODY_CONFIGURED_KEYS, SecretCustodyKeySet, SecretCustodyRepositoryError,
-    SecretCustodyValueError, VerifySecretCustody,
+    MAX_SECRET_CUSTODY_CONFIGURED_KEYS, SecretCustodyKeySet, SecretCustodyRepository,
+    SecretCustodyRepositoryError, SecretCustodyValueError, VerifySecretCustody,
 };
 
 fn key_id(value: &str) -> KeyId {
@@ -74,4 +74,10 @@ fn request_and_errors_are_safe_for_public_diagnostics() {
         assert!(!diagnostic.contains("plaintext"));
         assert!(!diagnostic.contains("ciphertext"));
     }
+}
+
+#[test]
+fn custody_port_is_object_safe() {
+    fn accepts_repository(_: &dyn SecretCustodyRepository) {}
+    let _ = accepts_repository;
 }

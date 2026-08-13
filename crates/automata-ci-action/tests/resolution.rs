@@ -12,7 +12,10 @@ use automata_ci_scm::{
     ArchiveLimits, RepositoryId, RepositorySnapshot, RevisionSpec, ScmError, ScmProvider,
     ScmProviderId, SnapshotRequest,
 };
+use static_assertions::assert_obj_safe;
 use support::{TestEntry, snapshot};
+
+assert_obj_safe!(ActionResolver);
 
 #[derive(Debug)]
 struct FixedScm {

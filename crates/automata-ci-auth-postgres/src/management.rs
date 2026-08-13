@@ -3377,9 +3377,19 @@ impl HumanRbacManagementRepository for PostgresHumanRbacManagementRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use automata_ci_auth::management::ManagementRepositoryError;
+    use automata_ci_auth::management::{HumanRbacManagementRepository, ManagementRepositoryError};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use static_assertions::assert_impl_all;
+
+    use super::*;
+
+    assert_impl_all!(
+        PostgresHumanRbacManagementRepository:
+            HumanRbacManagementRepository,
+            Clone,
+            Send,
+            Sync
+    );
 
     #[tokio::test]
     async fn adapter_debug_output_omits_pool_configuration() {

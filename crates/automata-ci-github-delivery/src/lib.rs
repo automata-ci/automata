@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod changed_files;
 mod checks_publisher;
 mod processor;
 mod schedule;
@@ -39,11 +40,17 @@ pub use checks_publisher::{
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubChecksServerServiceCredential,
 };
 
-pub use processor::GithubDeliveryWorkflowAdmissionProcessor;
+pub use changed_files::GithubRestPushChangedFilesProvider;
+
+pub use processor::{
+    GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
+    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+};
 
 pub use service::{
-    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
-    GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
+    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliverySourceCredentialValueError, GithubServerServiceCredentialRelease,
@@ -74,6 +81,8 @@ use std::{
 
 use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
+#[cfg(test)]
+use automata_ci_github::VerifiedGithubPush;
 use automata_ci_github::{
     GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubWebhook,
     X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
@@ -94,6 +103,8 @@ use http::HeaderMap;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+/// Canonical media type retained for an authenticated raw GitHub push event.
+pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
 /// Media type for a generic authenticated raw GitHub event.
 pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
     automata_ci_github::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
@@ -978,6 +989,18 @@ fn authenticated_event_coordinates(
         event,
         head_sha: check_head_sha_from_revision(revision)?,
     })
+}
+
+#[cfg(test)]
+fn check_head_sha(
+    push: &VerifiedGithubPush,
+) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
+    let value = if push.deleted() {
+        push.before_commit_sha()
+    } else {
+        push.after_commit_sha()
+    };
+    check_head_sha_from_revision(value)
 }
 
 fn check_head_sha_from_revision(

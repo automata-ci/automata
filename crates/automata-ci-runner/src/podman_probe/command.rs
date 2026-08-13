@@ -182,6 +182,16 @@ impl CommandOutput {
         }
     }
 
+    /// Constructs a successful synthetic result whose output exceeded its capture limit.
+    pub fn truncated_success(stdout: impl Into<String>) -> Self {
+        Self {
+            termination: CommandTermination::Exited(Some(0)),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            truncated: true,
+        }
+    }
+
     /// Constructs a process-start or capture-start synthetic failure.
     pub fn failed_to_start(detail: impl Into<String>) -> Self {
         Self {

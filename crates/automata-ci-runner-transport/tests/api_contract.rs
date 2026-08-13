@@ -7,15 +7,28 @@ use automata_ci_protocol::{
     SessionDisposition,
 };
 use automata_ci_runner_transport::{
-    ClientErrorKind, PrepareError, PreparedRequest, RetryClass, RunnerControlClient,
-    TransportLimits,
+    AuthenticatedRunnerEphemeralRequest, ClientErrorKind, PrepareError, PreparedEphemeralRequest,
+    PreparedRequest, RetryClass, RunnerControlClient, RunnerControlClientObserver,
+    RunnerControlHandler, RunnerEphemeralClient, RunnerEphemeralHandler, RunnerEphemeralReply,
+    RunnerEphemeralResponse, TransportLimits,
 };
+use static_assertions::{assert_not_impl_any, assert_obj_safe};
 use tokio_util::sync::CancellationToken;
 
 use support::{
     HandlerMode, RecordingVerifier, TestHandler, TestPki, client, hello_request, poll_request,
     spawn_server,
 };
+
+assert_obj_safe!(RunnerControlHandler);
+assert_obj_safe!(RunnerControlClient);
+assert_obj_safe!(RunnerControlClientObserver);
+assert_obj_safe!(RunnerEphemeralHandler);
+assert_obj_safe!(RunnerEphemeralClient);
+assert_not_impl_any!(AuthenticatedRunnerEphemeralRequest: Clone);
+assert_not_impl_any!(PreparedEphemeralRequest: Clone);
+assert_not_impl_any!(RunnerEphemeralReply: Clone);
+assert_not_impl_any!(RunnerEphemeralResponse: Clone);
 
 #[test]
 fn sync_preparation_rejects_a_cross_session_header() {

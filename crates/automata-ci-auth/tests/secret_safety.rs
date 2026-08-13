@@ -3,10 +3,35 @@ mod support;
 use std::sync::Arc;
 
 use automata_ci_auth::{
-    github::GithubWebCallback,
-    secret::{CsrfToken, PkceVerifier, SecretString, SharedSensitiveString},
+    github::{GithubTokenResponse, GithubWebCallback},
+    human::ProviderCredential,
+    secret::{
+        CsrfToken, PkceVerifier, SecretBytes, SecretString, SessionToken, SharedSensitiveString,
+    },
+    session::IssuedSession,
+    vault::{
+        ProviderAccessToken, ProviderRefreshToken, ProviderTokenSet, VersionedProviderTokens,
+        WrappedDataKey,
+    },
 };
+use static_assertions::{assert_impl_all, assert_not_impl_any};
 use support::{DeterministicRandom, secret, token_response};
+
+assert_not_impl_any!(SecretString: serde::Serialize, Clone);
+assert_not_impl_any!(SecretBytes: serde::Serialize, Clone);
+assert_not_impl_any!(ProviderAccessToken: serde::Serialize, Clone);
+assert_not_impl_any!(ProviderRefreshToken: serde::Serialize, Clone);
+assert_not_impl_any!(ProviderTokenSet: serde::Serialize, Clone);
+assert_not_impl_any!(ProviderCredential: serde::Serialize, Clone);
+assert_not_impl_any!(IssuedSession: serde::Serialize, Clone);
+assert_not_impl_any!(VersionedProviderTokens: serde::Serialize, Clone);
+assert_not_impl_any!(WrappedDataKey: serde::Serialize, Clone);
+assert_not_impl_any!(GithubTokenResponse: serde::Serialize, Clone);
+assert_not_impl_any!(SessionToken: serde::Serialize, Clone);
+assert_impl_all!(SharedSensitiveString: Clone, Send, Sync);
+assert_not_impl_any!(
+    SharedSensitiveString: Copy, std::fmt::Display, serde::Serialize, serde::Deserialize<'static>
+);
 
 #[test]
 fn all_secret_debug_output_is_redacted() {

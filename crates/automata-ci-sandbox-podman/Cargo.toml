@@ -26,3 +26,4 @@ thiserror.workspace = true
 rustix = { workspace = true, features = ["event"] }
 
 [dev-dependencies]
+static_assertions.workspace = true

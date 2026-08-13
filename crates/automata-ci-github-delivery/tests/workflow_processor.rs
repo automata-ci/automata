@@ -15,10 +15,15 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
-    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerError,
-    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowAdmissionProcessor,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
+    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
+    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
+    GithubDeliverySourceCredentialRequest, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
+    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
+    GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
+    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubServerServiceCredentialRelease,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -28,18 +33,22 @@ use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, AdmitLogicalWorkflowRun,
     AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubServerServiceAction, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceConsumerClaim,
+    GithubServerServiceHandoffId, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
-    ProviderDeliveryWorkflowConclusion, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ManifestPinnedGithubDeliveryEvidence,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RejectProviderDelivery,
+    RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
 };
+use automata_ci_workflow_github::GithubChangedFilesV1;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -58,6 +67,7 @@ const INSTALLATION_ID: u64 = 4_242;
 const DELIVERY: &str = "delivery-workflow-processor-1";
 const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 const CREDENTIAL: &str = "installation-token-private-marker";
+const DIFF_CREDENTIAL: &str = "installation-token-private-diff-marker";
 const ACCEPTED_WORKFLOW: &[u8] = b"name: Exact CI\non: push\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo exact\n";
 const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
 const PULL_REQUEST_WORKFLOW: &[u8] = b"name: Pull Request CI\non: pull_request\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request\n";
@@ -163,6 +173,10 @@ struct DeliveryOutcomes {
 impl DeliveryOutcomes {
     fn completions(&self) -> Vec<CompleteProviderDelivery> {
         self.completions.lock().expect("completions lock").clone()
+    }
+
+    fn retry_count(&self) -> usize {
+        self.retries.lock().expect("retries lock").len()
     }
 }
 
@@ -292,22 +306,219 @@ fn transition_receipt(
         .expect("transition receipt")
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CredentialObservation {
+    repository_owner_id: ProviderRepositoryOwnerId,
+    claim: ProviderDeliveryClaimFence,
+    attempt: u16,
+    action: GithubDeliveryPrivateRepositoryAction,
+    authority_selector: GithubServerServiceAuthoritySelector,
+    consumer: GithubServerServiceConsumerClaim,
+    observed_at: UnixMillis,
+    required_through: UnixMillis,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DiffCredentialBehavior {
+    #[default]
+    Exact,
+    WrongSelector,
+    WrongAction,
+}
+
+#[derive(Debug, Default)]
+struct DiffCredentials {
+    calls: AtomicUsize,
+    releases: Arc<AtomicUsize>,
+    observations: Mutex<Vec<CredentialObservation>>,
+    behavior: Mutex<DiffCredentialBehavior>,
+}
+
+impl DiffCredentials {
+    fn set_behavior(&self, behavior: DiffCredentialBehavior) {
+        *self.behavior.lock().expect("credential behavior lock") = behavior;
+    }
+}
+
+#[derive(Debug)]
+struct ReleaseProbe(Arc<AtomicUsize>);
+
+#[async_trait]
+impl GithubServerServiceCredentialRelease for ReleaseProbe {
+    async fn release(self: Box<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl GithubDeliverySourceCredentialProvider for DiffCredentials {
+    async fn acquire(
+        &self,
+        request: GithubDeliverySourceCredentialRequest<'_>,
+    ) -> Result<GithubDeliverySourceCredential, GithubDeliverySourceCredentialProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.observations
+            .lock()
+            .expect("credential observations lock")
+            .push(CredentialObservation {
+                repository_owner_id: request.repository_owner_id(),
+                claim: request.snapshot().claim(),
+                attempt: request.snapshot().attempt(),
+                action: request.action(),
+                authority_selector: request.authority_selector().clone(),
+                consumer: request.consumer_claim().expect("valid consumer claim"),
+                observed_at: request.observed_at(),
+                required_through: request.required_through(),
+            });
+        let behavior = *self.behavior.lock().expect("credential behavior lock");
+        let authority_selector = if behavior == DiffCredentialBehavior::WrongSelector {
+            GithubServerServiceAuthoritySelector::from_durable_parts(
+                request.authority_selector().tenant().clone(),
+                GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x7fff))
+                    .expect("wrong authority ID"),
+                request.authority_selector().identity_digest(),
+                request.authority_selector().app_configuration_revision(),
+                request.authority_selector().policy_revision(),
+            )
+        } else {
+            request.authority_selector().clone()
+        };
+        let requested_consumer = request
+            .consumer_claim()
+            .map_err(|_| GithubDeliverySourceCredentialProviderError::InvariantViolation)?;
+        let consumer = GithubServerServiceConsumerClaim::new(
+            requested_consumer.consumer_id(),
+            requested_consumer.owner(),
+            requested_consumer.fence(),
+            if behavior == DiffCredentialBehavior::WrongAction {
+                GithubServerServiceAction::FetchPrivateRepositoryRevision
+            } else {
+                requested_consumer.action()
+            },
+            requested_consumer.revision(),
+        );
+        let binding = GithubDeliverySourceCredentialBinding::new(
+            request.identity().clone(),
+            request.repository_owner_id(),
+            ScmRepositoryId::new(request.identity().repository_identity())
+                .expect("credential repository"),
+            authority_selector,
+            GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0x7300)).expect("handoff ID"),
+            consumer,
+            request.required_through(),
+        )
+        .map_err(|_| GithubDeliverySourceCredentialProviderError::InvariantViolation)?;
+        GithubDeliverySourceCredential::new(
+            binding,
+            request.observed_at(),
+            SecretString::new(DIFF_CREDENTIAL).expect("diff credential"),
+            request.required_through(),
+            Box::new(ReleaseProbe(Arc::clone(&self.releases))),
+        )
+        .map_err(|_| GithubDeliverySourceCredentialProviderError::InvariantViolation)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangedFilesObservation {
+    repository: String,
+    request_digest: Sha256Digest,
+    before: String,
+    after: String,
+    claim: ProviderDeliveryClaimFence,
+    attempt: u16,
+    observed_at: UnixMillis,
+    required_through: UnixMillis,
+    private_action: Option<GithubDeliveryPrivateRepositoryAction>,
+    credential_present: bool,
+    credential_matches: bool,
+}
+
+#[derive(Debug)]
+struct ChangedFiles {
+    result: Result<GithubChangedFilesV1, GithubPushChangedFilesError>,
+    calls: AtomicUsize,
+    observations: Mutex<Vec<ChangedFilesObservation>>,
+}
+
+impl ChangedFiles {
+    fn new(result: Result<GithubChangedFilesV1, GithubPushChangedFilesError>) -> Self {
+        Self {
+            result,
+            calls: AtomicUsize::new(0),
+            observations: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl GithubPushChangedFilesProvider for ChangedFiles {
+    async fn changed_files(
+        &self,
+        request: GithubPushChangedFilesRequest<'_>,
+    ) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let (credential_present, credential_matches) = match request.authority() {
+            GithubPushChangedFilesAuthority::PublicAnonymous => (false, false),
+            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(credential) => {
+                (true, credential.expose_secret() == DIFF_CREDENTIAL)
+            }
+        };
+        self.observations
+            .lock()
+            .expect("observations lock")
+            .push(ChangedFilesObservation {
+                repository: request.identity().repository_identity().to_owned(),
+                request_digest: request.request_digest(),
+                before: request.push().before_commit_sha().to_owned(),
+                after: request.push().after_commit_sha().to_owned(),
+                claim: request.snapshot().claim(),
+                attempt: request.snapshot().attempt(),
+                observed_at: request.observed_at(),
+                required_through: request.required_through(),
+                private_action: request.private_action(),
+                credential_present,
+                credential_matches,
+            });
+        self.result.clone()
+    }
+}
+
 struct Harness {
     worker: GithubDeliveryWorker,
     claimed: ClaimedProviderDelivery,
     blobs: Arc<MemoryBlobStore>,
     logical: Arc<LogicalAdmissions>,
     deliveries: Arc<DeliveryOutcomes>,
+    credentials: Arc<DiffCredentials>,
 }
 
-async fn harness(files: BTreeMap<&str, &[u8]>, commit_count: usize) -> Harness {
-    let visibility = ProviderRepositoryVisibility::Private;
+async fn harness(
+    files: BTreeMap<&str, &[u8]>,
+    changed_files: Option<Arc<ChangedFiles>>,
+    commit_count: usize,
+) -> Harness {
+    harness_with_visibility(
+        files,
+        changed_files,
+        commit_count,
+        ProviderRepositoryVisibility::Private,
+    )
+    .await
+}
+
+async fn harness_with_visibility(
+    files: BTreeMap<&str, &[u8]>,
+    changed_files: Option<Arc<ChangedFiles>>,
+    commit_count: usize,
+    visibility: ProviderRepositoryVisibility,
+) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = push_body(commit_count, visibility);
-    let raw_key = "provider-deliveries/github/event/fixture.json";
+    let raw_key = "provider-deliveries/github/push/fixture.json";
     let raw_payload = BlobPayload::from_bytes(
         BlobKey::new(raw_key).expect("raw key"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
+        MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE).expect("raw media type"),
         body.clone(),
     );
     let raw_descriptor = raw_payload.descriptor().clone();
@@ -315,11 +526,11 @@ async fn harness(files: BTreeMap<&str, &[u8]>, commit_count: usize) -> Harness {
         .put_if_absent(raw_payload)
         .await
         .expect("publish raw event");
-    let raw_event = AdmissionObject::new_event(
+    let raw_event = AdmissionObject::new(
         raw_descriptor.digest(),
         ObjectKey::new(raw_key).expect("raw object key"),
         raw_descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        GITHUB_PUSH_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let claimed = claimed(raw_event, visibility);
@@ -329,7 +540,10 @@ async fn harness(files: BTreeMap<&str, &[u8]>, commit_count: usize) -> Harness {
         logical.clone(),
         Arc::new(GithubWorkflowPlanVerifier::new()),
     );
-    let processor = GithubDeliveryWorkflowAdmissionProcessor::new(admission);
+    let mut processor = GithubDeliveryWorkflowAdmissionProcessor::new(admission);
+    if let Some(changed_files) = changed_files {
+        processor = processor.with_changed_files_provider(changed_files);
+    }
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
@@ -338,6 +552,7 @@ async fn harness(files: BTreeMap<&str, &[u8]>, commit_count: usize) -> Harness {
         archive(files),
     );
     let deliveries = Arc::new(DeliveryOutcomes::default());
+    let credentials = Arc::new(DiffCredentials::default());
     let subject_evidence = Arc::new(FixtureSubjectEvidence::from_claimed(&claimed));
     let worker = GithubDeliveryWorker::new(
         blobs.clone(),
@@ -355,6 +570,7 @@ async fn harness(files: BTreeMap<&str, &[u8]>, commit_count: usize) -> Harness {
         blobs,
         logical,
         deliveries,
+        credentials,
     }
 }
 
@@ -394,6 +610,7 @@ async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
         archive(files),
     );
     let deliveries = Arc::new(DeliveryOutcomes::default());
+    let credentials = Arc::new(DiffCredentials::default());
     let subject_evidence = Arc::new(FixtureSubjectEvidence::authenticated_event(
         &claimed,
         GithubAuthenticatedEventKind::PullRequest,
@@ -418,6 +635,7 @@ async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
         blobs,
         logical,
         deliveries,
+        credentials,
     }
 }
 
@@ -530,6 +748,7 @@ async fn process(
         ProviderRepositoryVisibility::Private => {
             GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
                 credential: &archive_credential,
+                changed_files_credentials: Some(harness.credentials.as_ref()),
             }
         }
     };
@@ -553,7 +772,12 @@ fn outcome_kind(conclusion: &ProviderDeliveryWorkflowConclusion) -> (&'static st
 
 #[tokio::test]
 async fn accepted_path_admits_exact_evidence_and_replays_the_same_run() {
-    let harness = harness(BTreeMap::from([(WORKFLOW_PATH, ACCEPTED_WORKFLOW)]), 0).await;
+    let harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, ACCEPTED_WORKFLOW)]),
+        None,
+        0,
+    )
+    .await;
 
     assert!(matches!(
         process(&harness).await.expect("first processing"),
@@ -663,8 +887,153 @@ async fn read_admission_object(blobs: &MemoryBlobStore, object: &AdmissionObject
 }
 
 #[tokio::test]
+async fn changed_files_are_requested_only_after_typed_compiler_demand() {
+    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+        "src/lib.rs",
+    ]))));
+    let harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(changed.clone()),
+        0,
+    )
+    .await;
+
+    process(&harness).await.expect("processing");
+    assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.logical.commands().len(), 1);
+    let observations = changed.observations.lock().expect("observations lock");
+    assert_eq!(
+        observations.as_slice(),
+        [ChangedFilesObservation {
+            repository: format!("{OWNER}/{REPOSITORY}"),
+            request_digest: Sha256Digest::from_bytes([0x42; 32]),
+            before: BEFORE.to_owned(),
+            after: AFTER.to_owned(),
+            claim: harness.claimed.claim(),
+            attempt: 1,
+            observed_at: UnixMillis::new(500),
+            required_through: UnixMillis::new(10_000 + MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS),
+            private_action: Some(
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+            ),
+            credential_present: true,
+            credential_matches: true,
+        }]
+    );
+    let credential_observations = harness
+        .credentials
+        .observations
+        .lock()
+        .expect("credential observations lock");
+    assert_eq!(credential_observations.len(), 1);
+    assert_eq!(
+        credential_observations[0].repository_owner_id,
+        ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner ID")
+    );
+    assert_eq!(credential_observations[0].claim, harness.claimed.claim());
+    assert_eq!(credential_observations[0].attempt, 1);
+    assert_eq!(credential_observations[0].observed_at, UnixMillis::new(500));
+    let pinned_evidence = fixture_subject_evidence(
+        harness.claimed.receipt().id(),
+        harness.claimed.identity(),
+        ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner ID"),
+        harness.claimed.receipt().accepted_at(),
+        0x7101,
+    );
+    assert_eq!(
+        &credential_observations[0].authority_selector,
+        pinned_evidence
+            .private_source_authority()
+            .expect("private delivery pins source authority")
+    );
+    assert_eq!(
+        credential_observations[0].consumer.action(),
+        GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+    );
+    assert_eq!(credential_observations[0].consumer.fence().get(), 7);
+    assert_eq!(credential_observations[0].consumer.revision().get(), 1);
+    assert_eq!(
+        credential_observations[0].action,
+        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+    );
+    assert_ne!(
+        credential_observations[0].action,
+        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision
+    );
+    let completions = harness.deliveries.completions();
+    let outcomes = completions[0].outcomes();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcome_kind(outcomes[0].conclusion()), ("admitted", None));
+}
+
+#[tokio::test]
+async fn public_changed_files_are_anonymous_and_never_request_private_authority() {
+    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+        "src/lib.rs",
+    ]))));
+    let harness = harness_with_visibility(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(changed.clone()),
+        0,
+        ProviderRepositoryVisibility::Public,
+    )
+    .await;
+
+    process(&harness).await.expect("public diff processing");
+    assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        harness
+            .credentials
+            .observations
+            .lock()
+            .expect("credential observations lock")
+            .is_empty()
+    );
+    let observations = changed.observations.lock().expect("observations lock");
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].claim, harness.claimed.claim());
+    assert_eq!(observations[0].attempt, 1);
+    assert_eq!(observations[0].private_action, None);
+    assert!(!observations[0].credential_present);
+    assert!(!observations[0].credential_matches);
+}
+
+#[tokio::test]
+async fn private_changed_files_reject_wrong_selector_or_action_before_provider_io() {
+    for behavior in [
+        DiffCredentialBehavior::WrongSelector,
+        DiffCredentialBehavior::WrongAction,
+    ] {
+        let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+            "src/lib.rs",
+        ]))));
+        let harness = harness(
+            BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+            Some(changed.clone()),
+            0,
+        )
+        .await;
+        harness.credentials.set_behavior(behavior);
+
+        assert!(matches!(
+            process(&harness)
+                .await
+                .expect("invalid credential is durably rejected"),
+            GithubDeliveryWorkerOutcome::Rejected(_)
+        ));
+        assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+        assert_eq!(changed.calls.load(Ordering::SeqCst), 0);
+        assert!(harness.logical.commands().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn path_filter_without_provider_evidence_is_a_non_mutating_prerequisite() {
-    let harness = harness(BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]), 0).await;
+    let harness = harness(BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]), None, 0).await;
 
     assert_eq!(
         process(&harness).await,
@@ -678,7 +1047,12 @@ async fn path_filter_without_provider_evidence_is_a_non_mutating_prerequisite() 
 
 #[tokio::test]
 async fn authenticated_commit_ceiling_bypasses_diff_without_a_provider_call() {
-    let harness = harness(BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]), 1_001).await;
+    let harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        None,
+        1_001,
+    )
+    .await;
 
     process(&harness).await.expect("provider bypass processing");
     assert_eq!(harness.logical.commands().len(), 1);
@@ -693,6 +1067,7 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
     let dispatch = b"name: Manual\non: workflow_dispatch\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo manual\n";
     let invalid = harness(
         BTreeMap::from([(WORKFLOW_PATH, b"not: [valid".as_slice())]),
+        None,
         0,
     )
     .await;
@@ -705,7 +1080,12 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
         ("failed", Some("github.workflow.frontend_rejected"))
     );
 
-    let not_selected = harness(BTreeMap::from([(WORKFLOW_PATH, dispatch.as_slice())]), 0).await;
+    let not_selected = harness(
+        BTreeMap::from([(WORKFLOW_PATH, dispatch.as_slice())]),
+        None,
+        0,
+    )
+    .await;
     process(&not_selected)
         .await
         .expect("non-selected pinned workflow");
@@ -716,4 +1096,70 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
         outcome_kind(outcomes[0].conclusion()),
         ("skipped", Some("github.workflow.event_not_configured"))
     );
+}
+
+#[tokio::test]
+async fn changed_file_provider_failures_remain_closed_and_sanitized() {
+    let oversized = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete(
+        (0..=3_000).map(|index| format!("src/{index}.rs")),
+    ))));
+    let oversized_harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(oversized),
+        0,
+    )
+    .await;
+    process(&oversized_harness)
+        .await
+        .expect("manifest changed-file limit outcome");
+    assert_eq!(
+        oversized_harness
+            .credentials
+            .releases
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        outcome_kind(oversized_harness.deliveries.completions()[0].outcomes()[0].conclusion(),),
+        ("failed", Some("github.workflow.changed_files_invalid"))
+    );
+    assert!(oversized_harness.logical.commands().is_empty());
+
+    let invalid = Arc::new(ChangedFiles::new(Err(
+        GithubPushChangedFilesError::InvalidEvidence,
+    )));
+    let invalid_harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(invalid),
+        0,
+    )
+    .await;
+    process(&invalid_harness)
+        .await
+        .expect("invalid evidence outcome");
+    assert_eq!(
+        invalid_harness.credentials.releases.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        outcome_kind(invalid_harness.deliveries.completions()[0].outcomes()[0].conclusion(),),
+        ("failed", Some("github.workflow.changed_files_invalid"))
+    );
+
+    let unavailable = Arc::new(ChangedFiles::new(Err(
+        GithubPushChangedFilesError::Unavailable,
+    )));
+    let harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(unavailable),
+        0,
+    )
+    .await;
+    assert!(matches!(
+        process(&harness).await.expect("durable retry"),
+        GithubDeliveryWorkerOutcome::RetryScheduled(_)
+    ));
+    assert_eq!(harness.deliveries.retry_count(), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    assert!(harness.logical.commands().is_empty());
 }
