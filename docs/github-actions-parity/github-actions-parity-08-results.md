@@ -119,26 +119,25 @@ Acceptance:
 **Owner:** X with C reviewing provider authority. **Size:** L.
 **Dependencies:** RES-02, AUTH-03.
 
-The current aggregate workflow Check is a useful base. This package adds the
-job-level detail expected from Actions without pretending Automata can create
-native GitHub Actions run records. Current fenced subjects cover provider
-deliveries, scheduled fires, every selected workflow in `all_direct` fanout,
-and each physical rerun through the durable projection outbox. A rerun receives
-a distinct workflow Check subject and finalizes only that Check. The GitHub
-adapter currently publishes only immutable identity, queued/in-progress/
-completed state, and conclusion: it deliberately omits output, annotations,
-actions, links, timestamps, logs, and artifacts. The Check store has no job
-identity yet.
+Automata retains a fenced workflow subject as the admission and diagnostic
+authority, then creates one child Check subject for every concrete job attempt.
+The child copies the exact provider identity and commit from its workflow
+authority, advances from queued through in-progress to its terminal conclusion,
+and links directly to that job in the Automata dashboard. Initial attempts and
+later retries use the same transactional insertion path. Automata does not
+pretend these are native GitHub Actions run records.
 
 Tasks:
 
 - [x] Preserve one fenced aggregate Check subject and durable outbox lifecycle
   for each delivery/schedule workflow subject and physical rerun.
-- [ ] Define stable per-job-attempt external IDs while preserving the existing
+- [x] Define stable per-job-attempt external IDs while preserving the existing
   distinct workflow subject for each physical rerun.
-- [ ] Project queued, in-progress, completed, skipped, cancelled, neutral, and
-  timed-out states with accurate start/completion timestamps.
-- [ ] Publish bounded title, summary, text, annotations, and details URLs.
+- [x] Project queued, in-progress, completed, skipped, cancelled, failed, and
+  timed-out states and conclusions from the durable attempt lifecycle.
+- [ ] Publish accurate start and completion timestamps.
+- [x] Publish a bounded job name and an exact HTTPS dashboard `details_url`.
+- [ ] Publish bounded title, summary, text, and annotations.
 - [ ] Batch annotations within GitHub API limits and preserve deterministic
   ordering.
 - [ ] Add requested-action support only after its authority and idempotency
@@ -157,7 +156,7 @@ Tasks:
 
 Acceptance:
 
-- [ ] Each visible job has one coherent Check lifecycle per attempt.
+- [x] Each visible job has one coherent Check lifecycle per attempt.
 - [ ] Check publication is idempotent and resumes after process restart.
 - [ ] Provider failures are observable and retryable without losing Automata's
   authoritative result.

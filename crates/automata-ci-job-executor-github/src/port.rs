@@ -589,8 +589,6 @@ pub enum OperationPurpose {
     InitializeArtifactsList = 10,
     /// Reads one completed `GITHUB_ARTIFACTS` declaration file.
     ReadArtifactsFile = 11,
-    /// Materializes GitHub's workflow-directory view after repository checkout.
-    MaterializeGithubWorkflowDirectory = 12,
 }
 
 /// Derives deterministic IDs for retryable endpoint operations.

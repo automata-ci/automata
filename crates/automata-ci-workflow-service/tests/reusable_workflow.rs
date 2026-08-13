@@ -62,7 +62,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     with:
       enabled: true
     secrets:
@@ -169,21 +169,21 @@ fn inherit_forwards_undeclared_secrets_across_each_explicit_direct_call_only() {
     const INHERITING_ROOT: &str = r"on: workflow_dispatch
 jobs:
   middle:
-    uses: ./.github/workflows/middle.yml
+    uses: ./.ci/workflows/middle.yml
     secrets: inherit
 ";
     const INHERITING_MIDDLE: &str = r"on:
   workflow_call: {}
 jobs:
   leaf:
-    uses: ./.github/workflows/leaf.yml
+    uses: ./.ci/workflows/leaf.yml
     secrets: inherit
 ";
     const NON_FORWARDING_MIDDLE: &str = r"on:
   workflow_call: {}
 jobs:
   leaf:
-    uses: ./.github/workflows/leaf.yml
+    uses: ./.ci/workflows/leaf.yml
 ";
     const LEAF: &str = r"on:
   workflow_call: {}
@@ -316,12 +316,12 @@ fn exact_source_change_changes_catalog_binding_ids_and_replay_digest() {
 #[test]
 fn canonical_local_path_resolution_rejects_aliases_and_remote_references() {
     for reference in [
-        "../.github/workflows/reusable.yml",
-        "./.github/workflows/../reusable.yml",
-        ".github/workflows/reusable.yml",
+        "../.ci/workflows/reusable.yml",
+        "./.ci/workflows/../reusable.yml",
+        ".ci/workflows/reusable.yml",
         "synthetic/repository/.github/workflows/reusable.yml@main",
     ] {
-        let root = ROOT.replace("./.github/workflows/reusable.yml", reference);
+        let root = ROOT.replace("./.ci/workflows/reusable.yml", reference);
         let exact_catalog = catalog([(CALLEE_PATH, CALLEE.to_owned())]);
         assert_eq!(
             expand(&root, &exact_catalog, None),
@@ -376,7 +376,7 @@ jobs:
       - id: result
         run: echo digest=cycle
   recurse:
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
 ";
     let exact_catalog = catalog([(CALLEE_PATH, cyclic.to_owned())]);
     assert_eq!(
@@ -423,7 +423,7 @@ jobs:
   workflow_call: {}
 jobs:
   descend:
-    uses: ./.github/workflows/leaf.yml
+    uses: ./.ci/workflows/leaf.yml
 ";
     let top = r"on:
   workflow_call:
@@ -446,7 +446,7 @@ jobs:
       - id: result
         run: echo digest=top
   descend:
-    uses: ./.github/workflows/middle.yml
+    uses: ./.ci/workflows/middle.yml
 ";
     let exact_catalog = catalog([
         (CALLEE_PATH, top.to_owned()),

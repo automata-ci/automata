@@ -50,7 +50,7 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     assert_eq!(environment["GITHUB_REF_TYPE"], "branch");
     assert_eq!(
         environment["GITHUB_WORKFLOW_REF"],
-        "automata-ci/automata/.github/workflows/ci.yml@refs/heads/main"
+        "automata-ci/automata/.ci/workflows/ci.yml@refs/heads/main"
     );
     assert_eq!(
         environment["GITHUB_WORKFLOW_SHA"],
@@ -90,7 +90,7 @@ fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation()
     );
     assert_eq!(
         github.get("workflow_ref").and_then(GithubValue::as_str),
-        Some("automata-ci/automata/.github/workflows/ci.yml@refs/heads/main")
+        Some("automata-ci/automata/.ci/workflows/ci.yml@refs/heads/main")
     );
     assert_eq!(
         github.get("run_id").and_then(GithubValue::as_str),

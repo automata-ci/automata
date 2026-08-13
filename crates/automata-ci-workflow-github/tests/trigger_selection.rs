@@ -325,8 +325,8 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
 }
 
 #[test]
-fn renamed_workflow_paths_match_unchanged_github_path_filters() {
-    let source = "on:\n  push:\n    paths: ['.github/workflows/ci.yml']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+fn workflow_paths_match_native_ci_path_filters() {
+    let source = "on:\n  push:\n    paths: ['.ci/workflows/ci.yml']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let metadata = GithubEventMetadata::push_with_changed_files(
         false,
         GithubChangedFiles::complete([".ci/workflows/ci.yml"]),

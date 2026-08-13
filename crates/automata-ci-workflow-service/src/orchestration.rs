@@ -1208,11 +1208,7 @@ pub(crate) fn github_activation_context(
         ),
         (
             "workflow_ref".to_owned(),
-            GithubValue::string(format!(
-                "{repository}/{}@{}",
-                crate::github::github_workflow_path(path),
-                execution.git_ref()
-            )),
+            GithubValue::string(format!("{repository}/{}@{}", path, execution.git_ref())),
         ),
         (
             "workflow_sha".to_owned(),

@@ -35,6 +35,36 @@ fn discovers_exact_direct_workflows_in_deterministic_path_order() {
 }
 
 #[test]
+fn rejects_the_github_actions_workflow_directory_as_a_second_runtime_authority() {
+    for entries in [
+        vec![
+            directory(ROOT),
+            directory(b"repository-deadbeef/.github/"),
+            directory(b"repository-deadbeef/.github/workflows/"),
+        ],
+        vec![
+            directory(ROOT),
+            regular(
+                b"repository-deadbeef/.github/workflows/ci.yml",
+                b"name: forbidden\n",
+            ),
+        ],
+        vec![
+            directory(ROOT),
+            regular(
+                b"repository-deadbeef/.github/workflows/nested/ci.yaml",
+                b"name: forbidden\n",
+            ),
+        ],
+    ] {
+        assert_eq!(
+            discover(&archive(&entries)),
+            Err(DiscoveryError::UnsupportedWorkflowLocation)
+        );
+    }
+}
+
+#[test]
 fn a_root_only_repository_has_no_workflows() {
     let archive = archive(&[directory(ROOT)]);
     assert!(

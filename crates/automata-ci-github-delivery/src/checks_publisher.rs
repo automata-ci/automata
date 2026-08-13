@@ -12,32 +12,34 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_core::UnixMillis;
 use automata_ci_github::{
     GithubCheckAppId as HttpAppId, GithubCheckConclusion as HttpConclusion,
-    GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckExternalId,
-    GithubCheckName as HttpCheckName, GithubCheckRetryEvidence, GithubCheckRun,
-    GithubCheckRunCreateOutcome, GithubCheckRunId as HttpRunId, GithubCheckRunIdentity,
-    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
-    GithubCheckSuiteId as HttpSuiteId, GithubChecksError, GithubHttpEndpoint,
-    GithubObservedCheckConclusion,
+    GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
+    GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRetryEvidence,
+    GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId as HttpRunId,
+    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId, GithubChecksError,
+    GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
-    GithubCheckConclusion, GithubCheckDesiredProjection, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectIdentity, GithubCheckSubjectReceipt, GithubCheckSuiteId,
-    GithubCheckValueError, GithubServerServiceAction, GithubServerServiceAuthoritySelector,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
-    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS,
-    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, TenantScope,
+    GithubCheckConclusion, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
+    GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox,
+    GithubCheckProjectionWorkerId, GithubCheckRunBindingFence, GithubCheckRunCreateFence,
+    GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity, GithubCheckSubjectReceipt,
+    GithubCheckSuiteId, GithubCheckValueError, GithubServerServiceAction,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
+    MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
+    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, TenantScope,
 };
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
+use url::Url;
 
 use crate::{GithubDeliveryClock, service::GithubServerServiceCredentialRelease};
 
@@ -126,6 +128,9 @@ pub enum GithubChecksPublisherConfigurationError {
     /// The retry base is outside the durable bound.
     #[error("the GitHub Checks publisher retry backoff is invalid")]
     InvalidRetryBackoff,
+    /// The dashboard origin is not a canonical credential-free HTTP(S) origin.
+    #[error("the GitHub Checks dashboard origin is invalid")]
+    InvalidDashboardOrigin,
 }
 
 /// Borrowed exact authority requested for one claimed provider operation.
@@ -511,6 +516,7 @@ pub struct GithubChecksPublisher {
     outbox: Arc<dyn GithubCheckProjectionOutbox>,
     credentials: Arc<dyn GithubChecksCredentialProvider>,
     clock: Arc<dyn GithubDeliveryClock>,
+    dashboard_origin: Url,
     config: GithubChecksPublisherConfig,
 }
 
@@ -558,21 +564,38 @@ impl GithubChecksClaimHorizon {
 
 impl GithubChecksPublisher {
     /// Constructs the publisher from explicit provider, durability, authority, and time ports.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dashboard origin is not a canonical credential-free HTTP(S)
+    /// origin.
     pub fn new(
         endpoint: GithubHttpEndpoint,
         outbox: Arc<dyn GithubCheckProjectionOutbox>,
         credentials: Arc<dyn GithubChecksCredentialProvider>,
         clock: Arc<dyn GithubDeliveryClock>,
+        dashboard_origin: Url,
         config: GithubChecksPublisherConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, GithubChecksPublisherConfigurationError> {
+        if dashboard_origin.cannot_be_a_base()
+            || dashboard_origin.host_str().is_none()
+            || !dashboard_origin.username().is_empty()
+            || dashboard_origin.password().is_some()
+            || dashboard_origin.query().is_some()
+            || dashboard_origin.fragment().is_some()
+            || dashboard_origin.path() != "/"
+            || !matches!(dashboard_origin.scheme(), "http" | "https")
+        {
+            return Err(GithubChecksPublisherConfigurationError::InvalidDashboardOrigin);
+        }
+        Ok(Self {
             endpoint,
             outbox,
             credentials,
             clock,
+            dashboard_origin,
             config,
-        }
+        })
     }
 
     /// Claims and processes at most one eligible projection for a connection.
@@ -749,7 +772,7 @@ impl GithubChecksPublisher {
         horizon: GithubChecksClaimHorizon,
         credential: &GithubChecksServerServiceCredential,
     ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
-        let identity = run_identity(claimed)?;
+        let identity = run_identity(claimed, &self.dashboard_origin)?;
         let started_at = horizon.observed_at()?;
         let request_timeout_millis =
             duration_millis_ceil(self.endpoint.trusted_origins().limits().request_timeout())?;
@@ -835,7 +858,7 @@ impl GithubChecksPublisher {
         horizon: GithubChecksClaimHorizon,
         credential: &GithubChecksServerServiceCredential,
     ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
-        let identity = run_identity(claimed)?;
+        let identity = run_identity(claimed, &self.dashboard_origin)?;
         let outcome = self
             .endpoint
             .reconcile_check_run_creation(credential.repository(), &identity, credential.token())
@@ -907,7 +930,7 @@ impl GithubChecksPublisher {
         horizon: GithubChecksClaimHorizon,
         credential: &GithubChecksServerServiceCredential,
     ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
-        let identity = run_identity(claimed)?;
+        let identity = run_identity(claimed, &self.dashboard_origin)?;
         let run_id = claimed
             .run_id()
             .ok_or(GithubChecksPublisherError::InvalidClaim)?;
@@ -1124,6 +1147,7 @@ impl fmt::Debug for GithubChecksPublisher {
             .field("outbox", &"[configured]")
             .field("credentials", &"[configured]")
             .field("clock", &self.clock)
+            .field("dashboard_origin", &self.dashboard_origin)
             .field("config", &self.config)
             .finish()
     }
@@ -1143,6 +1167,7 @@ fn exact_revision(
 
 fn run_identity(
     claimed: &ClaimedGithubCheckProjection,
+    dashboard_origin: &Url,
 ) -> Result<GithubCheckRunIdentity, GithubChecksPublisherError> {
     let suite_id = claimed
         .suite_id()
@@ -1155,7 +1180,41 @@ fn run_identity(
             .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
         GithubCheckExternalId::new(claimed.external_id().to_owned())
             .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+        check_details_url(claimed, dashboard_origin)?,
     ))
+}
+
+fn check_details_url(
+    claimed: &ClaimedGithubCheckProjection,
+    dashboard_origin: &Url,
+) -> Result<GithubCheckDetailsUrl, GithubChecksPublisherError> {
+    let mut url = dashboard_origin.clone();
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|()| GithubChecksPublisherError::InvariantViolation)?;
+    segments.pop_if_empty();
+    let repository = claimed.identity().github_repository_name().as_str();
+    let (owner, name) = repository
+        .split_once('/')
+        .ok_or(GithubChecksPublisherError::InvariantViolation)?;
+    segments.push(owner);
+    segments.push(name);
+    segments.push("actions");
+    match claimed.details_target() {
+        GithubCheckDetailsTarget::Repository => {}
+        GithubCheckDetailsTarget::WorkflowRun(run_id) => {
+            segments.push("runs");
+            segments.push(&run_id.to_string());
+        }
+        GithubCheckDetailsTarget::Job { run_id, job_id } => {
+            segments.push("runs");
+            segments.push(&run_id.to_string());
+            segments.push("jobs");
+            segments.push(&job_id.to_string());
+        }
+    }
+    drop(segments);
+    GithubCheckDetailsUrl::new(url).map_err(|_| GithubChecksPublisherError::InvariantViolation)
 }
 
 fn http_app_id(value: GithubCheckAppId) -> Result<HttpAppId, GithubChecksPublisherError> {

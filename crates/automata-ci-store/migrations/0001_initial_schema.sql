@@ -3661,6 +3661,22 @@ DECLARE
     repository repositories%ROWTYPE;
     canonical_name TEXT;
 BEGIN
+    IF NEW.subject_kind = 'job' THEN
+        SELECT parent.github_repository_name INTO canonical_name
+        FROM github_check_subjects AS parent
+        WHERE parent.id = NEW.parent_subject_id
+          AND parent.tenant_id = NEW.tenant_id
+          AND parent.subject_kind = 'workflow'
+        FOR SHARE OF parent;
+        IF canonical_name IS NULL THEN
+            RAISE EXCEPTION 'GitHub job Check has no exact workflow authority'
+                USING ERRCODE = 'integrity_constraint_violation',
+                      CONSTRAINT = 'github_check_subjects_parent_exact';
+        END IF;
+        NEW.github_repository_name := canonical_name;
+        RETURN NEW;
+    END IF;
+
     SELECT * INTO repository
     FROM repositories
     WHERE id = NEW.repository_id
@@ -3727,6 +3743,7 @@ BEGIN
         FROM workflow_rerun_attempts AS attempt
         JOIN github_check_subjects AS source
           ON source.workflow_run_id = attempt.source_run_id
+         AND source.subject_kind = 'workflow'
         WHERE attempt.run_id = NEW.workflow_rerun_run_id
           AND attempt.source_run_id IS NOT NULL
           AND source.desired_state = 'completed'
@@ -3735,6 +3752,7 @@ BEGIN
               SELECT count(*)
               FROM github_check_subjects AS exact_source
               WHERE exact_source.workflow_run_id = attempt.source_run_id
+                AND exact_source.subject_kind = 'workflow'
           )
         FOR SHARE OF attempt, source;
         IF canonical_name IS NULL
@@ -3778,6 +3796,36 @@ DECLARE
     authority RECORD;
     workflow_authorized BOOLEAN := FALSE;
 BEGIN
+    IF NEW.subject_kind = 'job' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM github_check_subjects AS parent
+            WHERE parent.id = NEW.parent_subject_id
+              AND parent.tenant_id = NEW.tenant_id
+              AND parent.repository_id = NEW.repository_id
+              AND parent.subject_kind = 'workflow'
+              AND parent.origin_kind = NEW.origin_kind
+              AND parent.provider_delivery_id IS NOT DISTINCT FROM
+                  NEW.provider_delivery_id
+              AND parent.schedule_fire_id IS NOT DISTINCT FROM
+                  NEW.schedule_fire_id
+              AND parent.workflow_rerun_run_id IS NOT DISTINCT FROM
+                  NEW.workflow_rerun_run_id
+              AND parent.provider_connection_id = NEW.provider_connection_id
+              AND parent.provider_installation_id = NEW.provider_installation_id
+              AND parent.github_repository_id = NEW.github_repository_id
+              AND parent.github_repository_name = NEW.github_repository_name
+              AND parent.github_app_id = NEW.github_app_id
+              AND parent.head_sha = NEW.head_sha
+            FOR SHARE OF parent
+        ) THEN
+            RAISE EXCEPTION 'GitHub job Check does not match its workflow authority'
+                USING ERRCODE = 'integrity_constraint_violation',
+                      CONSTRAINT = 'github_check_subjects_parent_exact';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF NEW.origin_kind IN ('scheduled_fire', 'workflow_rerun') THEN
         RETURN NEW;
     END IF;
@@ -3877,6 +3925,7 @@ DECLARE
     repository repositories%ROWTYPE;
     schedule RECORD;
     rerun RECORD;
+    job_check RECORD;
     now_ms BIGINT;
 BEGIN
     IF NEW.desired_state <> 'queued'
@@ -3904,6 +3953,51 @@ BEGIN
         RAISE EXCEPTION 'GitHub Check subject repository is not exact'
             USING ERRCODE = 'integrity_constraint_violation',
                   CONSTRAINT = 'github_check_subjects_authority_exact';
+    END IF;
+
+    IF NEW.subject_kind = 'job' THEN
+        SELECT parent.id AS parent_id,
+               parent.workflow_run_id AS parent_run_id,
+               parent.tenant_id AS parent_tenant_id,
+               parent.repository_id AS parent_repository_id,
+               parent.provider_connection_id AS parent_connection_id,
+               parent.provider_installation_id AS parent_installation_id,
+               parent.github_repository_id AS parent_github_repository_id,
+               parent.github_repository_name AS parent_repository_name,
+               parent.github_app_id AS parent_app_id,
+               parent.head_sha AS parent_head_sha,
+               job.run_id AS job_run_id,
+               attempt.job_id AS attempt_job_id,
+               attempt.queued_at_ms
+          INTO job_check
+        FROM github_check_subjects AS parent
+        JOIN jobs AS job ON job.id = NEW.job_id
+        JOIN job_attempts AS attempt
+          ON attempt.id = NEW.job_attempt_id
+         AND attempt.job_id = job.id
+        WHERE parent.id = NEW.parent_subject_id
+          AND parent.subject_kind = 'workflow'
+          AND parent.workflow_run_id = job.run_id
+        FOR SHARE OF parent, job, attempt;
+        IF NOT FOUND
+            OR job_check.parent_run_id IS NULL
+            OR job_check.parent_tenant_id <> NEW.tenant_id
+            OR job_check.parent_repository_id <> NEW.repository_id
+            OR job_check.parent_connection_id <> NEW.provider_connection_id
+            OR job_check.parent_installation_id <> NEW.provider_installation_id
+            OR job_check.parent_github_repository_id <> NEW.github_repository_id
+            OR job_check.parent_repository_name <> NEW.github_repository_name
+            OR job_check.parent_app_id <> NEW.github_app_id
+            OR job_check.parent_head_sha <> NEW.head_sha
+            OR NEW.created_at_ms <> job_check.queued_at_ms
+            OR NEW.subject_key <>
+                'job/' || NEW.job_id::TEXT || '/attempt/' || NEW.job_attempt_id::TEXT
+        THEN
+            RAISE EXCEPTION 'GitHub job Check authority is not exact'
+                USING ERRCODE = 'integrity_constraint_violation',
+                      CONSTRAINT = 'github_check_subjects_job_authority_exact';
+        END IF;
+        RETURN NEW;
     END IF;
 
     IF NEW.origin_kind = 'provider_delivery' THEN
@@ -4030,12 +4124,14 @@ BEGIN
         JOIN workflow_runs AS run ON run.id = attempt.run_id
         JOIN github_check_subjects AS source
           ON source.workflow_run_id = attempt.source_run_id
+         AND source.subject_kind = 'workflow'
         WHERE attempt.run_id = NEW.workflow_rerun_run_id
           AND attempt.source_run_id IS NOT NULL
           AND 1 = (
               SELECT count(*)
               FROM github_check_subjects AS exact_source
               WHERE exact_source.workflow_run_id = attempt.source_run_id
+                AND exact_source.subject_kind = 'workflow'
           )
         FOR SHARE OF attempt, request, run, source;
         IF NOT FOUND
@@ -4108,6 +4204,10 @@ BEGIN
         OR NEW.check_name IS DISTINCT FROM OLD.check_name
         OR NEW.external_id IS DISTINCT FROM OLD.external_id
         OR NEW.created_at_ms IS DISTINCT FROM OLD.created_at_ms
+        OR NEW.subject_kind IS DISTINCT FROM OLD.subject_kind
+        OR NEW.parent_subject_id IS DISTINCT FROM OLD.parent_subject_id
+        OR NEW.job_id IS DISTINCT FROM OLD.job_id
+        OR NEW.job_attempt_id IS DISTINCT FROM OLD.job_attempt_id
     THEN
         RAISE EXCEPTION 'GitHub Check subject identity is immutable'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -4647,10 +4747,7 @@ CREATE FUNCTION automata_github_oidc_authority_is_current(authority github_oidc_
               'sha', encode(origin.github_check_head_sha, 'hex'),
               'workflow', run.workflow_name,
               'workflow_ref', origin.github_repository_name || '/' ||
-                  regexp_replace(
-                      origin.workflow_path,
-                      '^\.ci/workflows/', '.github/workflows/'
-                  ) || '@' || origin.git_ref,
+                  origin.workflow_path || '@' || origin.git_ref,
               'workflow_sha', encode(origin.github_check_head_sha, 'hex')
           )
           AND manifest.webhook_verifier_fingerprint_sha256 =
@@ -6699,7 +6796,7 @@ DECLARE
     evidence github_schedule_check_evidence%ROWTYPE;
     outbox github_check_projection_outbox%ROWTYPE;
 BEGIN
-    IF NEW.origin_kind <> 'scheduled_fire' THEN
+    IF NEW.origin_kind <> 'scheduled_fire' OR NEW.subject_kind = 'job' THEN
         RETURN NULL;
     END IF;
     SELECT * INTO evidence
@@ -22872,6 +22969,86 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION automata_project_job_attempt_to_github_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    target_state TEXT;
+    target_conclusion TEXT;
+    target_cause TEXT;
+    projected_count BIGINT;
+BEGIN
+    IF NEW.lifecycle IS NOT DISTINCT FROM OLD.lifecycle THEN
+        RETURN NULL;
+    END IF;
+
+    CASE NEW.lifecycle
+        WHEN 'leased', 'preparing', 'running', 'cancelling', 'finalizing' THEN
+            target_state := 'in_progress';
+        WHEN 'succeeded' THEN
+            target_state := 'completed';
+            target_conclusion := 'success';
+            target_cause := 'workflow_success';
+        WHEN 'failed', 'lost' THEN
+            target_state := 'completed';
+            target_conclusion := 'failure';
+            target_cause := 'workflow_failure';
+        WHEN 'cancelled' THEN
+            target_state := 'completed';
+            target_conclusion := 'cancelled';
+            target_cause := 'workflow_cancelled';
+        WHEN 'timed_out' THEN
+            target_state := 'completed';
+            target_conclusion := 'timed_out';
+            target_cause := 'workflow_timed_out';
+        WHEN 'skipped' THEN
+            target_state := 'completed';
+            target_conclusion := 'skipped';
+            target_cause := 'workflow_skipped';
+        ELSE
+            RETURN NULL;
+    END CASE;
+
+    UPDATE github_check_subjects AS subject
+    SET desired_state = target_state,
+        desired_conclusion = target_conclusion,
+        terminal_cause = target_cause,
+        desired_revision = subject.desired_revision + 1,
+        desired_updated_at_ms = NEW.changed_at_ms
+    WHERE subject.job_attempt_id = NEW.id
+      AND subject.job_id = NEW.job_id
+      AND subject.subject_kind = 'job'
+      AND (
+          target_state = 'in_progress'
+          AND subject.desired_state = 'queued'
+          OR target_state = 'completed'
+          AND subject.desired_state IN ('queued', 'in_progress')
+      );
+    GET DIAGNOSTICS projected_count = ROW_COUNT;
+
+    IF EXISTS (
+        SELECT 1
+        FROM github_check_subjects
+        WHERE job_attempt_id = NEW.id
+          AND subject_kind = 'job'
+    ) AND projected_count <> 1 AND NOT EXISTS (
+        SELECT 1
+        FROM github_check_subjects
+        WHERE job_attempt_id = NEW.id
+          AND job_id = NEW.job_id
+          AND subject_kind = 'job'
+          AND desired_state = target_state
+          AND desired_conclusion IS NOT DISTINCT FROM target_conclusion
+          AND terminal_cause IS NOT DISTINCT FROM target_cause
+    ) THEN
+        RAISE EXCEPTION 'GitHub job Check lifecycle did not advance exactly'
+            USING ERRCODE = 'integrity_constraint_violation',
+                  CONSTRAINT = 'github_check_subjects_job_lifecycle_exact';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 CREATE FUNCTION automata_workflow_admission_github_evidence_flag_immutable() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -23012,7 +23189,7 @@ DECLARE
     run_evidence github_workflow_rerun_subject_evidence%ROWTYPE;
     outbox github_check_projection_outbox%ROWTYPE;
 BEGIN
-    IF NEW.origin_kind <> 'workflow_rerun' THEN
+    IF NEW.origin_kind <> 'workflow_rerun' OR NEW.subject_kind = 'job' THEN
         RETURN NULL;
     END IF;
     SELECT * INTO durable
@@ -23066,7 +23243,8 @@ CREATE FUNCTION automata_workflow_rerun_link_requires_run_evidence() RETURNS tri
 DECLARE
     evidence github_workflow_rerun_subject_evidence%ROWTYPE;
 BEGIN
-    IF NEW.origin_kind <> 'workflow_rerun'
+    IF NEW.subject_kind = 'job'
+        OR NEW.origin_kind <> 'workflow_rerun'
         OR OLD.workflow_run_id IS NOT NULL
         OR NEW.workflow_run_id IS NULL
     THEN
@@ -23925,12 +24103,16 @@ CREATE TABLE github_check_subjects (
     origin_kind text DEFAULT 'provider_delivery'::text NOT NULL COLLATE pg_catalog."C",
     schedule_fire_id uuid,
     workflow_rerun_run_id uuid,
+    subject_kind text DEFAULT 'workflow'::text NOT NULL COLLATE pg_catalog."C",
+    parent_subject_id uuid,
+    job_id uuid,
+    job_attempt_id uuid,
     CONSTRAINT github_check_subjects_desired_shape CHECK (((desired_revision > 0) AND (created_at_ms >= 0) AND (desired_updated_at_ms >= created_at_ms) AND (((desired_state = ANY (ARRAY['queued'::text, 'in_progress'::text])) AND (desired_conclusion IS NULL) AND (terminal_cause IS NULL)) OR ((desired_state = 'completed'::text) AND (desired_conclusion = ANY (ARRAY['action_required'::text, 'cancelled'::text, 'failure'::text, 'success'::text, 'skipped'::text, 'timed_out'::text])) AND (terminal_cause = ANY (ARRAY['workflow_success'::text, 'workflow_skipped'::text, 'workflow_failure'::text, 'workflow_cancelled'::text, 'workflow_timed_out'::text, 'provider_unknown'::text, 'system_unknown'::text])))))),
     CONSTRAINT github_check_subjects_external_id_exact CHECK (((external_id = ('automata-check:'::text || (id)::text)) AND (octet_length(external_id) <= 1024))),
     CONSTRAINT github_check_subjects_key_shape CHECK ((((octet_length(subject_key) >= 1) AND (octet_length(subject_key) <= 1024)) AND (btrim(subject_key) = subject_key) AND (subject_key !~ '[[:cntrl:]\\]'::text) AND ("left"(subject_key, 1) <> '/'::text) AND (subject_key !~ '(^|/)(\.|\.\.)(/|$)'::text) AND (subject_key !~ '//'::text))),
     CONSTRAINT github_check_subjects_link_shape CHECK ((((workflow_run_id IS NULL) AND (linked_at_ms IS NULL)) OR ((workflow_run_id IS NOT NULL) AND (linked_at_ms >= created_at_ms)))),
-    CONSTRAINT github_check_subjects_name_shape CHECK ((((octet_length(check_name) >= 1) AND (octet_length(check_name) <= 255)) AND (check_name = btrim(check_name)) AND (check_name ~ '^[ -~]+$'::text))),
-    CONSTRAINT github_check_subjects_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((workflow_run_id IS NULL) OR (workflow_run_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
+    CONSTRAINT github_check_subjects_name_shape CHECK ((((octet_length(check_name) >= 1) AND (octet_length(check_name) <= 255)) AND (check_name = btrim(check_name)) AND (check_name !~ '[[:cntrl:]]'::text))),
+    CONSTRAINT github_check_subjects_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (provider_connection_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((workflow_run_id IS NULL) OR (workflow_run_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((parent_subject_id IS NULL) OR (parent_subject_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((job_id IS NULL) OR (job_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((job_attempt_id IS NULL) OR (job_attempt_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
     CONSTRAINT github_check_subjects_numeric_identity CHECK (((provider_installation_id > 0) AND (github_repository_id > 0) AND (github_app_id > 0))),
     CONSTRAINT github_check_subjects_origin_exact CHECK (((num_nonnulls(provider_delivery_id, schedule_fire_id, workflow_rerun_run_id) = 1) AND (((origin_kind = 'provider_delivery'::text) AND (provider_delivery_id IS NOT NULL) AND (schedule_fire_id IS NULL) AND (workflow_rerun_run_id IS NULL)) OR ((origin_kind = 'scheduled_fire'::text) AND (provider_delivery_id IS NULL) AND (schedule_fire_id IS NOT NULL) AND (workflow_rerun_run_id IS NULL)) OR ((origin_kind = 'workflow_rerun'::text) AND (provider_delivery_id IS NULL) AND (schedule_fire_id IS NULL) AND (workflow_rerun_run_id IS NOT NULL))))),
     CONSTRAINT github_check_subjects_repository_name_shape CHECK ((((octet_length(github_repository_name) >= 3) AND (octet_length(github_repository_name) <= 140)) AND (github_repository_name ~ '^[^/]+/[^/]+$'::text) AND ((octet_length(split_part(github_repository_name, '/'::text, 1)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 1)) <= 39)) AND ((octet_length(split_part(github_repository_name, '/'::text, 2)) >= 1) AND (octet_length(split_part(github_repository_name, '/'::text, 2)) <= 100)) AND ((split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9]$'::text) OR (split_part(github_repository_name, '/'::text, 1) ~ '^[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]$'::text)) AND (split_part(github_repository_name, '/'::text, 1) !~ '--'::text) AND (split_part(github_repository_name, '/'::text, 2) ~ '^[A-Za-z0-9._-]+$'::text) AND (split_part(github_repository_name, '/'::text, 2) <> ALL (ARRAY['.'::text, '..'::text])) AND (split_part(github_repository_name, '/'::text, 2) !~* '[.]git$'::text))),
@@ -23947,6 +24129,7 @@ CASE terminal_cause
     WHEN 'system_unknown'::text THEN (desired_conclusion = 'failure'::text)
     ELSE false
 END)),
+    CONSTRAINT github_check_subjects_subject_shape CHECK ((((subject_kind = 'workflow'::text) AND (parent_subject_id IS NULL) AND (job_id IS NULL) AND (job_attempt_id IS NULL)) OR ((subject_kind = 'job'::text) AND (parent_subject_id IS NOT NULL) AND (job_id IS NOT NULL) AND (job_attempt_id IS NOT NULL)))),
     CONSTRAINT github_check_subjects_workflow_rerun_non_nil CHECK (((workflow_rerun_run_id IS NULL) OR (workflow_rerun_run_id <> '00000000-0000-0000-0000-000000000000'::uuid)))
 );
 
@@ -28073,7 +28256,10 @@ ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_workflow_rerun_identity_unique UNIQUE (tenant_id, repository_id, provider_connection_id, workflow_rerun_run_id, id);
 
 ALTER TABLE ONLY github_check_subjects
-    ADD CONSTRAINT github_check_subjects_workflow_rerun_unique UNIQUE (workflow_rerun_run_id);
+    ADD CONSTRAINT github_check_subjects_workflow_rerun_unique UNIQUE (workflow_rerun_run_id, subject_key);
+
+ALTER TABLE ONLY github_check_subjects
+    ADD CONSTRAINT github_check_subjects_job_attempt_unique UNIQUE (job_attempt_id);
 
 ALTER TABLE ONLY github_membership_snapshots
     ADD CONSTRAINT github_membership_snapshots_primary_key PRIMARY KEY (tenant_id, id);
@@ -29694,6 +29880,8 @@ CREATE CONSTRAINT TRIGGER job_attempts_github_runtime_authority_renewal_exact AF
 
 CREATE TRIGGER job_attempts_output_safety_immutable BEFORE UPDATE ON job_attempts FOR EACH ROW EXECUTE FUNCTION automata_job_attempt_output_safety_immutable();
 
+CREATE TRIGGER job_attempts_project_github_check AFTER UPDATE OF lifecycle ON job_attempts FOR EACH ROW EXECUTE FUNCTION automata_project_job_attempt_to_github_check();
+
 CREATE TRIGGER job_attempts_refresh_result_projection_due_after_terminal AFTER UPDATE OF lifecycle ON job_attempts FOR EACH ROW EXECUTE FUNCTION automata_refresh_logical_workflow_attempt_lifecycle_due_trigger();
 
 CREATE TRIGGER job_attempts_require_environment_gate_before_lease BEFORE UPDATE OF lifecycle ON job_attempts FOR EACH ROW EXECUTE FUNCTION automata_require_job_environment_gate_before_lease();
@@ -30683,6 +30871,15 @@ ALTER TABLE ONLY github_check_projection_outbox
 
 ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_repository_run FOREIGN KEY (repository_id, workflow_run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_check_subjects
+    ADD CONSTRAINT github_check_subjects_parent FOREIGN KEY (tenant_id, parent_subject_id) REFERENCES github_check_subjects(tenant_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY github_check_subjects
+    ADD CONSTRAINT github_check_subjects_job FOREIGN KEY (workflow_run_id, job_id) REFERENCES jobs(run_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY github_check_subjects
+    ADD CONSTRAINT github_check_subjects_job_attempt FOREIGN KEY (job_attempt_id) REFERENCES job_attempts(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_schedule_fire FOREIGN KEY (tenant_id, repository_id, provider_connection_id, schedule_fire_id) REFERENCES github_schedule_fires(tenant_id, repository_id, provider_connection_id, fire_id) ON DELETE RESTRICT;

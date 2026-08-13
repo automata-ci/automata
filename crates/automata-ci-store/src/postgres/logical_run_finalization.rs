@@ -829,6 +829,7 @@ async fn transition_linked_github_check(
             SELECT id
             FROM github_check_subjects
             WHERE workflow_run_id = $1
+              AND subject_kind = 'workflow'
             FOR UPDATE
         ), updated AS (
             UPDATE github_check_subjects AS subject
@@ -980,6 +981,7 @@ async fn linked_github_check_matches(
                    desired_revision, desired_updated_at_ms
             FROM github_check_subjects
             WHERE workflow_run_id = $1
+              AND subject_kind = 'workflow'
             FOR SHARE
         )
         SELECT count(*), count(*) FILTER (

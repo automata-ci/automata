@@ -717,13 +717,17 @@ impl GithubProviderRuntimeBuilder {
 
         let checks_credentials: Arc<dyn GithubChecksCredentialProvider> = adapters;
         let checks_outbox: Arc<dyn GithubCheckProjectionOutbox> = store.clone();
-        let checks = Arc::new(GithubChecksPublisher::new(
-            endpoint,
-            checks_outbox,
-            checks_credentials,
-            delivery_clock.clone(),
-            GithubChecksPublisherConfig::default(),
-        ));
+        let checks = Arc::new(
+            GithubChecksPublisher::new(
+                endpoint,
+                checks_outbox,
+                checks_credentials,
+                delivery_clock.clone(),
+                config.dashboard_url().clone(),
+                GithubChecksPublisherConfig::default(),
+            )
+            .map_err(|_| GithubProviderRuntimeBuildError::InvalidConfiguration)?,
+        );
         let checks_worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = store.clone();

@@ -90,7 +90,7 @@ pub use github_checks::{
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
     GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,

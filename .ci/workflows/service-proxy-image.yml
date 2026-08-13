@@ -631,7 +631,7 @@ jobs:
         id: evidence
         env:
           GH_TOKEN: ${{ github.token }}
-          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/service-proxy-image.yml
+          SIGNER_WORKFLOW: ${{ github.repository }}/.ci/workflows/service-proxy-image.yml
         run: |
           common=(
             "oci://${LOCKED_IMAGE}"

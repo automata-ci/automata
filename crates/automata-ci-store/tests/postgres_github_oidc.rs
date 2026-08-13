@@ -2357,7 +2357,7 @@ async fn authority_and_issuance_are_exact_current_and_durable() -> TestResult {
                 "sha": "1414141414141414141414141414141414141414",
                 "workflow": "OIDC",
                 "workflow_ref":
-                    "example/project/.github/workflows/ci.yml@refs/heads/main",
+                    "example/project/.ci/workflows/ci.yml@refs/heads/main",
                 "workflow_sha": "1414141414141414141414141414141414141414"
             })
         );

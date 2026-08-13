@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use automata_ci_core::PlanSourceOrigin;
 use automata_ci_workflow_github::{
@@ -13,15 +13,6 @@ use crate::{
     },
     github_schedule::{AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, GithubScheduleEvidence},
 };
-
-pub(crate) fn github_workflow_path(path: &str) -> Cow<'_, str> {
-    path.strip_prefix(".ci/workflows/")
-        .and_then(|file| (!file.is_empty() && !file.contains('/')).then_some(file))
-        .map_or_else(
-            || Cow::Borrowed(path),
-            |file| Cow::Owned(format!(".github/workflows/{file}")),
-        )
-}
 
 /// GitHub adapter that re-parses and recompiles exact admitted source.
 #[derive(Clone, Copy, Debug, Default)]

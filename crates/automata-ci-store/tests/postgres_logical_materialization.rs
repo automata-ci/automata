@@ -5,10 +5,10 @@ use crate::github_manifest_fixture;
 use std::{collections::BTreeMap, time::Duration};
 
 use automata_ci_core::{
-    Architecture, AttemptId, CompiledValueTemplate, ContextValue, JobAuthorityProfile,
-    JobConclusion, JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity, JobIr,
-    JobIrEnvelope, JobIrVersion, JobPermissionRequest, JobResult, JobRuntimeContext,
-    JobSecretExposure, JobSource, Located, LogicalJobKind, LogicalJobTemplate,
+    Architecture, AttemptId, AttemptNumber, CompiledValueTemplate, ContextValue,
+    JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
+    JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobPermissionRequest, JobResult,
+    JobRuntimeContext, JobSecretExposure, JobSource, Located, LogicalJobKind, LogicalJobTemplate,
     LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate,
     OperatingSystem, OperationId, OutputSensitivity, PlanSourceLocation, PlanSourceOrigin,
     PlanSourceSpan, RunId, RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform,
@@ -21,21 +21,22 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmitWorkflowRun,
     AdmittedLogicalWorkflowJob, AdmittedWorkflowJob, AuthenticatedGithubDeliveryClaim,
-    BindLogicalActivationPreparation, ClaimLogicalInstanceResult, ClaimLogicalJobResult,
-    ClaimLogicalRunFinalization, ClaimNextLogicalInstanceMaterialization,
+    BindLogicalActivationPreparation, ClaimGithubCheckProjection, ClaimLogicalInstanceResult,
+    ClaimLogicalJobResult, ClaimLogicalRunFinalization, ClaimNextLogicalInstanceMaterialization,
     ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization,
     ClaimedLogicalJobActivation, CommitLogicalInstanceMaterialization, CommitLogicalInstanceResult,
     CommitLogicalJobResult, CommitLogicalRunFinalization, CompleteReusableWorkflowCall,
     ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
     ConsumedLogicalJobOrchestrationAuthority, ConsumedSelectedLogicalInstanceMaterialization,
-    EnsureGithubServerServiceAuthority, EvaluatedReusableWorkflowOutput, GithubCheckHeadSha,
-    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
+    EnsureGithubServerServiceAuthority, EvaluatedReusableWorkflowOutput, GithubCheckDetailsTarget,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionOutbox as _,
+    GithubCheckProjectionWorkerId, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
+    InternalAttemptRepository as _, JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
     LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE, LogicalActivationObject,
     LogicalActivationPreparationStore as _, LogicalActivationRepository as _,
     LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
@@ -53,7 +54,7 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, PublishReusableWorkflowCall,
+    PublishLogicalJobActivation, PublishReusableWorkflowCall, QueuedAttempt,
     RegisterProviderDeliveryWorkflowInventory, ReusableCallOutputMapping, ReusableSecretPermission,
     ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
     ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
@@ -117,6 +118,26 @@ struct DurableAttemptSafety {
     reason: String,
     schema: i32,
     classified_at: i64,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct DurableGithubJobCheck {
+    parent_subject_id: Uuid,
+    workflow_run_id: Uuid,
+    job_id: Uuid,
+    job_attempt_id: Uuid,
+    check_name: String,
+    desired_state: String,
+    desired_conclusion: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct TerminalGithubJobCheck {
+    check_name: String,
+    desired_state: String,
+    desired_conclusion: Option<String>,
+    terminal_cause: Option<String>,
+    desired_revision: i64,
 }
 
 #[tokio::test]
@@ -904,6 +925,56 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
             load_attempt_safety(&database, second_receipt.attempt_id()).await?,
             standard_public_attempt_safety(second_receipt.committed_at().get())
         );
+        let root_subject_id: Uuid = sqlx::query_scalar(
+            r"
+            SELECT id
+            FROM github_check_subjects
+            WHERE workflow_run_id = $1
+              AND subject_kind = 'workflow'
+            ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        let job_checks: Vec<DurableGithubJobCheck> = sqlx::query_as(
+                r"
+                SELECT parent_subject_id, workflow_run_id, job_id,
+                       job_attempt_id, check_name, desired_state,
+                       desired_conclusion
+                FROM github_check_subjects
+                WHERE workflow_run_id = $1
+                  AND subject_kind = 'job'
+                ORDER BY check_name
+                ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(job_checks.len(), 2);
+        assert_eq!(
+            job_checks[0],
+            DurableGithubJobCheck {
+                parent_subject_id: root_subject_id,
+                workflow_run_id: fixture.command.run_id().as_uuid(),
+                job_id: left.job_id().as_uuid(),
+                job_attempt_id: left.attempt_id().as_uuid(),
+                check_name: "Build 0".to_owned(),
+                desired_state: "queued".to_owned(),
+                desired_conclusion: None,
+            }
+        );
+        assert_eq!(
+            job_checks[1],
+            DurableGithubJobCheck {
+                parent_subject_id: root_subject_id,
+                workflow_run_id: fixture.command.run_id().as_uuid(),
+                job_id: second_receipt.job_id().as_uuid(),
+                job_attempt_id: second_receipt.attempt_id().as_uuid(),
+                check_name: "Build 1".to_owned(),
+                desired_state: "queued".to_owned(),
+                desired_conclusion: None,
+            }
+        );
 
         let metadata = database.store().get_job_ir_metadata(left.job_id()).await?;
         assert_eq!(metadata.version().get(), 1);
@@ -954,6 +1025,38 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         .bind(database_now_ms(&database).await?)
         .execute(database.pool())
         .await?;
+        let terminal_job_checks: Vec<TerminalGithubJobCheck> = sqlx::query_as(
+                r"
+                SELECT check_name, desired_state, desired_conclusion,
+                       terminal_cause, desired_revision
+                FROM github_check_subjects
+                WHERE workflow_run_id = $1
+                  AND subject_kind = 'job'
+                ORDER BY check_name
+                ",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(
+            terminal_job_checks,
+            vec![
+                TerminalGithubJobCheck {
+                    check_name: "Build 0".to_owned(),
+                    desired_state: "completed".to_owned(),
+                    desired_conclusion: Some("success".to_owned()),
+                    terminal_cause: Some("workflow_success".to_owned()),
+                    desired_revision: 2,
+                },
+                TerminalGithubJobCheck {
+                    check_name: "Build 1".to_owned(),
+                    desired_state: "completed".to_owned(),
+                    desired_conclusion: Some("success".to_owned()),
+                    terminal_cause: Some("workflow_success".to_owned()),
+                    desired_revision: 2,
+                },
+            ]
+        );
         let reconciliation = database
             .store()
             .reconcile_run(
@@ -972,6 +1075,79 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
                 .is_err(),
             "logical runs must not complete before orchestration finalization"
         );
+
+        let retry_attempt_id = AttemptId::from_uuid(Uuid::from_u128(10_650));
+        let retry_queued_at = UnixMillis::new(database_now_ms(&database).await?);
+        database
+            .store()
+            .insert_queued(QueuedAttempt::new(
+                retry_attempt_id,
+                left.job_id(),
+                AttemptNumber::new(2)?,
+                retry_queued_at,
+            ))
+            .await?;
+        let retry_check: (Uuid, Uuid, Uuid, String, String, i64) = sqlx::query_as(
+            r"
+            SELECT parent_subject_id, workflow_run_id, job_id,
+                   check_name, desired_state, desired_revision
+            FROM github_check_subjects
+            WHERE job_attempt_id = $1
+              AND subject_kind = 'job'
+            ",
+        )
+        .bind(retry_attempt_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(retry_check.0, root_subject_id);
+        assert_eq!(retry_check.1, fixture.command.run_id().as_uuid());
+        assert_eq!(retry_check.2, left.job_id().as_uuid());
+        assert_eq!(retry_check.3, "Build 0");
+        assert_eq!(retry_check.4, "queued");
+        assert_eq!(retry_check.5, 1);
+
+        let mut root_projection_lock = database.pool().begin().await?;
+        let locked_workflow_checks: Vec<Uuid> = sqlx::query_scalar(
+            r"
+            SELECT outbox.subject_id
+            FROM github_check_projection_outbox AS outbox
+            JOIN github_check_subjects AS subject
+              ON subject.id = outbox.subject_id
+            WHERE subject.provider_connection_id = $1
+              AND subject.subject_kind = 'workflow'
+            FOR UPDATE OF outbox
+            ",
+        )
+        .bind(fixture.manifest.connection_id().as_uuid())
+        .fetch_all(&mut *root_projection_lock)
+        .await?;
+        assert!(locked_workflow_checks.contains(&root_subject_id));
+
+        let projection_now = database_now_ms(&database).await?;
+        let projected_job = database
+            .store()
+            .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                fixture.manifest.connection_id(),
+                GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(10_700))?,
+                UnixMillis::new(projection_now),
+                UnixMillis::new(projection_now + 60_000),
+            )?)
+            .await?
+            .ok_or("a concrete job Check was not claimable independently of its workflow Check")?;
+        let GithubCheckDetailsTarget::Job { run_id, job_id } = projected_job.details_target()
+        else {
+            return Err("a concrete job Check did not decode to a dashboard job target".into());
+        };
+        assert_eq!(run_id, fixture.command.run_id());
+        let expected_name = if job_id == left.job_id() {
+            "Build 0"
+        } else if job_id == second_receipt.job_id() {
+            "Build 1"
+        } else {
+            return Err("the claimed job Check targeted an unknown concrete job".into());
+        };
+        assert_eq!(projected_job.identity().name().as_str(), expected_name);
+        root_projection_lock.rollback().await?;
         Ok(())
     })
     .await

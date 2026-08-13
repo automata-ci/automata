@@ -7,7 +7,10 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{CurrentAttemptOutputSafety, PostgresStore, RunnerPayloadEncryption};
+use super::{
+    CurrentAttemptOutputSafety, PostgresStore, RunnerPayloadEncryption,
+    github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
+};
 use crate::{
     AdmissionObject, AdmitWorkflowRun, CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA,
     CancelJobCommandPayload, CancellationActor, CancellationReason, DocumentSchema,
@@ -764,6 +767,14 @@ async fn insert_jobs_and_dag(
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;
+        insert_github_job_check_subject(
+            transaction,
+            job.job_id(),
+            job.attempt_id(),
+            command.admitted_at(),
+        )
+        .await
+        .map_err(GithubJobCheckInsertError::into_store_error)?;
     }
     for job in command.jobs() {
         for prerequisite in job.prerequisites() {
@@ -1294,6 +1305,7 @@ async fn lock_logical_cancellation_dependents(
         SELECT desired_updated_at_ms
         FROM github_check_subjects
         WHERE workflow_run_id = $1
+          AND subject_kind = 'workflow'
         ORDER BY id
         FOR UPDATE
         ",
@@ -1426,6 +1438,7 @@ async fn finalize_logical_concurrency_cancellation(
             SELECT id
             FROM github_check_subjects
             WHERE workflow_run_id = $1
+              AND subject_kind = 'workflow'
             FOR UPDATE
         ), updated AS (
             UPDATE github_check_subjects AS subject

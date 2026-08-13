@@ -17,48 +17,6 @@ use support::{
 };
 
 #[tokio::test]
-async fn checkout_materializes_the_github_workflow_directory_view() {
-    let fixture = Fixture::new(
-        vec![prepared_node24_action()],
-        vec![
-            PhaseResponse::success(),
-            PhaseResponse::success(),
-            PhaseResponse::success(),
-        ],
-    );
-    let request = fixture.request(envelope(vec![action_step("checkout", "actions/checkout")]));
-    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
-
-    let result = fixture
-        .executor
-        .execute(request, events, ExecutionCancellation::new())
-        .await
-        .expect("checkout executes");
-
-    assert_eq!(result.conclusion(), JobConclusion::Success);
-    let state = fixture.endpoint_state.lock().expect("endpoint lock");
-    let compatibility = state
-        .commands
-        .iter()
-        .find(|command| {
-            command.argv().program().as_str() == "/usr/bin/sh"
-                && command
-                    .argv()
-                    .arguments()
-                    .get(1)
-                    .is_some_and(|script| script.contains(".ci/workflows"))
-        })
-        .expect("workflow-directory compatibility command");
-    assert_eq!(
-        compatibility.working_directory().as_str(),
-        "/__w/automata/automata"
-    );
-    assert!(
-        compatibility.argv().arguments()[1].contains("cp -R -- .ci/workflows .github/workflows")
-    );
-}
-
-#[tokio::test]
 async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
     let defaults = ExecutionEnvironment::new(
         [

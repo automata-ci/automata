@@ -139,6 +139,7 @@ impl fmt::Debug for GithubProviderInternalRepositoryId {
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderConfig {
     transport: GithubProviderTransport,
+    dashboard_url: Url,
     app: GithubProviderAppConfig,
     webhook: GithubProviderWebhookConfig,
     schedule: GithubProviderScheduleConfig,
@@ -181,6 +182,7 @@ impl GithubProviderConfig {
         let app = GithubProviderAppConfig::validate(raw.app)?;
         let webhook = GithubProviderWebhookConfig::validate(raw.webhook)?;
         let transport = GithubProviderTransport::validate(raw.transport)?;
+        let dashboard_url = validate_dashboard_url(&raw.dashboard_url, &transport)?;
         let schedule = GithubProviderScheduleConfig::validate(raw.schedule)?;
         let mut repositories = raw
             .repositories
@@ -193,6 +195,7 @@ impl GithubProviderConfig {
         });
         Ok(Self {
             transport,
+            dashboard_url,
             app,
             webhook,
             schedule,
@@ -204,6 +207,12 @@ impl GithubProviderConfig {
     #[must_use]
     pub const fn transport(&self) -> &GithubProviderTransport {
         &self.transport
+    }
+
+    /// Returns the canonical public Automata dashboard origin used by Check Runs.
+    #[must_use]
+    pub const fn dashboard_url(&self) -> &Url {
+        &self.dashboard_url
     }
 
     /// Returns the one App identity and private-key source authority.
@@ -241,6 +250,7 @@ impl fmt::Debug for GithubProviderConfig {
         formatter
             .debug_struct("GithubProviderConfig")
             .field("transport", &self.transport)
+            .field("dashboard_url", &"[configured]")
             .field("app", &self.app)
             .field("webhook", &self.webhook)
             .field("schedule", &self.schedule)
@@ -251,6 +261,39 @@ impl fmt::Debug for GithubProviderConfig {
                 &(self.repositories.len() - public_repositories),
             )
             .finish()
+    }
+}
+
+fn validate_dashboard_url(
+    value: &str,
+    transport: &GithubProviderTransport,
+) -> Result<Url, GithubProviderConfigError> {
+    let url = Url::parse(value).map_err(|_| GithubProviderConfigError)?;
+    if url.as_str() != value
+        || url.cannot_be_a_base()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(GithubProviderConfigError);
+    }
+    match transport {
+        GithubProviderTransport::GithubDotCom if url.scheme() == "https" => Ok(url),
+        GithubProviderTransport::LoopbackEmulator { .. }
+            if url.scheme() == "https"
+                || url.scheme() == "http"
+                    && url
+                        .host_str()
+                        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                        .is_some_and(|address| address.is_loopback()) =>
+        {
+            Ok(url)
+        }
+        GithubProviderTransport::GithubDotCom
+        | GithubProviderTransport::LoopbackEmulator { .. } => Err(GithubProviderConfigError),
     }
 }
 
@@ -880,6 +923,7 @@ fn validate_unique_repositories(
 struct RawConfig {
     schema: u16,
     transport: RawTransport,
+    dashboard_url: String,
     app: RawApp,
     webhook: RawWebhook,
     #[serde(default)]

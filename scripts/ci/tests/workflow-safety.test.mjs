@@ -705,18 +705,17 @@ test("Pages and profile publication isolate concurrency and environments", () =>
   assert.match(promote, /environment: profile-promotion/);
 });
 
-test("Automata publication retains GitHub-compatible signer identities", () => {
+test("Automata publication retains native workflow signer identities", () => {
   const profile = source(".ci/workflows/profile-image.yml");
   const serviceProxy = source(".ci/workflows/service-proxy-image.yml");
 
-  // These are provider-facing compatibility identities, not repository paths.
   assert.match(
     profile,
-    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/profile-image\.yml/,
+    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.ci\/workflows\/profile-image\.yml/,
   );
   assert.match(
     serviceProxy,
-    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/service-proxy-image\.yml/,
+    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.ci\/workflows\/service-proxy-image\.yml/,
   );
 });
 
@@ -976,6 +975,25 @@ test("release publication is globally serialized and fails early on registry cap
   assert.match(capacity, /initial_burst_override_approved=%s/);
   assert.match(release, /Revalidate identity before the first staging mutation/);
   assert.match(release, /Revalidate identity before the immutable image binding/);
+});
+
+test("release gating trusts the exact final Automata job Check", () => {
+  const { gate } = releaseJobs();
+  const checkGateStart = gate.indexOf(
+    "      - name: Require successful main CI for the tagged commit",
+  );
+  assert.notEqual(checkGateStart, -1, "missing Automata Check release gate");
+  const checkGate = gate.slice(checkGateStart);
+
+  assert.match(gate, /permissions:\n      checks: read\n      contents: read/);
+  assert.match(checkGate, /AUTOMATA_GITHUB_APP_ID/);
+  assert.match(checkGate, /commits\/\$\{RELEASE_COMMIT\}\/check-runs/);
+  assert.match(checkGate, /check_name="Static Linux distribution"/);
+  assert.match(checkGate, /-f app_id="\$AUTOMATA_GITHUB_APP_ID"/);
+  assert.match(checkGate, /-f check_name="\$check_name"/);
+  assert.match(checkGate, /"\$external_id" == automata-check:\*/);
+  assert.match(checkGate, /"\$details_url" == https:\/\/\*/);
+  assert.doesNotMatch(checkGate, /actions\/workflows|workflow_runs/);
 });
 
 test("release order validation handles drafts, retries, and stable monotonicity", () => {

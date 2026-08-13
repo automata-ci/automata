@@ -72,7 +72,7 @@ jobs:
       - name: Lint workflows and shell scripts
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
-          target/ci-tools/actionlint .github/workflows/*.yml
+          target/ci-tools/actionlint .ci/workflows/*.yml
           shellcheck -x \
             scripts/install.sh \
             scripts/ci/*.sh \

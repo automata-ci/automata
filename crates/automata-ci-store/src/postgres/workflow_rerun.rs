@@ -801,6 +801,7 @@ async fn lock_source_run(
                    )::BIGINT AS terminal_count
             FROM github_check_subjects AS subject
             WHERE subject.workflow_run_id = run.id
+              AND subject.subject_kind = 'workflow'
         ) AS check_projection ON TRUE
         WHERE repository.tenant_id = $1
           AND run.repository_id = $2

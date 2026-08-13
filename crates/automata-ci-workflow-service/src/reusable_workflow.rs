@@ -1559,7 +1559,7 @@ fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpans
 }
 
 fn resolve_local_reference(reference: &str) -> Result<String, ReusableWorkflowExpansionError> {
-    let Some(file) = reference.strip_prefix("./.github/workflows/") else {
+    let Some(file) = reference.strip_prefix("./.ci/workflows/") else {
         return Err(ReusableWorkflowExpansionError::NonLocalReference);
     };
     if file.is_empty() || file.contains('/') || file.contains('\\') {

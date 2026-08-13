@@ -1,25 +1,25 @@
 use async_trait::async_trait;
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
+    AttemptStoreError, BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
-    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckHeadSha,
-    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
-    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
-    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity,
-    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
-    GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
-    GithubCheckTerminalizationRepository, GithubRepositoryName, GithubScheduleFireId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
+    GithubCheckSubjectRepository, GithubCheckSubjectTarget, GithubCheckSuiteId,
+    GithubCheckTerminalCause, GithubCheckTerminalizationRepository, GithubRepositoryName,
+    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, LinkGithubCheckWorkflowRun, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
     ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
     ResolveGithubCheckRunCreate, RetryGithubCheckProjection, StartGithubCheckProjection,
-    TenantScope, TerminalizeGithubCheck,
+    StoreError, TenantScope, TerminalizeGithubCheck,
 };
 
 use super::PostgresStore;
@@ -36,11 +36,137 @@ enum ProjectionSubjectOrigin {
     WorkflowRerun,
 }
 
+pub(super) enum GithubJobCheckInsertError {
+    Operation(sqlx::Error),
+    CorruptData(&'static str),
+}
+
+impl GithubJobCheckInsertError {
+    pub(super) fn into_store_error(self) -> StoreError {
+        match self {
+            Self::Operation(error) => StoreError::operation(error),
+            Self::CorruptData(message) => StoreError::corrupt_data(message),
+        }
+    }
+
+    pub(super) fn into_attempt_error(self) -> AttemptStoreError {
+        match self {
+            Self::Operation(error) => AttemptStoreError::operation(error),
+            Self::CorruptData(message) => AttemptStoreError::corrupt_data(message),
+        }
+    }
+}
+
+pub(super) async fn insert_github_job_check_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: JobId,
+    attempt_id: AttemptId,
+    queued_at: UnixMillis,
+) -> Result<(), GithubJobCheckInsertError> {
+    let job = sqlx::query_as::<_, (Uuid, String, bool)>(
+        r"
+        SELECT job.run_id, job.display_name,
+               EXISTS (
+                   SELECT 1
+                   FROM github_check_subjects AS parent
+                   WHERE parent.workflow_run_id = job.run_id
+                     AND parent.subject_kind = 'workflow'
+               )
+        FROM jobs AS job
+        WHERE job.id = $1
+        FOR KEY SHARE OF job
+        ",
+    )
+    .bind(job_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GithubJobCheckInsertError::Operation)?
+    .ok_or(GithubJobCheckInsertError::CorruptData(
+        "GitHub job Check has no durable job",
+    ))?;
+    if !job.2 {
+        return Ok(());
+    }
+    let check_name = GithubCheckName::from_job_display_name(&job.1).map_err(|_| {
+        GithubJobCheckInsertError::CorruptData("job display name is not Check-safe")
+    })?;
+    let subject_id = Uuid::new_v4();
+    let subject_key = format!("job/{}/attempt/{}", job_id.as_uuid(), attempt_id.as_uuid());
+    let external_id = format!("automata-check:{subject_id}");
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r"
+        INSERT INTO github_check_subjects (
+            id, tenant_id, repository_id, provider_delivery_id, subject_key,
+            provider_connection_id, provider_installation_id,
+            github_repository_id, github_repository_name, github_app_id,
+            head_sha, check_name, external_id, created_at_ms,
+            desired_updated_at_ms, origin_kind, schedule_fire_id,
+            workflow_rerun_run_id, subject_kind, parent_subject_id,
+            job_id, job_attempt_id
+        )
+        SELECT $1, parent.tenant_id, parent.repository_id,
+               parent.provider_delivery_id, $2,
+               parent.provider_connection_id, parent.provider_installation_id,
+               parent.github_repository_id, parent.github_repository_name,
+               parent.github_app_id, parent.head_sha, $3, $4, $5, $5,
+               parent.origin_kind, parent.schedule_fire_id,
+               parent.workflow_rerun_run_id, 'job', parent.id, $6, $7
+        FROM github_check_subjects AS parent
+        WHERE parent.workflow_run_id = $8
+          AND parent.subject_kind = 'workflow'
+        RETURNING id
+        ",
+    )
+    .bind(subject_id)
+    .bind(subject_key)
+    .bind(check_name.as_str())
+    .bind(external_id)
+    .bind(queued_at.get())
+    .bind(job_id.as_uuid())
+    .bind(attempt_id.as_uuid())
+    .bind(job.0)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GithubJobCheckInsertError::Operation)?;
+
+    let Some(inserted) = inserted else {
+        return Ok(());
+    };
+    if inserted != subject_id {
+        return Err(GithubJobCheckInsertError::CorruptData(
+            "GitHub job Check identity changed on insert",
+        ));
+    }
+    let linked = sqlx::query(
+        r"
+        UPDATE github_check_subjects
+        SET workflow_run_id = $2, linked_at_ms = $3
+        WHERE id = $1
+          AND subject_kind = 'job'
+          AND workflow_run_id IS NULL
+          AND linked_at_ms IS NULL
+        ",
+    )
+    .bind(subject_id)
+    .bind(job.0)
+    .bind(queued_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(GithubJobCheckInsertError::Operation)?;
+    if linked.rows_affected() != 1 {
+        return Err(GithubJobCheckInsertError::CorruptData(
+            "GitHub job Check did not link exactly once",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) const SUBJECT_COLUMNS: &str = r"
     subject.id, subject.tenant_id, subject.repository_id,
     subject.origin_kind, subject.provider_delivery_id, subject.schedule_fire_id,
     subject.workflow_rerun_run_id,
-    subject.subject_key,
+    subject.subject_key, subject.subject_kind, subject.parent_subject_id,
+    subject.job_id, subject.job_attempt_id,
     subject.provider_connection_id, subject.provider_installation_id,
     subject.github_repository_id, subject.github_repository_name,
     subject.github_app_id, subject.head_sha,
@@ -64,16 +190,21 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
               AND delivery_evidence.tenant_id = subject.tenant_id
               AND delivery_evidence.repository_id = subject.repository_id
               AND (
-                delivery_evidence.github_check_subject_id = subject.id
+                delivery_evidence.github_check_subject_id =
+                    COALESCE(subject.parent_subject_id, subject.id)
                 OR EXISTS (
                     SELECT 1
                     FROM github_workflow_run_subject_evidence AS run_evidence
-                    WHERE run_evidence.github_check_subject_id = subject.id
+                    WHERE run_evidence.github_check_subject_id =
+                              COALESCE(subject.parent_subject_id, subject.id)
                       AND run_evidence.provider_delivery_id =
                           subject.provider_delivery_id
                       AND run_evidence.tenant_id = subject.tenant_id
                       AND run_evidence.repository_id = subject.repository_id
-                      AND run_evidence.workflow_path = subject.subject_key
+                      AND (
+                          subject.parent_subject_id IS NOT NULL
+                          OR run_evidence.workflow_path = subject.subject_key
+                      )
                       AND run_evidence.run_id = subject.workflow_run_id
                 )
                 OR EXISTS (
@@ -90,7 +221,8 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
         WHEN 'scheduled_fire' THEN EXISTS (
             SELECT 1
             FROM github_schedule_check_evidence AS schedule_evidence
-            WHERE schedule_evidence.github_check_subject_id = subject.id
+            WHERE schedule_evidence.github_check_subject_id =
+                      COALESCE(subject.parent_subject_id, subject.id)
               AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
               AND schedule_evidence.tenant_id = subject.tenant_id
               AND schedule_evidence.repository_id = subject.repository_id
@@ -100,7 +232,8 @@ const LOCK_PROJECTION_CANDIDATE_SQL: &str = r"
         WHEN 'workflow_rerun' THEN EXISTS (
             SELECT 1
             FROM workflow_rerun_check_evidence AS rerun_evidence
-            WHERE rerun_evidence.github_check_subject_id = subject.id
+            WHERE rerun_evidence.github_check_subject_id =
+                      COALESCE(subject.parent_subject_id, subject.id)
               AND rerun_evidence.run_id = subject.workflow_rerun_run_id
               AND rerun_evidence.tenant_id = subject.tenant_id
               AND rerun_evidence.repository_id = subject.repository_id
@@ -171,15 +304,19 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
       AND (
-        evidence.github_check_subject_id = subject.id
+        evidence.github_check_subject_id = COALESCE(subject.parent_subject_id, subject.id)
         OR EXISTS (
             SELECT 1
             FROM github_workflow_run_subject_evidence AS run_evidence
-            WHERE run_evidence.github_check_subject_id = subject.id
+            WHERE run_evidence.github_check_subject_id =
+                      COALESCE(subject.parent_subject_id, subject.id)
               AND run_evidence.provider_delivery_id = subject.provider_delivery_id
               AND run_evidence.tenant_id = subject.tenant_id
               AND run_evidence.repository_id = subject.repository_id
-              AND run_evidence.workflow_path = subject.subject_key
+              AND (
+                  subject.parent_subject_id IS NOT NULL
+                  OR run_evidence.workflow_path = subject.subject_key
+              )
               AND run_evidence.run_id = subject.workflow_run_id
         )
         OR EXISTS (
@@ -211,7 +348,8 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         subject.id, subject.tenant_id, subject.repository_id,
         subject.origin_kind, subject.provider_delivery_id,
         subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
+        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
+        subject.job_id, subject.job_attempt_id,
         subject.provider_connection_id, subject.provider_installation_id,
         subject.github_repository_id, subject.github_repository_name,
         subject.github_app_id, subject.head_sha,
@@ -260,7 +398,7 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
       AND subject.origin_kind = 'scheduled_fire'
       AND subject.provider_delivery_id IS NULL
       AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = subject.id
+      AND evidence.github_check_subject_id = COALESCE(subject.parent_subject_id, subject.id)
       AND evidence.schedule_fire_id = subject.schedule_fire_id
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
@@ -284,7 +422,8 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
         subject.id, subject.tenant_id, subject.repository_id,
         subject.origin_kind, subject.provider_delivery_id,
         subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
+        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
+        subject.job_id, subject.job_attempt_id,
         subject.provider_connection_id, subject.provider_installation_id,
         subject.github_repository_id, subject.github_repository_name,
         subject.github_app_id, subject.head_sha,
@@ -334,7 +473,7 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
       AND subject.provider_delivery_id IS NULL
       AND subject.schedule_fire_id IS NULL
       AND subject.provider_connection_id = $2
-      AND evidence.github_check_subject_id = subject.id
+      AND evidence.github_check_subject_id = COALESCE(subject.parent_subject_id, subject.id)
       AND evidence.run_id = subject.workflow_rerun_run_id
       AND evidence.tenant_id = subject.tenant_id
       AND evidence.repository_id = subject.repository_id
@@ -358,7 +497,8 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
         subject.id, subject.tenant_id, subject.repository_id,
         subject.origin_kind, subject.provider_delivery_id,
         subject.schedule_fire_id, subject.workflow_rerun_run_id,
-        subject.subject_key,
+        subject.subject_key, subject.subject_kind, subject.parent_subject_id,
+        subject.job_id, subject.job_attempt_id,
         subject.provider_connection_id, subject.provider_installation_id,
         subject.github_repository_id, subject.github_repository_name,
         subject.github_app_id, subject.head_sha,
@@ -472,6 +612,7 @@ impl GithubCheckSubjectRepository for PostgresStore {
             FROM locked_run AS run
             WHERE subject.id = $1
               AND subject.tenant_id = $2
+              AND subject.subject_kind = 'workflow'
               AND subject.workflow_run_id IS NULL
               AND run.id = $3
               AND run.repository_id = subject.repository_id
@@ -1161,6 +1302,7 @@ pub(super) struct DecodedSubject {
     pub(super) created_at: UnixMillis,
     pub(super) linked_at: Option<UnixMillis>,
     pub(super) desired_updated_at: UnixMillis,
+    pub(super) details_target: GithubCheckDetailsTarget,
 }
 
 pub(super) fn decode_subject(
@@ -1170,6 +1312,28 @@ pub(super) fn decode_subject(
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let identity = decode_subject_identity(row)?;
     let workflow_run_id = optional_uuid_column(row, "workflow_run_id")?.map(RunId::from_uuid);
+    let subject_kind = string_column(row, "subject_kind")?;
+    let parent_subject_id = optional_uuid_column(row, "parent_subject_id")?;
+    let job_id = optional_uuid_column(row, "job_id")?.map(JobId::from_uuid);
+    let job_attempt_id = optional_uuid_column(row, "job_attempt_id")?;
+    let details_target = match (
+        subject_kind.as_str(),
+        parent_subject_id,
+        job_id,
+        job_attempt_id,
+        workflow_run_id,
+    ) {
+        ("workflow", None, None, None, None) => GithubCheckDetailsTarget::Repository,
+        ("workflow", None, None, None, Some(run_id)) => {
+            GithubCheckDetailsTarget::WorkflowRun(run_id)
+        }
+        ("job", Some(parent_id), Some(job_id), Some(attempt_id), Some(run_id))
+            if !parent_id.is_nil() && !attempt_id.is_nil() =>
+        {
+            GithubCheckDetailsTarget::Job { run_id, job_id }
+        }
+        _ => return Err(GithubCheckStoreError::CorruptData),
+    };
     let desired = decode_desired(row)?;
     let desired_revision = positive_u64_column(row, "desired_revision")?;
     let external_id = string_column(row, "external_id")?;
@@ -1190,6 +1354,7 @@ pub(super) fn decode_subject(
         created_at,
         linked_at,
         desired_updated_at,
+        details_target,
     })
 }
 
@@ -1333,6 +1498,7 @@ fn decode_claimed(
         action,
         attempts,
         subject.identity,
+        subject.details_target,
         checks_authority,
         subject.receipt.external_id().to_owned(),
         subject.receipt.desired(),
@@ -1687,16 +1853,21 @@ async fn projection_fence_exhausted(
                       AND delivery_evidence.tenant_id = subject.tenant_id
                       AND delivery_evidence.repository_id = subject.repository_id
                       AND (
-                        delivery_evidence.github_check_subject_id = subject.id
+                        delivery_evidence.github_check_subject_id =
+                            COALESCE(subject.parent_subject_id, subject.id)
                         OR EXISTS (
                             SELECT 1
                             FROM github_workflow_run_subject_evidence AS run_evidence
-                            WHERE run_evidence.github_check_subject_id = subject.id
+                            WHERE run_evidence.github_check_subject_id =
+                                      COALESCE(subject.parent_subject_id, subject.id)
                               AND run_evidence.provider_delivery_id =
                                   subject.provider_delivery_id
                               AND run_evidence.tenant_id = subject.tenant_id
                               AND run_evidence.repository_id = subject.repository_id
-                              AND run_evidence.workflow_path = subject.subject_key
+                              AND (
+                                  subject.parent_subject_id IS NOT NULL
+                                  OR run_evidence.workflow_path = subject.subject_key
+                              )
                               AND run_evidence.run_id = subject.workflow_run_id
                         )
                         OR EXISTS (
@@ -1713,7 +1884,8 @@ async fn projection_fence_exhausted(
                 WHEN 'scheduled_fire' THEN EXISTS (
                     SELECT 1
                     FROM github_schedule_check_evidence AS schedule_evidence
-                    WHERE schedule_evidence.github_check_subject_id = subject.id
+                    WHERE schedule_evidence.github_check_subject_id =
+                              COALESCE(subject.parent_subject_id, subject.id)
                       AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
                       AND schedule_evidence.tenant_id = subject.tenant_id
                       AND schedule_evidence.repository_id = subject.repository_id
@@ -1723,7 +1895,8 @@ async fn projection_fence_exhausted(
                 WHEN 'workflow_rerun' THEN EXISTS (
                     SELECT 1
                     FROM workflow_rerun_check_evidence AS rerun_evidence
-                    WHERE rerun_evidence.github_check_subject_id = subject.id
+                    WHERE rerun_evidence.github_check_subject_id =
+                              COALESCE(subject.parent_subject_id, subject.id)
                       AND rerun_evidence.run_id = subject.workflow_rerun_run_id
                       AND rerun_evidence.tenant_id = subject.tenant_id
                       AND rerun_evidence.repository_id = subject.repository_id
@@ -1778,16 +1951,21 @@ async fn block_exhausted_candidates(
                   AND delivery_evidence.tenant_id = subject.tenant_id
                   AND delivery_evidence.repository_id = subject.repository_id
                   AND (
-                    delivery_evidence.github_check_subject_id = subject.id
+                    delivery_evidence.github_check_subject_id =
+                        COALESCE(subject.parent_subject_id, subject.id)
                     OR EXISTS (
                         SELECT 1
                         FROM github_workflow_run_subject_evidence AS run_evidence
-                        WHERE run_evidence.github_check_subject_id = subject.id
+                        WHERE run_evidence.github_check_subject_id =
+                                  COALESCE(subject.parent_subject_id, subject.id)
                           AND run_evidence.provider_delivery_id =
                               subject.provider_delivery_id
                           AND run_evidence.tenant_id = subject.tenant_id
                           AND run_evidence.repository_id = subject.repository_id
-                          AND run_evidence.workflow_path = subject.subject_key
+                          AND (
+                              subject.parent_subject_id IS NOT NULL
+                              OR run_evidence.workflow_path = subject.subject_key
+                          )
                           AND run_evidence.run_id = subject.workflow_run_id
                     )
                     OR EXISTS (
@@ -1804,7 +1982,8 @@ async fn block_exhausted_candidates(
             WHEN 'scheduled_fire' THEN EXISTS (
                 SELECT 1
                 FROM github_schedule_check_evidence AS schedule_evidence
-                WHERE schedule_evidence.github_check_subject_id = subject.id
+                WHERE schedule_evidence.github_check_subject_id =
+                          COALESCE(subject.parent_subject_id, subject.id)
                   AND schedule_evidence.schedule_fire_id = subject.schedule_fire_id
                   AND schedule_evidence.tenant_id = subject.tenant_id
                   AND schedule_evidence.repository_id = subject.repository_id
@@ -1814,7 +1993,8 @@ async fn block_exhausted_candidates(
             WHEN 'workflow_rerun' THEN EXISTS (
                 SELECT 1
                 FROM workflow_rerun_check_evidence AS rerun_evidence
-                WHERE rerun_evidence.github_check_subject_id = subject.id
+                WHERE rerun_evidence.github_check_subject_id =
+                          COALESCE(subject.parent_subject_id, subject.id)
                   AND rerun_evidence.run_id = subject.workflow_rerun_run_id
                   AND rerun_evidence.tenant_id = subject.tenant_id
                   AND rerun_evidence.repository_id = subject.repository_id
