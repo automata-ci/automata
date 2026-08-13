@@ -547,11 +547,15 @@ async fn execute_preserves_environment_cwd_streams_and_termination() {
     );
     let (termination, records, _) = exec_parts(exchange(&server.socket, &pwd).await);
     assert_eq!(termination, GuestTermination::Exited(0));
+    let expected_working_directory = std::fs::canonicalize(server.temp.path())
+        .expect("canonical guest test working directory")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         String::from_utf8(output_for(&records, GuestOutputStream::Stdout))
             .unwrap()
             .trim_end(),
-        server.temp.path().to_string_lossy()
+        expected_working_directory
     );
 
     let nonzero = exec_request(
