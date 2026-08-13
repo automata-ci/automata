@@ -3,6 +3,9 @@
 **/target/
 /crates/*/*.cdx.json
 
+# Swift Package Manager build output
+**/.build/
+
 # JavaScript and Vite build output
 /node_modules/
 **/node_modules/

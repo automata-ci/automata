@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.automata.guest-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Automata/bin/automata-ci-sandbox-guest</string>
+        <string>serve-vm</string>
+        <string>/Users/automata-job/Library/Caches/Automata/guest.sock</string>
+        <string>/Library/Automata/guest-identity.json</string>
+    </array>
+    <key>UserName</key>
+    <string>automata-job</string>
+    <key>GroupName</key>
+    <string>automata-job</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfProcesses</key>
+        <integer>512</integer>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+</dict>
+</plist>
