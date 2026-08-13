@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
     name = "automata-runner",
     version,
     long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AUTOMATA_BUILD_GIT_SHA"), ")"),
-    about = "Automata runner for rootless Linux and trusted native Windows/macOS execution hosts"
+    about = "Automata runner for Linux, Windows, and isolated macOS execution hosts"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -27,9 +27,6 @@ pub(crate) enum Command {
     /// Internal one-shot readiness server used by the isolated network probe.
     #[command(name = "__probe-http-ready", hide = true)]
     InternalProbeHttp(InternalProbeHttpArgs),
-    /// Internal same-binary supervisor for one trusted native macOS command.
-    #[command(name = "__macos-job-supervisor", hide = true)]
-    InternalMacosJobSupervisor,
 }
 
 #[derive(Debug, Args)]

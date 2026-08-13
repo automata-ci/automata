@@ -1,11 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "runner_id": "75934d27-b027-45df-94c4-97e5a91f4011",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
     "journal": "/Users/automata-runner/Library/Application Support/Automata/state/journal",
     "spool": "/Users/automata-runner/Library/Application Support/Automata/state/spool",
-    "macos_native": "/Users/automata-runner/Library/Application Support/Automata/native"
+    "macos_virtualization": "/Volumes/AutomataVM/state"
   },
   "tls": {
     "server_roots": {
@@ -45,14 +45,24 @@
     },
     "environment_profiles": [
       {
-        "id": "automata.dev/macos-15-arm64-native-v1",
+        "id": "automata.dev/macos-15-arm64-vm-v1",
         "manifest_sha256": "55177392ec9af57b967ecf016c7f12ab27c8e1e570caaae4cc39b17790e81ba3",
-        "workspace": "/Users/automata-runner/Library/Application Support/Automata/native/workspaces",
+        "workspace": "/Users/automata-job/workspaces",
         "default_environment": {}
       }
     ]
   },
-  "macos_native": {},
+  "macos_virtualization": {
+    "helper_executable": "/Library/Automata/bin/automata-macos-vm-helper",
+    "helper_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "helper_code_requirement": "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"",
+    "template_manifest": "/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json",
+    "template_manifest_sha256": "55177392ec9af57b967ecf016c7f12ab27c8e1e570caaae4cc39b17790e81ba3",
+    "storage_volume_uuid": "01234567-89AB-CDEF-0123-456789ABCDEF",
+    "storage_quota_bytes": 274877906944,
+    "boot_timeout_seconds": 300,
+    "stop_timeout_seconds": 10
+  },
   "executor": {
     "resources": {
       "cpu_millis": 4000,
@@ -60,16 +70,16 @@
       "ephemeral_disk_bytes": 0,
       "pids": 512
     },
-    "network": "host",
-    "root_filesystem": "host",
-    "privilege": "host",
+    "network": "disabled",
+    "root_filesystem": "writable",
+    "privilege": "unprivileged",
     "default_step_timeout_seconds": 3600,
     "maximum_output_bytes": 16777216,
-    "runner_root": "/Users/automata-runner/Library/Application Support/Automata/native/runner",
-    "home": "/Users/automata-runner",
-    "path": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-    "temp": "/Users/automata-runner/Library/Caches/Automata/tmp",
-    "tool_cache": "/Users/automata-runner/Library/Caches/Automata/tool-cache",
+    "runner_root": "/Users/automata-job/runner",
+    "home": "/Users/automata-job",
+    "path": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    "temp": "/Users/automata-job/tmp",
+    "tool_cache": "/Users/automata-job/tool-cache",
     "toolchain": {
       "bash": "/bin/bash",
       "sh": "/bin/sh",

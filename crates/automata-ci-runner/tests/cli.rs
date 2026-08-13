@@ -9,9 +9,9 @@ fn top_level_help_describes_the_supported_execution_hosts() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("runner help must be UTF-8");
-    assert!(stdout.contains(
-        "Automata runner for rootless Linux and trusted native Windows/macOS execution hosts"
-    ));
+    assert!(
+        stdout.contains("Automata runner for Linux, Windows, and isolated macOS execution hosts")
+    );
     assert!(stdout.contains("capabilities"));
     assert!(stdout.contains("without loading credentials"));
     assert!(!stdout.contains("cross-platform"));

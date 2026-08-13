@@ -53,7 +53,7 @@ pub use error::{
 };
 pub use sandbox::{
     DestroyDisposition, DestroySandbox, SandboxInspection, SandboxProvider, SandboxRecord,
-    SandboxResourcePolicy, SandboxSpec, SandboxState,
+    SandboxSpec, SandboxState,
 };
 pub use service::{
     ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,

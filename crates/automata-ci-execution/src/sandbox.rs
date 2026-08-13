@@ -20,29 +20,9 @@ pub struct SandboxSpec {
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
-    resource_policy: SandboxResourcePolicy,
+    resources: ResourceLimits,
     resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
-}
-
-/// Resource enforcement selected for one whole-job sandbox.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SandboxResourcePolicy {
-    /// CPU, memory, and process ceilings are hard provider-enforced limits.
-    Enforced(ResourceLimits),
-    /// A trusted native job shares host resources without per-job hard limits.
-    HostShared,
-}
-
-impl SandboxResourcePolicy {
-    /// Returns hard limits when this policy requires provider enforcement.
-    #[must_use]
-    pub const fn enforced(self) -> Option<ResourceLimits> {
-        match self {
-            Self::Enforced(resources) => Some(resources),
-            Self::HostShared => None,
-        }
-    }
 }
 
 impl SandboxSpec {
@@ -71,35 +51,7 @@ impl SandboxSpec {
             network,
             root_filesystem,
             privilege: SandboxPrivilegePolicy::Unprivileged,
-            resource_policy: SandboxResourcePolicy::Enforced(resources),
-            resource_allocation: None,
-            services: ServiceContainerSpecs::empty(),
-        }
-    }
-
-    /// Creates a trusted native request that explicitly shares host resources.
-    ///
-    /// This policy is not a resource-isolation boundary. Providers accepting
-    /// it must advertise [`crate::SandboxCapability::HostResources`].
-    #[must_use]
-    pub const fn host_shared(
-        operation_id: OperationId,
-        generation: SandboxGeneration,
-        profile: SandboxEnvironment,
-        workspace: TargetPath,
-        network: NetworkPolicy,
-        root_filesystem: RootFilesystemPolicy,
-    ) -> Self {
-        Self {
-            operation_id,
-            generation,
-            profile,
-            workspace,
-            scratch: None,
-            network,
-            root_filesystem,
-            privilege: SandboxPrivilegePolicy::Unprivileged,
-            resource_policy: SandboxResourcePolicy::HostShared,
+            resources,
             resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
         }
@@ -121,8 +73,8 @@ impl SandboxSpec {
 
     /// Selects the exact provider-owned per-attempt scratch root.
     ///
-    /// Native providers use this allowlist entry for command files and other
-    /// bounded execution material outside the job workspace.
+    /// Process and VM providers use this allowlist entry for command files and
+    /// other bounded execution material outside the job workspace.
     #[must_use]
     pub fn with_scratch(mut self, scratch: TargetPath) -> Self {
         self.scratch = Some(scratch);
@@ -177,16 +129,10 @@ impl SandboxSpec {
         self.privilege
     }
 
-    /// Returns the exact resource-enforcement policy.
+    /// Returns mandatory hard whole-job resource limits.
     #[must_use]
-    pub const fn resource_policy(&self) -> SandboxResourcePolicy {
-        self.resource_policy
-    }
-
-    /// Returns hard whole-job resource limits when enforcement was selected.
-    #[must_use]
-    pub const fn resources(&self) -> Option<ResourceLimits> {
-        self.resource_policy.enforced()
+    pub const fn resources(&self) -> ResourceLimits {
+        self.resources
     }
 
     /// Attaches the complete placement-request and enforcement-limit contract.
@@ -215,9 +161,7 @@ impl SandboxSpec {
         let Some(allocation) = self.resource_allocation else {
             return true;
         };
-        let Some(resources) = self.resources() else {
-            return true;
-        };
+        let resources = self.resources();
         allocation.limits().cpu_millis() == resources.cpu_millis()
             && allocation.limits().memory_bytes() == resources.memory_bytes()
     }

@@ -1,7 +1,6 @@
 use std::{
     ffi::{CStr, OsString},
-    fs::File,
-    io::{self, Read as _, Write as _},
+    io,
     os::unix::ffi::OsStrExt as _,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -10,16 +9,13 @@ use std::{
 use automata_ci_execution::{TargetPath, TargetPlatform};
 use rustix::{
     fd::OwnedFd,
-    fs::{
-        self, AtFlags, Dir, FileType, Mode, OFlags, fchmod, fstat, mkdirat, open, openat, unlinkat,
-    },
+    fs::{self, AtFlags, Dir, FileType, Mode, OFlags, fstat, mkdirat, open, openat, unlinkat},
     io::Errno,
 };
 
 use crate::path::is_strict_descendant;
 
 const DIRECTORY_MODE: Mode = Mode::from_raw_mode(0o700);
-const FILE_MODE: Mode = Mode::from_raw_mode(0o600);
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC)
@@ -99,34 +95,6 @@ impl SecureRoot {
         fs::fsync(&parent).map_err(io::Error::from)
     }
 
-    pub(crate) fn resolve_owned_target(
-        &self,
-        target: &TargetPath,
-        workspace: &TargetPath,
-        scratch: &TargetPath,
-    ) -> io::Result<OwnedTarget> {
-        let boundary = if target == workspace || is_strict_descendant(target, workspace) {
-            workspace
-        } else if target == scratch || is_strict_descendant(target, scratch) {
-            scratch
-        } else {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        };
-        let boundary_components = self.relative_components(boundary)?;
-        let boundary_descriptor = self.open_directory_components(&boundary_components)?;
-        let relative = Path::new(target.as_str())
-            .strip_prefix(Path::new(boundary.as_str()))
-            .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?
-            .components()
-            .map(component_name)
-            .collect::<io::Result<Vec<_>>>()?;
-        Ok(OwnedTarget {
-            host: PathBuf::from(target.as_str()),
-            boundary: Arc::new(boundary_descriptor),
-            relative,
-        })
-    }
-
     fn relative_components(&self, target: &TargetPath) -> io::Result<Vec<OsString>> {
         if target.platform() != TargetPlatform::Posix || !is_strict_descendant(target, &self.target)
         {
@@ -158,105 +126,6 @@ impl SecureRoot {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct OwnedTarget {
-    host: PathBuf,
-    boundary: Arc<OwnedFd>,
-    relative: Vec<OsString>,
-}
-
-impl OwnedTarget {
-    fn open_parent(&self) -> io::Result<(OwnedFd, &OsString)> {
-        let (name, parents) = self
-            .relative
-            .split_last()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::IsADirectory))?;
-        let mut current = self.boundary.try_clone()?;
-        for component in parents {
-            current = openat(&current, component, DIRECTORY_FLAGS, Mode::empty())
-                .map_err(io::Error::from)?;
-            require_owned_directory(&current)?;
-        }
-        Ok((current, name))
-    }
-}
-
-pub(crate) fn require_directory(target: &OwnedTarget) -> io::Result<PathBuf> {
-    let mut current = target.boundary.try_clone()?;
-    for component in &target.relative {
-        current =
-            openat(&current, component, DIRECTORY_FLAGS, Mode::empty()).map_err(io::Error::from)?;
-        require_owned_directory(&current)?;
-    }
-    Ok(target.host.clone())
-}
-
-pub(crate) fn require_executable(target: &TargetPath) -> io::Result<PathBuf> {
-    if target.platform() != TargetPlatform::Posix || target.as_str() == "/" {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
-    let path = Path::new(target.as_str());
-    let (name, parent) = path
-        .file_name()
-        .zip(path.parent())
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let parent = open_absolute_directory(parent)?;
-    let executable = openat(
-        &parent,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    let stat = fstat(&executable).map_err(io::Error::from)?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_mode & 0o111 == 0 {
-        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-    }
-    Ok(path.to_path_buf())
-}
-
-pub(crate) fn write_owned_file(target: &OwnedTarget, content: &[u8]) -> io::Result<()> {
-    let (parent, name) = target.open_parent()?;
-    let descriptor = openat(
-        &parent,
-        name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        FILE_MODE,
-    )
-    .map_err(open_error)?;
-    require_single_link_regular_file(&descriptor)?;
-    fs::ftruncate(&descriptor, 0).map_err(io::Error::from)?;
-    fchmod(&descriptor, FILE_MODE).map_err(io::Error::from)?;
-    let mut file = File::from(descriptor);
-    file.write_all(content)?;
-    file.sync_all()?;
-    fs::fsync(&parent).map_err(io::Error::from)
-}
-
-pub(crate) fn read_owned_file(target: &OwnedTarget, byte_limit: usize) -> io::Result<Vec<u8>> {
-    let (parent, name) = target.open_parent()?;
-    let descriptor = openat(
-        &parent,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(open_error)?;
-    require_single_link_regular_file(&descriptor)?;
-    let mut content = Vec::new();
-    File::from(descriptor)
-        .take(
-            u64::try_from(byte_limit)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-        )
-        .read_to_end(&mut content)?;
-    if content.len() > byte_limit {
-        return Err(io::Error::from(io::ErrorKind::FileTooLarge));
-    }
-    Ok(content)
-}
-
 fn open_or_create_absolute_directory(path: &Path) -> io::Result<OwnedFd> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -269,23 +138,6 @@ fn open_or_create_absolute_directory(path: &Path) -> io::Result<OwnedFd> {
         .collect::<io::Result<Vec<_>>>()?;
     for component in components {
         current = open_or_create_child_directory(&current, &component)?;
-    }
-    Ok(current)
-}
-
-fn open_absolute_directory(path: &Path) -> io::Result<OwnedFd> {
-    if !path.is_absolute() {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
-    let mut current = open("/", DIRECTORY_FLAGS, Mode::empty()).map_err(io::Error::from)?;
-    for component in path.components().skip(1) {
-        current = openat(
-            &current,
-            component_name(component)?,
-            DIRECTORY_FLAGS,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)?;
     }
     Ok(current)
 }
@@ -347,17 +199,6 @@ fn require_owned_directory(descriptor: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
-fn require_single_link_regular_file(descriptor: &OwnedFd) -> io::Result<()> {
-    let stat = fstat(descriptor).map_err(io::Error::from)?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
-        || stat.st_uid != rustix::process::geteuid().as_raw()
-        || stat.st_nlink != 1
-    {
-        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-    }
-    Ok(())
-}
-
 fn component_name(component: Component<'_>) -> io::Result<OsString> {
     match component {
         Component::Normal(value) if !value.as_bytes().is_empty() => Ok(value.to_os_string()),
@@ -367,12 +208,4 @@ fn component_name(component: Component<'_>) -> io::Result<OsString> {
 
 fn is_dot(name: &CStr) -> bool {
     matches!(name.to_bytes(), b"." | b"..")
-}
-
-fn open_error(error: Errno) -> io::Error {
-    if error == Errno::LOOP {
-        io::Error::from(io::ErrorKind::PermissionDenied)
-    } else {
-        error.into()
-    }
 }

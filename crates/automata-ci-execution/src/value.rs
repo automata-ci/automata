@@ -439,9 +439,13 @@ pub enum SandboxLaunch {
     /// Launch trusted commands as native host processes.
     ///
     /// Native providers must advertise host network/filesystem semantics and
-    /// process-tree containment. Their sandbox resource policy declares
-    /// whether per-job limits are enforced or explicitly shared with the host.
+    /// process-tree containment while enforcing every requested resource limit.
     Native,
+    /// Boot a disposable virtual machine from one immutable template.
+    VirtualMachine {
+        /// SHA-256 of the exact template manifest admitted for this profile.
+        template_manifest: Sha256Digest,
+    },
 }
 
 /// Provider launch material bound to the exact scheduler-selected environment
@@ -502,13 +506,14 @@ impl SandboxEnvironment {
         })
     }
 
-    /// Binds a trusted native POSIX launch to an exact scheduler-selected profile.
+    /// Binds a disposable virtual-machine launch to an exact scheduler-selected profile.
     ///
     /// # Errors
     ///
     /// Rejects a workspace that does not use normalized absolute POSIX syntax.
-    pub fn native_posix(
+    pub fn virtual_machine(
         attestation: EnvironmentProfile,
+        template_manifest: Sha256Digest,
         workspace: TargetPath,
         default_environment: ExecutionEnvironment,
     ) -> Result<Self, ValueError> {
@@ -517,7 +522,7 @@ impl SandboxEnvironment {
         }
         Ok(Self {
             attestation,
-            launch: SandboxLaunch::Native,
+            launch: SandboxLaunch::VirtualMachine { template_manifest },
             workspace,
             default_environment,
         })
@@ -553,7 +558,7 @@ impl SandboxEnvironment {
     pub const fn image(&self) -> Option<&ImmutableImage> {
         match &self.launch {
             SandboxLaunch::Container { image, .. } => Some(image),
-            SandboxLaunch::Native => None,
+            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. } => None,
         }
     }
 
@@ -564,7 +569,7 @@ impl SandboxEnvironment {
     pub const fn keepalive(&self) -> Option<&ExecutionArgv> {
         match &self.launch {
             SandboxLaunch::Container { keepalive, .. } => Some(keepalive),
-            SandboxLaunch::Native => None,
+            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. } => None,
         }
     }
 

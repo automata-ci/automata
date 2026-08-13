@@ -16,8 +16,12 @@ use sha2::{Digest as _, Sha256};
 
 use crate::filesystem::SecureRoot;
 
-const LOCK_FILE_NAME: &str = ".automata-macos-provider-v1.lock";
-const JOURNAL_FILE_NAME: &str = ".automata-macos-provider-v1.events";
+const LOCK_FILE_NAME: &str = ".automata-macos-virtualization-v1.lock";
+const JOURNAL_FILE_NAME: &str = ".automata-macos-virtualization-v1.events";
+const LEGACY_STATE_NAMES: [&str; 2] = [
+    ".automata-macos-provider-v1.lock",
+    ".automata-macos-provider-v1.events",
+];
 const DURABLE_SCHEMA: u32 = 1;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
@@ -139,6 +143,7 @@ pub(crate) struct LifecycleJournal {
 
 impl LifecycleJournal {
     pub(crate) fn open(root: &SecureRoot) -> io::Result<(Self, DurableSnapshot)> {
+        reject_legacy_state(root)?;
         let lock = open_private_file(root, LOCK_FILE_NAME, false)?;
         flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
             if error == Errno::AGAIN {
@@ -242,6 +247,22 @@ impl LifecycleJournal {
         apply_event(snapshot, event, sequence)?;
         Ok(sequence)
     }
+}
+
+fn reject_legacy_state(root: &SecureRoot) -> io::Result<()> {
+    for name in LEGACY_STATE_NAMES {
+        match openat(
+            root.descriptor(),
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        ) {
+            Err(Errno::NOENT) => {}
+            Ok(_) | Err(Errno::LOOP | Errno::NOTDIR) => return Err(invalid()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn open_private_file(
@@ -422,4 +443,135 @@ pub(crate) fn recovered_generation(value: u64) -> io::Result<SandboxGeneration> 
 
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write as _,
+        path::PathBuf,
+    };
+
+    use automata_ci_execution::{EnvironmentProfileId, Sha256Digest, TargetPath};
+
+    use super::*;
+
+    #[test]
+    fn journal_is_exclusive_and_recovers_only_an_unterminated_tail() {
+        let fixture = TestRoot::new("journal");
+        let root = fixture.secure_root();
+        let (mut journal, snapshot) = LifecycleJournal::open(&root).expect("open journal");
+        assert!(snapshot.entries.is_empty());
+        assert!(matches!(
+            LifecycleJournal::open(&root),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+
+        let operation_id = OperationId::new();
+        let handle = OperationId::new().to_string();
+        let profile = profile();
+        journal
+            .append(DurableEvent::CreateIntent {
+                create: DurableCreate {
+                    operation_id,
+                    fingerprint: [0x33; 32],
+                    handle: handle.clone(),
+                },
+                entry: DurableEntry {
+                    handle: handle.clone(),
+                    generation: 1,
+                    profile,
+                    workspace: "/Users/automata-job/workspaces/job".to_owned(),
+                    scratch: "/Users/automata-job/runner/job".to_owned(),
+                    phase: DurableEntryPhase::Intent,
+                },
+            })
+            .expect("append intent");
+        journal
+            .append(DurableEvent::CreateReady {
+                handle: handle.clone(),
+            })
+            .expect("append ready");
+        drop(journal);
+
+        OpenOptions::new()
+            .append(true)
+            .open(fixture.path.join(JOURNAL_FILE_NAME))
+            .and_then(|mut file| file.write_all(b"interrupted-tail"))
+            .expect("append crash tail");
+        let (_journal, snapshot) = LifecycleJournal::open(&root).expect("reopen journal");
+        assert_eq!(
+            snapshot
+                .entries
+                .get(&handle)
+                .expect("recovered entry")
+                .phase,
+            DurableEntryPhase::Running
+        );
+        assert_eq!(
+            snapshot
+                .creates
+                .get(&operation_id)
+                .expect("recovered create")
+                .fingerprint,
+            [0x33; 32]
+        );
+    }
+
+    #[test]
+    fn legacy_native_state_is_rejected_without_migration() {
+        let fixture = TestRoot::new("legacy");
+        let root = fixture.secure_root();
+        fs::write(
+            fixture.path.join(LEGACY_STATE_NAMES[1]),
+            b"legacy native state\n",
+        )
+        .expect("write legacy marker");
+        assert!(matches!(
+            LifecycleJournal::open(&root),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert!(!fixture.path.join(JOURNAL_FILE_NAME).exists());
+    }
+
+    fn profile() -> EnvironmentProfile {
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("automata.dev/macos-15-arm64-vm-v1").expect("profile ID"),
+            Sha256Digest::from_bytes([0x55; 32]),
+        )
+    }
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        fn new(label: &str) -> Self {
+            Self {
+                path: std::env::current_dir()
+                    .expect("current directory")
+                    .join("target/agent-scratch/macos-virtualization-journal")
+                    .join(format!("{label}-{}", OperationId::new())),
+            }
+        }
+
+        fn secure_root(&self) -> SecureRoot {
+            let target = TargetPath::posix(
+                self.path
+                    .to_str()
+                    .expect("test root must have a Unicode path"),
+            )
+            .expect("test root target");
+            SecureRoot::open_or_create(&self.path, target).expect("secure test root")
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            if self.path.exists() {
+                fs::remove_dir_all(&self.path).expect("remove exact test root");
+            }
+        }
+    }
 }

@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 use automata_ci_core::{Architecture, IsolationLevel, OperatingSystem, RunnerFeature};
-use automata_ci_execution::{SandboxLaunch, SandboxPrivilegePolicy};
+use automata_ci_execution::{NetworkPolicy, SandboxLaunch, SandboxPrivilegePolicy};
 use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
 
 fn baseline() -> serde_json::Value {
@@ -16,14 +16,20 @@ fn parse(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProduct
 }
 
 #[test]
-fn checked_in_macos_configuration_selects_host_shared_arm64_execution() {
+fn checked_in_macos_configuration_selects_disposable_arm64_vm_execution() {
     let config = parse(&baseline()).expect("checked-in macOS runner configuration");
 
-    assert!(config.macos_native().is_some());
+    let macos = config
+        .macos_virtualization()
+        .expect("macOS virtualization provider");
     assert!(config.podman().is_none());
     assert!(config.kubernetes().is_none());
     assert!(config.windows_native().is_none());
-    assert_eq!(config.executor().privilege(), SandboxPrivilegePolicy::Host);
+    assert_eq!(config.executor().network(), NetworkPolicy::Disabled);
+    assert_eq!(
+        config.executor().privilege(),
+        SandboxPrivilegePolicy::Unprivileged
+    );
     assert_eq!(
         config.inventory().platform().operating_system(),
         &OperatingSystem::Macos
@@ -34,7 +40,7 @@ fn checked_in_macos_configuration_selects_host_shared_arm64_execution() {
     );
     assert_eq!(
         config.inventory().sandbox().maximum_isolation(),
-        IsolationLevel::Process
+        IsolationLevel::VirtualMachine
     );
     assert!(
         config
@@ -51,12 +57,16 @@ fn checked_in_macos_configuration_selects_host_shared_arm64_execution() {
     let environment = config
         .environments()
         .first_key_value()
-        .expect("native macOS environment")
+        .expect("virtualized macOS environment")
         .1;
-    assert!(matches!(environment.launch(), SandboxLaunch::Native));
+    assert!(matches!(
+        environment.launch(),
+        SandboxLaunch::VirtualMachine { template_manifest }
+            if *template_manifest == macos.template_manifest_sha256()
+    ));
     assert_eq!(
         environment.workspace().as_str(),
-        "/Users/automata-runner/Library/Application Support/Automata/native/workspaces"
+        "/Users/automata-job/workspaces"
     );
     assert_eq!(
         config
@@ -70,12 +80,30 @@ fn checked_in_macos_configuration_selects_host_shared_arm64_execution() {
 }
 
 #[test]
-fn macos_configuration_rejects_unsupported_native_surface() {
+fn legacy_schema_and_native_provider_are_rejected() {
+    let mut schema_one = baseline();
+    schema_one["schema_version"] = serde_json::json!(1);
+    assert!(
+        parse(&schema_one).is_err(),
+        "schema v1 must not be migrated"
+    );
+
+    let mut native = baseline();
+    native
+        .as_object_mut()
+        .expect("configuration object")
+        .remove("macos_virtualization");
+    native["macos_native"] = serde_json::json!({});
+    assert!(parse(&native).is_err(), "macos_native must be unknown");
+}
+
+#[test]
+fn macos_configuration_rejects_every_weaker_boundary() {
     let mut no_provider = baseline();
     no_provider
         .as_object_mut()
         .expect("configuration object")
-        .remove("macos_native");
+        .remove("macos_virtualization");
     assert_eq!(
         parse(&no_provider).expect_err("a provider is required"),
         RunnerProductConfigError::InvalidProvider
@@ -83,14 +111,16 @@ fn macos_configuration_rejects_unsupported_native_surface() {
 
     for (field, invalid) in [
         ("network", serde_json::json!("private_egress")),
-        ("root_filesystem", serde_json::json!("writable")),
-        ("privilege", serde_json::json!("unprivileged")),
+        ("network", serde_json::json!("host")),
+        ("root_filesystem", serde_json::json!("read_only")),
+        ("root_filesystem", serde_json::json!("host")),
+        ("privilege", serde_json::json!("host")),
         ("privilege", serde_json::json!("administrator")),
     ] {
         let mut value = baseline();
         value["executor"][field] = invalid;
         assert_eq!(
-            parse(&value).expect_err("macOS host policy must remain explicit"),
+            parse(&value).expect_err("macOS VM isolation policy is mandatory"),
             RunnerProductConfigError::InvalidExecutor
         );
     }
@@ -98,12 +128,20 @@ fn macos_configuration_rejects_unsupported_native_surface() {
     let mut parallel = baseline();
     parallel["inventory"]["max_parallel_jobs"] = serde_json::json!(2);
     assert_eq!(
-        parse(&parallel).expect_err("native macOS is one-slot"),
+        parse(&parallel).expect_err("one template provider is one-slot"),
         RunnerProductConfigError::InvalidInventory
     );
 
+    let mut fractional_cpu = baseline();
+    fractional_cpu["executor"]["resources"]["cpu_millis"] = serde_json::json!(1500);
+    fractional_cpu["inventory"]["resources_per_job"]["cpu_millis"] = serde_json::json!(1500);
+    assert_eq!(
+        parse(&fractional_cpu).expect_err("Virtualization.framework uses whole vCPUs"),
+        RunnerProductConfigError::InvalidProvider
+    );
+
     let mut javascript = baseline();
-    javascript["executor"]["toolchain"]["node20"] = serde_json::json!("/opt/homebrew/bin/node");
+    javascript["executor"]["toolchain"]["node20"] = serde_json::json!("/usr/local/bin/node");
     assert_eq!(
         parse(&javascript).expect_err("JavaScript actions are not supported"),
         RunnerProductConfigError::InvalidExecutor
@@ -118,33 +156,72 @@ fn macos_configuration_rejects_unsupported_native_surface() {
 }
 
 #[test]
-fn macos_provider_roots_are_private_disjoint_descendants() {
-    for (section, invalid) in [
-        ("executor", "/Users/automata-runner/outside/runner"),
-        ("inventory", "/Users/automata-runner/outside/workspaces"),
-        (
-            "inventory",
-            "/Users/automata-runner/Library/Application Support/Automata/native/runner/workspaces",
-        ),
-    ] {
-        let mut value = baseline();
-        if section == "executor" {
-            value["executor"]["runner_root"] = serde_json::json!(invalid);
-        } else {
-            value["inventory"]["environment_profiles"][0]["workspace"] = serde_json::json!(invalid);
-        }
+fn macos_template_and_state_boundaries_are_pinned_and_disjoint() {
+    let mut digest_mismatch = baseline();
+    digest_mismatch["macos_virtualization"]["template_manifest_sha256"] =
+        serde_json::json!("66".repeat(32));
+    assert_eq!(
+        parse(&digest_mismatch).expect_err("profile and template pins must match"),
+        RunnerProductConfigError::InvalidProvider
+    );
+
+    let mut guest_overlap = baseline();
+    guest_overlap["executor"]["runner_root"] =
+        serde_json::json!("/Users/automata-job/workspaces/runner");
+    assert_eq!(
+        parse(&guest_overlap).expect_err("guest roots must be disjoint"),
+        RunnerProductConfigError::InvalidInventory
+    );
+
+    let mut state_overlap = baseline();
+    state_overlap["state"]["journal"] = serde_json::json!("/Volumes/AutomataVM/state/journal");
+    assert_eq!(
+        parse(&state_overlap).expect_err("durable and provider roots cannot overlap"),
+        RunnerProductConfigError::InvalidStateRoots
+    );
+
+    let mut mutable_helper = baseline();
+    mutable_helper["macos_virtualization"]["helper_executable"] =
+        serde_json::json!("/Volumes/AutomataVM/state/helper");
+    assert_eq!(
+        parse(&mutable_helper).expect_err("helper cannot reside in writable state"),
+        RunnerProductConfigError::InvalidProvider
+    );
+
+    for invalid_uuid in ["not-a-uuid", "01234567-89AB-CDEF-0123-456789ABCDEG"] {
+        let mut invalid_storage = baseline();
+        invalid_storage["macos_virtualization"]["storage_volume_uuid"] =
+            serde_json::json!(invalid_uuid);
         assert_eq!(
-            parse(&value).expect_err("provider-owned roots require disjoint descendants"),
-            RunnerProductConfigError::InvalidInventory
+            parse(&invalid_storage).expect_err("storage UUID must be exact"),
+            RunnerProductConfigError::InvalidProvider
         );
     }
 
-    let mut overlap = baseline();
-    overlap["state"]["journal"] = serde_json::json!(
-        "/Users/automata-runner/Library/Application Support/Automata/native/journal"
-    );
-    assert_eq!(
-        parse(&overlap).expect_err("durable and native roots cannot overlap"),
-        RunnerProductConfigError::InvalidStateRoots
-    );
+    for invalid_quota in [
+        63 * 1024 * 1024 * 1024_u64,
+        256 * 1024 * 1024 * 1024_u64 + 1,
+        1025 * 1024 * 1024 * 1024_u64,
+    ] {
+        let mut invalid_storage = baseline();
+        invalid_storage["macos_virtualization"]["storage_quota_bytes"] =
+            serde_json::json!(invalid_quota);
+        assert_eq!(
+            parse(&invalid_storage).expect_err("storage quota must be bounded whole GiB"),
+            RunnerProductConfigError::InvalidProvider
+        );
+    }
+
+    for weak_requirement in [
+        "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic",
+        "identifier \"dev.automata.macos-vm-helper\" or anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"",
+    ] {
+        let mut weak_helper = baseline();
+        weak_helper["macos_virtualization"]["helper_code_requirement"] =
+            serde_json::json!(weak_requirement);
+        assert_eq!(
+            parse(&weak_helper).expect_err("helper signature requirement must be conjunctive"),
+            RunnerProductConfigError::InvalidProvider
+        );
+    }
 }

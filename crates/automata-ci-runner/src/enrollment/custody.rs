@@ -829,10 +829,12 @@ mod tests {
     };
     use uuid::Uuid;
 
+    #[cfg(target_os = "linux")]
+    use super::remove_durable;
     use super::{
         CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, acquire_enrollment_lock,
-        persist_exact_file, persist_new, prepare_destination, remove_durable, same_destination,
-        temporary_path, validate_certificate_response, validate_destination_set,
+        persist_exact_file, persist_new, prepare_destination, same_destination, temporary_path,
+        validate_certificate_response, validate_destination_set,
     };
     use crate::enrollment::RedeemResponse;
     #[cfg(target_os = "linux")]

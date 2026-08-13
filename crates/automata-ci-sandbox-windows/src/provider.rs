@@ -385,12 +385,7 @@ impl ProviderInner {
             )
         })?;
         let group = create_process_group(spec)?;
-        let resources = spec.resources().ok_or_else(|| {
-            known(
-                ProviderErrorKind::InvalidConfiguration,
-                ProviderStage::Validate,
-            )
-        })?;
+        let resources = spec.resources();
         let entry = Arc::new(SandboxEntry {
             handle: handle.clone(),
             generation: spec.generation(),
@@ -929,12 +924,7 @@ fn preflight_error(error: &std::io::Error) -> ProviderError {
 }
 
 fn create_process_group(spec: &SandboxSpec) -> Result<Arc<ProcessGroup>, ProviderError> {
-    let limits = spec.resources().ok_or_else(|| {
-        known(
-            ProviderErrorKind::InvalidConfiguration,
-            ProviderStage::Validate,
-        )
-    })?;
+    let limits = spec.resources();
     create_process_group_with_limits(limits.memory_bytes(), limits.cpu_millis(), limits.pids())
 }
 
@@ -1407,15 +1397,10 @@ fn spec_fingerprint(spec: &SandboxSpec) -> [u8; 32] {
     } else {
         fingerprint_field(&mut digest, b"scratch-absent");
     }
-    match spec.resources() {
-        Some(resources) => {
-            fingerprint_field(&mut digest, b"enforced-resources");
-            fingerprint_field(&mut digest, &resources.memory_bytes().to_le_bytes());
-            fingerprint_field(&mut digest, &resources.cpu_millis().to_le_bytes());
-            fingerprint_field(&mut digest, &resources.pids().to_le_bytes());
-        }
-        None => fingerprint_field(&mut digest, b"host-shared-resources"),
-    }
+    let resources = spec.resources();
+    fingerprint_field(&mut digest, &resources.memory_bytes().to_le_bytes());
+    fingerprint_field(&mut digest, &resources.cpu_millis().to_le_bytes());
+    fingerprint_field(&mut digest, &resources.pids().to_le_bytes());
     digest.finalize().into()
 }
 

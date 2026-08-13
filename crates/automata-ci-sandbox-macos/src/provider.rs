@@ -1,7 +1,10 @@
+use rustix::fs::{FlockOperation, flock};
 use std::{
     collections::HashMap,
     fmt,
-    path::{Path, PathBuf},
+    fs::{File, OpenOptions},
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
+    path::{Component, Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{Duration, Instant},
@@ -10,25 +13,31 @@ use std::{
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, ExecutionEndpoint,
     NetworkPolicy, OperationId, OperationOutcome, ProviderCapabilities, ProviderError,
-    ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy, SandboxCapability,
-    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxLaunch, SandboxPrivilegePolicy,
-    SandboxProvider, SandboxRecord, SandboxResourcePolicy, SandboxSpec, SandboxState, TargetPath,
-    TargetPlatform,
+    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
+    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxInspection, SandboxLaunch,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    Sha256Digest, TargetPath, TargetPlatform,
 };
+use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    endpoint::MacosExecutionEndpoint,
-    filesystem::{SecureRoot, require_executable},
+    endpoint::MacosVirtualizationEndpoint,
+    filesystem::SecureRoot,
     path::{is_strict_descendant, overlaps, validate_posix_path},
     persistence::{
         DurableCreate, DurableDestroyRequest, DurableEntry, DurableEntryPhase, DurableEvent,
         DurableSnapshot, DurableTombstone, LifecycleJournal, recovered_generation,
     },
+    template::{VerifiedTemplate, load_template, plist_to_json, verify_helper},
+    vm::VmProcess,
 };
 
 const QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const GIBIBYTE: u64 = 1024 * 1024 * 1024;
+const MINIMUM_STORAGE_HEADROOM: u64 = 32 * GIBIBYTE;
+const MAX_DISKUTIL_PLIST_BYTES: usize = 4 * 1024 * 1024;
 
 const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
     SandboxCapability::WholeJob,
@@ -38,10 +47,10 @@ const PROVIDER_CAPABILITIES: [SandboxCapability; 11] = [
     SandboxCapability::CopyTo,
     SandboxCapability::CopyFrom,
     SandboxCapability::EnvironmentInjection,
-    SandboxCapability::HostNetwork,
-    SandboxCapability::HostFilesystem,
-    SandboxCapability::HostIdentity,
-    SandboxCapability::HostResources,
+    SandboxCapability::NetworkDisabled,
+    SandboxCapability::WritableRootFilesystem,
+    SandboxCapability::ResourceLimits,
+    SandboxCapability::ProcessLimits,
 ];
 
 pub(crate) const ENDPOINT_CAPABILITIES: [SandboxCapability; 4] = [
@@ -51,31 +60,51 @@ pub(crate) const ENDPOINT_CAPABILITIES: [SandboxCapability; 4] = [
     SandboxCapability::EnvironmentInjection,
 ];
 
-/// Immutable host roots and same-binary supervisor executable for native macOS.
+/// Immutable host state, helper, and template inputs for macOS virtualization.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MacosSandboxProviderOptions {
+pub struct MacosVirtualizationProviderOptions {
     provider_root: PathBuf,
     provider_target: TargetPath,
-    supervisor_executable: PathBuf,
+    helper_executable: PathBuf,
+    helper_digest: Sha256Digest,
+    helper_code_requirement: String,
+    template_manifest: PathBuf,
+    template_manifest_digest: Sha256Digest,
+    storage_volume_uuid: String,
+    storage_quota_bytes: u64,
+    boot_timeout: Duration,
+    stop_timeout: Duration,
 }
 
-impl MacosSandboxProviderOptions {
-    /// Creates a provider configuration rooted at one dedicated private path.
-    ///
-    /// Sandbox workspace and scratch directories must be distinct strict
-    /// descendants of this root. `supervisor_executable` must be the absolute
-    /// path of the shipped `automata-runner` binary.
+impl MacosVirtualizationProviderOptions {
+    /// Creates a provider configuration rooted at one dedicated private state path.
     ///
     /// # Errors
     ///
     /// Rejects non-absolute, non-Unicode, root, non-normalized, or mismatched
     /// POSIX paths.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider_root: impl Into<PathBuf>,
-        supervisor_executable: impl Into<PathBuf>,
+        helper_executable: impl Into<PathBuf>,
+        helper_digest: Sha256Digest,
+        helper_code_requirement: String,
+        template_manifest: impl Into<PathBuf>,
+        template_manifest_digest: Sha256Digest,
+        storage_volume_uuid: &str,
+        storage_quota_bytes: u64,
+        boot_timeout: Duration,
+        stop_timeout: Duration,
     ) -> Result<Self, ProviderError> {
         let provider_root = provider_root.into();
-        let supervisor_executable = supervisor_executable.into();
+        let helper_executable = helper_executable.into();
+        let template_manifest = template_manifest.into();
+        let storage_volume_uuid = normalized_volume_uuid(storage_volume_uuid).ok_or_else(|| {
+            known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
         let provider = provider_root.to_str().ok_or_else(|| {
             known(
                 ProviderErrorKind::InvalidConfiguration,
@@ -89,8 +118,19 @@ impl MacosSandboxProviderOptions {
             )
         })?;
         if !validate_posix_path(&provider_target)
-            || !supervisor_executable.is_absolute()
-            || supervisor_executable.to_str().is_none()
+            || !normalized_absolute_host_path(&helper_executable)
+            || !normalized_absolute_host_path(&template_manifest)
+            || helper_code_requirement.is_empty()
+            || helper_code_requirement.len() > 4_096
+            || !helper_code_requirement.is_ascii()
+            || helper_code_requirement
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || !valid_helper_code_requirement(&helper_code_requirement)
+            || !(64 * GIBIBYTE..=1024 * GIBIBYTE).contains(&storage_quota_bytes)
+            || !storage_quota_bytes.is_multiple_of(GIBIBYTE)
+            || !(Duration::from_secs(30)..=Duration::from_mins(15)).contains(&boot_timeout)
+            || !(Duration::from_secs(1)..=Duration::from_secs(30)).contains(&stop_timeout)
         {
             return Err(known(
                 ProviderErrorKind::InvalidConfiguration,
@@ -100,7 +140,15 @@ impl MacosSandboxProviderOptions {
         Ok(Self {
             provider_root,
             provider_target,
-            supervisor_executable,
+            helper_executable,
+            helper_digest,
+            helper_code_requirement,
+            template_manifest,
+            template_manifest_digest,
+            storage_volume_uuid,
+            storage_quota_bytes,
+            boot_timeout,
+            stop_timeout,
         })
     }
 
@@ -110,10 +158,42 @@ impl MacosSandboxProviderOptions {
         &self.provider_root
     }
 
-    /// Returns the exact same-binary supervisor executable.
+    /// Returns the exact signed Swift helper executable.
     #[must_use]
-    pub fn supervisor_executable(&self) -> &Path {
-        &self.supervisor_executable
+    pub fn helper_executable(&self) -> &Path {
+        &self.helper_executable
+    }
+
+    pub(crate) const fn helper_digest(&self) -> Sha256Digest {
+        self.helper_digest
+    }
+
+    pub(crate) fn helper_code_requirement(&self) -> &str {
+        &self.helper_code_requirement
+    }
+
+    pub(crate) fn template_manifest(&self) -> &Path {
+        &self.template_manifest
+    }
+
+    pub(crate) const fn template_manifest_digest(&self) -> Sha256Digest {
+        self.template_manifest_digest
+    }
+
+    pub(crate) fn storage_volume_uuid(&self) -> &str {
+        &self.storage_volume_uuid
+    }
+
+    pub(crate) const fn storage_quota_bytes(&self) -> u64 {
+        self.storage_quota_bytes
+    }
+
+    pub(crate) const fn boot_timeout(&self) -> Duration {
+        self.boot_timeout
+    }
+
+    pub(crate) const fn stop_timeout(&self) -> Duration {
+        self.stop_timeout
     }
 
     pub(crate) const fn provider_target(&self) -> &TargetPath {
@@ -121,37 +201,53 @@ impl MacosSandboxProviderOptions {
     }
 }
 
-/// Trusted native macOS provider backed by supervised POSIX process groups.
+/// macOS provider backed by one disposable Virtualization.framework VM per job.
 ///
 /// Clones share the exclusive lifecycle lock and all operation-replay state.
-/// The provider exposes host-shared semantics and must not be used for
-/// untrusted workflows.
+/// The host kernel and Apple hypervisor remain in the trusted computing base.
 #[derive(Clone)]
-pub struct MacosSandboxProvider {
+pub struct MacosVirtualizationProvider {
     inner: Arc<ProviderInner>,
 }
 
-impl MacosSandboxProvider {
+impl MacosVirtualizationProvider {
     /// Opens and exclusively locks the provider root, then reconciles orphaned
     /// lifecycle entries before accepting work.
     ///
     /// # Errors
     ///
-    /// Rejects unsupported macOS hosts, insecure roots or supervisor paths,
+    /// Rejects unsupported macOS hosts, insecure roots, unsigned helpers,
     /// concurrent opens, corrupt state, and failed recovery cleanup.
-    pub fn open(options: MacosSandboxProviderOptions) -> Result<Self, ProviderError> {
+    pub fn open(options: MacosVirtualizationProviderOptions) -> Result<Self, ProviderError> {
         require_supported_host()?;
-        let supervisor = options
-            .supervisor_executable()
-            .to_str()
-            .and_then(|path| TargetPath::posix(path.to_owned()).ok())
-            .ok_or_else(|| {
-                known(
-                    ProviderErrorKind::InvalidConfiguration,
-                    ProviderStage::Validate,
-                )
-            })?;
-        require_executable(&supervisor).map_err(|_| {
+        verify_helper(
+            options.helper_executable(),
+            options.helper_digest(),
+            options.helper_code_requirement(),
+        )
+        .map_err(|_| {
+            known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        let template = load_template(
+            options.template_manifest(),
+            options.template_manifest_digest(),
+        )
+        .map_err(|_| {
+            known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        if !trust_material_is_separate(&options, &template) {
+            return Err(known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            ));
+        }
+        require_root_owned_provider_ancestry(options.provider_root()).map_err(|_| {
             known(
                 ProviderErrorKind::InvalidConfiguration,
                 ProviderStage::Validate,
@@ -165,7 +261,13 @@ impl MacosSandboxProvider {
                         ProviderStage::CreateWorkspace,
                     )
                 })?;
-        let provider_id = ProviderId::new("macos-native").map_err(|_| {
+        verify_vm_storage(&options, &template, false).map_err(|_| {
+            known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
+        let provider_id = ProviderId::new("macos-virtualization").map_err(|_| {
             known(
                 ProviderErrorKind::InvalidConfiguration,
                 ProviderStage::Validate,
@@ -185,14 +287,21 @@ impl MacosSandboxProvider {
             };
             known(kind, ProviderStage::Validate)
         })?;
-        validate_snapshot_paths(&options, &snapshot)?;
-        reconcile_orphans(&root, &mut journal, &mut snapshot)?;
+        validate_snapshot_paths(&snapshot)?;
+        reconcile_orphans(&options, &root, &mut journal, &mut snapshot)?;
+        verify_vm_storage(&options, &template, true).map_err(|_| {
+            known(
+                ProviderErrorKind::InvalidConfiguration,
+                ProviderStage::Validate,
+            )
+        })?;
         let state = restore_state(&provider_id, journal, snapshot)?;
         Ok(Self {
             inner: Arc::new(ProviderInner {
                 provider_id,
                 capabilities,
                 options,
+                template,
                 root,
                 state: Mutex::new(state),
             }),
@@ -200,17 +309,17 @@ impl MacosSandboxProvider {
     }
 }
 
-impl fmt::Debug for MacosSandboxProvider {
+impl fmt::Debug for MacosVirtualizationProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("MacosSandboxProvider")
+            .debug_struct("MacosVirtualizationProvider")
             .field("provider_id", &self.inner.provider_id)
             .field("capabilities", &self.inner.capabilities)
             .finish_non_exhaustive()
     }
 }
 
-impl SandboxProvider for MacosSandboxProvider {
+impl SandboxProvider for MacosVirtualizationProvider {
     fn provider_id(&self) -> &ProviderId {
         &self.inner.provider_id
     }
@@ -260,6 +369,8 @@ pub(crate) struct SandboxEntry {
     pub(crate) scratch: TargetPath,
     pub(crate) operation_lock: Mutex<()>,
     pub(crate) endpoint_state: Mutex<crate::endpoint::EndpointState>,
+    pub(crate) vm: Mutex<Option<VmProcess>>,
+    resources: ResourceLimits,
     phase: Mutex<DurableEntryPhase>,
 }
 
@@ -302,7 +413,8 @@ impl SandboxEntry {
 pub(crate) struct ProviderInner {
     provider_id: ProviderId,
     capabilities: ProviderCapabilities,
-    pub(crate) options: MacosSandboxProviderOptions,
+    pub(crate) options: MacosVirtualizationProviderOptions,
+    template: VerifiedTemplate,
     pub(crate) root: SecureRoot,
     state: Mutex<ProviderState>,
 }
@@ -330,7 +442,7 @@ impl ProviderInner {
         spec: &SandboxSpec,
         cancellation: &dyn Cancellation,
     ) -> Result<SandboxRecord, ProviderError> {
-        validate_spec(&self.options, spec)?;
+        validate_spec(&self.options, &self.template, spec)?;
         require_not_cancelled(cancellation, ProviderStage::Validate)?;
         let fingerprint = spec_fingerprint(spec)?;
         let mut state = self.lock_state(ProviderStage::CreateSandbox)?;
@@ -339,7 +451,7 @@ impl ProviderInner {
                 return Err(known(ProviderErrorKind::Conflict, ProviderStage::Validate));
             }
             if let Some(entry) = state.entries.get(&replay.handle).cloned() {
-                return resume_create(&self.root, &mut state, &entry, cancellation);
+                return resume_create(self, &mut state, &entry, cancellation);
             }
             if let Some(tombstone) = state.tombstones.get(&replay.handle) {
                 return Ok(SandboxRecord::new(
@@ -363,10 +475,6 @@ impl ProviderInner {
                 ProviderStage::Validate,
             )
         })?;
-        self.root
-            .require_directory_absent(spec.workspace())
-            .and_then(|()| self.root.require_directory_absent(scratch))
-            .map_err(|error| preflight_error(&error))?;
         let handle = SandboxHandle::new(self.provider_id.clone(), OperationId::new().to_string())
             .map_err(|_| {
             known(
@@ -374,6 +482,11 @@ impl ProviderInner {
                 ProviderStage::CreateSandbox,
             )
         })?;
+        let attempt = attempt_target(&self.options, handle.opaque())?;
+        self.root
+            .require_directory_absent(&attempt)
+            .map_err(|error| preflight_error(&error))?;
+        let resources = spec.resources();
         let entry = Arc::new(SandboxEntry {
             handle: handle.clone(),
             generation: spec.generation(),
@@ -382,6 +495,8 @@ impl ProviderInner {
             scratch: scratch.clone(),
             operation_lock: Mutex::new(()),
             endpoint_state: Mutex::new(crate::endpoint::EndpointState::default()),
+            vm: Mutex::new(None),
+            resources,
             phase: Mutex::new(DurableEntryPhase::Intent),
         });
         let event = DurableEvent::CreateIntent {
@@ -407,7 +522,7 @@ impl ProviderInner {
             },
         );
         state.entries.insert(handle, Arc::clone(&entry));
-        resume_create(&self.root, &mut state, &entry, cancellation)
+        resume_create(self, &mut state, &entry, cancellation)
     }
 
     fn attach(
@@ -428,7 +543,7 @@ impl ProviderInner {
                 ProviderStage::Attach,
             ));
         }
-        Ok(Box::new(MacosExecutionEndpoint::new(
+        Ok(Box::new(MacosVirtualizationEndpoint::new(
             Arc::clone(self),
             Arc::clone(entry),
         )))
@@ -486,7 +601,7 @@ impl ProviderInner {
                 .get(request.handle())
                 .cloned()
                 .ok_or_else(invalid_journal)?;
-            return complete_destroy(&self.root, &mut state, &entry, &pending, cancellation);
+            return complete_destroy(self, &mut state, &entry, &pending, cancellation);
         }
         if state
             .pending_destroy_operations
@@ -556,7 +671,7 @@ impl ProviderInner {
         entry
             .set_phase(DurableEntryPhase::Destroying)
             .map_err(|()| local(ProviderStage::DestroySandbox))?;
-        complete_destroy(&self.root, &mut state, &entry, &pending, cancellation)
+        complete_destroy(self, &mut state, &entry, &pending, cancellation)
     }
 
     fn require_owned_handle(
@@ -573,7 +688,7 @@ impl ProviderInner {
 }
 
 fn complete_destroy(
-    root: &SecureRoot,
+    provider: &ProviderInner,
     state: &mut ProviderState,
     entry: &Arc<SandboxEntry>,
     pending: &PendingDestroy,
@@ -586,15 +701,27 @@ fn complete_destroy(
         return Err(invalid_journal());
     }
     let operation = quiesce(entry, cancellation)?;
-    root.remove_owned_tree(&entry.scratch)
-        .and_then(|()| root.remove_owned_tree(&entry.workspace))
-        .map_err(|_| {
+    if let Some(mut vm) = entry
+        .vm
+        .lock()
+        .map_err(|_| local(ProviderStage::DestroySandbox))?
+        .take()
+    {
+        vm.stop().map_err(|_| {
             uncertain(
-                ProviderErrorKind::LocalStorage,
-                ProviderStage::DestroyWorkspace,
+                ProviderErrorKind::AdapterUnavailable,
+                ProviderStage::DestroySandbox,
                 entry.handle.clone(),
             )
         })?;
+    }
+    remove_attempt(&provider.options, &provider.root, entry.handle.opaque()).map_err(|_| {
+        uncertain(
+            ProviderErrorKind::LocalStorage,
+            ProviderStage::DestroyWorkspace,
+            entry.handle.clone(),
+        )
+    })?;
     let operation_id = pending.request.operation_id();
     state
         .journal
@@ -670,7 +797,7 @@ impl Tombstone {
 }
 
 fn resume_create(
-    root: &SecureRoot,
+    provider: &ProviderInner,
     state: &mut ProviderState,
     entry: &Arc<SandboxEntry>,
     cancellation: &dyn Cancellation,
@@ -689,15 +816,51 @@ fn resume_create(
             entry.handle.clone(),
         ));
     }
-    root.ensure_owned_directory(&entry.workspace)
-        .and_then(|()| root.ensure_owned_directory(&entry.scratch))
-        .map_err(|_| {
-            uncertain(
-                ProviderErrorKind::LocalStorage,
-                ProviderStage::CreateWorkspace,
-                entry.handle.clone(),
-            )
+    let attempt = attempt_target(&provider.options, entry.handle.opaque())?;
+    let mut vm = entry
+        .vm
+        .lock()
+        .map_err(|_| local(ProviderStage::CreateSandbox))?;
+    if vm.is_none() {
+        provider
+            .root
+            .remove_owned_tree(&attempt)
+            .and_then(|()| provider.root.ensure_owned_directory(&attempt))
+            .map_err(|_| {
+                uncertain(
+                    ProviderErrorKind::LocalStorage,
+                    ProviderStage::CreateWorkspace,
+                    entry.handle.clone(),
+                )
+            })?;
+        let mut launched = VmProcess::launch(
+            &provider.options,
+            &provider.template,
+            entry.handle.opaque(),
+            &attempt_path(&provider.options, entry.handle.opaque()),
+            entry.resources,
+            cancellation,
+        )
+        .map_err(|error| {
+            let kind = match error.kind() {
+                std::io::ErrorKind::Interrupted => ProviderErrorKind::Cancelled,
+                std::io::ErrorKind::TimedOut => ProviderErrorKind::TimedOut,
+                _ => ProviderErrorKind::AdapterUnavailable,
+            };
+            uncertain(kind, ProviderStage::CreateSandbox, entry.handle.clone())
         })?;
+        launched
+            .prepare_directories(&entry.workspace, &entry.scratch, cancellation)
+            .map_err(|error| {
+                let kind = match error.kind() {
+                    std::io::ErrorKind::Interrupted => ProviderErrorKind::Cancelled,
+                    std::io::ErrorKind::TimedOut => ProviderErrorKind::TimedOut,
+                    _ => ProviderErrorKind::AdapterUnavailable,
+                };
+                uncertain(kind, ProviderStage::CreateWorkspace, entry.handle.clone())
+            })?;
+        *vm = Some(launched);
+    }
     state
         .journal
         .append(DurableEvent::CreateReady {
@@ -713,11 +876,13 @@ fn resume_create(
     entry
         .set_phase(DurableEntryPhase::Running)
         .map_err(|()| local(ProviderStage::CreateSandbox))?;
+    drop(vm);
     entry.record()
 }
 
 fn validate_spec(
-    options: &MacosSandboxProviderOptions,
+    _options: &MacosVirtualizationProviderOptions,
+    template: &VerifiedTemplate,
     spec: &SandboxSpec,
 ) -> Result<(), ProviderError> {
     let scratch = spec.scratch().ok_or_else(|| {
@@ -726,18 +891,23 @@ fn validate_spec(
             ProviderStage::Validate,
         )
     })?;
-    let valid = matches!(spec.profile().launch(), SandboxLaunch::Native)
+    let valid = matches!(
+        spec.profile().launch(),
+        SandboxLaunch::VirtualMachine { template_manifest }
+            if *template_manifest == template.manifest_digest
+    ) && spec.profile().id() == &template.profile_id
         && spec.profile().workspace().platform() == TargetPlatform::Posix
         && spec.workspace().platform() == TargetPlatform::Posix
         && scratch.platform() == TargetPlatform::Posix
-        && is_strict_descendant(spec.profile().workspace(), options.provider_target())
         && is_strict_descendant(spec.workspace(), spec.profile().workspace())
-        && is_strict_descendant(scratch, options.provider_target())
         && !overlaps(spec.workspace(), scratch)
-        && spec.network() == NetworkPolicy::Host
-        && spec.root_filesystem() == RootFilesystemPolicy::Host
-        && spec.privilege() == SandboxPrivilegePolicy::Host
-        && spec.resource_policy() == SandboxResourcePolicy::HostShared
+        && spec.network() == NetworkPolicy::Disabled
+        && spec.root_filesystem() == RootFilesystemPolicy::Writable
+        && spec.privilege() == SandboxPrivilegePolicy::Unprivileged
+        && spec.resources().cpu_millis().is_multiple_of(1_000)
+        && spec.resources().cpu_millis() / 1_000 >= template.minimum_cpu_count
+        && spec.resources().memory_bytes() >= template.minimum_memory_bytes
+        && spec.resources().pids() == template.process_limit
         && spec.services().is_empty()
         && spec.has_coherent_resource_contract()
         && !spec
@@ -756,7 +926,7 @@ fn validate_spec(
 
 fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
     let mut digest = Sha256::new();
-    fingerprint_field(&mut digest, b"automata-macos-sandbox-spec-v1");
+    fingerprint_field(&mut digest, b"automata-macos-virtualization-spec-v1");
     fingerprint_field(&mut digest, &spec.generation().get().to_le_bytes());
     fingerprint_field(
         &mut digest,
@@ -777,12 +947,16 @@ fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
             spec.network() as u8,
             spec.root_filesystem() as u8,
             spec.privilege() as u8,
-            match spec.resource_policy() {
-                SandboxResourcePolicy::Enforced(_) => 0,
-                SandboxResourcePolicy::HostShared => 1,
-            },
+            0,
         ],
     );
+    let resources = spec.resources();
+    fingerprint_field(&mut digest, &resources.memory_bytes().to_le_bytes());
+    fingerprint_field(&mut digest, &resources.cpu_millis().to_le_bytes());
+    fingerprint_field(&mut digest, &resources.pids().to_le_bytes());
+    if let SandboxLaunch::VirtualMachine { template_manifest } = spec.profile().launch() {
+        fingerprint_field(&mut digest, template_manifest.as_bytes());
+    }
     if let Some(allocation) = spec.resource_allocation() {
         fingerprint_field(
             &mut digest,
@@ -838,21 +1012,8 @@ fn restore_state(
         entries: HashMap::new(),
         tombstones: HashMap::new(),
     };
-    for durable in snapshot.entries.into_values() {
-        let handle = recovered_handle(provider_id, &durable.handle)?;
-        let entry = Arc::new(SandboxEntry {
-            handle: handle.clone(),
-            generation: recovered_generation(durable.generation).map_err(|_| invalid_journal())?,
-            profile: durable.profile,
-            workspace: TargetPath::posix(durable.workspace).map_err(|_| invalid_journal())?,
-            scratch: TargetPath::posix(durable.scratch).map_err(|_| invalid_journal())?,
-            operation_lock: Mutex::new(()),
-            endpoint_state: Mutex::new(crate::endpoint::EndpointState::default()),
-            phase: Mutex::new(durable.phase),
-        });
-        if state.entries.insert(handle, entry).is_some() {
-            return Err(invalid_journal());
-        }
+    if !snapshot.entries.is_empty() || !snapshot.pending_destroys.is_empty() {
+        return Err(invalid_journal());
     }
     for durable in snapshot.tombstones.into_values() {
         let tombstone = restored_tombstone(provider_id, durable)?;
@@ -902,23 +1063,17 @@ fn restore_state(
             return Err(invalid_journal());
         }
     }
-    if !snapshot.pending_destroys.is_empty() {
-        return Err(invalid_journal());
-    }
     Ok(state)
 }
 
-fn validate_snapshot_paths(
-    options: &MacosSandboxProviderOptions,
-    snapshot: &DurableSnapshot,
-) -> Result<(), ProviderError> {
+fn validate_snapshot_paths(snapshot: &DurableSnapshot) -> Result<(), ProviderError> {
     let mut paths: Vec<(TargetPath, TargetPath)> = Vec::new();
     for entry in snapshot.entries.values() {
         let workspace =
             TargetPath::posix(entry.workspace.clone()).map_err(|_| invalid_journal())?;
         let scratch = TargetPath::posix(entry.scratch.clone()).map_err(|_| invalid_journal())?;
-        if !is_strict_descendant(&workspace, options.provider_target())
-            || !is_strict_descendant(&scratch, options.provider_target())
+        if !validate_posix_path(&workspace)
+            || !validate_posix_path(&scratch)
             || overlaps(&workspace, &scratch)
             || paths.iter().any(|(other_workspace, other_scratch)| {
                 overlaps(&workspace, other_workspace)
@@ -935,6 +1090,7 @@ fn validate_snapshot_paths(
 }
 
 fn reconcile_orphans(
+    options: &MacosVirtualizationProviderOptions,
     root: &SecureRoot,
     journal: &mut LifecycleJournal,
     snapshot: &mut DurableSnapshot,
@@ -965,10 +1121,7 @@ fn reconcile_orphans(
                 .map_err(|_| local(ProviderStage::DestroySandbox))?;
             request
         };
-        let workspace = TargetPath::posix(entry.workspace).map_err(|_| invalid_journal())?;
-        let scratch = TargetPath::posix(entry.scratch).map_err(|_| invalid_journal())?;
-        root.remove_owned_tree(&scratch)
-            .and_then(|()| root.remove_owned_tree(&workspace))
+        remove_attempt(options, root, &entry.handle)
             .map_err(|_| local(ProviderStage::DestroyWorkspace))?;
         journal
             .append_to_snapshot(
@@ -1026,6 +1179,70 @@ fn quiesce<'a>(
     }
 }
 
+fn attempt_target(
+    options: &MacosVirtualizationProviderOptions,
+    handle: &str,
+) -> Result<TargetPath, ProviderError> {
+    TargetPath::posix(format!(
+        "{}/attempts/{handle}",
+        options.provider_target().as_str().trim_end_matches('/')
+    ))
+    .map_err(|_| invalid_journal())
+}
+
+fn attempt_path(options: &MacosVirtualizationProviderOptions, handle: &str) -> PathBuf {
+    options.provider_root().join("attempts").join(handle)
+}
+
+fn acquire_attempt_lock(root: &Path, handle: &str, timeout: Duration) -> std::io::Result<File> {
+    let lock_path = root.join("attempts").join(handle).join(".vm.lock");
+    let deadline = Instant::now() + timeout;
+    loop {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(file),
+            Err(_) if Instant::now() >= deadline => {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            Err(_) => std::thread::sleep(QUIESCE_POLL_INTERVAL),
+        }
+    }
+}
+
+fn remove_attempt(
+    options: &MacosVirtualizationProviderOptions,
+    root: &SecureRoot,
+    handle: &str,
+) -> std::io::Result<()> {
+    let attempt = attempt_target(options, handle).map_err(|_| std::io::ErrorKind::InvalidData)?;
+    match root.require_directory_absent(&attempt) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _lock = acquire_attempt_lock(
+                options.provider_root(),
+                handle,
+                options.stop_timeout() + QUIESCE_TIMEOUT,
+            )?;
+            root.remove_owned_tree(&attempt)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn require_supported_host() -> Result<(), ProviderError> {
     if !cfg!(target_arch = "aarch64") {
         return Err(known(
@@ -1059,6 +1276,355 @@ fn supported_product_version(output: &[u8]) -> bool {
         .and_then(|version| version.trim().split('.').next())
         .and_then(|major| major.parse::<u32>().ok())
         .is_some_and(|major| major >= 15)
+}
+
+fn normalized_absolute_host_path(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::RootDir))
+        && components.clone().next().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
+        && path.to_str().is_some()
+}
+
+fn normalized_volume_uuid(value: &str) -> Option<String> {
+    let normalized = value.to_ascii_uppercase();
+    let valid = normalized.len() == 36
+        && normalized.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()
+            }
+        });
+    valid.then_some(normalized)
+}
+
+fn valid_helper_code_requirement(value: &str) -> bool {
+    const PREFIX: &str = "identifier \"";
+    const MIDDLE: &str = "\" and anchor apple generic and certificate leaf[subject.OU] = \"";
+    let Some(remainder) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    let Some((identifier, team)) = remainder.split_once(MIDDLE) else {
+        return false;
+    };
+    let Some(team) = team.strip_suffix('"') else {
+        return false;
+    };
+    let identifier_valid = identifier.len() <= 255
+        && identifier.split('.').count() >= 2
+        && identifier.split('.').all(|component| {
+            !component.is_empty()
+                && component.len() <= 63
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && component
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && component
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        });
+    identifier_valid
+        && team.len() == 10
+        && team
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+#[derive(serde::Deserialize)]
+struct DiskInfo {
+    #[serde(rename = "VolumeUUID")]
+    volume_uuid: String,
+    #[serde(rename = "DeviceIdentifier")]
+    device_identifier: String,
+    #[serde(rename = "FilesystemType")]
+    filesystem_type: String,
+    #[serde(rename = "Writable")]
+    writable: bool,
+    #[serde(rename = "GlobalPermissionsEnabled")]
+    global_permissions_enabled: bool,
+    #[serde(rename = "APFSContainerReference")]
+    apfs_container_reference: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ApfsInventory {
+    #[serde(rename = "Containers")]
+    containers: Vec<ApfsContainer>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApfsContainer {
+    #[serde(rename = "ContainerReference")]
+    container_reference: String,
+    #[serde(rename = "CapacityCeiling")]
+    capacity_ceiling: u64,
+    #[serde(rename = "CapacityFree")]
+    capacity_free: u64,
+    #[serde(rename = "PhysicalStores")]
+    physical_stores: Vec<ApfsPhysicalStore>,
+    #[serde(rename = "Volumes")]
+    volumes: Vec<ApfsVolume>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApfsPhysicalStore {
+    #[serde(rename = "DeviceIdentifier")]
+    device_identifier: String,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct ApfsVolume {
+    #[serde(rename = "APFSVolumeUUID")]
+    volume_uuid: String,
+    #[serde(rename = "DeviceIdentifier")]
+    device_identifier: String,
+    #[serde(rename = "CapacityQuota")]
+    capacity_quota: u64,
+    #[serde(rename = "CapacityInUse")]
+    capacity_in_use: u64,
+    #[serde(rename = "Roles")]
+    roles: Vec<String>,
+}
+
+struct DedicatedApfsStorage {
+    container_reference: String,
+    capacity_ceiling: u64,
+    capacity_free: u64,
+    physical_stores: Vec<ApfsPhysicalStore>,
+    volume: ApfsVolume,
+}
+
+#[derive(serde::Deserialize)]
+struct PhysicalStoreInfo {
+    #[serde(rename = "ParentWholeDisk")]
+    parent_whole_disk: String,
+}
+
+#[derive(serde::Deserialize)]
+struct WholeDiskInfo {
+    #[serde(rename = "DeviceIdentifier")]
+    device_identifier: String,
+    #[serde(rename = "WholeDisk")]
+    whole_disk: bool,
+    #[serde(rename = "VirtualOrPhysical")]
+    virtual_or_physical: String,
+    #[serde(rename = "BusProtocol")]
+    bus_protocol: String,
+    #[serde(rename = "Internal")]
+    internal: bool,
+    #[serde(rename = "SystemImage")]
+    system_image: bool,
+}
+
+fn diskutil_plist(arguments: &[&str]) -> std::io::Result<Vec<u8>> {
+    let output = Command::new("/usr/sbin/diskutil")
+        .args(arguments)
+        .env_clear()
+        .output()?;
+    if !output.status.success()
+        || output.stdout.is_empty()
+        || output.stdout.len() > MAX_DISKUTIL_PLIST_BYTES
+    {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    Ok(output.stdout)
+}
+
+fn filesystem_device(path: &Path) -> std::io::Result<String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    let output = Command::new("/bin/df")
+        .args(["-P", "--", value])
+        .env_clear()
+        .output()?;
+    if !output.status.success() || output.stdout.len() > 64 * 1024 {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    let output = std::str::from_utf8(&output.stdout)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    let device = output
+        .lines()
+        .last()
+        .and_then(|line| line.split_ascii_whitespace().next())
+        .and_then(|device| device.strip_prefix("/dev/"))
+        .filter(|device| {
+            device.starts_with("disk") && device.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    Ok(device.to_owned())
+}
+
+fn disk_info<T: DeserializeOwned>(device: &str) -> std::io::Result<T> {
+    let plist = diskutil_plist(&["info", "-plist", device])?;
+    let json = plist_to_json(&plist, MAX_DISKUTIL_PLIST_BYTES)?;
+    serde_json::from_slice(&json).map_err(|_| std::io::ErrorKind::InvalidData.into())
+}
+
+fn physical_storage_is_non_virtual(stores: &[ApfsPhysicalStore]) -> std::io::Result<bool> {
+    if stores.is_empty() {
+        return Ok(false);
+    }
+    for store in stores {
+        let store_info: PhysicalStoreInfo = disk_info(&store.device_identifier)?;
+        let whole: WholeDiskInfo = disk_info(&store_info.parent_whole_disk)?;
+        if !whole_disk_is_physical(&whole)
+            || whole.device_identifier != store_info.parent_whole_disk
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn whole_disk_is_physical(info: &WholeDiskInfo) -> bool {
+    let physical = info.virtual_or_physical.eq_ignore_ascii_case("physical");
+    // Apple Silicon internal media currently reports `Unknown` with the
+    // Apple Fabric bus even on physical hardware. Accept only that narrowly
+    // identifiable case; all other unknown and virtual backing is rejected.
+    let apple_fabric = info.virtual_or_physical.eq_ignore_ascii_case("unknown")
+        && info.internal
+        && info.bus_protocol.eq_ignore_ascii_case("apple fabric");
+    info.whole_disk
+        && (physical || apple_fabric)
+        && !info.bus_protocol.eq_ignore_ascii_case("disk image")
+        && !info.system_image
+}
+
+fn dedicated_apfs_storage(uuid: &str) -> std::io::Result<DedicatedApfsStorage> {
+    let plist = diskutil_plist(&["apfs", "list", "-plist"])?;
+    let json = plist_to_json(&plist, MAX_DISKUTIL_PLIST_BYTES)?;
+    let inventory: ApfsInventory =
+        serde_json::from_slice(&json).map_err(|_| std::io::ErrorKind::InvalidData)?;
+    select_dedicated_apfs_storage(inventory, uuid)
+}
+
+fn select_dedicated_apfs_storage(
+    inventory: ApfsInventory,
+    uuid: &str,
+) -> std::io::Result<DedicatedApfsStorage> {
+    let container = inventory
+        .containers
+        .into_iter()
+        .find(|container| {
+            container
+                .volumes
+                .iter()
+                .any(|volume| normalized_volume_uuid(&volume.volume_uuid).as_deref() == Some(uuid))
+        })
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if container.volumes.len() != 1 {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    let volume = container
+        .volumes
+        .first()
+        .cloned()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    Ok(DedicatedApfsStorage {
+        container_reference: container.container_reference,
+        capacity_ceiling: container.capacity_ceiling,
+        capacity_free: container.capacity_free,
+        physical_stores: container.physical_stores,
+        volume,
+    })
+}
+
+fn verify_vm_storage(
+    options: &MacosVirtualizationProviderOptions,
+    template: &VerifiedTemplate,
+    require_clone_capacity: bool,
+) -> std::io::Result<()> {
+    let paths = [
+        options.provider_root(),
+        options.template_manifest(),
+        &template.disk_image,
+        &template.auxiliary_storage,
+    ];
+    let device = filesystem_device(options.provider_root())?;
+    let root_device = options.provider_root().metadata()?.dev();
+    if paths.into_iter().any(|path| {
+        !path
+            .metadata()
+            .is_ok_and(|metadata| metadata.dev() == root_device)
+    }) {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    let info: DiskInfo = disk_info(&device)?;
+    let boot_info: DiskInfo = disk_info(&filesystem_device(Path::new("/"))?)?;
+    let storage = dedicated_apfs_storage(options.storage_volume_uuid())?;
+    let physical_storage = physical_storage_is_non_virtual(&storage.physical_stores)?;
+    let required_free = template
+        .disk_image
+        .metadata()?
+        .len()
+        .checked_add(template.auxiliary_storage.metadata()?.len())
+        .and_then(|bytes| bytes.checked_add(MINIMUM_STORAGE_HEADROOM))
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    let quota_free = storage
+        .volume
+        .capacity_quota
+        .checked_sub(storage.volume.capacity_in_use)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
+    let valid = info.filesystem_type == "apfs"
+        && info.writable
+        && info.global_permissions_enabled
+        && normalized_volume_uuid(&info.volume_uuid).as_deref()
+            == Some(options.storage_volume_uuid())
+        && info.device_identifier == device
+        && info.device_identifier == storage.volume.device_identifier
+        && info.apfs_container_reference == storage.container_reference
+        && storage.container_reference != boot_info.apfs_container_reference
+        && physical_storage
+        && storage.volume.roles.is_empty()
+        && storage.volume.capacity_quota == options.storage_quota_bytes()
+        && storage.capacity_ceiling >= storage.volume.capacity_quota
+        && (!require_clone_capacity
+            || quota_free >= required_free && storage.capacity_free >= required_free);
+    valid
+        .then_some(())
+        .ok_or_else(|| std::io::ErrorKind::PermissionDenied.into())
+}
+
+fn require_root_owned_provider_ancestry(provider_root: &Path) -> std::io::Result<()> {
+    let parent = provider_root
+        .parent()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    for ancestor in parent.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+    }
+    Ok(())
+}
+
+fn trust_material_is_separate(
+    options: &MacosVirtualizationProviderOptions,
+    template: &VerifiedTemplate,
+) -> bool {
+    let paths = [
+        options.helper_executable(),
+        options.template_manifest(),
+        &template.disk_image,
+        &template.auxiliary_storage,
+    ];
+    paths
+        .iter()
+        .all(|path| !path.starts_with(options.provider_root()))
+        && paths
+            .iter()
+            .enumerate()
+            .all(|(index, path)| paths[index + 1..].iter().all(|other| path != other))
 }
 
 fn preflight_error(error: &std::io::Error) -> ProviderError {
@@ -1106,15 +1672,111 @@ fn uncertain(
 
 #[cfg(test)]
 mod tests {
-    use super::supported_product_version;
+    use super::{
+        ApfsContainer, ApfsInventory, ApfsPhysicalStore, ApfsVolume, WholeDiskInfo,
+        normalized_volume_uuid, select_dedicated_apfs_storage, supported_product_version,
+        valid_helper_code_requirement, whole_disk_is_physical,
+    };
 
     #[test]
-    fn native_provider_requires_macos_15_or_newer() {
+    fn virtualization_provider_requires_macos_15_or_newer() {
         for supported in [b"15.0\n".as_slice(), b"15.7.1", b"26.0"] {
             assert!(supported_product_version(supported));
         }
         for unsupported in [b"14.7.6\n".as_slice(), b"0", b"", b"macOS 15", &[0xff]] {
             assert!(!supported_product_version(unsupported));
         }
+    }
+
+    #[test]
+    fn storage_uuid_is_strict_and_canonical() {
+        assert_eq!(
+            normalized_volume_uuid("01234567-89ab-cdef-0123-456789abcdef").as_deref(),
+            Some("01234567-89AB-CDEF-0123-456789ABCDEF")
+        );
+        for invalid in [
+            "",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "01234567-89AB-CDEG-0123-456789ABCDEF",
+            "01234567-89AB-CDEF-0123-456789ABCDEFF",
+        ] {
+            assert!(normalized_volume_uuid(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn helper_requirement_is_exactly_identifier_anchor_and_team() {
+        assert!(valid_helper_code_requirement(
+            "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\""
+        ));
+        for invalid in [
+            "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic",
+            "identifier \"dev.automata.macos-vm-helper\" or anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"",
+            "identifier \"dev..helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"",
+            "identifier \"dev.automata.helper\" and anchor apple generic and certificate leaf[subject.OU] = \"teamid1234\"",
+        ] {
+            assert!(!valid_helper_code_requirement(invalid));
+        }
+    }
+
+    #[test]
+    fn storage_volume_must_be_alone_in_its_apfs_container() {
+        let uuid = "01234567-89AB-CDEF-0123-456789ABCDEF";
+        let target = ApfsVolume {
+            volume_uuid: uuid.to_owned(),
+            device_identifier: "disk9s1".to_owned(),
+            capacity_quota: 256 * 1024 * 1024 * 1024,
+            capacity_in_use: 16 * 1024 * 1024 * 1024,
+            roles: Vec::new(),
+        };
+        let inventory = |volumes| ApfsInventory {
+            containers: vec![ApfsContainer {
+                container_reference: "disk9".to_owned(),
+                capacity_ceiling: 300 * 1024 * 1024 * 1024,
+                capacity_free: 280 * 1024 * 1024 * 1024,
+                physical_stores: vec![ApfsPhysicalStore {
+                    device_identifier: "disk8s2".to_owned(),
+                }],
+                volumes,
+            }],
+        };
+
+        let selected = select_dedicated_apfs_storage(inventory(vec![target.clone()]), uuid)
+            .expect("one dedicated volume");
+        assert_eq!(selected.volume.device_identifier, "disk9s1");
+        assert!(
+            select_dedicated_apfs_storage(inventory(vec![target.clone(), target]), uuid).is_err(),
+            "a sibling volume weakens the fixed storage boundary"
+        );
+    }
+
+    #[test]
+    fn physical_store_classification_is_fail_closed() {
+        let info = |classification: &str, bus: &str, internal: bool| WholeDiskInfo {
+            device_identifier: "disk0".to_owned(),
+            whole_disk: true,
+            virtual_or_physical: classification.to_owned(),
+            bus_protocol: bus.to_owned(),
+            internal,
+            system_image: false,
+        };
+
+        assert!(whole_disk_is_physical(&info("Physical", "USB", false)));
+        assert!(whole_disk_is_physical(&info(
+            "Unknown",
+            "Apple Fabric",
+            true
+        )));
+        assert!(!whole_disk_is_physical(&info("Virtual", "PCI", true)));
+        assert!(!whole_disk_is_physical(&info("Unknown", "USB", true)));
+        assert!(!whole_disk_is_physical(&info(
+            "Unknown",
+            "Apple Fabric",
+            false
+        )));
+
+        let mut system_image = info("Physical", "USB", false);
+        system_image.system_image = true;
+        assert!(!whole_disk_is_physical(&system_image));
     }
 }

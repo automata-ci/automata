@@ -24,9 +24,9 @@ use automata_ci_execution::{
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
     ImmutableImage, NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind,
     ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
-    SandboxLaunch, SandboxProvider, SandboxResourcePolicy, SandboxSpec, SandboxState,
-    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
-    ServiceHealthPolicy, ServicePort, ServiceTransportProtocol, TargetPath, TargetPlatform,
+    SandboxLaunch, SandboxProvider, SandboxSpec, SandboxState, ServiceContainerBindings,
+    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
+    ServicePort, ServiceTransportProtocol, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
@@ -507,7 +507,7 @@ impl GithubJobExecutor {
                 return Err(AdmissionRejection::CapabilityChanged);
             }
         }
-        validate_resource_admission(job, self.config.resource_policy(), capabilities)?;
+        validate_resource_admission(job, capabilities)?;
         let network = match self.config.network() {
             NetworkPolicy::Disabled => SandboxCapability::NetworkDisabled,
             NetworkPolicy::PrivateEgress => SandboxCapability::PrivateEgress,
@@ -4466,25 +4466,16 @@ impl GithubJobExecutor {
         scratch: &TargetPath,
         service_specs: &ServiceContainerSpecs,
     ) -> Result<SandboxSpec, ExecutorAdapterError> {
-        let mut spec = match self.sandbox_resource_policy(request)? {
-            SandboxResourcePolicy::Enforced(resources) => SandboxSpec::new(
-                operation_id,
-                generation,
-                request.environment().clone(),
-                workspace.clone(),
-                self.config.network(),
-                self.config.root_filesystem(),
-                resources,
-            ),
-            SandboxResourcePolicy::HostShared => SandboxSpec::host_shared(
-                operation_id,
-                generation,
-                request.environment().clone(),
-                workspace.clone(),
-                self.config.network(),
-                self.config.root_filesystem(),
-            ),
-        }
+        let resources = self.sandbox_resources(request)?;
+        let mut spec = SandboxSpec::new(
+            operation_id,
+            generation,
+            request.environment().clone(),
+            workspace.clone(),
+            self.config.network(),
+            self.config.root_filesystem(),
+            resources,
+        )
         .with_privilege(self.config.privilege())
         .with_services(service_specs.clone())
         .with_resource_allocation(
@@ -4495,19 +4486,19 @@ impl GithubJobExecutor {
                 .resource_allocation()
                 .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
         );
-        if matches!(request.environment().launch(), SandboxLaunch::Native) {
+        if matches!(
+            request.environment().launch(),
+            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. }
+        ) {
             spec = spec.with_scratch(scratch.clone());
         }
         Ok(spec)
     }
 
-    fn sandbox_resource_policy(
+    fn sandbox_resources(
         &self,
         request: &ExecutionRequest,
-    ) -> Result<SandboxResourcePolicy, ExecutorAdapterError> {
-        if self.config.resource_policy() == SandboxResourcePolicy::HostShared {
-            return Ok(SandboxResourcePolicy::HostShared);
-        }
+    ) -> Result<ResourceLimits, ExecutorAdapterError> {
         let allocation = request
             .job()
             .job()
@@ -4518,12 +4509,8 @@ impl GithubJobExecutor {
         ResourceLimits::new(
             limits.memory_bytes(),
             limits.cpu_millis(),
-            self.config
-                .resources()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?
-                .pids(),
+            self.config.resources().pids(),
         )
-        .map(SandboxResourcePolicy::Enforced)
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
 
@@ -6865,7 +6852,6 @@ fn validate_action_step_admission(
 
 fn validate_resource_admission(
     job: &JobIrEnvelope,
-    resource_policy: SandboxResourcePolicy,
     capabilities: &ProviderCapabilities,
 ) -> Result<(), AdmissionRejection> {
     let allocation = job
@@ -6873,28 +6859,19 @@ fn validate_resource_admission(
         .requirements()
         .resource_allocation()
         .ok_or(AdmissionRejection::InvalidJob)?;
-    match resource_policy {
-        SandboxResourcePolicy::Enforced(_) => {
-            if !capabilities.supports(SandboxCapability::ResourceLimits)
-                || !capabilities.supports(SandboxCapability::ProcessLimits)
-            {
-                return Err(AdmissionRejection::CapabilityChanged);
-            }
-            let limits = allocation.limits();
-            if limits.ephemeral_disk_bytes() > 0
-                && !capabilities.supports(SandboxCapability::EphemeralStorageLimits)
-            {
-                return Err(AdmissionRejection::CapabilityChanged);
-            }
-            if limits.gpu_count() > 0 && !capabilities.supports(SandboxCapability::DeviceLimits) {
-                return Err(AdmissionRejection::CapabilityChanged);
-            }
-        }
-        SandboxResourcePolicy::HostShared => {
-            if !capabilities.supports(SandboxCapability::HostResources) {
-                return Err(AdmissionRejection::CapabilityChanged);
-            }
-        }
+    if !capabilities.supports(SandboxCapability::ResourceLimits)
+        || !capabilities.supports(SandboxCapability::ProcessLimits)
+    {
+        return Err(AdmissionRejection::CapabilityChanged);
+    }
+    let limits = allocation.limits();
+    if limits.ephemeral_disk_bytes() > 0
+        && !capabilities.supports(SandboxCapability::EphemeralStorageLimits)
+    {
+        return Err(AdmissionRejection::CapabilityChanged);
+    }
+    if limits.gpu_count() > 0 && !capabilities.supports(SandboxCapability::DeviceLimits) {
+        return Err(AdmissionRejection::CapabilityChanged);
     }
     Ok(())
 }
@@ -7397,7 +7374,10 @@ fn job_workspace(
             }
             Ok(logical_workspace)
         }
-        (TargetPlatform::Posix | TargetPlatform::Windows, SandboxLaunch::Native) => {
+        (
+            TargetPlatform::Posix | TargetPlatform::Windows,
+            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. },
+        ) => {
             let relative = logical_workspace
                 .as_str()
                 .strip_prefix(LOGICAL_WORKSPACE_ROOT)

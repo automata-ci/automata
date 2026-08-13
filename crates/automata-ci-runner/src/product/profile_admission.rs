@@ -11,8 +11,8 @@ use automata_ci_execution::{
     ExecutionArgv, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionStage,
     ExecutionTermination, NetworkPolicy, OperationId, OperationOutcome, ProviderError,
     ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxResourcePolicy, SandboxSpec,
-    SandboxState, TargetPath, TargetPlatform,
+    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, TargetPath,
+    TargetPlatform,
 };
 use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
 use uuid::Uuid;
@@ -35,7 +35,7 @@ pub(super) struct ProfileAdmissionPolicy {
     network: NetworkPolicy,
     root_filesystem: RootFilesystemPolicy,
     privilege: SandboxPrivilegePolicy,
-    resource_policy: SandboxResourcePolicy,
+    resources: ResourceLimits,
     resource_allocation: JobResourceAllocation,
     native: Option<NativeProfileAdmissionPolicy>,
 }
@@ -43,6 +43,7 @@ pub(super) struct ProfileAdmissionPolicy {
 struct NativeProfileAdmissionPolicy {
     scratch_root: TargetPath,
     shell_probes: Vec<NativeShellProbe>,
+    host_identity: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,23 +136,7 @@ impl ProfileAdmissionPolicy {
             network,
             root_filesystem,
             privilege,
-            resource_policy: SandboxResourcePolicy::Enforced(resources),
-            resource_allocation,
-            native: None,
-        }
-    }
-
-    pub(super) const fn host_shared(
-        network: NetworkPolicy,
-        root_filesystem: RootFilesystemPolicy,
-        privilege: SandboxPrivilegePolicy,
-        resource_allocation: JobResourceAllocation,
-    ) -> Self {
-        Self {
-            network,
-            root_filesystem,
-            privilege,
-            resource_policy: SandboxResourcePolicy::HostShared,
+            resources,
             resource_allocation,
             native: None,
         }
@@ -191,11 +176,12 @@ impl ProfileAdmissionPolicy {
         self.native = Some(NativeProfileAdmissionPolicy {
             scratch_root,
             shell_probes,
+            host_identity: true,
         });
         Ok(self)
     }
 
-    pub(super) fn with_native_macos_shells(
+    pub(super) fn with_virtualized_macos_shells(
         mut self,
         scratch_root: TargetPath,
         bash: TargetPath,
@@ -229,6 +215,7 @@ impl ProfileAdmissionPolicy {
         self.native = Some(NativeProfileAdmissionPolicy {
             scratch_root,
             shell_probes,
+            host_identity: false,
         });
         Ok(self)
     }
@@ -441,25 +428,16 @@ impl ProfileAdmissionContext<'_> {
             (None, None) => None,
             _ => return Err(invalid_catalog()),
         };
-        let mut spec = match self.policy.resource_policy {
-            SandboxResourcePolicy::Enforced(resources) => SandboxSpec::new(
-                operation_ids.create,
-                self.generation,
-                environment.clone(),
-                workspace.clone(),
-                self.policy.network,
-                self.policy.root_filesystem,
-                resources,
-            ),
-            SandboxResourcePolicy::HostShared => SandboxSpec::host_shared(
-                operation_ids.create,
-                self.generation,
-                environment.clone(),
-                workspace.clone(),
-                self.policy.network,
-                self.policy.root_filesystem,
-            ),
-        }
+        let resources = self.policy.resources;
+        let mut spec = SandboxSpec::new(
+            operation_ids.create,
+            self.generation,
+            environment.clone(),
+            workspace.clone(),
+            self.policy.network,
+            self.policy.root_filesystem,
+            resources,
+        )
         .with_privilege(self.policy.privilege)
         .with_resource_allocation(self.policy.resource_allocation);
         if let Some(scratch) = &scratch {
@@ -838,35 +816,49 @@ fn validate_provider_policy(
     provider: &dyn SandboxProvider,
     policy: &ProfileAdmissionPolicy,
 ) -> Result<(), ProfileAdmissionError> {
-    if policy.native.is_some()
-        && (policy.network != NetworkPolicy::Host
-            || policy.root_filesystem != RootFilesystemPolicy::Host
-            || policy.privilege != SandboxPrivilegePolicy::Host
-            || ![
-                SandboxCapability::WholeJob,
-                SandboxCapability::Attach,
-                SandboxCapability::Inspect,
-                SandboxCapability::CopyTo,
-                SandboxCapability::Exec,
-                SandboxCapability::EnvironmentInjection,
-                SandboxCapability::HostNetwork,
-                SandboxCapability::HostFilesystem,
-                SandboxCapability::HostIdentity,
-            ]
+    if let Some(native) = &policy.native {
+        let common_capabilities = [
+            SandboxCapability::WholeJob,
+            SandboxCapability::Attach,
+            SandboxCapability::Inspect,
+            SandboxCapability::CopyTo,
+            SandboxCapability::Exec,
+            SandboxCapability::EnvironmentInjection,
+            SandboxCapability::ResourceLimits,
+            SandboxCapability::ProcessLimits,
+        ];
+        let common_valid = common_capabilities
             .into_iter()
-            .all(|capability| provider.capabilities().supports(capability))
-            || !provider
-                .capabilities()
-                .supports(match policy.resource_policy {
-                    SandboxResourcePolicy::Enforced(_) => SandboxCapability::ResourceLimits,
-                    SandboxResourcePolicy::HostShared => SandboxCapability::HostResources,
-                }))
-    {
-        return Err(ProfileAdmissionError::evidence(
-            ProfileAdmissionErrorKind::InvalidProviderEvidence,
-            ProfileAdmissionCleanupStatus::NotRequired,
-            None,
-        ));
+            .all(|capability| provider.capabilities().supports(capability));
+        let boundary_valid = if native.host_identity {
+            policy.network == NetworkPolicy::Host
+                && policy.root_filesystem == RootFilesystemPolicy::Host
+                && policy.privilege == SandboxPrivilegePolicy::Host
+                && [
+                    SandboxCapability::HostNetwork,
+                    SandboxCapability::HostFilesystem,
+                    SandboxCapability::HostIdentity,
+                ]
+                .into_iter()
+                .all(|capability| provider.capabilities().supports(capability))
+        } else {
+            policy.network == NetworkPolicy::Disabled
+                && policy.root_filesystem == RootFilesystemPolicy::Writable
+                && policy.privilege == SandboxPrivilegePolicy::Unprivileged
+                && provider
+                    .capabilities()
+                    .supports(SandboxCapability::WritableRootFilesystem)
+                && provider
+                    .capabilities()
+                    .supports(SandboxCapability::NetworkDisabled)
+        };
+        if !common_valid || !boundary_valid {
+            return Err(ProfileAdmissionError::evidence(
+                ProfileAdmissionErrorKind::InvalidProviderEvidence,
+                ProfileAdmissionCleanupStatus::NotRequired,
+                None,
+            ));
+        }
     }
     Ok(())
 }
@@ -1118,6 +1110,7 @@ mod tests {
                     SandboxCapability::HostFilesystem,
                     SandboxCapability::HostIdentity,
                     SandboxCapability::ResourceLimits,
+                    SandboxCapability::ProcessLimits,
                 ])
                 .expect("capabilities"),
                 behavior,
@@ -1570,7 +1563,7 @@ mod tests {
             assert_eq!(spec.network(), NetworkPolicy::Disabled);
             assert_eq!(spec.root_filesystem(), RootFilesystemPolicy::Writable);
             assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Administrator);
-            assert_eq!(spec.resources(), policy().resource_policy.enforced());
+            assert_eq!(spec.resources(), policy().resources);
             assert_eq!(spec.generation().get(), ADMISSION_GENERATION);
             let Call::Inspect(inspected) = &calls[1] else {
                 panic!("profile create must be inspected")
@@ -1774,11 +1767,13 @@ mod tests {
             SandboxCapability::HostFilesystem,
             SandboxCapability::HostIdentity,
             SandboxCapability::ResourceLimits,
+            SandboxCapability::ProcessLimits,
         ];
         for missing in [
             SandboxCapability::HostIdentity,
             SandboxCapability::CopyTo,
             SandboxCapability::HostFilesystem,
+            SandboxCapability::ProcessLimits,
         ] {
             let signals = ProbeCancellation::default();
             let mut provider = FakeProvider::new(FakeBehavior::Happy, signals.clone());

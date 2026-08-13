@@ -406,6 +406,7 @@ fn repository_authority_with_the_wrong_endpoint_fails_closed() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn mapped_repository_authority_requires_the_exact_emulator_origin_and_trust_class() {
     let config = fixture_runner_config_with_github(
         "http://automata-git.invalid:18088/",
@@ -795,8 +796,11 @@ fn fixture_runner_config_with_github(
     document["github"]["api_url"] = serde_json::json!(api_url);
     document["github"]["graphql_url"] = serde_json::json!(graphql_url);
     document["github"]["allow_insecure_http"] = serde_json::json!(allow_insecure_http);
-    document["podman"]["map_github_server_to_host_gateway"] =
-        serde_json::json!(server_url.contains(".invalid"));
+    #[cfg(target_os = "linux")]
+    {
+        document["podman"]["map_github_server_to_host_gateway"] =
+            serde_json::json!(server_url.contains(".invalid"));
+    }
     let encoded = serde_json::to_vec(&document).expect("runner config encoding");
     RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
 }
@@ -1146,7 +1150,7 @@ const fn expected_workspace() -> &'static str {
     if cfg!(windows) {
         r"C:\automata\native\workspaces\automata\automata"
     } else if cfg!(target_os = "macos") {
-        "/Users/automata-runner/Library/Application Support/Automata/native/workspaces/automata/automata"
+        "/Users/automata-job/workspaces/automata/automata"
     } else {
         "/__w/automata/automata"
     }
@@ -1156,7 +1160,7 @@ const fn expected_event_path() -> &'static str {
     if cfg!(windows) {
         r"C:\automata\native\runner\attempts\fixture\event.json"
     } else if cfg!(target_os = "macos") {
-        "/Users/automata-runner/Library/Application Support/Automata/native/runner/attempts/fixture/event.json"
+        "/Users/automata-job/runner/attempts/fixture/event.json"
     } else {
         "/__automata/attempts/fixture/event.json"
     }

@@ -576,12 +576,7 @@ impl PodmanInner {
         names: &ResourceNames,
         fingerprint: &str,
     ) -> Result<ServiceManifest, ProviderError> {
-        let resources = spec.resources().ok_or_else(|| {
-            provider_error::known(
-                ProviderErrorKind::InvalidConfiguration,
-                ProviderStage::Validate,
-            )
-        })?;
+        let resources = spec.resources();
         let manifest = ServiceManifest::from_specs(
             names,
             fingerprint,
@@ -787,12 +782,7 @@ impl PodmanInner {
                 )
                 .map(|inspection| inspection.identifier);
         }
-        let resources = sandbox.resources().ok_or_else(|| {
-            provider_error::known(
-                ProviderErrorKind::InvalidConfiguration,
-                ProviderStage::Validate,
-            )
-        })?;
+        let resources = sandbox.resources();
         let mut arguments = self.base_arguments();
         arguments.extend(os_args(["create"]));
         push_option(&mut arguments, "--name", entry.container());
@@ -2539,12 +2529,7 @@ impl PodmanInner {
             )?;
             return self.verify_pod_network_sysctl(names, deadline, cancellation);
         }
-        let resources = spec.resources().ok_or_else(|| {
-            provider_error::known(
-                ProviderErrorKind::InvalidConfiguration,
-                ProviderStage::Validate,
-            )
-        })?;
+        let resources = spec.resources();
         let mut arguments = self.base_arguments();
         arguments.extend(os_args([
             "pod",
@@ -2707,12 +2692,7 @@ impl PodmanInner {
             "--init",
         ]));
         push_job_engine_create_options(&mut arguments, storage.engine)?;
-        let resources = spec.resources().ok_or_else(|| {
-            provider_error::known(
-                ProviderErrorKind::InvalidConfiguration,
-                ProviderStage::Validate,
-            )
-        })?;
+        let resources = spec.resources();
         push_option(&mut arguments, "--pids-limit", resources.pids().to_string());
         push_option(&mut arguments, "--volume", mount);
         push_option(&mut arguments, "--workdir", spec.workspace().as_str());
@@ -2916,17 +2896,7 @@ impl PodmanInner {
             &self.options,
             paths,
             listener,
-            JobDockerLaunch::new(
-                &names.handle(),
-                process_id,
-                cgroup,
-                spec.resources().ok_or_else(|| {
-                    provider_error::known(
-                        ProviderErrorKind::InvalidConfiguration,
-                        ProviderStage::Validate,
-                    )
-                })?,
-            ),
+            JobDockerLaunch::new(&names.handle(), process_id, cgroup, spec.resources()),
             Arc::clone(&self.observer),
         )
         .map_err(|_| {
@@ -4307,15 +4277,10 @@ fn spec_fingerprint(
     hash_field(&mut hasher, &[spec.network() as u8]);
     hash_field(&mut hasher, &[spec.root_filesystem() as u8]);
     hash_field(&mut hasher, &[spec.privilege() as u8]);
-    match spec.resources() {
-        Some(resources) => {
-            hash_field(&mut hasher, &[1]);
-            hash_field(&mut hasher, &resources.memory_bytes().to_be_bytes());
-            hash_field(&mut hasher, &resources.cpu_millis().to_be_bytes());
-            hash_field(&mut hasher, &resources.pids().to_be_bytes());
-        }
-        None => hash_field(&mut hasher, &[0]),
-    }
+    let resources = spec.resources();
+    hash_field(&mut hasher, &resources.memory_bytes().to_be_bytes());
+    hash_field(&mut hasher, &resources.cpu_millis().to_be_bytes());
+    hash_field(&mut hasher, &resources.pids().to_be_bytes());
     match spec.resource_allocation() {
         Some(allocation) => {
             hash_field(&mut hasher, &[1]);

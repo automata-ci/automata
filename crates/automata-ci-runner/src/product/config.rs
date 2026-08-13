@@ -32,7 +32,7 @@ use super::files::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -152,7 +152,7 @@ impl RunnerProductConfig {
             RunnerProviderConfig::Podman(config) => Some(config),
             RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::WindowsNative(_)
-            | RunnerProviderConfig::MacosNative(_) => None,
+            | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
     }
 
@@ -163,7 +163,7 @@ impl RunnerProductConfig {
             RunnerProviderConfig::Kubernetes(config) => Some(config),
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::WindowsNative(_)
-            | RunnerProviderConfig::MacosNative(_) => None,
+            | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
     }
 
@@ -174,15 +174,15 @@ impl RunnerProductConfig {
             RunnerProviderConfig::WindowsNative(config) => Some(config),
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::Kubernetes(_)
-            | RunnerProviderConfig::MacosNative(_) => None,
+            | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
     }
 
-    /// Returns trusted native-macOS provider policy when selected.
+    /// Returns disposable macOS virtual-machine provider policy when selected.
     #[must_use]
-    pub const fn macos_native(&self) -> Option<&MacosNativeProductConfig> {
+    pub const fn macos_virtualization(&self) -> Option<&MacosVirtualizationProductConfig> {
         match &self.provider {
-            RunnerProviderConfig::MacosNative(config) => Some(config),
+            RunnerProviderConfig::MacosVirtualization(config) => Some(config),
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::WindowsNative(_) => None,
@@ -255,7 +255,7 @@ pub struct StateRoots {
     spool: SpoolRoot,
     podman: Option<PathBuf>,
     windows_native: Option<PathBuf>,
-    macos_native: Option<PathBuf>,
+    macos_virtualization: Option<PathBuf>,
 }
 
 impl StateRoots {
@@ -277,7 +277,7 @@ impl StateRoots {
         self.podman
             .as_deref()
             .or(self.windows_native.as_deref())
-            .or(self.macos_native.as_deref())
+            .or(self.macos_virtualization.as_deref())
     }
 
     /// Returns the rootless-Podman durable state root when selected.
@@ -292,10 +292,10 @@ impl StateRoots {
         self.windows_native.as_deref()
     }
 
-    /// Returns the native-macOS durable state root when selected.
+    /// Returns the macOS virtual-machine durable state root when selected.
     #[must_use]
-    pub fn macos_native(&self) -> Option<&Path> {
-        self.macos_native.as_deref()
+    pub fn macos_virtualization(&self) -> Option<&Path> {
+        self.macos_virtualization.as_deref()
     }
 }
 
@@ -308,8 +308,8 @@ pub enum RunnerProviderConfig {
     Kubernetes(KubernetesProductConfig),
     /// Job Object-contained native processes for trusted Windows jobs.
     WindowsNative(WindowsNativeProductConfig),
-    /// Supervised POSIX process groups for trusted macOS jobs.
-    MacosNative(MacosNativeProductConfig),
+    /// Disposable Virtualization.framework machines for untrusted macOS jobs.
+    MacosVirtualization(MacosVirtualizationProductConfig),
 }
 
 /// Validated Kubernetes product configuration and operator attestations.
@@ -330,9 +330,75 @@ impl KubernetesProductConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsNativeProductConfig;
 
-/// Trusted native-macOS execution provider configuration.
+/// Verified helper and immutable template policy for macOS virtual machines.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MacosNativeProductConfig;
+pub struct MacosVirtualizationProductConfig {
+    helper_executable: PathBuf,
+    helper_sha256: Sha256Digest,
+    helper_code_requirement: String,
+    template_manifest: PathBuf,
+    template_manifest_sha256: Sha256Digest,
+    storage_volume_uuid: String,
+    storage_quota_bytes: u64,
+    boot_timeout: Duration,
+    stop_timeout: Duration,
+}
+
+impl MacosVirtualizationProductConfig {
+    /// Returns the exact signed Swift helper executable.
+    #[must_use]
+    pub fn helper_executable(&self) -> &Path {
+        &self.helper_executable
+    }
+
+    /// Returns the pinned helper content digest.
+    #[must_use]
+    pub const fn helper_sha256(&self) -> Sha256Digest {
+        self.helper_sha256
+    }
+
+    /// Returns the code-signing requirement applied before every helper launch.
+    #[must_use]
+    pub fn helper_code_requirement(&self) -> &str {
+        &self.helper_code_requirement
+    }
+
+    /// Returns the immutable VM-template manifest path.
+    #[must_use]
+    pub fn template_manifest(&self) -> &Path {
+        &self.template_manifest
+    }
+
+    /// Returns the pinned VM-template manifest digest.
+    #[must_use]
+    pub const fn template_manifest_sha256(&self) -> Sha256Digest {
+        self.template_manifest_sha256
+    }
+
+    /// Returns the exact dedicated APFS volume UUID used by templates and clones.
+    #[must_use]
+    pub fn storage_volume_uuid(&self) -> &str {
+        &self.storage_volume_uuid
+    }
+
+    /// Returns the exact required APFS volume quota.
+    #[must_use]
+    pub const fn storage_quota_bytes(&self) -> u64 {
+        self.storage_quota_bytes
+    }
+
+    /// Returns the maximum cold-boot and guest-handshake duration.
+    #[must_use]
+    pub const fn boot_timeout(&self) -> Duration {
+        self.boot_timeout
+    }
+
+    /// Returns the graceful-stop window before destructive VM termination.
+    #[must_use]
+    pub const fn stop_timeout(&self) -> Duration {
+        self.stop_timeout
+    }
+}
 
 /// Explicit material locations for outbound runner mTLS.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -901,7 +967,7 @@ enum ProviderKind {
     Podman,
     Kubernetes,
     WindowsNative,
-    MacosNative,
+    MacosVirtualization,
 }
 
 #[derive(Deserialize)]
@@ -921,7 +987,7 @@ struct RawRunnerProductConfig {
     #[serde(default)]
     windows_native: Option<RawWindowsNativeProductConfig>,
     #[serde(default)]
-    macos_native: Option<RawMacosNativeProductConfig>,
+    macos_virtualization: Option<RawMacosVirtualizationProductConfig>,
     executor: RawExecutorProductConfig,
     object_store: RawObjectStoreProductConfig,
     github: RawGithubProductConfig,
@@ -939,12 +1005,12 @@ impl RawRunnerProductConfig {
             &self.podman,
             &self.kubernetes,
             &self.windows_native,
-            &self.macos_native,
+            &self.macos_virtualization,
         ) {
             (Some(_), None, None, None) => ProviderKind::Podman,
             (None, Some(_), None, None) => ProviderKind::Kubernetes,
             (None, None, Some(_), None) => ProviderKind::WindowsNative,
-            (None, None, None, Some(_)) => ProviderKind::MacosNative,
+            (None, None, None, Some(_)) => ProviderKind::MacosVirtualization,
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
@@ -961,7 +1027,7 @@ impl RawRunnerProductConfig {
             self.podman,
             self.kubernetes,
             self.windows_native,
-            self.macos_native,
+            self.macos_virtualization,
         ) {
             (Some(raw), None, None, None) => {
                 RunnerProviderConfig::Podman(raw.validate(github.server_url())?)
@@ -972,8 +1038,8 @@ impl RawRunnerProductConfig {
             (None, None, Some(_), None) => {
                 RunnerProviderConfig::WindowsNative(RawWindowsNativeProductConfig::validate()?)
             }
-            (None, None, None, Some(_)) => {
-                RunnerProviderConfig::MacosNative(RawMacosNativeProductConfig::validate()?)
+            (None, None, None, Some(raw)) => {
+                RunnerProviderConfig::MacosVirtualization(raw.validate()?)
             }
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
@@ -1015,7 +1081,7 @@ impl RawRunnerProductConfig {
             ),
             RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::WindowsNative(_)
-            | RunnerProviderConfig::MacosNative(_) => (
+            | RunnerProviderConfig::MacosVirtualization(_) => (
                 automata_ci_sandbox_podman::JobContainerEngine::Disabled,
                 false,
                 false,
@@ -1029,10 +1095,31 @@ impl RawRunnerProductConfig {
             service_proxy_configured,
             buildkit_configured,
         )?;
+        if let RunnerProviderConfig::MacosVirtualization(macos) = &provider {
+            let roots = [state.journal().as_path(), state.spool().as_path()]
+                .into_iter()
+                .chain(state.macos_virtualization());
+            if environments.len() != 1
+                || environments.values().any(|environment| {
+                    !matches!(
+                        environment.launch(),
+                        automata_ci_execution::SandboxLaunch::VirtualMachine {
+                            template_manifest
+                        } if *template_manifest == macos.template_manifest_sha256()
+                    )
+                })
+                || roots.into_iter().any(|root| {
+                    macos.helper_executable().starts_with(root)
+                        || macos.template_manifest().starts_with(root)
+                })
+            {
+                return Err(RunnerProductConfigError::InvalidProvider);
+            }
+        }
         match &provider {
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::WindowsNative(_)
-            | RunnerProviderConfig::MacosNative(_) => {
+            | RunnerProviderConfig::MacosVirtualization(_) => {
                 if inventory.resources_per_job().ephemeral_disk_bytes() != 0
                     || inventory.resources_per_job().gpu_count() != 0
                 {
@@ -1057,7 +1144,7 @@ impl RawRunnerProductConfig {
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
-        if matches!(&provider, RunnerProviderConfig::MacosNative(_))
+        if matches!(&provider, RunnerProviderConfig::MacosVirtualization(_))
             && !valid_macos_provider_topology(&state, &executor, &environments)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
@@ -1129,21 +1216,16 @@ fn valid_macos_provider_topology(
     executor: &ExecutorProductConfig,
     environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
 ) -> bool {
-    let Some(provider_root) = state.macos_native() else {
+    if state.macos_virtualization().is_none() {
         return false;
-    };
-    let strict_descendant = |path: &TargetPath| {
-        path.platform() == TargetPlatform::Posix
-            && Path::new(path.as_str()) != provider_root
-            && Path::new(path.as_str()).starts_with(provider_root)
-    };
-    if !strict_descendant(executor.runner_root()) {
+    }
+    if executor.runner_root().platform() != TargetPlatform::Posix {
         return false;
     }
     let runner_root = Path::new(executor.runner_root().as_str());
     environments.values().all(|environment| {
         let workspace = Path::new(environment.workspace().as_str());
-        strict_descendant(environment.workspace())
+        environment.workspace().platform() == TargetPlatform::Posix
             && !workspace.starts_with(runner_root)
             && !runner_root.starts_with(workspace)
     })
@@ -1178,7 +1260,7 @@ struct RawStateRoots {
     #[serde(default)]
     windows_native: Option<PathBuf>,
     #[serde(default)]
-    macos_native: Option<PathBuf>,
+    macos_virtualization: Option<PathBuf>,
 }
 
 impl RawStateRoots {
@@ -1187,11 +1269,11 @@ impl RawStateRoots {
             provider_kind,
             self.podman.as_ref(),
             self.windows_native.as_ref(),
-            self.macos_native.as_ref(),
+            self.macos_virtualization.as_ref(),
         ) {
             (ProviderKind::Podman, Some(provider), None, None)
             | (ProviderKind::WindowsNative, None, Some(provider), None)
-            | (ProviderKind::MacosNative, None, None, Some(provider)) => Some(provider),
+            | (ProviderKind::MacosVirtualization, None, None, Some(provider)) => Some(provider),
             (ProviderKind::Kubernetes, None, None, None) => None,
             _ => return Err(RunnerProductConfigError::InvalidStateRoots),
         };
@@ -1201,7 +1283,7 @@ impl RawStateRoots {
             .iter()
             .any(|path| validate_absolute_path(path).is_err());
         let overlap = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => {
+            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
                 roots.iter().enumerate().any(|(left_index, left)| {
                     roots.iter().enumerate().any(|(right_index, right)| {
                         left_index != right_index
@@ -1242,7 +1324,7 @@ impl RawStateRoots {
             spool,
             podman: self.podman,
             windows_native: self.windows_native,
-            macos_native: self.macos_native,
+            macos_virtualization: self.macos_virtualization,
         })
     }
 }
@@ -1364,9 +1446,11 @@ impl RawInventory {
             || self.groups.len() > MAX_SELECTORS
             || self.environment_profiles.is_empty()
             || self.environment_profiles.len() > MAX_ENVIRONMENTS
+            || (provider_kind == ProviderKind::MacosVirtualization
+                && self.environment_profiles.len() != 1)
             || (matches!(
                 provider_kind,
-                ProviderKind::WindowsNative | ProviderKind::MacosNative
+                ProviderKind::WindowsNative | ProviderKind::MacosVirtualization
             ) && self.max_parallel_jobs != 1)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
@@ -1413,12 +1497,14 @@ impl RawInventory {
                 ProviderKind::Podman | ProviderKind::Kubernetes,
                 OperatingSystem::Linux
             ) | (ProviderKind::WindowsNative, OperatingSystem::Windows)
-                | (ProviderKind::MacosNative, OperatingSystem::Macos)
+                | (ProviderKind::MacosVirtualization, OperatingSystem::Macos)
         ) {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
         let host_architecture = host_architecture()?;
-        if provider_kind == ProviderKind::MacosNative && host_architecture != Architecture::Aarch64
+        if provider_kind == ProviderKind::MacosVirtualization
+            && (host_architecture != Architecture::Aarch64
+                || resources.capacity.cpu_millis() % 1_000 != 0)
         {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
@@ -1492,8 +1578,19 @@ fn provider_capabilities(
                 ]),
             )
         }
-        ProviderKind::WindowsNative | ProviderKind::MacosNative => (
+        ProviderKind::WindowsNative => (
             SandboxCapabilities::new(IsolationLevel::Process, [SandboxFeature::CLEAN_WORKSPACE]),
+            BTreeSet::new(),
+            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+        ),
+        ProviderKind::MacosVirtualization => (
+            SandboxCapabilities::new(
+                IsolationLevel::VirtualMachine,
+                [
+                    SandboxFeature::CLEAN_WORKSPACE,
+                    SandboxFeature::NETWORK_ISOLATION,
+                ],
+            ),
             BTreeSet::new(),
             BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
         ),
@@ -1668,7 +1765,7 @@ impl RawEnvironment {
                 SandboxEnvironment::native(attestation, workspace, default_environment)
                     .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
-            ProviderKind::MacosNative => {
+            ProviderKind::MacosVirtualization => {
                 if self.image.is_some()
                     || self.keepalive_program.is_some()
                     || !self.keepalive_arguments.is_empty()
@@ -1677,8 +1774,13 @@ impl RawEnvironment {
                 }
                 let workspace = TargetPath::posix(self.workspace)
                     .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-                SandboxEnvironment::native_posix(attestation, workspace, default_environment)
-                    .map_err(|_| RunnerProductConfigError::InvalidInventory)
+                SandboxEnvironment::virtual_machine(
+                    attestation,
+                    digest,
+                    workspace,
+                    default_environment,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
         }
     }
@@ -1719,15 +1821,113 @@ impl RawWindowsNativeProductConfig {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawMacosNativeProductConfig {}
+struct RawMacosVirtualizationProductConfig {
+    helper_executable: PathBuf,
+    helper_sha256: String,
+    helper_code_requirement: String,
+    template_manifest: PathBuf,
+    template_manifest_sha256: String,
+    storage_volume_uuid: String,
+    storage_quota_bytes: u64,
+    boot_timeout_seconds: u64,
+    stop_timeout_seconds: u64,
+}
 
-impl RawMacosNativeProductConfig {
-    fn validate() -> Result<MacosNativeProductConfig, RunnerProductConfigError> {
+impl RawMacosVirtualizationProductConfig {
+    fn validate(self) -> Result<MacosVirtualizationProductConfig, RunnerProductConfigError> {
         if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
-        Ok(MacosNativeProductConfig)
+        validate_absolute_path(&self.helper_executable)
+            .and_then(|()| validate_absolute_path(&self.template_manifest))
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        let helper_sha256 = self
+            .helper_sha256
+            .parse()
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        let template_manifest_sha256 = self
+            .template_manifest_sha256
+            .parse()
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        if self.helper_code_requirement.is_empty()
+            || self.helper_code_requirement.len() > 4_096
+            || !self.helper_code_requirement.is_ascii()
+            || self
+                .helper_code_requirement
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || !valid_helper_code_requirement(&self.helper_code_requirement)
+            || normalized_volume_uuid(&self.storage_volume_uuid).is_none()
+            || !(64 * 1024 * 1024 * 1024..=1024 * 1024 * 1024 * 1024)
+                .contains(&self.storage_quota_bytes)
+            || !self.storage_quota_bytes.is_multiple_of(1024 * 1024 * 1024)
+            || !(30..=900).contains(&self.boot_timeout_seconds)
+            || !(1..=30).contains(&self.stop_timeout_seconds)
+        {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        Ok(MacosVirtualizationProductConfig {
+            helper_executable: self.helper_executable,
+            helper_sha256,
+            helper_code_requirement: self.helper_code_requirement,
+            template_manifest: self.template_manifest,
+            template_manifest_sha256,
+            storage_volume_uuid: normalized_volume_uuid(&self.storage_volume_uuid)
+                .ok_or(RunnerProductConfigError::InvalidProvider)?,
+            storage_quota_bytes: self.storage_quota_bytes,
+            boot_timeout: Duration::from_secs(self.boot_timeout_seconds),
+            stop_timeout: Duration::from_secs(self.stop_timeout_seconds),
+        })
     }
+}
+
+fn normalized_volume_uuid(value: &str) -> Option<String> {
+    let normalized = value.to_ascii_uppercase();
+    let valid = normalized.len() == 36
+        && normalized.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()
+            }
+        });
+    valid.then_some(normalized)
+}
+
+fn valid_helper_code_requirement(value: &str) -> bool {
+    const PREFIX: &str = "identifier \"";
+    const MIDDLE: &str = "\" and anchor apple generic and certificate leaf[subject.OU] = \"";
+    let Some(remainder) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    let Some((identifier, team)) = remainder.split_once(MIDDLE) else {
+        return false;
+    };
+    let Some(team) = team.strip_suffix('"') else {
+        return false;
+    };
+    let identifier_valid = identifier.len() <= 255
+        && identifier.split('.').count() >= 2
+        && identifier.split('.').all(|component| {
+            !component.is_empty()
+                && component.len() <= 63
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && component
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && component
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        });
+    identifier_valid
+        && team.len() == 10
+        && team
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -2028,12 +2228,14 @@ impl RawExecutorProductConfig {
                 _,
                 SandboxPrivilegePolicy::Host
             )
-        ) || (matches!(
-            provider_kind,
-            ProviderKind::WindowsNative | ProviderKind::MacosNative
-        ) && (network != NetworkPolicy::Host
-            || root_filesystem != RootFilesystemPolicy::Host
-            || privilege != SandboxPrivilegePolicy::Host))
+        ) || (matches!(provider_kind, ProviderKind::WindowsNative)
+            && (network != NetworkPolicy::Host
+                || root_filesystem != RootFilesystemPolicy::Host
+                || privilege != SandboxPrivilegePolicy::Host))
+            || (provider_kind == ProviderKind::MacosVirtualization
+                && (network != NetworkPolicy::Disabled
+                    || root_filesystem != RootFilesystemPolicy::Writable
+                    || privilege != SandboxPrivilegePolicy::Unprivileged))
         {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
@@ -2047,7 +2249,9 @@ impl RawExecutorProductConfig {
         let tool_cache = parse_path(self.tool_cache)?;
         let temp = parse_path(self.temp)?;
         let path_separator = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => ':',
+            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
+                ':'
+            }
             ProviderKind::WindowsNative => ';',
         };
         if target_is_root(&home)
@@ -2062,26 +2266,15 @@ impl RawExecutorProductConfig {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
         let toolchain = self.toolchain.validate(provider_kind)?;
-        let executor_contract = if provider_kind == ProviderKind::MacosNative {
-            automata_ci_job_executor_github::GithubJobExecutorConfig::host_shared(
-                network,
-                root_filesystem,
-                privilege,
-                default_step_timeout,
-                self.maximum_output_bytes,
-                runner_root.clone(),
-            )
-        } else {
-            automata_ci_job_executor_github::GithubJobExecutorConfig::new(
-                resources,
-                network,
-                root_filesystem,
-                privilege,
-                default_step_timeout,
-                self.maximum_output_bytes,
-                runner_root.clone(),
-            )
-        };
+        let executor_contract = automata_ci_job_executor_github::GithubJobExecutorConfig::new(
+            resources,
+            network,
+            root_filesystem,
+            privilege,
+            default_step_timeout,
+            self.maximum_output_bytes,
+            runner_root.clone(),
+        );
         executor_contract.map_err(|_| RunnerProductConfigError::InvalidExecutor)?;
         Ok(ExecutorProductConfig {
             resources,
@@ -2110,7 +2303,7 @@ fn provider_target_path(
         return Err(RunnerProductConfigError::InvalidExecutor);
     }
     match provider_kind {
-        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosNative => {
+        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
             TargetPath::posix(value)
         }
         ProviderKind::WindowsNative => TargetPath::windows(value),
@@ -2202,7 +2395,7 @@ impl RawToolchainConfig {
                     && config.node20.is_none()
                     && config.node24.is_none()
             }
-            ProviderKind::MacosNative => {
+            ProviderKind::MacosVirtualization => {
                 config.bash.is_some()
                     && config.sh.is_some()
                     && config.install.is_some()
