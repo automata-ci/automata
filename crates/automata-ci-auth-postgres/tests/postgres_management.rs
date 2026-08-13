@@ -24,8 +24,21 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
-use automata_ci_auth_postgres::PostgresHumanRbacManagementRepository;
+use automata_ci_auth_postgres::{
+    PostgresHumanRbacManagementRepository,
+    management::{
+        ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
+        MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, PrepareRunnerEnrollment,
+        RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
+    },
+};
+use automata_ci_core::{
+    Architecture, OperatingSystem, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel,
+    RunnerPlatform, Sha256Digest,
+};
 use automata_ci_postgres_test_support::TestClock;
+use automata_ci_runner_auth::RunnerMachineDirectory as _;
+use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -3157,6 +3170,452 @@ async fn grant_role_rechecks_active_target_after_the_option_snapshot() -> TestRe
         .fetch_one(pool)
         .await?;
         assert_eq!(inserted, 0);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the integration test keeps issuance, concurrent consumption, and durable assertions contiguous"
+)]
+async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResult {
+    run_with_database(|database| async move {
+        let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
+        seed_tenant(pool, "runner-enrollment").await?;
+        let manager = Uuid::new_v4();
+        seed_member(pool, "runner-enrollment", manager, "runner-manager", "runner-manager")
+            .await?;
+        let role_id = Uuid::new_v4();
+        seed_role(
+            pool,
+            "runner-enrollment",
+            role_id,
+            "runner-enroller",
+            false,
+            &["runners:enroll"],
+        )
+        .await?;
+        seed_binding(
+            pool,
+            "runner-enrollment",
+            Uuid::new_v4(),
+            manager,
+            role_id,
+        )
+        .await?;
+        let session_id = Uuid::new_v4();
+        let authority_revision =
+            seed_session(pool, "runner-enrollment", manager, session_id).await?;
+        let repository = PostgresHumanRbacManagementRepository::new(pool.clone());
+        let token_sha256 = [7_u8; 32];
+        let enrollment_id = Uuid::new_v4();
+        let issued = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-runner-token",
+                ),
+                enrollment_id,
+                token_sha256,
+                runner_group: "trusted-linux".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        let ManagementMutationOutcome::Applied(issued) = issued else {
+            return Err("runner token was not issued".into());
+        };
+        let retried = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "retry-runner-token",
+                ),
+                enrollment_id,
+                token_sha256,
+                runner_group: "trusted-linux".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        let ManagementMutationOutcome::Applied(retried) = retried else {
+            return Err("identical runner-token retry was not applied".into());
+        };
+        assert_eq!(retried, issued);
+        let successful_create_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM security_audit_events WHERE action='runner.enrollment_token.create' AND resource_id=$1 AND outcome='succeeded'",
+        )
+        .bind(enrollment_id.hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(successful_create_audits, 1);
+        let conflicting = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "conflicting-runner-token",
+                ),
+                enrollment_id,
+                token_sha256: [6_u8; 32],
+                runner_group: "trusted-linux".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        assert!(matches!(
+            conflicting,
+            ManagementMutationOutcome::AlreadyExists
+        ));
+        let racing_token_sha256 = [18_u8; 32];
+        let left_enrollment_id = Uuid::new_v4();
+        let right_enrollment_id = Uuid::new_v4();
+        let (left, right) = tokio::join!(
+            repository.create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "racing-runner-token-left",
+                ),
+                enrollment_id: left_enrollment_id,
+                token_sha256: racing_token_sha256,
+                runner_group: "race-left".to_owned(),
+                lifetime_ms: 60_000,
+            }),
+            repository.create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "racing-runner-token-right",
+                ),
+                enrollment_id: right_enrollment_id,
+                token_sha256: racing_token_sha256,
+                runner_group: "race-right".to_owned(),
+                lifetime_ms: 60_000,
+            }),
+        );
+        let racing_outcomes = [left?, right?];
+        assert_eq!(
+            racing_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ManagementMutationOutcome::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            racing_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ManagementMutationOutcome::AlreadyExists))
+                .count(),
+            1
+        );
+        let racing_state: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runner_enrollment_tokens WHERE token_sha256=$1),(SELECT count(*) FROM runner_groups WHERE tenant_id='runner-enrollment' AND name IN ('race-left','race-right'))",
+        )
+        .bind(racing_token_sha256.as_slice())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(racing_state, (1, 1));
+        let first_operation_id = Uuid::new_v4();
+        let second_operation_id = Uuid::new_v4();
+        let first_request_sha256 = [10_u8; 32];
+        let second_request_sha256 = [11_u8; 32];
+        assert!(matches!(
+            repository
+                .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                    token_sha256,
+                    operation_id: first_operation_id,
+                    request_sha256: first_request_sha256,
+                })
+                .await?,
+            RunnerEnrollmentPrepareOutcome::Prepared(scope)
+                if scope.enrollment_id == enrollment_id
+                    && scope.runner_group == "trusted-linux"
+                    && scope.database_time_ms > 0
+        ));
+
+        let group = RunnerGroup::new("trusted-linux")?;
+        let label = RunnerLabel::new("linux")?;
+        let certificate_issued_at_seconds: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT",
+        )
+        .fetch_one(pool)
+        .await?;
+        let consume = |operation_id: Uuid,
+                       request_sha256: [u8; 32],
+                       response: &[u8],
+                       runner_id: RunnerId,
+                       name: &str,
+                       certificate_byte: u8| {
+            let capabilities = RunnerCapabilities::new(
+                runner_id,
+                RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+            )
+            .with_groups([group.clone()])
+            .with_labels([label.clone()])
+            .with_max_parallel_jobs(2)
+            .expect("valid slots");
+            ConsumeRunnerEnrollment {
+                token_sha256,
+                operation_id,
+                request_sha256,
+                runner_id: runner_id.as_uuid(),
+                runner_name: name.to_owned(),
+                capabilities,
+                certificate_leaf_sha256: [certificate_byte; 32],
+                certificate_issued_at_seconds,
+                certificate_expires_at_seconds: certificate_issued_at_seconds
+                    + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+                response: response.to_vec(),
+            }
+        };
+        let extra_group_runner = RunnerId::new();
+        let extra_group_capabilities = RunnerCapabilities::new(
+            extra_group_runner,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_groups([group.clone(), RunnerGroup::new("unrelated-group")?])
+        .with_labels([label.clone()])
+        .with_max_parallel_jobs(2)?;
+        assert_eq!(
+            repository
+                .consume_runner_enrollment(ConsumeRunnerEnrollment {
+                    token_sha256,
+                    operation_id: Uuid::new_v4(),
+                    request_sha256: [16_u8; 32],
+                    runner_id: extra_group_runner.as_uuid(),
+                    runner_name: "runner-with-extra-group".to_owned(),
+                    capabilities: extra_group_capabilities,
+                    certificate_leaf_sha256: [17_u8; 32],
+                    certificate_issued_at_seconds,
+                    certificate_expires_at_seconds: certificate_issued_at_seconds
+                        + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+                    response: br#"{"runner":"extra-group"}"#.to_vec(),
+                })
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Rejected
+        );
+        let rejected_state: (i64, i64, bool) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runners),(SELECT count(*) FROM runner_machine_certificates),redeem_response IS NULL FROM runner_enrollment_tokens WHERE id=$1",
+        )
+        .bind(enrollment_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(rejected_state, (0, 0, true));
+        let first_response = br#"{"runner":"one"}"#;
+        let second_response = br#"{"runner":"two"}"#;
+        let first_runner = RunnerId::new();
+        let second_runner = RunnerId::new();
+        let (first, second) = tokio::join!(
+            repository.consume_runner_enrollment(consume(
+                first_operation_id,
+                first_request_sha256,
+                first_response,
+                first_runner,
+                "runner-one",
+                8,
+            )),
+            repository.consume_runner_enrollment(consume(
+                second_operation_id,
+                second_request_sha256,
+                second_response,
+                second_runner,
+                "runner-two",
+                9,
+            ))
+        );
+        let outcomes = [first?, second?];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerEnrollmentConsumeOutcome::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerEnrollmentConsumeOutcome::Rejected))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            repository
+                .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                    token_sha256,
+                    operation_id: Uuid::new_v4(),
+                    request_sha256: [12_u8; 32],
+                })
+                .await?,
+            RunnerEnrollmentPrepareOutcome::Rejected
+        ));
+        let replay = if matches!(outcomes[0], RunnerEnrollmentConsumeOutcome::Applied(_)) {
+            (
+                first_operation_id,
+                first_request_sha256,
+                first_response.as_slice(),
+                first_runner,
+                8_u8,
+            )
+        } else {
+            (
+                second_operation_id,
+                second_request_sha256,
+                second_response.as_slice(),
+                second_runner,
+                9_u8,
+            )
+        };
+        assert_eq!(
+            repository
+                .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                    token_sha256,
+                    operation_id: replay.0,
+                    request_sha256: replay.1,
+                })
+                .await?,
+            RunnerEnrollmentPrepareOutcome::Replayed(replay.2.to_vec())
+        );
+        let machine = PostgresRunnerMachineDirectory::new(pool.clone())
+            .find_by_leaf_sha256(Sha256Digest::from_bytes([replay.4; 32]))
+            .await?
+            .ok_or("enrolled runner certificate did not resolve through machine authority")?;
+        assert_eq!(machine.runner_id(), replay.3);
+        assert_eq!(
+            machine.external_identity().as_str(),
+            format!("automata:runner:{}", replay.3.as_uuid().hyphenated())
+        );
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runners),(SELECT count(*) FROM runner_machine_certificates),(SELECT count(*) FROM security_audit_events WHERE action='runner.enroll')",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(counts, (1, 1, 1));
+
+        let expiring_token_sha256 = [13_u8; 32];
+        let expiring_id = Uuid::new_v4();
+        let expiring = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-expiring-runner-token",
+                ),
+                enrollment_id: expiring_id,
+                token_sha256: expiring_token_sha256,
+                runner_group: "trusted-linux".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        let ManagementMutationOutcome::Applied(expiring) = expiring else {
+            return Err("expiring runner token was not issued".into());
+        };
+        let mut gate = pool.begin().await?;
+        sqlx::query("SELECT id FROM runner_enrollment_tokens WHERE id=$1 FOR UPDATE")
+            .bind(expiring_id)
+            .execute(&mut *gate)
+            .await?;
+        let expiring_runner = RunnerId::new();
+        let expiring_capabilities = RunnerCapabilities::new(
+            expiring_runner,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_groups([group])
+        .with_labels([label.clone()])
+        .with_max_parallel_jobs(2)?;
+        let certificate_issued_at_seconds = clock.now().await?.div_euclid(1_000);
+        let repository_for_waiter = repository.clone();
+        let waiter = tokio::spawn(async move {
+            repository_for_waiter
+                .consume_runner_enrollment(ConsumeRunnerEnrollment {
+                    token_sha256: expiring_token_sha256,
+                    operation_id: Uuid::new_v4(),
+                    request_sha256: [14_u8; 32],
+                    runner_id: expiring_runner.as_uuid(),
+                    runner_name: "runner-after-expiry".to_owned(),
+                    capabilities: expiring_capabilities,
+                    certificate_leaf_sha256: [15_u8; 32],
+                    certificate_issued_at_seconds,
+                    certificate_expires_at_seconds: certificate_issued_at_seconds
+                        + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+                    response: br#"{"runner":"expired"}"#.to_vec(),
+                })
+                .await
+        });
+        if !wait_for_blocked_transaction(pool).await? {
+            gate.rollback().await?;
+            return Err(format!(
+                "runner enrollment did not wait on its token row: {:?}",
+                waiter.await?
+            )
+            .into());
+        }
+        clock.set(expiring.expires_at_ms).await?;
+        gate.commit().await?;
+        assert_eq!(
+            waiter.await??,
+            RunnerEnrollmentConsumeOutcome::Rejected
+        );
+        let expired_state: (i64, i64, i64, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runners WHERE id=$2),
+                (SELECT count(*) FROM runner_machine_certificates WHERE leaf_sha256=$3),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.enroll' AND resource_id=$4),
+                consumed_at_ms IS NULL,
+                consumed_runner_id IS NULL,
+                redeem_operation_id IS NULL,
+                redeem_request_sha256 IS NULL,
+                redeem_response IS NULL,
+                redeem_certificate_expires_at_seconds IS NULL
+            FROM runner_enrollment_tokens
+            WHERE id=$1
+            ",
+        )
+        .bind(expiring_id)
+        .bind(expiring_runner.as_uuid())
+        .bind([15_u8; 32].as_slice())
+        .bind(expiring_runner.as_uuid().hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            expired_state,
+            (0, 0, 0, true, true, true, true, true, true)
+        );
+        clock
+            .set(
+                certificate_issued_at_seconds
+                    .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+                    .and_then(|seconds| seconds.checked_mul(1_000))
+                    .ok_or("certificate expiry overflow")?,
+            )
+            .await?;
+        assert!(matches!(
+            repository
+                .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                    token_sha256,
+                    operation_id: replay.0,
+                    request_sha256: replay.1,
+                })
+                .await?,
+            RunnerEnrollmentPrepareOutcome::Rejected
+        ));
         Ok(())
     })
     .await

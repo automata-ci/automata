@@ -124,7 +124,7 @@ These files and contracts are merge hotspots. Assign one owner at a time.
   event registry split lands.
 - GitHub Check store and publisher: lane X.
 - UI shared models and renderer contract: lane X.
-- runner routing, registration, and static fleet files: lane P after the
+- runner routing, enrollment, and lifecycle files: lane P after the
   unchanged workflow gate.
 - root `Cargo.toml`, `Cargo.lock`, compatibility docs, and shared CI workflow:
   the wave's integration owner.

@@ -5,7 +5,6 @@ mod admission;
 mod assignment;
 mod attempt;
 mod blocked;
-mod bootstrap;
 mod cancellation;
 mod conformance;
 mod error;
@@ -42,6 +41,7 @@ mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
 mod routing;
 mod runnable;
+mod runner_capability_admission;
 mod runner_control;
 mod runner_payload;
 mod runtime_authority;
@@ -71,11 +71,6 @@ pub use attempt::{
 pub use automata_ci_core::Sha256Digest;
 pub use blocked::{
     BlockedAttempt, BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt,
-};
-pub use bootstrap::{
-    EnsureTenant, MAX_STATIC_RUNNERS, ProductBootstrapRepository, ProductBootstrapStoreError,
-    RunnerCapabilityReadiness, StaticBootstrapValueError, StaticRunnerFleet,
-    StaticRunnerRegistration,
 };
 pub use cancellation::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
@@ -403,6 +398,10 @@ pub use runnable::{
     MAX_RUNNABLE_SCAN_LIMIT, RunnableAttempt, RunnableAttemptError, RunnableAttemptRepository,
     RunnableCursorAdvance, RunnableQueueKey, RunnableScanError, RunnableScanLimit,
     RunnableScanPage, RunnableScanRequest,
+};
+pub use runner_capability_admission::{
+    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
+    RunnerCapabilityReadiness,
 };
 pub use runner_control::{
     CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,

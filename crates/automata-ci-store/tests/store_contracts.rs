@@ -9,8 +9,6 @@ mod adapter_port;
 mod admission_event_limits;
 #[path = "attempt_api.rs"]
 mod attempt_api;
-#[path = "bootstrap_api.rs"]
-mod bootstrap_api;
 #[path = "g1_api.rs"]
 mod g1_api;
 #[path = "github_authenticated_event.rs"]
@@ -57,6 +55,10 @@ mod provider_delivery_api;
 mod provider_delivery_receipt;
 #[path = "reusable_workflow_admission_api.rs"]
 mod reusable_workflow_admission_api;
+#[path = "runner_capability_admission_api.rs"]
+mod runner_capability_admission_api;
+#[path = "runner_enrollment_schema.rs"]
+mod runner_enrollment_schema;
 #[path = "runner_payload_tombstone_api.rs"]
 mod runner_payload_tombstone_api;
 #[path = "runtime_authority_api.rs"]

@@ -11,7 +11,7 @@ fn startup_errors_do_not_disclose_secret_source_references() {
             "127.0.0.1:0",
             "--runner-listen",
             "127.0.0.1:0",
-            "--runner-client-ca-source",
+            "--runner-client-ca-cert-source",
             &accidental_inline_secret,
         ])
         .output()

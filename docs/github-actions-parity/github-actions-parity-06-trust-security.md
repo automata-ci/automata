@@ -365,8 +365,8 @@ Acceptance:
 - [ ] Cross-attempt, fence, or session replay always fails.
 - [ ] A weaker runner cannot receive stronger authority.
 - [ ] Tests restart real processes rather than only in-memory fakes.
-- [ ] This package proves the existing static-registration runner identity
-  boundary; `FLT-01` reruns the suite before dynamic registration is accepted.
+- [ ] This package proves the one-use enrollment and durable leaf-digest runner
+  identity boundary; `FLT-01` reruns the suite before any enrollment expansion.
 
 ---
 

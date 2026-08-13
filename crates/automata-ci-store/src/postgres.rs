@@ -23,7 +23,6 @@ use crate::{
 };
 
 mod admission;
-mod bootstrap;
 mod conformance;
 mod g1;
 mod github_checks;
@@ -49,6 +48,7 @@ mod provider_delivery;
 mod publication;
 mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
+mod runner_capability_admission;
 mod runtime_authority;
 mod secret_custody;
 mod secret_management;
@@ -391,9 +391,9 @@ impl RunnerPayloadEncryption {
         Self {
             codec: Arc::new(EnvelopeCodec::new(provider)),
             command_purpose: KeyPurpose::new(RUNNER_COMMAND_ENCRYPTION_PURPOSE)
-                .expect("the static runner command encryption purpose is valid"),
+                .expect("the runner command encryption purpose is valid"),
             response_purpose: KeyPurpose::new(RUNNER_RPC_RESPONSE_ENCRYPTION_PURPOSE)
-                .expect("the static runner RPC response encryption purpose is valid"),
+                .expect("the runner RPC response encryption purpose is valid"),
         }
     }
 }

@@ -24,14 +24,14 @@ definition of done.
 
 ## Current Windows boundary
 
-The latest shipped Windows-native path is a trusted-host, single-slot runner for
-PowerShell, `cmd`, and optional Python `run:` steps. Job Objects provide process,
-CPU, and memory ceilings, but the job still uses host networking, the host
-filesystem, and the unchanged service identity. All action steps, job and
-service containers, and parallel jobs remain unsupported. Product configuration
-rejects reparse traversal of runner roots, but does not yet attest root DACL
-ownership or hard-link counts. Hosted Windows CI is currently disabled, so
-component tests are not release-gate evidence.
+The Windows-native implementation is a source-only, unprovisionable trusted-host
+experiment for single-slot PowerShell, `cmd`, and optional Python `run:` steps.
+Job Objects provide process, CPU, and memory ceilings, but the job still uses
+host networking, the host filesystem, and the unchanged service identity. All
+action steps, job and service containers, and parallel jobs remain unsupported.
+Product configuration rejects reparse traversal of runner roots, but does not
+yet attest root DACL ownership or hard-link counts. It has no enrollment path or
+hosted release gate, so component tests are not product acceptance evidence.
 
 ## Work packages
 

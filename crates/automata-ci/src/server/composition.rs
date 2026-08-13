@@ -58,9 +58,9 @@ use automata_ci_store::{
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
     ManagedSecretAuthorityRepository, PostgresSecretCustodyRepository,
     PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
-    ProductBootstrapRepository as _, ProtectedEnvironmentRepository,
-    RepositoryPublicationRepository, RepositorySecretManagementReadRepository,
-    RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository,
+    ProtectedEnvironmentRepository, RepositoryPublicationRepository,
+    RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
+    ReusableWorkflowRuntimeRepository, RunnerCapabilityAdmissionRepository as _,
     RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
     RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
     RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
@@ -87,7 +87,6 @@ use super::github_oidc::{
     GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
 };
 use super::state_metrics::ControlPlaneStateSampler;
-use super::static_registration::load_static_runner_fleet;
 use super::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, GithubProviderRuntime,
     GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder, MaintenanceClock,
@@ -112,6 +111,7 @@ use crate::app::{
         OperationalRepositorySecretWebData, RepositorySecretWebData,
         repository_secret_browser_router,
     },
+    runner_enrollment_api::{RunnerCertificateIssuer, runner_enrollment_api_router},
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
@@ -300,7 +300,7 @@ impl ProductionComponents {
         } else {
             RunnerCapabilityReadiness::unavailable()
         };
-        apply_product_bootstrap(config, store.as_ref(), capability_readiness).await?;
+        verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -338,6 +338,7 @@ impl ProductionComponents {
             secret_management.as_ref(),
             repository_secret_web.clone(),
             fallback_tenant,
+            capability_readiness,
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
@@ -543,37 +544,16 @@ impl ProductionComponents {
     }
 }
 
-async fn apply_product_bootstrap(
-    config: &ServerConfig,
+async fn verify_runner_capability_readiness(
     store: &PostgresStore,
     readiness: RunnerCapabilityReadiness,
 ) -> Result<(), ServerCompositionError> {
-    // This audit must precede the no-configuration return. Both durable and
-    // static capability inventory are admitted against products whose full
-    // operational readiness this replica has already proved.
+    // Durable capability inventory is admitted only against products whose
+    // full operational readiness this replica has already proved.
     store
         .verify_runner_capability_readiness(readiness)
         .await
-        .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    if config.static_runner_registration_file.is_none() {
-        return Ok(());
-    }
-    let observed_seconds = i64::try_from(SystemClock.now().as_seconds())
-        .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-
-    let fleet = config
-        .static_runner_registration_file
-        .as_deref()
-        .map(|path| load_static_runner_fleet(path, observed_seconds, readiness))
-        .transpose()
-        .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-
-    if let Some(fleet) = fleet {
-        store
-            .apply_static_runner_fleet(fleet)
-            .await
-            .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    }
+        .map_err(|_| ServerCompositionError::RunnerCapabilityAdmission)?;
     Ok(())
 }
 
@@ -1451,7 +1431,11 @@ mod setup_page_composition_tests {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "human API composition keeps each independently owned product boundary explicit"
+)]
 async fn build_human_api(
     config: &ServerConfig,
     store: Arc<PostgresStore>,
@@ -1460,6 +1444,7 @@ async fn build_human_api(
     secret_management: Option<&SecretManagementComposition>,
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
+    capability_readiness: RunnerCapabilityReadiness,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
@@ -1480,6 +1465,26 @@ async fn build_human_api(
         None => Router::new(),
     };
 
+    let enrollment_issuer = if config.human_auth().is_some() {
+        let client_ca = config.load_client_ca_pem()?;
+        let client_ca_key = config.load_client_ca_private_key_pem()?;
+        let server_ca = config.load_runner_server_ca_pem()?;
+        let authority = config
+            .runner_public_authority
+            .as_ref()
+            .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?;
+        Some(Arc::new(
+            RunnerCertificateIssuer::from_pem(
+                &client_ca,
+                &client_ca_key,
+                &server_ca,
+                format!("https://{authority}/"),
+            )
+            .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
+        ))
+    } else {
+        None
+    };
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {
             router,
@@ -1591,6 +1596,12 @@ async fn build_human_api(
 
     let management = Arc::new(PostgresHumanRbacManagementRepository::new(
         store.postgres_pool().clone(),
+    ));
+    router = router.merge(runner_enrollment_api_router(
+        Arc::clone(&management),
+        enrollment_issuer.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+        Arc::clone(runtime.clock()),
+        capability_readiness,
     ));
     let management_api_repository: Arc<
         dyn automata_ci_auth::management::HumanRbacManagementRepository,
@@ -1874,6 +1885,9 @@ pub enum ServerCompositionError {
     /// The configured human-authentication adapters or policies are invalid.
     #[error("human authentication configuration is invalid")]
     InvalidHumanAuthentication,
+    /// Runner enrollment CA material or public endpoint was invalid.
+    #[error("runner enrollment configuration is invalid")]
+    InvalidRunnerEnrollment,
     /// The configured built-in provider violates the encrypted secret contract.
     #[error("secret management configuration is invalid")]
     InvalidSecretManagement,
@@ -1886,12 +1900,9 @@ pub enum ServerCompositionError {
     /// Installation setup could not be armed from the exact operator configuration.
     #[error("human authentication installation setup could not be armed")]
     HumanAuthenticationSetup,
-    /// The privileged static-runner document or its certificate set was invalid.
-    #[error("static runner registration configuration is invalid")]
-    InvalidStaticRunnerRegistration,
-    /// Validated product bootstrap state could not be applied transactionally.
-    #[error("product bootstrap state could not be applied")]
-    ProductBootstrap,
+    /// Durable runner capabilities do not match products ready on this replica.
+    #[error("runner capability admission failed")]
+    RunnerCapabilityAdmission,
     /// A fresh process-local run-finalization worker identity was invalid.
     #[error("logical run-finalization worker identity is invalid")]
     InvalidLogicalRunFinalizationWorker,

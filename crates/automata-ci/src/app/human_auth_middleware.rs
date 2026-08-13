@@ -212,6 +212,7 @@ fn request_surface(path: &str) -> HumanRequestSurface {
                 | "/api/v1/auth/device/poll"
                 | "/api/v1/setup/device"
                 | "/api/v1/setup/device/poll"
+                | "/api/v1/runner-enrollments/redeem"
         )
     {
         HumanRequestSurface::Bypass

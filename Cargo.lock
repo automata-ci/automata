@@ -344,8 +344,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-auth",
+ "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-postgres-test-support",
+ "automata-ci-runner-auth",
+ "automata-ci-runner-auth-postgres",
  "automata-ci-store",
  "serde",
  "serde_json",
@@ -760,6 +763,7 @@ dependencies = [
  "automata-ci-workflow-github",
  "axum",
  "base64 0.23.1",
+ "bytes",
  "clap",
  "http 1.5.0",
  "kube",
@@ -773,12 +777,14 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "time",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -3982,6 +3988,7 @@ version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57f6d249aad744e274e682777a50283a225a32705394ee6d5fcc01efa25e4055"
 dependencies = [
+ "pem",
  "ring",
  "rustls-pki-types",
  "time",

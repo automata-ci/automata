@@ -1,12 +1,12 @@
 # Control-plane setup
 
-This guide starts `automata server`, PostgreSQL, RustFS, and three statically
-registered runner processes on a development machine. Optional sections add
+This guide starts `automata server`, PostgreSQL, RustFS, and three dynamically
+enrolled runner processes on a development machine. Optional sections add
 GitHub login, provider ingress, and the built-in secret provider.
 
 > [!CAUTION]
-> This is not a production deployment. Runner enrollment is static, production
-> retention is incomplete, and the end-to-end compatibility gate is still open.
+> This is not a production deployment. Automated certificate rotation,
+> production retention, and the end-to-end compatibility gate are still open.
 
 ## What you will run
 
@@ -82,6 +82,8 @@ CA is also the trust root for experimental runner client certificates:
 ```console
 openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 30 \
   -subj '/CN=Automata local development CA' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
   -keyout "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca-key.pem" \
   -out "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem"
 
@@ -105,18 +107,12 @@ chmod 0600 "$AUTOMATA_LOCAL_SECRET_DIR"/*-key.pem
 These files are deliberately disposable and unsuitable for a shared machine or
 production environment.
 
-### Bootstrap three static local runners
+### Prepare three local runners for enrollment
 
-The bootstrap composition has no enrollment API. Its supported initial
-runner-admission path is one privileged declarative fleet file loaded at server
-startup. A Linux host runs exactly three independent single-slot processes.
-Run the non-`sudo` derivation commands below from one private non-root staging
-account. The deployed host uses three separate service accounts (the checked-in
-units use UID/GID pairs 1001 through 1003). Python 3 and GNU coreutils `date`
-are also required.
-
-Copy all three examples to an ignored host-specific directory and review every
-host, resource, profile, and identity value:
+Copy the three examples to an ignored host-specific directory and review every
+host, resource, profile, and identity value. Each needs a unique `runner_id`,
+the common `default` group, instance-specific state paths, and file-backed TLS
+destinations that do not exist yet:
 
 ```console
 export AUTOMATA_RUNNER_CONFIG_DIR="$(pwd -P)/target/runner-local/config"
@@ -125,196 +121,22 @@ for instance in 1 2 3; do
   install -m 0600 -- \
     "crates/automata-ci-runner/config/runner.local-${instance}.example.json" \
     "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json"
-done
-```
-
-Follow the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md)
-when adapting those files. Each needs a unique canonical `runner_id`, exactly
-one common runner group, instance-specific durable/transient paths and
-credentials, and `max_parallel_jobs: 1`. The next loop validates each complete
-configuration and emits its exact durable-registration `RunnerCapabilities`
-ceiling. It validates credential references but does not open their values:
-
-```console
-for instance in 1 2 3; do
   automata-runner capabilities \
-    --config "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json" \
-    > "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-capabilities.json"
+    --config "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json"
 done
 ```
 
-Issue three different CA-signed leaves whose extended key usage is exactly
-`clientAuth`. A leaf or private key must never be reused between runner IDs.
-The registration loader rejects CA leaves, CA/key-signing usage, missing or
-additional extended usages, a PEM certificate chain, and an expiry that differs
-from the leaf's exact X.509 `notAfter` value:
-
-```console
-umask 077
-for instance in 1 2 3; do
-  openssl req -newkey rsa:3072 -nodes -sha256 \
-    -subj "/CN=Automata local static runner ${instance}" \
-    -addext 'basicConstraints=critical,CA:FALSE' \
-    -addext 'keyUsage=critical,digitalSignature' \
-    -addext 'extendedKeyUsage=critical,clientAuth' \
-    -keyout "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-key.pem" \
-    -out "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.csr"
-
-  openssl x509 -req -sha256 -days 30 \
-    -in "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.csr" \
-    -CA "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
-    -CAkey "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca-key.pem" \
-    -CAserial "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.srl" \
-    -copy_extensions copy \
-    -out "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem"
-
-  LC_ALL=C date --utc --date="$(
-    LC_ALL=C openssl x509 \
-      -in "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
-      -noout -enddate | sed 's/^notAfter=//'
-  )" +%s > "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-not-after"
-done
-```
-
-Build one static fleet document from all three canonical outputs. The builder
-requires one common group, future certificate expiries, unique runner IDs, and
-exactly one slot per process:
-
-```console
-python3 - "$AUTOMATA_LOCAL_SECRET_DIR" \
-  > "$AUTOMATA_LOCAL_SECRET_DIR/static-runners.json" <<'PY'
-import json
-import pathlib
-import sys
-import time
-
-root = pathlib.Path(sys.argv[1])
-now = int(time.time())
-runners = []
-fleet_group = None
-seen_ids = set()
-
-for instance in range(1, 4):
-    with (root / f"runner-{instance}-capabilities.json").open(
-        encoding="utf-8"
-    ) as source:
-        capabilities = json.load(source)
-
-    groups = capabilities.get("groups")
-    if not isinstance(groups, list) or len(groups) != 1:
-        raise SystemExit(f"runner {instance} capabilities must name one group")
-    if fleet_group is None:
-        fleet_group = groups[0]
-    elif groups[0] != fleet_group:
-        raise SystemExit("all three runners must use one fleet group")
-    if capabilities.get("max_parallel_jobs") != 1:
-        raise SystemExit(f"runner {instance} must advertise exactly one slot")
-
-    runner_id = capabilities["runner_id"]
-    if runner_id in seen_ids:
-        raise SystemExit("runner IDs must be unique")
-    seen_ids.add(runner_id)
-    expires_at_seconds = int(
-        (root / f"runner-{instance}-not-after").read_text(encoding="ascii")
-    )
-    if expires_at_seconds <= now:
-        raise SystemExit(f"runner {instance} certificate must be current")
-
-    runners.append({
-        "id": runner_id,
-        "name": f"local-runner-{instance}",
-        "external_identity": f"local-static:{runner_id}",
-        "labels": capabilities["labels"],
-        "capabilities": capabilities,
-        "slots": 1,
-        "active_client_certificates": [{
-            "source": f"file:/etc/automata/bootstrap/runner-{instance}.pem",
-            "expires_at_seconds": expires_at_seconds,
-        }],
-    })
-
-document = {
-    "schema_version": 1,
-    "tenant": "local",
-    "group": fleet_group,
-    "runners": runners,
-}
-json.dump(document, sys.stdout, sort_keys=True, separators=(",", ":"))
-sys.stdout.write("\n")
-PY
-```
-
-The three processes expose three jobs in aggregate. At the checked-in per-job
-ceiling, the host needs at least 12,000 CPU millicores, 48 GiB of job memory,
-and 12,288 job PIDs, plus runner, Podman, and operating-system overhead. Keep
-every static `slots` value equal to its configuration's
-`max_parallel_jobs: 1`; increasing one process to three slots would create
-five host jobs rather than the requested three.
-
-The server-side leaves and fleet document have a stricter trust boundary than
-ordinary secret files: every ancestor is root-owned and not group- or
-world-writable, and each file is root-owned, single-linked, and has no write
-bits. Install separate copies so each runner can keep its private key
-owner-only:
-
-```console
-test "$(id -u)" -ne 0
-
-sudo install -d -o root -g root -m 0755 \
-  /etc/automata /etc/automata/bootstrap
-for instance in 1 2 3; do
-  sudo install -o root -g root -m 0444 \
-    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
-    "/etc/automata/bootstrap/runner-${instance}.pem"
-done
-sudo install -o root -g root -m 0444 \
-  "$AUTOMATA_LOCAL_SECRET_DIR/static-runners.json" \
-  /etc/automata/bootstrap/static-runners.json
-
-sudo install -d -o root -g root -m 0755 \
-  /etc/automata-runner /etc/automata-runner/instances
-for instance in 1 2 3; do
-  runner_account="automata-runner-${instance}"
-  sudo install -d -o root -g "$runner_account" -m 0750 \
-    "/etc/automata-runner/instances/${instance}" \
-    "/etc/automata-runner/instances/${instance}/tls" \
-    "/etc/automata-runner/instances/${instance}/secrets"
-  sudo install -o root -g root -m 0444 \
-    "$AUTOMATA_LOCAL_SECRET_DIR/runner-ca.pem" \
-    "/etc/automata-runner/instances/${instance}/tls/server-ca.pem"
-  sudo install -o root -g root -m 0444 \
-    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}.pem" \
-    "/etc/automata-runner/instances/${instance}/tls/runner.pem"
-  sudo install \
-    -o "$runner_account" -g "$runner_account" -m 0600 \
-    "$AUTOMATA_LOCAL_SECRET_DIR/runner-${instance}-key.pem" \
-    "/etc/automata-runner/instances/${instance}/tls/runner-key.pem"
-done
-```
-
-The server loads this exact fleet after migrations and before readiness.
-Reapplying an unchanged document is idempotent; membership, identity, routing,
-slot, or capability drift aborts startup. Certificate rotation is coordinated:
-publish each affected runner's old and new leaves together (at most two),
-restart every server replica, switch and restart that runner process, then omit
-the old leaf and restart every server replica again. Omission revokes the old
-digest and a stale document cannot restore it.
-
-Static registration and TLS identity alone do not make the execution host
-runnable. Before enabling the three-process target, finish the runner guide's
-three owner-only spool keys, service credentials, private state roots, rootless
-Podman mounts, immutable profile, repository bridge, and static-binary
-requirements. The checked-in [host units](../deploy/runner-host/README.md)
-encode the exact three-service lifecycle and aggregate cgroup budget.
+Finish the [runner host guide](../crates/automata-ci-runner/config/README.md):
+create the owner-only spool keys and service credentials, private state roots,
+rootless Podman mounts, and immutable profiles. Do not pre-create the three TLS
+files named by each configuration; enrollment creates them without overwriting.
 
 On Unix, every ordinary server `file:` secret-source reference must be an
 absolute path. Automata opens each path component without following symbolic
 links and accepts only a regular file owned by the server's effective user,
 readable by that owner, with no group or other permission bits. A relative
 path, symlink, FIFO, directory, file owned by another user, or mode such as
-`0640`/`0644` fails startup. The privileged static registration document and
-its referenced leaf are the root-owned, write-bit-free exception governed by
-the stricter rules above. Environment references avoid putting values in
+`0640`/`0644` fails startup. Environment references avoid putting values in
 process arguments, but the service manager must still prevent inherited
 environment disclosure. Prefer a mounted owner-only secret file or a platform
 secret-injection facility for long-running deployments.
@@ -336,20 +158,23 @@ automata server \
   --s3-prefix automata/v1 \
   --s3-access-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-access-key" \
   --s3-secret-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-secret-key" \
-  --runner-client-ca-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
+  --runner-public-url https://localhost:9090/ \
+  --runner-client-ca-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
+  --runner-client-ca-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca-key.pem" \
+  --runner-server-ca-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
   --runner-server-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-chain.pem" \
-  --runner-server-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-key.pem" \
-  --static-runner-registration-file /etc/automata/bootstrap/static-runners.json
+  --runner-server-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-key.pem"
 ```
 
 Startup applies embedded PostgreSQL migrations, verifies the database, and
 performs a conditional immutable write/read probe against RustFS. A failed
 dependency prevents the server from becoming ready.
 
-### Optional GitHub human authentication
+### Enable GitHub human authentication for enrollment
 
-The base command leaves human authentication disabled. To enable it, create a
-GitHub App whose user callback is the external origin plus
+The base command can start without human authentication, but runner enrollment
+is intentionally available only after it is enabled. Create a GitHub App whose
+user callback is the external origin plus
 `/auth/github/callback`, then create local keys:
 
 ```console
@@ -377,6 +202,37 @@ the base command separately encrypts runner messages and GitHub App service
 credentials. Keep both outside PostgreSQL and its backups. See
 [Authentication and authorization](authentication.md#enable-github-human-authentication)
 for setup state, sessions, and key rotation.
+
+### Enroll the three runners
+
+After restarting the server with human authentication configured, sign in once
+and issue a separate 15-minute token for each process. Pipe it directly to the
+runner so it does not enter argv or a shell-history assignment. Literal
+loopback HTTP is accepted only for this explicit development case:
+
+```console
+automata auth login --server http://127.0.0.1:8080
+for instance in 1 2 3; do
+  automata runner token \
+    --server http://127.0.0.1:8080 \
+    --output json \
+  | jq -r .token \
+  | automata-runner enroll \
+      --server http://127.0.0.1:8080 \
+      --config "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json" \
+      --name "local-runner-${instance}"
+done
+```
+
+The runner generates its ECDSA P-256 key locally. The control plane receives a
+CSR, registers the exact configuration capabilities, and returns only the
+signed client chain and server roots. Tokens are tenant/group scoped, one-use,
+and stored only as domain-separated digests. Interrupted enrollment can be
+rerun: a private adjacent stage retains the operation and key until all three
+credential files are durably reconciled, including when the exact server response
+had not yet been staged. The token source is not needed again after that request
+stage has been created. See the
+[security and lifecycle plan](runner-control-plane-security-and-enrollment.md).
 
 ### Optional GitHub provider runtime
 

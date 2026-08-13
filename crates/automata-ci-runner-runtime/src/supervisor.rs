@@ -663,8 +663,9 @@ impl RunnerSessionSupervisor {
         match reply.message().message() {
             ServerToRunner::LeaseOffer(offer) => {
                 // Durable commands are ordered per session and may be replayed
-                // by any concurrent request. The signed offer is authoritative
-                // for its stable slot; the request carrying it is not.
+                // by any concurrent request. The mTLS-authenticated, session-
+                // correlated offer is authoritative for its stable slot; the
+                // request carrying it is not.
                 self.record_lease_offer(session, offer, reply.canonical_bytes())?;
                 Ok(())
             }

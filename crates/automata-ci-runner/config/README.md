@@ -86,9 +86,12 @@ replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
 or kubelet verification.
 
 > [!WARNING]
-> Runner enrollment and certificate lifecycle are not yet a turnkey user flow.
-> This guide is for contributors integrating the G1 end-to-end path, not for a
-> production runner installation.
+> Initial enrollment is available through `automata runner token` and
+> `automata-runner enroll` on Unix hosts. Windows remains an unprovisionable
+> source-only experiment; there is no static-registration fallback. Automated
+> certificate rotation and runner disable/drain/delete lifecycle operations
+> remain planned work; account for that operational gap before a production
+> deployment.
 
 Start with the
 [control-plane setup](https://github.com/automata-ci/automata/blob/main/docs/deployment.md),
@@ -97,7 +100,8 @@ then provision a Linux runner host with the
 
 ## Windows native example
 
-The Windows example is an experimental source-build path for trusted workflows.
+The Windows example is an unprovisionable experimental source-build path for
+trusted workflows.
 It advertises PowerShell and `cmd.exe` shell steps, with optional support for an
 absolute standalone Python interpreter, and uses fresh job directories plus Job
 Object process containment; it is not container or VM isolation. Run
@@ -416,10 +420,10 @@ Each instance `N` expects:
   matching the JSON configuration.
 
 Before starting the host, follow the control-plane guide's
-[static runner bootstrap](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
-for all three configurations: render three canonical capability documents,
-issue three client-only leaves, and bind each digest to its exact distinct
-runner identity. Automated enrollment remains unavailable.
+[runner enrollment](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#enroll-the-three-runners)
+for all three configurations. Create a separate one-use token for each process;
+each runner generates its private key locally, submits its canonical capability
+document, and installs the returned client-only chain and server roots.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

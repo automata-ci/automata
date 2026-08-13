@@ -1089,20 +1089,19 @@ GitHub self-hosted runners include label and group routing, registration,
 ephemeral or JIT operation, autoscaling, and ARC or scale-set patterns. See
 [self-hosted runner reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
 
-Current bootstrap is a privileged declarative static fleet. The shipped Linux
-host uses three independent one-slot runner processes with distinct identities,
+Current registration uses short-lived, one-use, tenant/group-scoped enrollment
+tokens. Each runner generates its own key and submits its exact configured
+capability ceiling in a CSR-based enrollment. The shipped Linux host still uses
+three independent one-slot runner processes with distinct identities,
 credentials, state, and metrics ports `9464`–`9466`; it is not one three-slot
-runner. There is no enrollment API.
+runner.
 
-- [x] Load and atomically validate the current privileged static fleet at
-  startup.
+- [x] Add authenticated token issuance and unauthenticated one-use redemption.
+- [x] Remove privileged static fleet bootstrap rather than retaining a
+  migration or break-glass compatibility path.
 - [x] Negotiate the runner protocol and JobIR ranges before a session or lease;
   the current baseline admits protocol v1 only.
-- [ ] Preserve static loading as a migration and break-glass path when dynamic
-  enrollment lands.
-
-- [ ] Add a runner enrollment and registration API.
-- [ ] Remove the requirement for privileged static fleet bootstrapping.
+- [x] Add a runner enrollment and registration API.
 - [ ] Add credential rotation.
 - [ ] Add disable and enable.
 - [ ] Add drain.
@@ -1162,11 +1161,12 @@ tools, filesystem conventions, and privileges. See
 
 ### Windows
 
-Current Windows execution is a single-slot, trusted-host `run:` boundary for
-PowerShell, `cmd`, and optional Python. Every `uses:` action and all job/service
-containers are rejected; Job Objects bound process lifetime and resource use
-without changing the inherited account, host filesystem, or network. Hosted
-Windows CI is disabled on the current baseline.
+The Windows implementation is a source-only, unprovisionable trusted-host
+`run:` experiment for single-slot PowerShell, `cmd`, and optional Python. Every
+`uses:` action and all job/service containers are rejected; Job Objects bound
+process lifetime and resource use without changing the inherited account, host
+filesystem, or network. It has no enrollment path or hosted release gate on the
+current baseline.
 
 - [ ] Support all `uses:` actions.
 - [ ] Support Node 24 actions.
