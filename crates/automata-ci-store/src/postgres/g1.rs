@@ -46,11 +46,16 @@ use crate::{
     TryClaimReceipt, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
 };
 
+// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
+// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
+// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-rpc-response-metadata:v1";
 
@@ -2696,7 +2701,7 @@ fn decode_runner_log_safety(
         effective_visibility.as_str(),
         "private" | "authenticated" | "public"
     ) || !matches!(reason.as_str(), "repository_policy" | "secret_exposure")
-        || schema != 1
+        || !crate::human_output_publication_safety_schema_is_current(schema)
     {
         return Err(StoreError::corrupt_data(
             "invalid runner log output-safety snapshot",
@@ -2723,7 +2728,8 @@ fn decode_runner_log_safety(
 
 fn runner_log_safety_is_consistent(safety: &DurableRunnerLogSafety) -> bool {
     let raw_policy_is_consistent =
-        safety.schema == 1 && safety.raw_log_disposition == RawLogDisposition::Persist;
+        crate::human_output_publication_safety_schema_is_current(safety.schema)
+            && safety.raw_log_disposition == RawLogDisposition::Persist;
     raw_policy_is_consistent
         && matches!(
             (
@@ -2736,6 +2742,29 @@ fn runner_log_safety_is_consistent(safety: &DurableRunnerLogSafety) -> bool {
         )
         && (safety.secret_exposure != SecretExposureClass::ReadableSecret
             || safety.effective_visibility == "private")
+}
+
+#[cfg(test)]
+mod runner_log_safety_tests {
+    use super::*;
+
+    #[test]
+    fn runner_log_reader_rejects_noncurrent_publication_safety_schema() {
+        let mut safety = DurableRunnerLogSafety {
+            tenant_id: TenantId::new("tenant-1").expect("tenant ID"),
+            secret_exposure: SecretExposureClass::Secretless,
+            raw_log_disposition: RawLogDisposition::Persist,
+            requested_visibility: "private".to_owned(),
+            effective_visibility: "private".to_owned(),
+            reason: "repository_policy".to_owned(),
+            schema: crate::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
+        };
+        assert!(runner_log_safety_is_consistent(&safety));
+        for schema in [0, 2] {
+            safety.schema = schema;
+            assert!(!runner_log_safety_is_consistent(&safety));
+        }
+    }
 }
 
 async fn lock_runner_log_position(

@@ -179,6 +179,41 @@ async fn restart_authenticates_material_and_wrong_bytes_for_same_id_fail() -> Te
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn noncurrent_canary_schema_fails_closed() -> TestResult {
+    run_with_database(|database| async move {
+        let keys = configured("key-schema", &[]);
+        let repository = PostgresSecretCustodyRepository::new(database.pool().clone())
+            .with_key_encryption_provider(key_provider(("key-schema", 0x19), &[]));
+        assert!(matches!(
+            repository
+                .verify_or_create_secret_custody(VerifySecretCustody::configured(keys.clone()))
+                .await?,
+            VerifySecretCustodyOutcome::Verified(_)
+        ));
+
+        sqlx::query(
+            "UPDATE secret_custody_key_canaries \
+             SET canary_schema = 2 \
+             WHERE wrapping_key_id = 'key-schema'",
+        )
+        .execute(database.pool())
+        .await?;
+
+        let restarted = PostgresSecretCustodyRepository::new(database.pool().clone())
+            .with_key_encryption_provider(key_provider(("key-schema", 0x19), &[]));
+        assert!(matches!(
+            restarted
+                .verify_or_create_secret_custody(VerifySecretCustody::configured(keys))
+                .await,
+            Err(SecretCustodyRepositoryError::CorruptData)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn concurrent_first_writers_converge_on_one_authenticated_canary() -> TestResult {
     run_with_database(|database| async move {
         let first = PostgresSecretCustodyRepository::new(database.pool().clone())

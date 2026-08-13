@@ -19,8 +19,9 @@ use crate::{
     SecretWorkloadGrantId, SessionEpoch, TenantScope,
 };
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const EVIDENCE_DOMAIN: &[u8] = b"automata/store/managed-secret-authority:v1\0";
 
 #[derive(Debug)]
@@ -220,6 +221,7 @@ async fn resolve_managed_secret_execution_scope(
 ) -> Result<ManagedSecretExecutionScope, ManagedSecretAuthorityStoreError> {
     let lease = request.lease();
     let session = request.session();
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r"
         SELECT repository.tenant_id, repository.id AS repository_id
@@ -261,29 +263,29 @@ async fn resolve_managed_secret_execution_scope(
           AND attempt.lease_expires_at_ms > $14
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $16
+          AND job.job_ir_schema = $15
           AND run.id = $12
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $16
+          AND run.plan_schema = $16
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $17
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $18
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 1
+          AND instance.job_ir_version = $19
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 1
+          AND instance.runtime_context_schema = $20
           AND instance.runtime_context_digest = $13
-          AND concrete.runtime_context_schema = 1
+          AND concrete.runtime_context_schema = $20
           AND concrete.runtime_context_digest = $13
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -297,7 +299,7 @@ async fn resolve_managed_secret_execution_scope(
           AND runner_session.id = $8
           AND runner_session.session_epoch = $9
           AND runner_session.runner_generation = $10
-          AND runner_session.job_ir_schema = 1
+          AND runner_session.job_ir_schema = $15
           AND runner_session.disconnected_at_ms IS NULL
         ",
     )
@@ -315,6 +317,12 @@ async fn resolve_managed_secret_execution_scope(
     .bind(request.run_id().as_uuid())
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(request.observed_at().get())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
     .fetch_optional(pool)
     .await
     .map_err(operation_error)?
@@ -627,6 +635,7 @@ async fn lock_current_execution(
 ) -> Result<ExecutionRow, ManagedSecretAuthorityStoreError> {
     let lease = request.lease();
     let session = request.session();
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r"
         SELECT attempt.attempt_number, attempt.secret_exposure_class,
@@ -670,32 +679,32 @@ async fn lock_current_execution(
           AND attempt.lease_expires_at_ms > $16
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $18
+          AND job.job_ir_schema = $17
           AND run.id = $12
           AND run.repository_id = $13
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $18
+          AND run.plan_schema = $18
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
           AND repository.id = $13
           AND repository.tenant_id = $14
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $19
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $20
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 1
+          AND instance.job_ir_version = $21
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 1
+          AND instance.runtime_context_schema = $22
           AND instance.runtime_context_digest = $15
-          AND concrete.runtime_context_schema = 1
+          AND concrete.runtime_context_schema = $22
           AND concrete.runtime_context_digest = $15
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -709,7 +718,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 1
+          AND session.job_ir_schema = $17
           AND session.disconnected_at_ms IS NULL
         FOR UPDATE OF attempt, job
         FOR SHARE OF run, repository, marker, concrete, instance,
@@ -732,6 +741,12 @@ async fn lock_current_execution(
     .bind(request.tenant().as_str())
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(request.observed_at().get())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?

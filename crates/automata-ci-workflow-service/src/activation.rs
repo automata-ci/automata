@@ -24,18 +24,54 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Maximum aggregate serialized runtime-context bytes emitted by one activation.
-pub const MAX_ACTIVATION_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_ACTIVATION_OUTPUT_BYTES: usize = 67_108_864;
 
 /// Maximum raw Cartesian candidates inspected before matrix exclusions.
 ///
 /// GitHub's generated-job limit is applied after exclusions and includes. This
 /// separate bound prevents an exclusion-heavy matrix from becoming an
 /// unbounded control-plane CPU or allocation request.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_CANDIDATE_COMBINATIONS: usize = 4_096;
 
 /// Maximum combination/patch operations performed by one matrix expansion.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_EXPANSION_WORK: usize = 1_048_576;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogicalActivationLimitRejection {
+    OutputBytes,
+    MatrixCandidates,
+    MatrixWork,
+}
+
+const fn activation_output_byte_rejection(
+    observed: usize,
+) -> Option<LogicalActivationLimitRejection> {
+    if observed > MAX_ACTIVATION_OUTPUT_BYTES {
+        return Some(LogicalActivationLimitRejection::OutputBytes);
+    }
+    None
+}
+
+const fn matrix_candidate_rejection(observed: usize) -> Option<LogicalActivationLimitRejection> {
+    if observed > MAX_MATRIX_CANDIDATE_COMBINATIONS {
+        return Some(LogicalActivationLimitRejection::MatrixCandidates);
+    }
+    None
+}
+
+const fn matrix_expansion_work_rejection(
+    observed: usize,
+) -> Option<LogicalActivationLimitRejection> {
+    if observed > MAX_MATRIX_EXPANSION_WORK {
+        return Some(LogicalActivationLimitRejection::MatrixWork);
+    }
+    None
+}
+
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const MATRIX_DIGEST_DOMAIN: &[u8] = b"automata-ci/matrix-instance/v1\0";
 
 /// Insertion-stable value returned by a provider expression adapter.
@@ -1048,7 +1084,7 @@ where
                 field: "activation output bytes",
                 maximum: MAX_ACTIVATION_OUTPUT_BYTES,
             })?;
-    if *output_bytes > MAX_ACTIVATION_OUTPUT_BYTES {
+    if activation_output_byte_rejection(*output_bytes).is_some() {
         return Err(LogicalActivationError::LimitExceeded {
             field: "activation output bytes",
             maximum: MAX_ACTIVATION_OUTPUT_BYTES,
@@ -2244,7 +2280,7 @@ impl MatrixExpansionBudget {
                 field: "matrix expansion work",
                 maximum: MAX_MATRIX_EXPANSION_WORK,
             })?;
-        if self.work > MAX_MATRIX_EXPANSION_WORK {
+        if matrix_expansion_work_rejection(self.work).is_some() {
             return Err(LogicalActivationError::LimitExceeded {
                 field: "matrix expansion work",
                 maximum: MAX_MATRIX_EXPANSION_WORK,
@@ -2298,7 +2334,7 @@ where
                 maximum: MAX_MATRIX_CANDIDATE_COMBINATIONS,
             },
         )?;
-        if next_len > MAX_MATRIX_CANDIDATE_COMBINATIONS {
+        if matrix_candidate_rejection(next_len).is_some() {
             return Err(LogicalActivationError::LimitExceeded {
                 field: "matrix candidate combinations",
                 maximum: MAX_MATRIX_CANDIDATE_COMBINATIONS,
@@ -2507,6 +2543,64 @@ where
     /// Canonical protobuf encoding for a runtime context failed.
     #[error("canonical runtime-context encoding failed")]
     RuntimeContextEncoding(#[source] automata_ci_protocol_protobuf::EncodeError),
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        LogicalActivationLimitRejection, MAX_ACTIVATION_OUTPUT_BYTES,
+        MAX_MATRIX_CANDIDATE_COMBINATIONS, MAX_MATRIX_EXPANSION_WORK,
+        activation_output_byte_rejection, matrix_candidate_rejection,
+        matrix_expansion_work_rejection,
+    };
+
+    #[test]
+    fn activation_output_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            activation_output_byte_rejection(MAX_ACTIVATION_OUTPUT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            activation_output_byte_rejection(MAX_ACTIVATION_OUTPUT_BYTES),
+            None
+        );
+        assert_eq!(
+            activation_output_byte_rejection(MAX_ACTIVATION_OUTPUT_BYTES + 1),
+            Some(LogicalActivationLimitRejection::OutputBytes)
+        );
+    }
+
+    #[test]
+    fn matrix_candidate_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_candidate_rejection(MAX_MATRIX_CANDIDATE_COMBINATIONS - 1),
+            None
+        );
+        assert_eq!(
+            matrix_candidate_rejection(MAX_MATRIX_CANDIDATE_COMBINATIONS),
+            None
+        );
+        assert_eq!(
+            matrix_candidate_rejection(MAX_MATRIX_CANDIDATE_COMBINATIONS + 1),
+            Some(LogicalActivationLimitRejection::MatrixCandidates)
+        );
+    }
+
+    #[test]
+    fn matrix_expansion_work_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_expansion_work_rejection(MAX_MATRIX_EXPANSION_WORK - 1),
+            None
+        );
+        assert_eq!(
+            matrix_expansion_work_rejection(MAX_MATRIX_EXPANSION_WORK),
+            None
+        );
+        assert_eq!(
+            matrix_expansion_work_rejection(MAX_MATRIX_EXPANSION_WORK + 1),
+            Some(LogicalActivationLimitRejection::MatrixWork)
+        );
+    }
 }
 
 #[cfg(test)]

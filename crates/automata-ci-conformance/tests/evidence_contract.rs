@@ -326,13 +326,21 @@ fn structural_evidence_comparison_never_coerces_or_ignores_fields() {
 }
 
 #[test]
-fn null_cannot_stand_in_for_explicit_unavailability() {
-    let evidence = serde_json::json!({"outputs": null});
+fn semantic_null_values_are_preserved_without_weakening_typed_availability() {
+    let evidence = serde_json::json!({
+        "matrix": {"optional": null},
+        "outputs": {"state": "unavailable", "reason": "not_produced"}
+    });
     let catalog = fixture_catalog(&evidence, EvidenceClass::Contract, Vec::new());
-    assert!(matches!(
-        EvidenceEnvelope::for_fixture(&catalog, provenance(&catalog), evidence),
-        Err(EvidenceError::ImplicitUnavailableEvidence)
-    ));
+    let envelope = EvidenceEnvelope::for_fixture(&catalog, provenance(&catalog), evidence)
+        .expect("semantic null is valid evidence");
+    let encoded = envelope.canonical_json().expect("canonical evidence");
+    let decoded: serde_json::Value = serde_json::from_slice(&encoded).expect("JSON");
+    assert!(decoded["evidence"]["matrix"]["optional"].is_null());
+    assert_eq!(
+        decoded["evidence"]["outputs"]["state"],
+        serde_json::json!("unavailable")
+    );
 }
 
 #[test]

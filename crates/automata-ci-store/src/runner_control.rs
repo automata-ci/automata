@@ -8,10 +8,10 @@ use thiserror::Error;
 
 use crate::{
     AcknowledgeRunnerCommands, CommandCursor, CommandSequence, DocumentSchema,
-    DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, MAX_LOG_SEGMENT_BYTES,
-    MAX_TERMINAL_RESULT_BYTES, ObjectKey, RenewLease, RunnerGeneration, RunnerOperationReceipt,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
-    StableRunnerSlot, StoreError,
+    DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, MAX_LOG_SEGMENT_BYTES, ObjectKey,
+    RenewLease, RunnerGeneration, RunnerOperationReceipt, RunnerOperationRequest,
+    RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence, StableRunnerSlot,
+    StoreError, value::terminal_result_bytes_rejection,
 };
 
 const MAX_UNCOMPRESSED_RUNNER_LOG_BYTES: u64 = 256 * 1024 * 1024;
@@ -600,7 +600,7 @@ impl CommitRunnerTerminalResult {
         committed_at: UnixMillis,
         response: RunnerOperationResponse,
     ) -> Result<Self, RunnerControlValueError> {
-        if encoded_size == 0 || encoded_size > MAX_TERMINAL_RESULT_BYTES {
+        if encoded_size == 0 || terminal_result_bytes_rejection(encoded_size).is_some() {
             return Err(RunnerControlValueError::InvalidObjectSize);
         }
         if committed_at < completed_at {

@@ -15,9 +15,46 @@ use crate::webhook::{
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
+// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS: usize = 100;
+// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES: usize = 10;
+// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS: usize = 65_535;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubRepositoryDispatchLimitRejection {
+    EventTypeCharacters,
+    ClientPayloadProperties,
+    ClientPayloadCharacters,
+}
+
+const fn repository_dispatch_event_type_rejection(
+    observed: usize,
+) -> Option<GithubRepositoryDispatchLimitRejection> {
+    if observed > MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS {
+        return Some(GithubRepositoryDispatchLimitRejection::EventTypeCharacters);
+    }
+    None
+}
+
+const fn repository_dispatch_payload_property_rejection(
+    observed: usize,
+) -> Option<GithubRepositoryDispatchLimitRejection> {
+    if observed > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES {
+        return Some(GithubRepositoryDispatchLimitRejection::ClientPayloadProperties);
+    }
+    None
+}
+
+const fn repository_dispatch_payload_character_rejection(
+    observed: usize,
+) -> Option<GithubRepositoryDispatchLimitRejection> {
+    if observed > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS {
+        return Some(GithubRepositoryDispatchLimitRejection::ClientPayloadCharacters);
+    }
+    None
+}
 
 /// Repository identity retained by normalized non-push webhook evidence.
 ///
@@ -1127,7 +1164,7 @@ fn normalize_repository_dispatch_event_type(
 ) -> Result<Box<str>, GithubWebhookError> {
     let character_count = event_type.chars().count();
     if character_count == 0
-        || character_count > MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS
+        || repository_dispatch_event_type_rejection(character_count).is_some()
         || event_type.chars().any(char::is_control)
     {
         return Err(GithubWebhookError::InvalidPayload);
@@ -1144,11 +1181,11 @@ fn normalize_repository_dispatch_client_payload(
     let JsonValue::Object(object) = value else {
         return Err(GithubWebhookError::InvalidPayload);
     };
-    if object.len() > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES {
+    if repository_dispatch_payload_property_rejection(object.len()).is_some() {
         return Err(GithubWebhookError::InvalidPayload);
     }
     let encoded = serde_json::to_string(&object).map_err(|_| GithubWebhookError::InvalidPayload)?;
-    if encoded.chars().count() > MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS {
+    if repository_dispatch_payload_character_rejection(encoded.chars().count()).is_some() {
         return Err(GithubWebhookError::InvalidPayload);
     }
     Ok(Some(object))
@@ -1291,5 +1328,58 @@ impl<'de> Visitor<'de> for UniqueJsonVisitor {
             map.next_value_seed(UniqueJsonSeed)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn repository_dispatch_event_type_limit_has_exact_boundaries() {
+        assert_eq!(
+            repository_dispatch_event_type_rejection(MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS - 1),
+            None
+        );
+        assert_eq!(
+            repository_dispatch_event_type_rejection(MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS),
+            None
+        );
+        assert_eq!(
+            repository_dispatch_event_type_rejection(MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS + 1),
+            Some(GithubRepositoryDispatchLimitRejection::EventTypeCharacters)
+        );
+    }
+
+    #[test]
+    fn repository_dispatch_payload_property_limit_has_exact_boundaries() {
+        let minus_one = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES - 1;
+        let at = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES;
+        let plus_one = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES + 1;
+        assert_eq!(
+            repository_dispatch_payload_property_rejection(minus_one),
+            None
+        );
+        assert_eq!(repository_dispatch_payload_property_rejection(at), None);
+        assert_eq!(
+            repository_dispatch_payload_property_rejection(plus_one),
+            Some(GithubRepositoryDispatchLimitRejection::ClientPayloadProperties)
+        );
+    }
+
+    #[test]
+    fn repository_dispatch_payload_character_limit_has_exact_boundaries() {
+        let minus_one = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS - 1;
+        let at = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS;
+        let plus_one = MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS + 1;
+        assert_eq!(
+            repository_dispatch_payload_character_rejection(minus_one),
+            None
+        );
+        assert_eq!(repository_dispatch_payload_character_rejection(at), None);
+        assert_eq!(
+            repository_dispatch_payload_character_rejection(plus_one),
+            Some(GithubRepositoryDispatchLimitRejection::ClientPayloadCharacters)
+        );
     }
 }

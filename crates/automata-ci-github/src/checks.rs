@@ -19,7 +19,9 @@ use crate::{
 };
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
+// foundation-governance: parity-limit
 const MAX_CHECK_NAME_BYTES: usize = 255;
+// foundation-governance: parity-limit
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
 const MAX_DETAILS_URL_BYTES: usize = 2_048;
 const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
@@ -36,7 +38,8 @@ const MAX_CHECK_ANNOTATIONS_PER_REQUEST: usize = 50;
 const CHECK_ANNOTATIONS_PER_PAGE: usize = 100;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
-const MAX_GITHUB_ID: u64 = i64::MAX as u64;
+// foundation-governance: parity-limit
+const MAX_GITHUB_ID: u64 = 9_223_372_036_854_775_807;
 const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
 const MAX_RATE_LIMIT_RESET_SECONDS: u64 = 253_402_300_799;
 const X_RATE_LIMIT_REMAINING: &str = "x-ratelimit-remaining";
@@ -53,7 +56,7 @@ impl GithubCheckAppId {
     ///
     /// Rejects zero and values outside GitHub's signed 64-bit identifier range.
     pub const fn new(value: u64) -> Result<Self, GithubCheckModelError> {
-        if value == 0 || value > MAX_GITHUB_ID {
+        if value == 0 || github_check_identifier_rejection(value).is_some() {
             return Err(GithubCheckModelError::InvalidIdentifier);
         }
         Ok(Self(value))
@@ -77,7 +80,7 @@ impl GithubCheckSuiteId {
     ///
     /// Rejects zero and values outside GitHub's signed 64-bit identifier range.
     pub const fn new(value: u64) -> Result<Self, GithubCheckModelError> {
-        if value == 0 || value > MAX_GITHUB_ID {
+        if value == 0 || github_check_identifier_rejection(value).is_some() {
             return Err(GithubCheckModelError::InvalidIdentifier);
         }
         Ok(Self(value))
@@ -101,7 +104,7 @@ impl GithubCheckRunId {
     ///
     /// Rejects zero and values outside GitHub's signed 64-bit identifier range.
     pub const fn new(value: u64) -> Result<Self, GithubCheckModelError> {
-        if value == 0 || value > MAX_GITHUB_ID {
+        if value == 0 || github_check_identifier_rejection(value).is_some() {
             return Err(GithubCheckModelError::InvalidIdentifier);
         }
         Ok(Self(value))
@@ -130,9 +133,9 @@ impl GithubCheckName {
     pub fn new(value: impl Into<String>) -> Result<Self, GithubCheckModelError> {
         let value = value.into();
         if value.is_empty()
-            || value.len() > MAX_CHECK_NAME_BYTES
-            || value.trim() != value
-            || value.chars().any(char::is_control)
+            || check_name_byte_rejection(value.len()).is_some()
+            || value.trim_ascii() != value
+            || !value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
         {
             return Err(GithubCheckModelError::InvalidCheckName);
         }
@@ -167,7 +170,7 @@ impl GithubCheckExternalId {
     pub fn new(value: impl Into<String>) -> Result<Self, GithubCheckModelError> {
         let value = value.into();
         if value.is_empty()
-            || value.len() > MAX_EXTERNAL_ID_BYTES
+            || check_external_id_byte_rejection(value.len()).is_some()
             || !value.bytes().all(|byte| matches!(byte, b'!'..=b'~'))
         {
             return Err(GithubCheckModelError::InvalidExternalId);
@@ -942,6 +945,27 @@ pub enum GithubCheckModelError {
     /// A source annotation violated path, location, or bounded text policy.
     #[error("invalid GitHub Check annotation")]
     InvalidAnnotation,
+}
+
+const fn github_check_identifier_rejection(value: u64) -> Option<GithubCheckModelError> {
+    if value > MAX_GITHUB_ID {
+        return Some(GithubCheckModelError::InvalidIdentifier);
+    }
+    None
+}
+
+const fn check_name_byte_rejection(bytes: usize) -> Option<GithubCheckModelError> {
+    if bytes > MAX_CHECK_NAME_BYTES {
+        return Some(GithubCheckModelError::InvalidCheckName);
+    }
+    None
+}
+
+const fn check_external_id_byte_rejection(bytes: usize) -> Option<GithubCheckModelError> {
+    if bytes > MAX_EXTERNAL_ID_BYTES {
+        return Some(GithubCheckModelError::InvalidExternalId);
+    }
+    None
 }
 
 /// Sanitized failure at the GitHub Checks HTTP boundary.
@@ -2113,5 +2137,50 @@ fn page_value(url: &Url) -> Result<String, GithubChecksError> {
     match values.as_slice() {
         [value] => Ok(value.clone()),
         _ => Err(GithubChecksError::InvalidResponse),
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        GithubCheckModelError, MAX_CHECK_NAME_BYTES, MAX_EXTERNAL_ID_BYTES, MAX_GITHUB_ID,
+        check_external_id_byte_rejection, check_name_byte_rejection,
+        github_check_identifier_rejection,
+    };
+
+    #[test]
+    fn github_check_identifier_limit_has_exact_boundaries() {
+        assert_eq!(github_check_identifier_rejection(MAX_GITHUB_ID - 1), None);
+        assert_eq!(github_check_identifier_rejection(MAX_GITHUB_ID), None);
+        assert_eq!(
+            github_check_identifier_rejection(MAX_GITHUB_ID + 1),
+            Some(GithubCheckModelError::InvalidIdentifier)
+        );
+    }
+
+    #[test]
+    fn check_name_byte_limit_has_exact_boundaries() {
+        assert_eq!(check_name_byte_rejection(MAX_CHECK_NAME_BYTES - 1), None);
+        assert_eq!(check_name_byte_rejection(MAX_CHECK_NAME_BYTES), None);
+        assert_eq!(
+            check_name_byte_rejection(MAX_CHECK_NAME_BYTES + 1),
+            Some(GithubCheckModelError::InvalidCheckName)
+        );
+    }
+
+    #[test]
+    fn check_external_id_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            check_external_id_byte_rejection(MAX_EXTERNAL_ID_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            check_external_id_byte_rejection(MAX_EXTERNAL_ID_BYTES),
+            None
+        );
+        assert_eq!(
+            check_external_id_byte_rejection(MAX_EXTERNAL_ID_BYTES + 1),
+            Some(GithubCheckModelError::InvalidExternalId)
+        );
     }
 }

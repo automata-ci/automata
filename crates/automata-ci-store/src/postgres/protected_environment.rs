@@ -19,6 +19,7 @@ use crate::{
 use super::{PostgresStore, secret_management::authorize_human_repository_action};
 
 const PROTECTED_ENVIRONMENT_REVIEW_PERMISSION: &str = "environments:approve";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const TERMINAL_CANCELLATION_ID_DOMAIN: &[u8] =
     b"automata.store.protected-environment-terminal-cancellation.v1\0";
 const PROTECTED_ENVIRONMENT_GATE_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;

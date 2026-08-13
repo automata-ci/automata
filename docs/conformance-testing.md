@@ -98,7 +98,10 @@ runner result, protocol, and persistence boundary.
 ## Product fixture contracts
 
 The `automata-ci-conformance` crate owns the provider-neutral fixture contract
-consumed by the companion integration harness. It provides:
+intended for consumption by the companion integration harness. Product-side
+composition is exposed only when the `automata-ci/conformance-test-support`
+Cargo feature is enabled; default production builds do not expose or select it.
+A companion JSON/CLI adapter has not landed yet. The crate provides:
 
 - immutable, canonically digestible fixture catalog entries;
 - non-substitutable contract, provider-emulator, hermetic-product, live-GitHub,
@@ -116,7 +119,28 @@ consumed by the companion integration harness. It provides:
   prefixes, credential scopes, and port-reservation keys;
 - explicit skip outcomes for missing live prerequisites. A skip is not a pass.
 
-The crate performs no provider I/O and contains no credentials. Process launch,
-dynamic port reservation, PostgreSQL/S3 provisioning, and live-provider setup
-remain adapter responsibilities. This separation lets contract tests remain
-hermetic while preventing their evidence from satisfying a live-provider gate.
+The contract crate performs no provider I/O and contains no credentials. The
+control-plane crate supplies an explicit opt-in conformance composition and a
+`ProductConformanceShard` consumer of
+one selected shard identity: it creates and marker-owns the exact PostgreSQL
+schema with transaction-local `shard, pg_catalog, pg_temp` resolution, prefixes
+and gates real `ImmutableBlobStore` operations through an implementation that
+can be injected as `Arc<dyn ImmutableBlobStore>`, scopes
+redacting hermetic GitHub credentials, and hands an already-bound loopback
+listener to a server adapter. Each shard/purpose port-reservation identity is
+single-use within the test process, including after listener handoff, so two
+adapters cannot publish the same reservation evidence. Its PostgreSQL 18 integration test runs in the
+repository's PostgreSQL lane; the object, credential, and listener tests are
+secret-free. The opt-in composition consumes the held listener with the
+exact-order GitHub stub, configures the real hardened GitHub HTTP client, and
+installs the shared manual clock and operation-specific fault wrappers in real
+workflow-admission, Results, GitHub-provider, credential, Checks-credential,
+runner-control, and object-store ports. Production defaults remain unchanged.
+
+This is product-side fixture composition, not a launched end-to-end run. The companion
+harness still has to pass the held listeners and scoped configuration into the
+real control-plane and runner processes, provision an external S3-compatible
+bucket, drive the real workflow lifecycle through each injected fault, apply
+the restart probe to every real service, emit retained evidence, and prove
+cleanup. Live-provider setup remains
+deployment-owned, so hermetic evidence cannot satisfy a live-provider gate.

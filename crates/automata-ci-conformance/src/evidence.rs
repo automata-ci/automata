@@ -329,9 +329,6 @@ where
 }
 
 fn validate_expected_evidence(value: &Value, expected_sha256: &str) -> Result<(), EvidenceError> {
-    if contains_null(value) {
-        return Err(EvidenceError::ImplicitUnavailableEvidence);
-    }
     let encoded =
         serde_json::to_vec(&sort_json_objects(value.clone())).map_err(EvidenceError::Json)?;
     if hex_digest(&Sha256::digest(encoded)) != expected_sha256 {
@@ -351,15 +348,6 @@ fn operating_system_name(operating_system: OperatingSystem) -> &'static str {
         OperatingSystem::Linux => "linux",
         OperatingSystem::Windows => "windows",
         OperatingSystem::Macos => "macos",
-    }
-}
-
-fn contains_null(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Array(values) => values.iter().any(contains_null),
-        Value::Object(values) => values.values().any(contains_null),
-        Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }
 
@@ -609,8 +597,6 @@ pub enum EvidenceError {
     CatalogDigestMismatch,
     #[error("evidence provider or operating system differs from the fixture catalog")]
     FixtureEnvironmentMismatch,
-    #[error("evidence contains null; unavailable fields must use EvidenceAvailability")]
-    ImplicitUnavailableEvidence,
     #[error("evidence digest differs from the fixture catalog expectation")]
     ExpectedEvidenceDigestMismatch,
     #[error("evidence structures differ at {0:?}")]

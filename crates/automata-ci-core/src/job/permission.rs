@@ -6,9 +6,33 @@ use super::JobValidationError;
 use crate::PermissionLevel;
 
 /// Maximum number of explicitly named permission grants in one job request.
+// foundation-governance: parity-limit
 pub const MAX_JOB_PERMISSION_GRANTS: usize = 64;
 /// Maximum UTF-8 bytes in one canonical provider permission name.
+// foundation-governance: parity-limit
 pub const MAX_JOB_PERMISSION_NAME_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobPermissionLimitRejection {
+    Grants,
+    NameBytes,
+}
+
+const fn job_permission_grant_rejection(observed: usize) -> Option<JobPermissionLimitRejection> {
+    if observed > MAX_JOB_PERMISSION_GRANTS {
+        return Some(JobPermissionLimitRejection::Grants);
+    }
+    None
+}
+
+const fn job_permission_name_byte_rejection(
+    observed: usize,
+) -> Option<JobPermissionLimitRejection> {
+    if observed > MAX_JOB_PERMISSION_NAME_BYTES {
+        return Some(JobPermissionLimitRejection::NameBytes);
+    }
+    None
+}
 
 const ID_TOKEN_PERMISSION: &str = "id-token";
 
@@ -127,7 +151,7 @@ impl JobPermissionRequest {
         let Self::Mapping(grants) = self else {
             return Ok(());
         };
-        if grants.len() > MAX_JOB_PERMISSION_GRANTS {
+        if job_permission_grant_rejection(grants.len()).is_some() {
             return Err(JobValidationError::TooManyPermissionGrants {
                 maximum: MAX_JOB_PERMISSION_GRANTS,
             });
@@ -151,7 +175,7 @@ impl JobPermissionRequest {
 }
 
 fn canonical_permission_name(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_JOB_PERMISSION_NAME_BYTES {
+    if value.is_empty() || job_permission_name_byte_rejection(value.len()).is_some() {
         return false;
     }
     let mut bytes = value.bytes();
@@ -172,4 +196,44 @@ fn canonical_permission_name(value: &str) -> bool {
         }
     }
     !previous_hyphen
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        JobPermissionLimitRejection, MAX_JOB_PERMISSION_GRANTS, MAX_JOB_PERMISSION_NAME_BYTES,
+        job_permission_grant_rejection, job_permission_name_byte_rejection,
+    };
+
+    #[test]
+    fn job_permission_grant_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS - 1),
+            None
+        );
+        assert_eq!(
+            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS),
+            None
+        );
+        assert_eq!(
+            job_permission_grant_rejection(MAX_JOB_PERMISSION_GRANTS + 1),
+            Some(JobPermissionLimitRejection::Grants)
+        );
+    }
+
+    #[test]
+    fn job_permission_name_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES),
+            None
+        );
+        assert_eq!(
+            job_permission_name_byte_rejection(MAX_JOB_PERMISSION_NAME_BYTES + 1),
+            Some(JobPermissionLimitRejection::NameBytes)
+        );
+    }
 }

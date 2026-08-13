@@ -66,10 +66,15 @@ pub const MAX_GITHUB_SERVICE_PLAINTEXT_BYTES: u64 = 16 * 1024;
 const MAX_APP_CLIENT_ID_BYTES: usize = 128;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const PROTECTED_PLAINTEXT_SCHEMA: u16 = 1;
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const WRAPPING_PURPOSE: &str = "control-plane/github-server-service-authority-wrapping:v1";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const PAYLOAD_PURPOSE: &str = "control-plane/github-server-service-authority:v1";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const IDENTITY_DIGEST_DOMAIN: &[u8] = b"automata.store.github-server-service.identity.v1\0";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const AAD_DIGEST_DOMAIN: &[u8] = b"automata.store.github-server-service.aad.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const POLICY_DIGEST_DOMAIN: &[u8] = b"automata.store.github-server-service.policy.v1\0";
 
 macro_rules! uuid_identity {

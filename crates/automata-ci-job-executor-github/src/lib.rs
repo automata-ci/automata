@@ -50,6 +50,6 @@ pub use prepared::{
 };
 pub use secret::{
     EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError,
-    MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS,
+    MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS, validate_ephemeral_job_secret_bytes,
 };
 pub use shell::{WindowsScriptShell, windows_script_arguments};

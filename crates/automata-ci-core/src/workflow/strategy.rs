@@ -15,22 +15,91 @@ use super::{
 /// Strategy representation emitted by this build.
 pub const WORKFLOW_STRATEGY_SCHEMA_VERSION: u16 = WorkflowStrategyVersion::current().get();
 /// Maximum logical job instances one matrix may activate.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_EXPANSION: usize = 256;
 /// Maximum named axes in one matrix.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_AXES: usize = 32;
 /// Maximum statically listed values in one axis.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_AXIS_VALUES: usize = 256;
 /// Maximum include or exclude patches in one matrix.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_PATCHES: usize = 256;
 /// Maximum entries in one matrix object or patch.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_OBJECT_ENTRIES: usize = 128;
 /// Maximum nesting depth of a literal matrix value.
+// foundation-governance: parity-limit
 pub const MAX_MATRIX_VALUE_DEPTH: usize = 8;
 /// Maximum bytes in a matrix key or string literal.
-pub const MAX_MATRIX_TEXT_BYTES: usize = 16 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_MATRIX_TEXT_BYTES: usize = 16_384;
 /// Maximum fully static Cartesian candidates activation may inspect before
 /// include/exclude transformations reduce the emitted instance set.
+// foundation-governance: parity-limit
 const MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MatrixLimitRejection {
+    Expansion,
+    Axes,
+    AxisValues,
+    Patches,
+    ObjectEntries,
+    ValueDepth,
+    TextBytes,
+    StaticCandidates,
+}
+
+pub(super) const fn matrix_expansion_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_EXPANSION {
+        return Some(MatrixLimitRejection::Expansion);
+    }
+    None
+}
+const fn matrix_axis_count_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_AXES {
+        return Some(MatrixLimitRejection::Axes);
+    }
+    None
+}
+const fn matrix_axis_value_count_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_AXIS_VALUES {
+        return Some(MatrixLimitRejection::AxisValues);
+    }
+    None
+}
+const fn matrix_patch_count_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_PATCHES {
+        return Some(MatrixLimitRejection::Patches);
+    }
+    None
+}
+const fn matrix_object_entry_count_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_OBJECT_ENTRIES {
+        return Some(MatrixLimitRejection::ObjectEntries);
+    }
+    None
+}
+const fn matrix_value_depth_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_VALUE_DEPTH {
+        return Some(MatrixLimitRejection::ValueDepth);
+    }
+    None
+}
+pub(super) const fn matrix_text_byte_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_MATRIX_TEXT_BYTES {
+        return Some(MatrixLimitRejection::TextBytes);
+    }
+    None
+}
+const fn matrix_static_candidate_count_rejection(observed: usize) -> Option<MatrixLimitRejection> {
+    if observed > MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS {
+        return Some(MatrixLimitRejection::StaticCandidates);
+    }
+    None
+}
 
 /// A positive workflow-strategy representation version.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -124,7 +193,7 @@ impl MatrixValue {
         budget: &mut LogicalPlanBudget,
     ) -> Result<(), WorkflowPlanError> {
         budget.charge_node("matrix value")?;
-        if depth > MAX_MATRIX_VALUE_DEPTH {
+        if matrix_value_depth_rejection(depth).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "matrix value depth",
                 maximum: MAX_MATRIX_VALUE_DEPTH,
@@ -144,7 +213,7 @@ impl MatrixValue {
                 budget.charge_text("matrix string", value, MAX_MATRIX_TEXT_BYTES)
             }
             Self::Array(values) => {
-                if values.len() > MAX_MATRIX_OBJECT_ENTRIES {
+                if matrix_object_entry_count_rejection(values.len()).is_some() {
                     return Err(WorkflowPlanError::LimitExceeded {
                         field: "matrix array values",
                         maximum: MAX_MATRIX_OBJECT_ENTRIES,
@@ -156,7 +225,7 @@ impl MatrixValue {
                 Ok(())
             }
             Self::Object(entries) => {
-                if entries.len() > MAX_MATRIX_OBJECT_ENTRIES {
+                if matrix_object_entry_count_rejection(entries.len()).is_some() {
                     return Err(WorkflowPlanError::LimitExceeded {
                         field: "matrix object entries",
                         maximum: MAX_MATRIX_OBJECT_ENTRIES,
@@ -311,7 +380,7 @@ impl MatrixAxis {
                         self.name.value().clone(),
                     ));
                 }
-                if values.len() > MAX_MATRIX_AXIS_VALUES {
+                if matrix_axis_value_count_rejection(values.len()).is_some() {
                     return Err(WorkflowPlanError::LimitExceeded {
                         field: "matrix axis values",
                         maximum: MAX_MATRIX_AXIS_VALUES,
@@ -376,7 +445,7 @@ impl MatrixPatch {
         if self.entries.is_empty() {
             return Err(WorkflowPlanError::EmptyField("matrix patch"));
         }
-        if self.entries.len() > MAX_MATRIX_OBJECT_ENTRIES {
+        if matrix_object_entry_count_rejection(self.entries.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "matrix patch entries",
                 maximum: MAX_MATRIX_OBJECT_ENTRIES,
@@ -533,7 +602,7 @@ impl MatrixTemplate {
                 budget,
             );
         }
-        if self.axes.len() > MAX_MATRIX_AXES {
+        if matrix_axis_count_rejection(self.axes.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "matrix axes",
                 maximum: MAX_MATRIX_AXES,
@@ -558,7 +627,8 @@ impl MatrixTemplate {
                 )?),
                 _ => None,
             };
-            if static_product.is_some_and(|count| count > MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS)
+            if static_product
+                .is_some_and(|count| matrix_static_candidate_count_rejection(count).is_some())
             {
                 return Err(WorkflowPlanError::LimitExceeded {
                     field: "matrix candidate combinations",
@@ -584,7 +654,7 @@ fn validate_patch_set(
 ) -> Result<bool, WorkflowPlanError> {
     match patches {
         MatrixPatchSet::Static(patches) => {
-            if patches.len() > MAX_MATRIX_PATCHES {
+            if matrix_patch_count_rejection(patches.len()).is_some() {
                 return Err(WorkflowPlanError::LimitExceeded {
                     field,
                     maximum: MAX_MATRIX_PATCHES,
@@ -705,7 +775,7 @@ impl WorkflowStrategyTemplate {
             });
         }
         let expansion_limit = usize::from(self.expansion_limit);
-        if expansion_limit == 0 || expansion_limit > MAX_MATRIX_EXPANSION {
+        if expansion_limit == 0 || matrix_expansion_rejection(expansion_limit).is_some() {
             return Err(WorkflowPlanError::InvalidMatrixExpansionLimit {
                 maximum: MAX_MATRIX_EXPANSION,
             });
@@ -771,4 +841,103 @@ fn is_json_number(value: &str) -> bool {
         }
     }
     cursor == bytes.len()
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn matrix_expansion_limit_has_exact_boundaries() {
+        assert_eq!(matrix_expansion_rejection(MAX_MATRIX_EXPANSION - 1), None);
+        assert_eq!(matrix_expansion_rejection(MAX_MATRIX_EXPANSION), None);
+        assert_eq!(
+            matrix_expansion_rejection(MAX_MATRIX_EXPANSION + 1),
+            Some(MatrixLimitRejection::Expansion)
+        );
+    }
+    #[test]
+    fn matrix_axis_count_limit_has_exact_boundaries() {
+        assert_eq!(matrix_axis_count_rejection(MAX_MATRIX_AXES - 1), None);
+        assert_eq!(matrix_axis_count_rejection(MAX_MATRIX_AXES), None);
+        assert_eq!(
+            matrix_axis_count_rejection(MAX_MATRIX_AXES + 1),
+            Some(MatrixLimitRejection::Axes)
+        );
+    }
+    #[test]
+    fn matrix_axis_value_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES - 1),
+            None
+        );
+        assert_eq!(
+            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES),
+            None
+        );
+        assert_eq!(
+            matrix_axis_value_count_rejection(MAX_MATRIX_AXIS_VALUES + 1),
+            Some(MatrixLimitRejection::AxisValues)
+        );
+    }
+    #[test]
+    fn matrix_patch_count_limit_has_exact_boundaries() {
+        assert_eq!(matrix_patch_count_rejection(MAX_MATRIX_PATCHES - 1), None);
+        assert_eq!(matrix_patch_count_rejection(MAX_MATRIX_PATCHES), None);
+        assert_eq!(
+            matrix_patch_count_rejection(MAX_MATRIX_PATCHES + 1),
+            Some(MatrixLimitRejection::Patches)
+        );
+    }
+    #[test]
+    fn matrix_object_entry_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES - 1),
+            None
+        );
+        assert_eq!(
+            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES),
+            None
+        );
+        assert_eq!(
+            matrix_object_entry_count_rejection(MAX_MATRIX_OBJECT_ENTRIES + 1),
+            Some(MatrixLimitRejection::ObjectEntries)
+        );
+    }
+    #[test]
+    fn matrix_value_depth_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH - 1),
+            None
+        );
+        assert_eq!(matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH), None);
+        assert_eq!(
+            matrix_value_depth_rejection(MAX_MATRIX_VALUE_DEPTH + 1),
+            Some(MatrixLimitRejection::ValueDepth)
+        );
+    }
+    #[test]
+    fn matrix_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES - 1), None);
+        assert_eq!(matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES), None);
+        assert_eq!(
+            matrix_text_byte_rejection(MAX_MATRIX_TEXT_BYTES + 1),
+            Some(MatrixLimitRejection::TextBytes)
+        );
+    }
+    #[test]
+    fn matrix_static_candidate_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS - 1),
+            None
+        );
+        assert_eq!(
+            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS),
+            None
+        );
+        assert_eq!(
+            matrix_static_candidate_count_rejection(MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS + 1),
+            Some(MatrixLimitRejection::StaticCandidates)
+        );
+    }
 }

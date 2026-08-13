@@ -29,7 +29,22 @@ pub const AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE: &str =
 
 const EVIDENCE_SCHEMA: u16 = 1;
 const EVIDENCE_KIND: &str = "automata_workflow_dispatch";
+// foundation-governance: parity-limit
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowDispatchEvidenceLimitRejection {
+    TextBytes,
+}
+
+const fn workflow_dispatch_evidence_text_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchEvidenceLimitRejection> {
+    if observed > MAX_EVIDENCE_TEXT_BYTES {
+        return Some(WorkflowDispatchEvidenceLimitRejection::TextBytes);
+    }
+    None
+}
 
 /// Exact, authenticated target authorized for a control-plane manual dispatch.
 #[derive(Clone, Eq, PartialEq)]
@@ -684,7 +699,7 @@ fn diagnostic_codes(diagnostics: &[Diagnostic]) -> String {
 
 fn valid_text(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_EVIDENCE_TEXT_BYTES
+        && workflow_dispatch_evidence_text_byte_rejection(value.len()).is_none()
         && !value.chars().any(char::is_control)
 }
 
@@ -773,6 +788,22 @@ pub enum GithubWorkflowDispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_dispatch_evidence_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES + 1),
+            Some(WorkflowDispatchEvidenceLimitRejection::TextBytes)
+        );
+    }
 
     #[test]
     fn workflow_dispatch_evidence_rejects_noncurrent_schemas() {

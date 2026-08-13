@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Maximum bytes retained across every body in one deterministic script.
+// foundation-governance: operational-limit
 pub const MAX_STUB_AGGREGATE_RESPONSE_BYTES: usize = 64 * 1_048_576;
+// foundation-governance: operational-limit
 const MAX_STUB_RESPONSE_BYTES: usize = 16 * 1_048_576;
 
 /// Exact request expected by the hermetic GitHub HTTP stub.

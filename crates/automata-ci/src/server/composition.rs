@@ -150,8 +150,10 @@ use super::workflow_rerun::OperationalWorkflowRerunBackend;
 const MAX_TLS_CERTIFICATES: usize = 32;
 const MAX_TLS_CERTIFICATE_DER_BYTES: usize = 1024 * 1024;
 const MAX_TLS_CHAIN_DER_BYTES: usize = 4 * 1024 * 1024;
+// foundation-governance: derived-contract-exclusion
 const READINESS_OBJECT_KEY: &str = "system/readiness/v1";
 const READINESS_MEDIA_TYPE: &str = "application/vnd.automata.readiness+plain";
+// foundation-governance: derived-contract-exclusion
 const READINESS_BYTES: &[u8] = b"automata-immutable-readiness-v1\n";
 const RESULTS_ISSUER: &str = "automata";
 const RESULTS_AUDIENCE: &str = "github-actions-results";

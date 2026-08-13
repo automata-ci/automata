@@ -10,11 +10,48 @@ use thiserror::Error;
 
 use crate::WORKFLOW_EVENT_MEDIA_TYPE;
 
+// foundation-governance: parity-limit
 const MAX_IDENTITY_BYTES: usize = 1_024;
-const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_EVENT_BYTES: usize = 25 * 1024 * 1024;
+// foundation-governance: parity-limit
+const MAX_SOURCE_BYTES: usize = 16_777_216;
+// foundation-governance: parity-limit
+const MAX_EVENT_BYTES: usize = 26_214_400;
 const _: () = assert!(MAX_SOURCE_BYTES as u64 == MAX_ADMISSION_OBJECT_BYTES);
 const _: () = assert!(MAX_EVENT_BYTES as u64 == MAX_ADMISSION_EVENT_BYTES);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowAdmissionLimitRejection {
+    IdentityBytes,
+    SourceBytes,
+    EventBytes,
+}
+
+const fn admission_identity_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowAdmissionLimitRejection> {
+    if observed > MAX_IDENTITY_BYTES {
+        return Some(WorkflowAdmissionLimitRejection::IdentityBytes);
+    }
+    None
+}
+
+const fn admission_source_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowAdmissionLimitRejection> {
+    if observed > MAX_SOURCE_BYTES {
+        return Some(WorkflowAdmissionLimitRejection::SourceBytes);
+    }
+    None
+}
+
+const fn admission_event_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowAdmissionLimitRejection> {
+    if observed > MAX_EVENT_BYTES {
+        return Some(WorkflowAdmissionLimitRejection::EventBytes);
+    }
+    None
+}
 
 /// Authenticated provider repository coordinates before server ID derivation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -355,10 +392,11 @@ impl WorkflowAdmissionRequestBuilder {
         if request.source.is_empty() {
             return Err(WorkflowAdmissionRequestError::EmptySource);
         }
-        if request.source.len() > MAX_SOURCE_BYTES {
+        if admission_source_byte_rejection(request.source.len()).is_some() {
             return Err(WorkflowAdmissionRequestError::OversizedSource);
         }
-        if request.event.is_empty() || request.event.len() > MAX_EVENT_BYTES {
+        if request.event.is_empty() || admission_event_byte_rejection(request.event.len()).is_some()
+        {
             return Err(WorkflowAdmissionRequestError::InvalidEvent);
         }
         serde_json::from_slice::<serde_json::Value>(&request.event)
@@ -543,8 +581,53 @@ fn validate_commit_sha(value: &str) -> Result<(), WorkflowAdmissionRequestError>
 }
 
 fn validate_text(value: &str, field: &'static str) -> Result<(), WorkflowAdmissionRequestError> {
-    if value.is_empty() || value.len() > MAX_IDENTITY_BYTES || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || admission_identity_byte_rejection(value.len()).is_some()
+        || value.chars().any(char::is_control)
+    {
         return Err(WorkflowAdmissionRequestError::InvalidText(field));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_EVENT_BYTES, MAX_IDENTITY_BYTES, MAX_SOURCE_BYTES, WorkflowAdmissionLimitRejection,
+        admission_event_byte_rejection, admission_identity_byte_rejection,
+        admission_source_byte_rejection,
+    };
+
+    #[test]
+    fn admission_identity_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            admission_identity_byte_rejection(MAX_IDENTITY_BYTES - 1),
+            None
+        );
+        assert_eq!(admission_identity_byte_rejection(MAX_IDENTITY_BYTES), None);
+        assert_eq!(
+            admission_identity_byte_rejection(MAX_IDENTITY_BYTES + 1),
+            Some(WorkflowAdmissionLimitRejection::IdentityBytes)
+        );
+    }
+
+    #[test]
+    fn admission_source_byte_limit_has_exact_boundaries() {
+        assert_eq!(admission_source_byte_rejection(MAX_SOURCE_BYTES - 1), None);
+        assert_eq!(admission_source_byte_rejection(MAX_SOURCE_BYTES), None);
+        assert_eq!(
+            admission_source_byte_rejection(MAX_SOURCE_BYTES + 1),
+            Some(WorkflowAdmissionLimitRejection::SourceBytes)
+        );
+    }
+
+    #[test]
+    fn admission_event_byte_limit_has_exact_boundaries() {
+        assert_eq!(admission_event_byte_rejection(MAX_EVENT_BYTES - 1), None);
+        assert_eq!(admission_event_byte_rejection(MAX_EVENT_BYTES), None);
+        assert_eq!(
+            admission_event_byte_rejection(MAX_EVENT_BYTES + 1),
+            Some(WorkflowAdmissionLimitRejection::EventBytes)
+        );
+    }
 }

@@ -15,8 +15,9 @@ use crate::{
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const COMPARE_COMMITS_PER_PAGE: usize = 100;
-const GITHUB_COMPARE_FILE_CAP: usize = 300;
+// foundation-governance: parity-limit
 const MAX_ACTIONS_PUSH_COMMITS: usize = 1_000;
+// foundation-governance: parity-limit
 const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 
 /// Largest GitHub Compare JSON file collection that is demonstrably complete.
@@ -24,7 +25,40 @@ const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 /// GitHub documents a 300-file response cap without a total-file count. An
 /// exactly 300-entry response is therefore ambiguous and is never accepted as
 /// complete.
-pub const MAX_COMPLETE_GITHUB_COMPARE_FILES: usize = GITHUB_COMPARE_FILE_CAP - 1;
+// foundation-governance: parity-limit
+pub const MAX_COMPLETE_GITHUB_COMPARE_FILES: usize = 299;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubChangedFilesLimitRejection {
+    ActionsPushCommitCount,
+    CompareFileCount,
+    ChangedPathBytes,
+}
+
+const fn actions_push_commit_count_rejection(
+    observed: usize,
+) -> Option<GithubChangedFilesLimitRejection> {
+    if observed > MAX_ACTIONS_PUSH_COMMITS {
+        return Some(GithubChangedFilesLimitRejection::ActionsPushCommitCount);
+    }
+    None
+}
+
+const fn complete_compare_file_count_rejection(
+    observed: usize,
+) -> Option<GithubChangedFilesLimitRejection> {
+    if observed > MAX_COMPLETE_GITHUB_COMPARE_FILES {
+        return Some(GithubChangedFilesLimitRejection::CompareFileCount);
+    }
+    None
+}
+
+const fn changed_path_byte_rejection(observed: usize) -> Option<GithubChangedFilesLimitRejection> {
+    if observed > MAX_CHANGED_PATH_BYTES {
+        return Some(GithubChangedFilesLimitRejection::ChangedPathBytes);
+    }
+    None
+}
 
 /// Least-authority authentication for one GitHub push comparison.
 pub enum GithubPushDiffAuthority<'credential> {
@@ -409,7 +443,7 @@ fn validate_requested_commits(
 ) -> Result<(), CompareFailure> {
     if before == after
         || commits.is_empty()
-        || commits.len() > MAX_ACTIONS_PUSH_COMMITS
+        || actions_push_commit_count_rejection(commits.len()).is_some()
         || !commits.iter().any(|commit| commit == after)
         || commits.iter().any(|commit| commit == before)
     {
@@ -533,7 +567,7 @@ fn validate_observed_commits(
 
 fn complete_changed_paths(files: Option<Vec<CompareFile>>) -> Result<Vec<String>, CompareFailure> {
     let files = files.ok_or_else(invalid_evidence)?;
-    if files.len() >= GITHUB_COMPARE_FILE_CAP {
+    if complete_compare_file_count_rejection(files.len()).is_some() {
         return Err(CompareFailure::Incomplete(
             GithubPushDiffIncompleteReason::FileListCapped,
         ));
@@ -562,10 +596,60 @@ fn complete_changed_paths(files: Option<Vec<CompareFile>>) -> Result<Vec<String>
 
 fn valid_changed_path(path: &str) -> bool {
     !path.is_empty()
-        && path.len() <= MAX_CHANGED_PATH_BYTES
+        && changed_path_byte_rejection(path.len()).is_none()
         && !path.starts_with('/')
         && !path.chars().any(char::is_control)
         && path
             .split('/')
             .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn actions_push_commit_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            actions_push_commit_count_rejection(MAX_ACTIONS_PUSH_COMMITS - 1),
+            None
+        );
+        assert_eq!(
+            actions_push_commit_count_rejection(MAX_ACTIONS_PUSH_COMMITS),
+            None
+        );
+        assert_eq!(
+            actions_push_commit_count_rejection(MAX_ACTIONS_PUSH_COMMITS + 1),
+            Some(GithubChangedFilesLimitRejection::ActionsPushCommitCount)
+        );
+    }
+
+    #[test]
+    fn complete_compare_file_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES - 1),
+            None
+        );
+        assert_eq!(
+            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES),
+            None
+        );
+        assert_eq!(
+            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES + 1),
+            Some(GithubChangedFilesLimitRejection::CompareFileCount)
+        );
+    }
+
+    #[test]
+    fn changed_path_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            changed_path_byte_rejection(MAX_CHANGED_PATH_BYTES - 1),
+            None
+        );
+        assert_eq!(changed_path_byte_rejection(MAX_CHANGED_PATH_BYTES), None);
+        assert_eq!(
+            changed_path_byte_rejection(MAX_CHANGED_PATH_BYTES + 1),
+            Some(GithubChangedFilesLimitRejection::ChangedPathBytes)
+        );
+    }
 }

@@ -20,9 +20,10 @@ use super::{
     PostgresStore,
     secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
 };
+use crate::workflow_rerun::workflow_rerun_age_rejection;
 use crate::{
     GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
-    GithubCheckRerunStoreError, GithubCheckRerunTarget, MAX_WORKFLOW_RERUN_AGE_MILLIS,
+    GithubCheckRerunStoreError, GithubCheckRerunTarget,
     MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow, RerunWorkflowByName, StoreError,
     WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowConcurrency, WorkflowRerunReceipt,
     WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
@@ -31,11 +32,17 @@ use crate::{
 
 const RERUN_PERMISSION: &str = "runs:rerun";
 const RERUN_IDEMPOTENCY_PREFIX: &str = "workflow-rerun:";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.workflow-rerun.request.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_RUN_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.run-id.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_INVOCATION_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.invocation-id.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_JOB_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.job-id.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_CHECK_SUBJECT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.check-subject-id.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const RERUN_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.audit.v1\0";
 const GITHUB_CHECK_RERUN_OPERATION_ID_DOMAIN: &[u8] =
     b"automata.github-check-rerun.operation-id.v1\0";
@@ -620,7 +627,8 @@ async fn admit_authorized_rerun(
     }
     let database_now = database_now_ms(&mut transaction).await?;
     if source.root_created_at_ms > database_now
-        || database_now.saturating_sub(source.root_created_at_ms) > MAX_WORKFLOW_RERUN_AGE_MILLIS
+        || workflow_rerun_age_rejection(database_now.saturating_sub(source.root_created_at_ms))
+            .is_some()
     {
         return Err(WorkflowRerunStoreError::SourceExpired);
     }

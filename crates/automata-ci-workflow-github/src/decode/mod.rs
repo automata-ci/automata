@@ -17,10 +17,26 @@ use crate::{
 // Parsing already bounds source bytes and AST nodes. This separate budget keeps
 // repeated fully qualified paths and diagnostics linear in a small multiple of
 // the accepted source size, even when one very long key has many descendants.
-const MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024 * 1024;
+// foundation-governance: parity-limit
+const MAX_DERIVED_TEXT_BYTES: usize = 16_777_216;
 const DERIVED_TEXT_LIMIT_CODE: &str = "github.decode.derived_text_limit";
 const DERIVED_TEXT_LIMIT_MESSAGE: &str =
     "workflow decoding exceeded the 16 MiB derived-text and diagnostic budget";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodeLimitRejection {
+    DerivedTextBytes,
+}
+
+const fn derived_text_byte_rejection(
+    remaining: usize,
+    requested: usize,
+) -> Option<DecodeLimitRejection> {
+    if requested > remaining {
+        return Some(DecodeLimitRejection::DerivedTextBytes);
+    }
+    None
+}
 
 #[derive(Debug)]
 pub(super) struct DecodeContext<'diagnostics> {
@@ -214,11 +230,11 @@ impl<'diagnostics> DecodeContext<'diagnostics> {
             self.exhaust(span);
             return None;
         };
-        let Some(remaining) = self.remaining_derived_text_bytes.checked_sub(bytes) else {
+        if derived_text_byte_rejection(self.remaining_derived_text_bytes, bytes).is_some() {
             self.exhaust(span);
             return None;
-        };
-        self.remaining_derived_text_bytes = remaining;
+        }
+        self.remaining_derived_text_bytes -= bytes;
         Some(bytes)
     }
 
@@ -241,6 +257,27 @@ fn decimal_digits(value: usize) -> usize {
         1
     } else {
         value.ilog10() as usize + 1
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{DecodeLimitRejection, MAX_DERIVED_TEXT_BYTES, derived_text_byte_rejection};
+
+    #[test]
+    fn derived_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES + 1),
+            Some(DecodeLimitRejection::DerivedTextBytes)
+        );
     }
 }
 

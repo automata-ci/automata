@@ -10,7 +10,9 @@ use automata_ci_execution::{EnvironmentProfile, OperationId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+// foundation-governance: derived-contract owner=sandbox kind=storage-namespace
 const LOCK_FILE_NAME: &str = ".automata-windows-provider-v2.lock";
+// foundation-governance: derived-contract owner=sandbox kind=storage-namespace
 const JOURNAL_FILE_NAME: &str = ".automata-windows-provider-v2.events";
 const DURABLE_SCHEMA: u32 = 1;
 const MAX_EVENT_BYTES: usize = 64 * 1024;

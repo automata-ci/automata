@@ -38,7 +38,9 @@ use zeroize::Zeroizing;
 /// Immutable media type used for standalone protobuf `JobIR` objects.
 pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";
 
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
 const LEASE_OFFER_COMMAND_SCHEMA: u16 = 1;
 

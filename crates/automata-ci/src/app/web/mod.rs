@@ -16,7 +16,7 @@ pub(crate) use data::{ManagementRbacWebData, RbacWebData, RequestContext, Viewer
 pub(crate) use data::{
     SetupPageAvailability, SetupPageAvailabilityError, SetupPageAvailabilityState,
 };
-pub(crate) use live::LiveWebData;
+pub(crate) use live::{LiveWebData, log_stream_safety_is_valid};
 pub use routes::router;
 pub(crate) use routes::router_with_data_and_setup_availability;
 pub(crate) use routes::{

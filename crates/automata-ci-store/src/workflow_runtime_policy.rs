@@ -43,6 +43,7 @@ pub const WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE: &str =
 /// The sole current workspace root supported by derivation version 1.
 pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT: &str = "/__w";
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const POLICY_DIGEST_DOMAIN: &[u8] = b"automata.store.workflow-runtime-policy.v2\0";
 
 const ID_TOKEN_PERMISSION: &str = "id-token";

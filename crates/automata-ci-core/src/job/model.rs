@@ -9,16 +9,69 @@ use super::{
     JobIrVersion, JobOutputDefinition, JobPermissionRequest, JobValidationError, RuntimeBoolean,
     RuntimePositiveInteger, SemanticStep, StepIr, ValueTemplate,
 };
+
 use crate::{
     JobId, OutputSensitivity, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunIdAlias, RunnerFeature,
     RunnerRequirements, Sha256Digest, WorkflowId,
 };
 
+/// Canonical media type for the exact provider event attached to a job.
+pub const WORKFLOW_EVENT_MEDIA_TYPE: &str = "application/json";
+
+// foundation-governance: parity-limit
 const MAX_EXECUTION_CONTEXT_TEXT_BYTES: usize = 1_024;
+// foundation-governance: parity-limit
 const MAX_CONTENT_KEY_BYTES: usize = 1_024;
+// foundation-governance: parity-limit
 const MAX_CONTENT_MEDIA_TYPE_BYTES: usize = 128;
-const MAX_JOB_CONTENT_BYTES: u64 = 16 * 1024 * 1024;
+// foundation-governance: parity-limit
+const MAX_JOB_CONTENT_BYTES: u64 = 16_777_216;
+// foundation-governance: parity-limit
 const MAX_SECRET_REFERENCE_BYTES: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobModelLimitRejection {
+    ExecutionContextTextBytes,
+    ContentKeyBytes,
+    ContentMediaTypeBytes,
+    JobContentBytes,
+    SecretReferenceBytes,
+}
+
+const fn execution_context_text_byte_rejection(observed: usize) -> Option<JobModelLimitRejection> {
+    if observed > MAX_EXECUTION_CONTEXT_TEXT_BYTES {
+        return Some(JobModelLimitRejection::ExecutionContextTextBytes);
+    }
+    None
+}
+
+const fn content_key_byte_rejection(observed: usize) -> Option<JobModelLimitRejection> {
+    if observed > MAX_CONTENT_KEY_BYTES {
+        return Some(JobModelLimitRejection::ContentKeyBytes);
+    }
+    None
+}
+
+const fn content_media_type_byte_rejection(observed: usize) -> Option<JobModelLimitRejection> {
+    if observed > MAX_CONTENT_MEDIA_TYPE_BYTES {
+        return Some(JobModelLimitRejection::ContentMediaTypeBytes);
+    }
+    None
+}
+
+const fn job_content_byte_rejection(observed: u64) -> Option<JobModelLimitRejection> {
+    if observed > MAX_JOB_CONTENT_BYTES {
+        return Some(JobModelLimitRejection::JobContentBytes);
+    }
+    None
+}
+
+const fn secret_reference_byte_rejection(observed: usize) -> Option<JobModelLimitRejection> {
+    if observed > MAX_SECRET_REFERENCE_BYTES {
+        return Some(JobModelLimitRejection::SecretReferenceBytes);
+    }
+    None
+}
 
 /// Original source coordinates for an immutable job plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -450,7 +503,7 @@ impl JobIrEnvelope {
             service.validate_values()?;
         }
 
-        if self.job.outputs.len() > super::MAX_JOB_OUTPUT_DEFINITIONS {
+        if super::instance::job_output_definition_rejection(self.job.outputs.len()).is_some() {
             return Err(JobValidationError::TooManyJobOutputs {
                 maximum: super::MAX_JOB_OUTPUT_DEFINITIONS,
             });
@@ -526,7 +579,7 @@ fn validate_execution_context(context: &JobExecutionContext) -> Result<(), JobVa
 fn validate_content_reference(reference: &JobContentReference) -> Result<(), JobValidationError> {
     let key = reference.object_key.as_str();
     if key.is_empty()
-        || key.len() > MAX_CONTENT_KEY_BYTES
+        || content_key_byte_rejection(key.len()).is_some()
         || key.starts_with('/')
         || key.contains('\\')
         || key.chars().any(char::is_control)
@@ -539,9 +592,9 @@ fn validate_content_reference(reference: &JobContentReference) -> Result<(), Job
     let media_type = reference.media_type.as_str();
     let mut media_type_components = media_type.split('/');
     if reference.encoded_size == 0
-        || reference.encoded_size > MAX_JOB_CONTENT_BYTES
+        || job_content_byte_rejection(reference.encoded_size).is_some()
         || media_type.is_empty()
-        || media_type.len() > MAX_CONTENT_MEDIA_TYPE_BYTES
+        || content_media_type_byte_rejection(media_type.len()).is_some()
         || !media_type.is_ascii()
         || !media_type.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
@@ -571,7 +624,7 @@ fn validate_content_reference(reference: &JobContentReference) -> Result<(), Job
 
 fn validate_bounded_text(value: &str, field: &'static str) -> Result<(), JobValidationError> {
     if value.trim().is_empty()
-        || value.len() > MAX_EXECUTION_CONTEXT_TEXT_BYTES
+        || execution_context_text_byte_rejection(value.len()).is_some()
         || value.chars().any(char::is_control)
     {
         return Err(JobValidationError::InvalidContextField(field));
@@ -878,7 +931,7 @@ impl ValueSource {
             Self::SecretReference(reference) => {
                 if reference.is_empty()
                     || reference.trim() != reference
-                    || reference.len() > MAX_SECRET_REFERENCE_BYTES
+                    || secret_reference_byte_rejection(reference.len()).is_some()
                     || reference.chars().any(char::is_control)
                 {
                     return Err(JobValidationError::InvalidLogicalName {
@@ -1025,4 +1078,83 @@ fn results_action(reference: &ActionReference) -> bool {
     };
     owner.eq_ignore_ascii_case("actions")
         && (name.eq_ignore_ascii_case("cache") || name.to_ascii_lowercase().contains("artifact"))
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        JobModelLimitRejection, MAX_CONTENT_KEY_BYTES, MAX_CONTENT_MEDIA_TYPE_BYTES,
+        MAX_EXECUTION_CONTEXT_TEXT_BYTES, MAX_JOB_CONTENT_BYTES, MAX_SECRET_REFERENCE_BYTES,
+        content_key_byte_rejection, content_media_type_byte_rejection,
+        execution_context_text_byte_rejection, job_content_byte_rejection,
+        secret_reference_byte_rejection,
+    };
+
+    #[test]
+    fn execution_context_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            execution_context_text_byte_rejection(MAX_EXECUTION_CONTEXT_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            execution_context_text_byte_rejection(MAX_EXECUTION_CONTEXT_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            execution_context_text_byte_rejection(MAX_EXECUTION_CONTEXT_TEXT_BYTES + 1),
+            Some(JobModelLimitRejection::ExecutionContextTextBytes)
+        );
+    }
+
+    #[test]
+    fn content_key_byte_limit_has_exact_boundaries() {
+        assert_eq!(content_key_byte_rejection(MAX_CONTENT_KEY_BYTES - 1), None);
+        assert_eq!(content_key_byte_rejection(MAX_CONTENT_KEY_BYTES), None);
+        assert_eq!(
+            content_key_byte_rejection(MAX_CONTENT_KEY_BYTES + 1),
+            Some(JobModelLimitRejection::ContentKeyBytes)
+        );
+    }
+
+    #[test]
+    fn content_media_type_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            content_media_type_byte_rejection(MAX_CONTENT_MEDIA_TYPE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            content_media_type_byte_rejection(MAX_CONTENT_MEDIA_TYPE_BYTES),
+            None
+        );
+        assert_eq!(
+            content_media_type_byte_rejection(MAX_CONTENT_MEDIA_TYPE_BYTES + 1),
+            Some(JobModelLimitRejection::ContentMediaTypeBytes)
+        );
+    }
+
+    #[test]
+    fn job_content_byte_limit_has_exact_boundaries() {
+        assert_eq!(job_content_byte_rejection(MAX_JOB_CONTENT_BYTES - 1), None);
+        assert_eq!(job_content_byte_rejection(MAX_JOB_CONTENT_BYTES), None);
+        assert_eq!(
+            job_content_byte_rejection(MAX_JOB_CONTENT_BYTES + 1),
+            Some(JobModelLimitRejection::JobContentBytes)
+        );
+    }
+
+    #[test]
+    fn secret_reference_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            secret_reference_byte_rejection(MAX_SECRET_REFERENCE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            secret_reference_byte_rejection(MAX_SECRET_REFERENCE_BYTES),
+            None
+        );
+        assert_eq!(
+            secret_reference_byte_rejection(MAX_SECRET_REFERENCE_BYTES + 1),
+            Some(JobModelLimitRejection::SecretReferenceBytes)
+        );
+    }
 }

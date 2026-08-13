@@ -16,29 +16,154 @@ use super::{
 };
 
 /// Maximum logical jobs in one logical-workflow workflow plan.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOBS: usize = 1_024;
 /// Maximum direct prerequisite jobs for one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOB_NEEDS: usize = 128;
 /// Maximum declared result references consumed by one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_RESULT_REFERENCES: usize = 512;
 /// Maximum outputs declared by one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOB_OUTPUTS: usize = 256;
 /// Maximum step templates in one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_STEPS: usize = 2_048;
 /// Maximum service containers attached to one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICES: usize = 64;
 /// Maximum exposed ports on one logical service container.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICE_PORTS: usize = 256;
 /// Maximum parsed engine-option tokens retained for one logical service.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICE_OPTIONS: usize = 64;
 /// Maximum entries in one environment/input layer.
+// foundation-governance: parity-limit
 pub const MAX_TEMPLATE_MAP_ENTRIES: usize = 512;
 /// Maximum runner labels in one logical job.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_RUNNER_LABELS: usize = 64;
 /// Maximum input/secret bindings on one reusable invocation.
+// foundation-governance: parity-limit
 pub const MAX_REUSABLE_BINDINGS: usize = 256;
 /// Maximum bytes in a logical-plan name, key, reference, or description.
-pub const MAX_LOGICAL_FIELD_BYTES: usize = 64 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_LOGICAL_FIELD_BYTES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LogicalWorkflowLimitRejection {
+    Jobs,
+    JobNeeds,
+    ResultReferences,
+    JobOutputs,
+    Steps,
+    Services,
+    ServicePorts,
+    ServiceOptions,
+    TemplateMapEntries,
+    RunnerLabels,
+    ReusableBindings,
+    FieldBytes,
+}
+
+pub(super) const fn logical_job_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_JOBS {
+        return Some(LogicalWorkflowLimitRejection::Jobs);
+    }
+    None
+}
+pub(super) const fn logical_job_need_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_JOB_NEEDS {
+        return Some(LogicalWorkflowLimitRejection::JobNeeds);
+    }
+    None
+}
+pub(super) const fn logical_result_reference_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_RESULT_REFERENCES {
+        return Some(LogicalWorkflowLimitRejection::ResultReferences);
+    }
+    None
+}
+pub(super) const fn logical_job_output_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_JOB_OUTPUTS {
+        return Some(LogicalWorkflowLimitRejection::JobOutputs);
+    }
+    None
+}
+pub(super) const fn logical_step_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_STEPS {
+        return Some(LogicalWorkflowLimitRejection::Steps);
+    }
+    None
+}
+pub(super) const fn logical_service_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_SERVICES {
+        return Some(LogicalWorkflowLimitRejection::Services);
+    }
+    None
+}
+pub(super) const fn logical_service_port_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_SERVICE_PORTS {
+        return Some(LogicalWorkflowLimitRejection::ServicePorts);
+    }
+    None
+}
+pub(super) const fn logical_service_option_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_SERVICE_OPTIONS {
+        return Some(LogicalWorkflowLimitRejection::ServiceOptions);
+    }
+    None
+}
+pub(super) const fn template_map_entry_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_TEMPLATE_MAP_ENTRIES {
+        return Some(LogicalWorkflowLimitRejection::TemplateMapEntries);
+    }
+    None
+}
+pub(super) const fn logical_runner_label_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_RUNNER_LABELS {
+        return Some(LogicalWorkflowLimitRejection::RunnerLabels);
+    }
+    None
+}
+pub(super) const fn reusable_binding_count_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_REUSABLE_BINDINGS {
+        return Some(LogicalWorkflowLimitRejection::ReusableBindings);
+    }
+    None
+}
+pub(super) const fn logical_field_byte_rejection(
+    observed: usize,
+) -> Option<LogicalWorkflowLimitRejection> {
+    if observed > MAX_LOGICAL_FIELD_BYTES {
+        return Some(LogicalWorkflowLimitRejection::FieldBytes);
+    }
+    None
+}
 
 /// Unit retained for a deferred positive timeout value.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -161,7 +286,7 @@ impl TemplateValueMap {
         budget: &mut LogicalPlanBudget,
     ) -> Result<(), WorkflowPlanError> {
         budget.charge_node(field)?;
-        if self.entries.len() > MAX_TEMPLATE_MAP_ENTRIES {
+        if template_map_entry_count_rejection(self.entries.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field,
                 maximum: MAX_TEMPLATE_MAP_ENTRIES,
@@ -407,7 +532,7 @@ impl LogicalRunnerTemplate {
         if self.group.is_none() && self.labels.is_empty() {
             return Err(WorkflowPlanError::EmptyRunnerProfile(job.to_string()));
         }
-        if self.labels.len() > MAX_LOGICAL_RUNNER_LABELS {
+        if logical_runner_label_count_rejection(self.labels.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical runner labels",
                 maximum: MAX_LOGICAL_RUNNER_LABELS,
@@ -916,7 +1041,7 @@ impl LogicalServiceContainerTemplate {
             PlanEvaluationPhase::JobExecution,
             budget,
         )?;
-        if self.ports.len() > MAX_LOGICAL_SERVICE_PORTS {
+        if logical_service_port_count_rejection(self.ports.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical service ports",
                 maximum: MAX_LOGICAL_SERVICE_PORTS,
@@ -941,7 +1066,7 @@ impl LogicalServiceContainerTemplate {
                 });
             }
         }
-        if self.options.len() > MAX_LOGICAL_SERVICE_OPTIONS {
+        if logical_service_option_count_rejection(self.options.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical service options",
                 maximum: MAX_LOGICAL_SERVICE_OPTIONS,
@@ -1220,7 +1345,7 @@ impl StepJobTemplate {
         if let Some(resources) = &self.resources {
             resources.validate(source_id, budget)?;
         }
-        if self.services.len() > MAX_LOGICAL_SERVICES {
+        if logical_service_count_rejection(self.services.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical services",
                 maximum: MAX_LOGICAL_SERVICES,
@@ -1239,7 +1364,7 @@ impl StepJobTemplate {
         if self.steps.is_empty() {
             return Err(WorkflowPlanError::NoSteps(job.to_string()));
         }
-        if self.steps.len() > MAX_LOGICAL_STEPS {
+        if logical_step_count_rejection(self.steps.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical steps",
                 maximum: MAX_LOGICAL_STEPS,
@@ -1434,7 +1559,7 @@ impl ReusableWorkflowInvocation {
         if self.reference.value().is_empty() {
             return Err(WorkflowPlanError::EmptyField("reusable workflow reference"));
         }
-        if self.inputs.len() > MAX_REUSABLE_BINDINGS {
+        if reusable_binding_count_rejection(self.inputs.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "reusable workflow inputs",
                 maximum: MAX_REUSABLE_BINDINGS,
@@ -1461,7 +1586,7 @@ impl ReusableWorkflowInvocation {
                 validate_span_source(span, source_id, "reusable inherited secrets")?;
             }
             ReusableSecretForwarding::Mapping(bindings) => {
-                if bindings.len() > MAX_REUSABLE_BINDINGS {
+                if reusable_binding_count_rejection(bindings.len()).is_some() {
                     return Err(WorkflowPlanError::LimitExceeded {
                         field: "reusable workflow secrets",
                         maximum: MAX_REUSABLE_BINDINGS,
@@ -2022,7 +2147,7 @@ impl LogicalJobTemplate {
         ] {
             validate_span_source(span, source_id, field)?;
         }
-        if self.needs.len() > MAX_LOGICAL_JOB_NEEDS {
+        if logical_job_need_count_rejection(self.needs.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical job needs",
                 maximum: MAX_LOGICAL_JOB_NEEDS,
@@ -2038,7 +2163,7 @@ impl LogicalJobTemplate {
                 });
             }
         }
-        if self.result_references.len() > MAX_LOGICAL_RESULT_REFERENCES {
+        if logical_result_reference_count_rejection(self.result_references.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical result references",
                 maximum: MAX_LOGICAL_RESULT_REFERENCES,
@@ -2119,7 +2244,7 @@ impl LogicalJobTemplate {
         source_id: &str,
         budget: &mut LogicalPlanBudget,
     ) -> Result<(), WorkflowPlanError> {
-        if self.outputs.len() > MAX_LOGICAL_JOB_OUTPUTS {
+        if logical_job_output_count_rejection(self.outputs.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical job outputs",
                 maximum: MAX_LOGICAL_JOB_OUTPUTS,
@@ -2393,7 +2518,7 @@ impl LogicalWorkflowPlan {
         if self.jobs.is_empty() {
             return Err(WorkflowPlanError::NoJobs);
         }
-        if self.jobs.len() > MAX_LOGICAL_JOBS {
+        if logical_job_count_rejection(self.jobs.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical jobs",
                 maximum: MAX_LOGICAL_JOBS,
@@ -2446,6 +2571,185 @@ impl LogicalWorkflowPlan {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn logical_job_count_limit_has_exact_boundaries() {
+        assert_eq!(logical_job_count_rejection(MAX_LOGICAL_JOBS - 1), None);
+        assert_eq!(logical_job_count_rejection(MAX_LOGICAL_JOBS), None);
+        assert_eq!(
+            logical_job_count_rejection(MAX_LOGICAL_JOBS + 1),
+            Some(LogicalWorkflowLimitRejection::Jobs)
+        );
+    }
+
+    #[test]
+    fn logical_job_need_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_job_need_count_rejection(MAX_LOGICAL_JOB_NEEDS - 1),
+            None
+        );
+        assert_eq!(
+            logical_job_need_count_rejection(MAX_LOGICAL_JOB_NEEDS),
+            None
+        );
+        assert_eq!(
+            logical_job_need_count_rejection(MAX_LOGICAL_JOB_NEEDS + 1),
+            Some(LogicalWorkflowLimitRejection::JobNeeds)
+        );
+    }
+
+    #[test]
+    fn logical_result_reference_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_result_reference_count_rejection(MAX_LOGICAL_RESULT_REFERENCES - 1),
+            None
+        );
+        assert_eq!(
+            logical_result_reference_count_rejection(MAX_LOGICAL_RESULT_REFERENCES),
+            None
+        );
+        assert_eq!(
+            logical_result_reference_count_rejection(MAX_LOGICAL_RESULT_REFERENCES + 1),
+            Some(LogicalWorkflowLimitRejection::ResultReferences)
+        );
+    }
+
+    #[test]
+    fn logical_job_output_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_job_output_count_rejection(MAX_LOGICAL_JOB_OUTPUTS - 1),
+            None
+        );
+        assert_eq!(
+            logical_job_output_count_rejection(MAX_LOGICAL_JOB_OUTPUTS),
+            None
+        );
+        assert_eq!(
+            logical_job_output_count_rejection(MAX_LOGICAL_JOB_OUTPUTS + 1),
+            Some(LogicalWorkflowLimitRejection::JobOutputs)
+        );
+    }
+
+    #[test]
+    fn logical_step_count_limit_has_exact_boundaries() {
+        assert_eq!(logical_step_count_rejection(MAX_LOGICAL_STEPS - 1), None);
+        assert_eq!(logical_step_count_rejection(MAX_LOGICAL_STEPS), None);
+        assert_eq!(
+            logical_step_count_rejection(MAX_LOGICAL_STEPS + 1),
+            Some(LogicalWorkflowLimitRejection::Steps)
+        );
+    }
+
+    #[test]
+    fn logical_service_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_service_count_rejection(MAX_LOGICAL_SERVICES - 1),
+            None
+        );
+        assert_eq!(logical_service_count_rejection(MAX_LOGICAL_SERVICES), None);
+        assert_eq!(
+            logical_service_count_rejection(MAX_LOGICAL_SERVICES + 1),
+            Some(LogicalWorkflowLimitRejection::Services)
+        );
+    }
+
+    #[test]
+    fn logical_service_port_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_service_port_count_rejection(MAX_LOGICAL_SERVICE_PORTS - 1),
+            None
+        );
+        assert_eq!(
+            logical_service_port_count_rejection(MAX_LOGICAL_SERVICE_PORTS),
+            None
+        );
+        assert_eq!(
+            logical_service_port_count_rejection(MAX_LOGICAL_SERVICE_PORTS + 1),
+            Some(LogicalWorkflowLimitRejection::ServicePorts)
+        );
+    }
+
+    #[test]
+    fn logical_service_option_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_service_option_count_rejection(MAX_LOGICAL_SERVICE_OPTIONS - 1),
+            None
+        );
+        assert_eq!(
+            logical_service_option_count_rejection(MAX_LOGICAL_SERVICE_OPTIONS),
+            None
+        );
+        assert_eq!(
+            logical_service_option_count_rejection(MAX_LOGICAL_SERVICE_OPTIONS + 1),
+            Some(LogicalWorkflowLimitRejection::ServiceOptions)
+        );
+    }
+
+    #[test]
+    fn template_map_entry_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            template_map_entry_count_rejection(MAX_TEMPLATE_MAP_ENTRIES - 1),
+            None
+        );
+        assert_eq!(
+            template_map_entry_count_rejection(MAX_TEMPLATE_MAP_ENTRIES),
+            None
+        );
+        assert_eq!(
+            template_map_entry_count_rejection(MAX_TEMPLATE_MAP_ENTRIES + 1),
+            Some(LogicalWorkflowLimitRejection::TemplateMapEntries)
+        );
+    }
+
+    #[test]
+    fn logical_runner_label_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_runner_label_count_rejection(MAX_LOGICAL_RUNNER_LABELS - 1),
+            None
+        );
+        assert_eq!(
+            logical_runner_label_count_rejection(MAX_LOGICAL_RUNNER_LABELS),
+            None
+        );
+        assert_eq!(
+            logical_runner_label_count_rejection(MAX_LOGICAL_RUNNER_LABELS + 1),
+            Some(LogicalWorkflowLimitRejection::RunnerLabels)
+        );
+    }
+
+    #[test]
+    fn reusable_binding_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            reusable_binding_count_rejection(MAX_REUSABLE_BINDINGS - 1),
+            None
+        );
+        assert_eq!(
+            reusable_binding_count_rejection(MAX_REUSABLE_BINDINGS),
+            None
+        );
+        assert_eq!(
+            reusable_binding_count_rejection(MAX_REUSABLE_BINDINGS + 1),
+            Some(LogicalWorkflowLimitRejection::ReusableBindings)
+        );
+    }
+
+    #[test]
+    fn logical_field_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_field_byte_rejection(MAX_LOGICAL_FIELD_BYTES - 1),
+            None
+        );
+        assert_eq!(logical_field_byte_rejection(MAX_LOGICAL_FIELD_BYTES), None);
+        assert_eq!(
+            logical_field_byte_rejection(MAX_LOGICAL_FIELD_BYTES + 1),
+            Some(LogicalWorkflowLimitRejection::FieldBytes)
+        );
     }
 }
 

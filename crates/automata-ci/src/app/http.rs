@@ -27,8 +27,11 @@ use crate::{
 
 const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");
 const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
+// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 const HUMAN_API_ROOT: &str = "/api/v1";
+// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 const HUMAN_API_ROOT_WITH_SLASH: &str = "/api/v1/";
+// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 const HUMAN_API_CATCH_ALL: &str = "/api/v1/{*api_path}";
 
 #[derive(Debug, Serialize)]

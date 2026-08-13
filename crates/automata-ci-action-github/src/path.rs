@@ -3,8 +3,30 @@ use crate::{
     MetadataScalarKind,
 };
 
-const MAX_ENTRY_PATH_BYTES: usize = 4 * 1_024;
-const MAX_IMAGE_REFERENCE_BYTES: usize = 4 * 1_024;
+// foundation-governance: parity-limit
+const MAX_ENTRY_PATH_BYTES: usize = 4_096;
+// foundation-governance: parity-limit
+const MAX_IMAGE_REFERENCE_BYTES: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubActionPathLimitRejection {
+    EntryPathBytes,
+    ImageReferenceBytes,
+}
+
+const fn entry_path_byte_rejection(observed: usize) -> Option<GithubActionPathLimitRejection> {
+    if observed > MAX_ENTRY_PATH_BYTES {
+        return Some(GithubActionPathLimitRejection::EntryPathBytes);
+    }
+    None
+}
+
+const fn image_reference_byte_rejection(observed: usize) -> Option<GithubActionPathLimitRejection> {
+    if observed > MAX_IMAGE_REFERENCE_BYTES {
+        return Some(GithubActionPathLimitRejection::ImageReferenceBytes);
+    }
+    None
+}
 
 pub(crate) fn scalar_string(value: &MetadataScalar) -> String {
     match value.kind() {
@@ -22,7 +44,7 @@ pub(crate) fn entry_path(
 ) -> Result<MetadataEntryPath, MetadataDecodeError> {
     let declared = scalar_string(value);
     if declared.is_empty()
-        || declared.len() > MAX_ENTRY_PATH_BYTES
+        || entry_path_byte_rejection(declared.len()).is_some()
         || declared.starts_with('/')
         || declared.ends_with('/')
         || declared.contains('\\')
@@ -56,7 +78,7 @@ pub(crate) fn docker_image(value: &MetadataScalar) -> Result<DockerImage, Metada
     let declared = scalar_string(value);
     if let Some(reference) = strip_prefix_ignore_ascii_case(&declared, "docker://") {
         if reference.is_empty()
-            || reference.len() > MAX_IMAGE_REFERENCE_BYTES
+            || image_reference_byte_rejection(reference.len()).is_some()
             || reference.contains("${{")
             || reference.chars().any(char::is_whitespace)
             || reference.chars().any(char::is_control)
@@ -82,4 +104,38 @@ fn unsafe_path(field: &'static str, value: &MetadataScalar) -> MetadataDecodeErr
         field,
         value.location(),
     )
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        GithubActionPathLimitRejection, MAX_ENTRY_PATH_BYTES, MAX_IMAGE_REFERENCE_BYTES,
+        entry_path_byte_rejection, image_reference_byte_rejection,
+    };
+
+    #[test]
+    fn entry_path_byte_limit_has_exact_boundaries() {
+        assert_eq!(entry_path_byte_rejection(MAX_ENTRY_PATH_BYTES - 1), None);
+        assert_eq!(entry_path_byte_rejection(MAX_ENTRY_PATH_BYTES), None);
+        assert_eq!(
+            entry_path_byte_rejection(MAX_ENTRY_PATH_BYTES + 1),
+            Some(GithubActionPathLimitRejection::EntryPathBytes)
+        );
+    }
+
+    #[test]
+    fn image_reference_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            image_reference_byte_rejection(MAX_IMAGE_REFERENCE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            image_reference_byte_rejection(MAX_IMAGE_REFERENCE_BYTES),
+            None
+        );
+        assert_eq!(
+            image_reference_byte_rejection(MAX_IMAGE_REFERENCE_BYTES + 1),
+            Some(GithubActionPathLimitRejection::ImageReferenceBytes)
+        );
+    }
 }

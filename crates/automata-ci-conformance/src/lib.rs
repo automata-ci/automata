@@ -11,9 +11,10 @@ pub use catalog::{
     FixtureCatalog, FixtureCatalogEntry, FixtureProvider, OperatingSystem, RepositorySourceLock,
 };
 pub use control::{
-    ConformanceClock, DurableTransition, FaultMode, FaultPlan, FaultTarget, FixtureControl,
-    FixtureControlError, MAX_CONFORMANCE_SHARDS, ManualConformanceClock, ProductService,
-    RestartRecord, ServiceObservation, ServiceRestartProbe, ServiceState, ShardIdentity, ShardPlan,
+    ConformanceClock, DurableTransition, FaultMode, FaultNotDue, FaultOperation, FaultPlan,
+    FaultTarget, FixtureControl, FixtureControlError, MAX_CONFORMANCE_SHARDS,
+    ManualConformanceClock, ProductService, RestartRecord, ServiceObservation, ServiceRestartProbe,
+    ServiceState, ShardIdentity, ShardPlan,
 };
 pub use evidence::{
     AdmissionOutcome, AvailabilityReason, EVIDENCE_SCHEMA_VERSION, EvidenceAvailability,

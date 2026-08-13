@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 const MAX_REQUEST_BYTES: usize = 1_024;
 
+// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const PROTECTED_ENVIRONMENT_REVIEW_PATH: &str =
     "/api/v1/repositories/{repository_id}/attempts/{attempt_id}/environment/reviews";
 

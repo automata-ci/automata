@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::model::SensitiveText;
+use crate::model::{SensitiveText, artifact_declaration_file_byte_rejection};
 use crate::{
     CommandFileError, CommandFileKind, CommandFileLimits, CommandFilePlatform,
     EnvironmentCommandFile, MAX_ARTIFACT_DECLARATION_FILE_BYTES, NameValueCommand,
@@ -75,6 +75,15 @@ impl CommandFileDecoder for GithubCommandFileDecoder {
         } else {
             self.limits.maximum_file_bytes()
         };
+        if kind == CommandFileKind::Artifacts
+            && artifact_declaration_file_byte_rejection(source.len()).is_some()
+        {
+            return Err(CommandFileError::FileTooLarge {
+                kind,
+                maximum: MAX_ARTIFACT_DECLARATION_FILE_BYTES,
+                received: source.len(),
+            });
+        }
         if source.len() > maximum_file_bytes {
             return Err(CommandFileError::FileTooLarge {
                 kind,

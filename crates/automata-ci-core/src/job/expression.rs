@@ -8,15 +8,72 @@ use thiserror::Error;
 /// Current durable expression-program representation.
 pub const EXPRESSION_PROGRAM_SCHEMA_VERSION: u16 = 1;
 /// Maximum preserved expression source size in UTF-8 bytes.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_SOURCE_BYTES: usize = 84_000;
 /// Maximum number of instructions in one expression program.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_INSTRUCTIONS: usize = 4_096;
 /// Maximum validated expression stack-tree depth.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_DEPTH: usize = 50;
 /// Maximum aggregate UTF-8 bytes stored by instruction text operands.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_TEXT_BYTES: usize = 84_000;
 /// Maximum durable expression dialect identifier length.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_DIALECT_LENGTH: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpressionProgramLimitRejection {
+    SourceBytes,
+    Instructions,
+    Depth,
+    TextBytes,
+    DialectBytes,
+}
+
+const fn expression_source_byte_rejection(
+    observed: usize,
+) -> Option<ExpressionProgramLimitRejection> {
+    if observed > MAX_EXPRESSION_SOURCE_BYTES {
+        return Some(ExpressionProgramLimitRejection::SourceBytes);
+    }
+    None
+}
+
+const fn expression_instruction_rejection(
+    observed: usize,
+) -> Option<ExpressionProgramLimitRejection> {
+    if observed > MAX_EXPRESSION_INSTRUCTIONS {
+        return Some(ExpressionProgramLimitRejection::Instructions);
+    }
+    None
+}
+
+const fn expression_depth_rejection(observed: usize) -> Option<ExpressionProgramLimitRejection> {
+    if observed > MAX_EXPRESSION_DEPTH {
+        return Some(ExpressionProgramLimitRejection::Depth);
+    }
+    None
+}
+
+const fn expression_text_byte_rejection(
+    observed: usize,
+) -> Option<ExpressionProgramLimitRejection> {
+    if observed > MAX_EXPRESSION_TEXT_BYTES {
+        return Some(ExpressionProgramLimitRejection::TextBytes);
+    }
+    None
+}
+
+const fn expression_dialect_byte_rejection(
+    observed: usize,
+) -> Option<ExpressionProgramLimitRejection> {
+    if observed > MAX_EXPRESSION_DIALECT_LENGTH {
+        return Some(ExpressionProgramLimitRejection::DialectBytes);
+    }
+    None
+}
 
 /// A versioned expression semantic dialect implemented by an adapter.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -53,7 +110,7 @@ impl ExpressionDialect {
         if name.is_empty() {
             return Err(ExpressionProgramError::EmptyDialect);
         }
-        if name.len() > MAX_EXPRESSION_DIALECT_LENGTH {
+        if expression_dialect_byte_rejection(name.len()).is_some() {
             return Err(ExpressionProgramError::DialectTooLong {
                 maximum: MAX_EXPRESSION_DIALECT_LENGTH,
             });
@@ -292,7 +349,7 @@ impl ExpressionProgram {
         if self.source.is_empty() {
             return Err(ExpressionProgramError::EmptySource);
         }
-        if self.source.len() > MAX_EXPRESSION_SOURCE_BYTES {
+        if expression_source_byte_rejection(self.source.len()).is_some() {
             return Err(ExpressionProgramError::SourceTooLong {
                 maximum: MAX_EXPRESSION_SOURCE_BYTES,
             });
@@ -307,7 +364,7 @@ impl ExpressionProgram {
         if self.instructions.is_empty() {
             return Err(ExpressionProgramError::EmptyProgram);
         }
-        if self.instructions.len() > MAX_EXPRESSION_INSTRUCTIONS {
+        if expression_instruction_rejection(self.instructions.len()).is_some() {
             return Err(ExpressionProgramError::TooManyInstructions {
                 maximum: MAX_EXPRESSION_INSTRUCTIONS,
             });
@@ -451,7 +508,7 @@ fn charge_text(value: &str, total: &mut usize) -> Result<(), ExpressionProgramEr
         .ok_or(ExpressionProgramError::TextTooLong {
             maximum: MAX_EXPRESSION_TEXT_BYTES,
         })?;
-    if *total > MAX_EXPRESSION_TEXT_BYTES {
+    if expression_text_byte_rejection(*total).is_some() {
         return Err(ExpressionProgramError::TextTooLong {
             maximum: MAX_EXPRESSION_TEXT_BYTES,
         });
@@ -491,7 +548,7 @@ fn push_value(
     wildcard: bool,
     logical: Option<ExpressionLogical>,
 ) -> Result<(), ExpressionProgramError> {
-    if depth > MAX_EXPRESSION_DEPTH {
+    if expression_depth_rejection(depth).is_some() {
         return Err(ExpressionProgramError::TooDeep {
             maximum: MAX_EXPRESSION_DEPTH,
         });
@@ -502,6 +559,91 @@ fn push_value(
         logical,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        ExpressionProgramLimitRejection, MAX_EXPRESSION_DEPTH, MAX_EXPRESSION_DIALECT_LENGTH,
+        MAX_EXPRESSION_INSTRUCTIONS, MAX_EXPRESSION_SOURCE_BYTES, MAX_EXPRESSION_TEXT_BYTES,
+        expression_depth_rejection, expression_dialect_byte_rejection,
+        expression_instruction_rejection, expression_source_byte_rejection,
+        expression_text_byte_rejection,
+    };
+
+    #[test]
+    fn expression_source_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES),
+            None
+        );
+        assert_eq!(
+            expression_source_byte_rejection(MAX_EXPRESSION_SOURCE_BYTES + 1),
+            Some(ExpressionProgramLimitRejection::SourceBytes)
+        );
+    }
+
+    #[test]
+    fn expression_instruction_limit_has_exact_boundaries() {
+        assert_eq!(
+            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS - 1),
+            None
+        );
+        assert_eq!(
+            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS),
+            None
+        );
+        assert_eq!(
+            expression_instruction_rejection(MAX_EXPRESSION_INSTRUCTIONS + 1),
+            Some(ExpressionProgramLimitRejection::Instructions)
+        );
+    }
+
+    #[test]
+    fn expression_depth_limit_has_exact_boundaries() {
+        assert_eq!(expression_depth_rejection(MAX_EXPRESSION_DEPTH - 1), None);
+        assert_eq!(expression_depth_rejection(MAX_EXPRESSION_DEPTH), None);
+        assert_eq!(
+            expression_depth_rejection(MAX_EXPRESSION_DEPTH + 1),
+            Some(ExpressionProgramLimitRejection::Depth)
+        );
+    }
+
+    #[test]
+    fn expression_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            expression_text_byte_rejection(MAX_EXPRESSION_TEXT_BYTES + 1),
+            Some(ExpressionProgramLimitRejection::TextBytes)
+        );
+    }
+
+    #[test]
+    fn expression_dialect_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH - 1),
+            None
+        );
+        assert_eq!(
+            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH),
+            None
+        );
+        assert_eq!(
+            expression_dialect_byte_rejection(MAX_EXPRESSION_DIALECT_LENGTH + 1),
+            Some(ExpressionProgramLimitRejection::DialectBytes)
+        );
+    }
 }
 
 /// Invalid durable expression dialect, source, or canonical program.

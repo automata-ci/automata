@@ -17,9 +17,10 @@ pub use container::{
     ContainerCredentials, ContainerPort, ContainerSpec, MountSource, TransportProtocol, VolumeMount,
 };
 pub use context::{
-    ContextValue, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobRuntimeContext, MAX_CONTEXT_VALUE_DEPTH,
-    MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES,
-    NeedContext, NeedOutput, RuntimeContextError, SecretBinding, StrategyContext,
+    ContextValue, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION,
+    JobRuntimeContext, MAX_CONTEXT_VALUE_DEPTH, MAX_CONTEXT_VALUE_NODES,
+    MAX_CONTEXT_VALUE_TEXT_BYTES, MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES, NeedContext, NeedOutput,
+    RuntimeContextError, SecretBinding, StrategyContext,
 };
 pub use error::JobValidationError;
 pub use expression::{
@@ -35,7 +36,7 @@ pub use instance::{
 };
 pub use model::{
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobIr, JobIrEnvelope, JobSource,
-    ValueSource, canonical_git_ref,
+    ValueSource, WORKFLOW_EVENT_MEDIA_TYPE, canonical_git_ref,
 };
 pub use permission::{
     JobPermissionGrant, JobPermissionRequest, MAX_JOB_PERMISSION_GRANTS,

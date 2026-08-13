@@ -41,16 +41,16 @@ pub use cache_service::{
 };
 pub use http::{GithubResultsApi, GithubResultsHttpLimits, GithubResultsHttpLimitsError};
 pub use model::{
-    ArtifactBlock, ArtifactBlockReservation, ArtifactFinalizationClaim,
-    ArtifactFinalizationReservation, ArtifactFinalizationWork, ArtifactId, ArtifactIdError,
-    ArtifactManifest, ArtifactManifestBlock, ArtifactName, ArtifactNameError,
-    BeginArtifactFinalization, CommitArtifactBlocks, CommittedArtifact, CompleteArtifactBlock,
-    CompleteArtifactFinalization, CreateArtifact, CreateArtifactOutcome, ExecutionAuthority,
-    FinalizeArtifactOutcome, ListArtifacts, LoadArtifactFinalization,
-    MAXIMUM_ARTIFACT_FINALIZATION_LEASE_SECONDS, MAXIMUM_ARTIFACT_MANIFEST_BYTES,
-    PublishedArtifactMetadata, RecordArtifactVerification, RenewArtifactFinalization,
-    ReserveArtifactBlock, ResolveArtifactDownload, ResultsLimits, ResultsLimitsError,
-    RuntimeTokenClaims, UploadId, VerifiedArtifactFinalization,
+    ARTIFACT_MANIFEST_SCHEMA_VERSION, ArtifactBlock, ArtifactBlockReservation,
+    ArtifactFinalizationClaim, ArtifactFinalizationReservation, ArtifactFinalizationWork,
+    ArtifactId, ArtifactIdError, ArtifactManifest, ArtifactManifestBlock,
+    ArtifactManifestSchemaError, ArtifactName, ArtifactNameError, BeginArtifactFinalization,
+    CommitArtifactBlocks, CommittedArtifact, CompleteArtifactBlock, CompleteArtifactFinalization,
+    CreateArtifact, CreateArtifactOutcome, ExecutionAuthority, FinalizeArtifactOutcome,
+    ListArtifacts, LoadArtifactFinalization, MAXIMUM_ARTIFACT_FINALIZATION_LEASE_SECONDS,
+    MAXIMUM_ARTIFACT_MANIFEST_BYTES, PublishedArtifactMetadata, RecordArtifactVerification,
+    RenewArtifactFinalization, ReserveArtifactBlock, ResolveArtifactDownload, ResultsLimits,
+    ResultsLimitsError, RuntimeTokenClaims, UploadId, VerifiedArtifactFinalization,
 };
 pub use observer::{
     NoopResultsObserver, ResultsBlobOperation, ResultsBlobOperationOutcome, ResultsHttpMethod,

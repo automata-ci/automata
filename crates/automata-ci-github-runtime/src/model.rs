@@ -4,16 +4,55 @@ use serde::Serialize;
 
 use crate::{ArtifactListEncodingError, ArtifactSubjectError, CommandScopeIdError};
 
+// foundation-governance: parity-limit
 const MAX_SCOPE_ID_BYTES: usize = 512;
 
+/// Exact schema of the read-only `GITHUB_ARTIFACTS_LIST` JSON payload.
+pub const ARTIFACT_LIST_SCHEMA_VERSION: u8 = 1;
+
 /// Fixed upstream ceiling for one `GITHUB_ARTIFACTS` declaration file.
-pub const MAX_ARTIFACT_DECLARATION_FILE_BYTES: usize = 1_024 * 1_024;
+// foundation-governance: parity-limit
+pub const MAX_ARTIFACT_DECLARATION_FILE_BYTES: usize = 1_048_576;
 
 /// Fixed upstream ceiling for distinct artifact subjects accumulated by one job.
+// foundation-governance: parity-limit
 pub const MAX_ARTIFACT_SUBJECTS: usize = 500;
 
 /// Automata transport ceiling for the generated read-only artifact list.
-pub const MAX_ARTIFACT_LIST_BYTES: usize = 16 * 1_024 * 1_024;
+// foundation-governance: parity-limit
+pub const MAX_ARTIFACT_LIST_BYTES: usize = 16_777_216;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArtifactRuntimeLimitRejection {
+    ScopeId,
+    DeclarationFile,
+    ArtifactList,
+}
+
+pub(crate) const fn command_scope_id_byte_rejection(
+    observed: usize,
+) -> Option<ArtifactRuntimeLimitRejection> {
+    if observed > MAX_SCOPE_ID_BYTES {
+        return Some(ArtifactRuntimeLimitRejection::ScopeId);
+    }
+    None
+}
+pub(crate) const fn artifact_declaration_file_byte_rejection(
+    observed: usize,
+) -> Option<ArtifactRuntimeLimitRejection> {
+    if observed > MAX_ARTIFACT_DECLARATION_FILE_BYTES {
+        return Some(ArtifactRuntimeLimitRejection::DeclarationFile);
+    }
+    None
+}
+pub(crate) const fn artifact_list_byte_rejection(
+    observed: usize,
+) -> Option<ArtifactRuntimeLimitRejection> {
+    if observed > MAX_ARTIFACT_LIST_BYTES {
+        return Some(ArtifactRuntimeLimitRejection::ArtifactList);
+    }
+    None
+}
 
 /// One well-known per-step command file.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -570,7 +609,7 @@ impl ActionInvocationId {
 
 fn validated_scope_id(value: String) -> Result<String, CommandScopeIdError> {
     if value.is_empty()
-        || value.len() > MAX_SCOPE_ID_BYTES
+        || command_scope_id_byte_rejection(value.len()).is_some()
         || value.chars().any(char::is_whitespace)
         || value.chars().any(char::is_control)
     {
@@ -741,7 +780,7 @@ impl JobCommandState {
             })
             .collect();
         serde_json::to_vec(&ArtifactList {
-            version: 1,
+            version: ARTIFACT_LIST_SCHEMA_VERSION,
             subjects,
         })
         .map_err(|_| ArtifactListEncodingError)
@@ -1270,5 +1309,50 @@ impl Default for WorkflowCommandPolicy {
             allow_insecure_legacy_commands: false,
             enhanced_annotations: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn command_scope_id_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            command_scope_id_byte_rejection(MAX_SCOPE_ID_BYTES - 1),
+            None
+        );
+        assert_eq!(command_scope_id_byte_rejection(MAX_SCOPE_ID_BYTES), None);
+        assert_eq!(
+            command_scope_id_byte_rejection(MAX_SCOPE_ID_BYTES + 1),
+            Some(ArtifactRuntimeLimitRejection::ScopeId)
+        );
+    }
+    #[test]
+    fn artifact_declaration_file_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_declaration_file_byte_rejection(MAX_ARTIFACT_DECLARATION_FILE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            artifact_declaration_file_byte_rejection(MAX_ARTIFACT_DECLARATION_FILE_BYTES),
+            None
+        );
+        assert_eq!(
+            artifact_declaration_file_byte_rejection(MAX_ARTIFACT_DECLARATION_FILE_BYTES + 1),
+            Some(ArtifactRuntimeLimitRejection::DeclarationFile)
+        );
+    }
+    #[test]
+    fn artifact_list_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_list_byte_rejection(MAX_ARTIFACT_LIST_BYTES - 1),
+            None
+        );
+        assert_eq!(artifact_list_byte_rejection(MAX_ARTIFACT_LIST_BYTES), None);
+        assert_eq!(
+            artifact_list_byte_rejection(MAX_ARTIFACT_LIST_BYTES + 1),
+            Some(ArtifactRuntimeLimitRejection::ArtifactList)
+        );
     }
 }

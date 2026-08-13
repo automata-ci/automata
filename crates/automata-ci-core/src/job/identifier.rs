@@ -6,7 +6,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::JobValidationError;
 
+// foundation-governance: parity-limit
 const MAX_SEMANTIC_ID_LENGTH: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobIdentifierLimitRejection {
+    StepIdBytes,
+}
+
+const fn step_id_byte_rejection(observed: usize) -> Option<JobIdentifierLimitRejection> {
+    if observed > MAX_SEMANTIC_ID_LENGTH {
+        return Some(JobIdentifierLimitRejection::StepIdBytes);
+    }
+    None
+}
 
 /// Stable step identifier used by expressions and result records.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -24,7 +37,7 @@ impl StepId {
         if value.is_empty() {
             return Err(JobValidationError::EmptyStepId);
         }
-        if value.len() > MAX_SEMANTIC_ID_LENGTH {
+        if step_id_byte_rejection(value.len()).is_some() {
             return Err(JobValidationError::StepIdTooLong {
                 maximum: MAX_SEMANTIC_ID_LENGTH,
             });
@@ -81,5 +94,20 @@ impl<'de> Deserialize<'de> for StepId {
     {
         let value = String::deserialize(deserializer)?;
         Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{JobIdentifierLimitRejection, MAX_SEMANTIC_ID_LENGTH, step_id_byte_rejection};
+
+    #[test]
+    fn step_id_byte_limit_has_exact_boundaries() {
+        assert_eq!(step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH - 1), None);
+        assert_eq!(step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH), None);
+        assert_eq!(
+            step_id_byte_rejection(MAX_SEMANTIC_ID_LENGTH + 1),
+            Some(JobIdentifierLimitRejection::StepIdBytes)
+        );
     }
 }

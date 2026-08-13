@@ -22,15 +22,24 @@ const MAXIMUM_JWT_PAYLOAD_BYTES: usize = 8 * 1024;
 const MAXIMUM_SCOPE_BYTES: usize = 4 * 1024;
 const MAXIMUM_SCOPE_COUNT: usize = 32;
 const MAXIMUM_SCOPE_PART_BYTES: usize = 255;
+// foundation-governance: derived-contract owner=github-runtime kind=cryptographic-context
 const JWT_DERIVATION_LABEL: &[u8] = b"automata/results/runtime-jwt/hs256/v1";
+// foundation-governance: derived-contract owner=github-runtime kind=cryptographic-context
 const UPLOAD_DERIVATION_LABEL: &[u8] = b"automata/results/upload-capability/hs256/v1";
+// foundation-governance: derived-contract owner=github-runtime kind=cryptographic-context
 const DOWNLOAD_DERIVATION_LABEL: &[u8] = b"automata/results/download-capability/hs256/v1";
+// foundation-governance: derived-contract owner=github-runtime kind=cryptographic-context
 const CACHE_UPLOAD_DERIVATION_LABEL: &[u8] = b"automata/results/cache-upload-capability/hs256/v1";
+// foundation-governance: derived-contract owner=github-runtime kind=cryptographic-context
 const CACHE_DOWNLOAD_DERIVATION_LABEL: &[u8] =
     b"automata/results/cache-download-capability/hs256/v1";
+// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const UPLOAD_SIGNATURE_DOMAIN: &str = "automata-results-upload-v1";
+// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const DOWNLOAD_SIGNATURE_DOMAIN: &str = "automata-results-download-v1";
+// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const CACHE_UPLOAD_SIGNATURE_DOMAIN: &str = "automata-results-cache-upload-v1";
+// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const CACHE_DOWNLOAD_SIGNATURE_DOMAIN: &str = "automata-results-cache-download-v1";
 
 /// Validated public Results origin and its explicit transport policy.

@@ -6,9 +6,13 @@ use automata_ci_core::{
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{PostgresStore, runtime_authority::github_manifest_origin_is_closed};
+use super::{
+    PostgresStore, durable_schema::current_durable_schemas,
+    runtime_authority::github_manifest_origin_is_closed,
+};
 use crate::{
-    GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_REST_API_VERSION, GITHUB_PROVIDER_WEB_ORIGIN,
+    GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_REST_API_VERSION,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_WEB_ORIGIN,
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,
     GithubJobRuntimeAuthorityStoreError, GithubRepositoryId, GithubRepositoryName,
@@ -16,7 +20,8 @@ use crate::{
     GithubRuntimeAuthorityMaterializationSelectionTail, GithubRuntimeAuthorityNamespace,
     GithubRuntimeAuthorityPreparationSelectionTail, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceJwtIssuer, JobIrMetadata,
-    LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
+    LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LogicalActivationGeneration,
+    LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
     MAX_GITHUB_AUTHORITY_REQUEST_MILLIS, ObjectKey, ProviderConnectionId, ProviderInstallationId,
     RepositoryId, RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
@@ -243,6 +248,7 @@ async fn lock_exact_execution(
     transaction: &mut Transaction<'_, Postgres>,
     selector: &ExactExecutionSelector,
 ) -> Result<ExactExecutionRow, GithubJobRuntimeAuthorityStoreError> {
+    let schemas = current_durable_schemas();
     let profile = authority_profile_name(selector.authority_profile);
     let rows = sqlx::query(
         r"
@@ -398,8 +404,8 @@ async fn lock_exact_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $29
+          AND job.job_ir_schema = $28
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
           AND job.job_ir_digest = $15
@@ -407,8 +413,8 @@ async fn lock_exact_execution(
           AND ($16::TEXT IS NULL OR job.job_ir_object_key = $16)
           AND run.id = $12
           AND ($17::UUID IS NULL OR run.workflow_id = $17)
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $29
+          AND run.plan_schema = $29
           AND run.status IN ('queued', 'in_progress')
           AND (
               concrete.invocation_id <> marker.root_invocation_id
@@ -455,8 +461,7 @@ async fn lock_exact_execution(
               || pg_catalog.encode(manifest.runner_policy_digest, 'hex') || '.json'
           AND manifest.runner_policy_size_bytes =
               pg_catalog.octet_length(runtime_policy.canonical_policy)
-          AND manifest.runner_policy_media_type =
-              'application/vnd.automata.github-runner-policy+json'
+          AND manifest.runner_policy_media_type = $34
           AND manifest.github_web_origin = $20
           AND manifest.github_api_origin = $21
           AND manifest.github_rest_api_version = $22
@@ -491,9 +496,9 @@ async fn lock_exact_execution(
           AND materialization.runtime_policy_digest = runtime_policy_pin.policy_digest
           AND concrete.runtime_policy_revision = runtime_policy_pin.policy_revision
           AND concrete.runtime_policy_digest = runtime_policy_pin.policy_digest
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $30
           AND marker.state IN ('pending', 'active')
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $31
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
@@ -501,14 +506,14 @@ async fn lock_exact_execution(
           AND publication.condition_matched
           AND publication.activation_generation = logical_job.activation_fence
           AND publication.activation_input_digest = logical_job.activation_input_digest
-          AND publication.job_ir_version = 1
-          AND publication.runtime_context_schema = 1
-          AND instance.job_ir_version = 1
+          AND publication.job_ir_version = $32
+          AND publication.runtime_context_schema = $33
+          AND instance.job_ir_version = $32
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.job_ir_media_type = 'application/vnd.automata.job-ir.protobuf'
-          AND concrete.runtime_context_schema = 1
+          AND instance.job_ir_media_type = $35
+          AND concrete.runtime_context_schema = $33
           AND concrete.requirements = job.requirements
           AND materialization.state = 'materialized'
           AND runner.id = $7
@@ -520,7 +525,7 @@ async fn lock_exact_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 1
+          AND session.job_ir_schema = $28
           AND session.disconnected_at_ms IS NULL
           AND ($24::UUID IS NULL OR origin.provider_connection_id = $24)
           AND ($25::BIGINT IS NULL OR origin.provider_installation_id = $25)
@@ -570,6 +575,14 @@ async fn lock_exact_execution(
             .map(|value| i64::try_from(value.get()).expect("validated GitHub ID fits BIGINT")),
     )
     .bind(selector.policy_digest.as_bytes().as_slice())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE)
+    .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
     .fetch_all(&mut **transaction)
     .await
     .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;

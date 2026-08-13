@@ -21,8 +21,12 @@ use thiserror::Error;
 pub const MAX_SECRET_CUSTODY_CONFIGURED_KEYS: usize = 32;
 /// The only current immutable canary generation.
 pub const SECRET_CUSTODY_CANARY_GENERATION: u64 = 1;
+/// Durable schema for one encrypted secret-custody key canary.
+pub(crate) const SECRET_CUSTODY_CANARY_SCHEMA_VERSION: u16 = 1;
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const KEY_SET_DIGEST_DOMAIN: &[u8] = b"automata.store.secret-custody.key-set.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const REQUIREMENTS_DIGEST_DOMAIN: &[u8] = b"automata.store.secret-custody.requirements.v1\0";
 const ACTIVE_PROVIDER: usize = 0;
 const ENCRYPTED_ENVELOPES: usize = 1;

@@ -28,7 +28,9 @@ pub const GITHUB_REPOSITORY_RUNTIME_AUTHORITY: &str = "github-repository";
 /// Durable namespace required on a GitHub repository-token issuance.
 pub const GITHUB_REPOSITORY_AUTHORITY_NAMESPACE: &str = "github.repository";
 
+// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const INSTALLATION_TOKEN_FRAME_DOMAIN: &[u8] = b"automata-ci/github-installation-token/v1\0";
+// foundation-governance: derived-contract owner=auth-security kind=digest-domain
 const READY_ENVELOPE_DIGEST_DOMAIN: &[u8] =
     b"automata-ci/github-runtime-authority/ready-envelope/v1\0";
 

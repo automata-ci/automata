@@ -449,6 +449,16 @@ fn compile_event(
         return CompiledEvent::NotSelected(WorkflowNotSelectedReason::EventNotConfigured);
     };
     let selected = &triggers.events()[selected_index];
+    if let EventName::Other(name) = selected.name().value() {
+        context.unsupported(
+            "github.compile.provider_event_unavailable",
+            format!(
+                "GitHub provider ingress does not normalize the `{name}` event; the workflow cannot be published"
+            ),
+            selected.name().span().clone(),
+        );
+        return CompiledEvent::Rejected;
+    }
     let Some(span) = context.span(selected.span()) else {
         return CompiledEvent::Rejected;
     };

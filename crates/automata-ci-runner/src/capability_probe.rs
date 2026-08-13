@@ -10,12 +10,16 @@ use std::{fs, io::Read as _, path::Path};
 use serde::Serialize;
 
 /// Capability identifier for successfully spawning and waiting for a child process.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const PROCESS_EXECUTION: &str = "core.process-exec/v1";
 /// Capability identifier for the presence of the Linux cgroup-v2 interface.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const CGROUP_V2: &str = "linux.cgroup-v2/v1";
 /// Capability identifier for the presence of the Linux user-namespace interface.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const USER_NAMESPACE: &str = "linux.user-namespace/v1";
 /// Capability identifier for verified rootless-Podman network isolation.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const PODMAN_NETWORK_ISOLATION: &str = "linux.podman-network-isolation/v1";
 
 #[cfg(target_os = "linux")]

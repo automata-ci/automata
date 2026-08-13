@@ -101,6 +101,7 @@ const HTTP_METHOD_LABELS: [&str; 8] = [
     "get", "head", "post", "put", "patch", "delete", "options", "other",
 ];
 const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
+// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";

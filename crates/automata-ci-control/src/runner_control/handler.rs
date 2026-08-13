@@ -63,10 +63,15 @@ use super::{
     RunnerLeaseRequestStage,
 };
 
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const COMMAND_ACK_KIND: &str = "automata.runner.command-ack.v1";
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const LEASE_RESPONSE_KIND: &str = "automata.runner.lease-response.v1";
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const JOB_RESULT_KIND: &str = "automata.runner.job-result.v1";
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 const LOG_BATCH_KIND: &str = "automata.runner.log-batch.v1";
 
 enum PendingCommand {

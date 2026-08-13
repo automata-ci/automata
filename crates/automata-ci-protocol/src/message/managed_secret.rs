@@ -13,6 +13,7 @@ pub const MANAGED_SECRET_BINDING_OVERLAY_SCHEMA_VERSION: u16 = 1;
 
 /// Maximum value-free binding entries carried by one lease overlay.
 pub const MAX_MANAGED_SECRET_BINDINGS: usize = 256;
+// foundation-governance: derived-contract owner=protocol kind=digest-domain
 const OVERLAY_DIGEST_DOMAIN: &[u8] = b"automata.managed-secret-binding-overlay.v1\0";
 
 /// One canonical environment name and its value-free grant/version locator.

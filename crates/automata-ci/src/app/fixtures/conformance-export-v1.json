@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "delivery": {
+    "id": "delivery",
+    "externalId": "external-delivery",
+    "state": "completed",
+    "attempts": 1,
+    "acceptedAtMs": 10,
+    "completedAtMs": 20,
+    "workflows": [
+      {
+        "path": ".ci/workflows/ci.yml",
+        "outcome": { "kind": "admitted", "runId": "run" }
+      }
+    ]
+  },
+  "runs": [
+    {
+      "id": "run",
+      "workflowId": "workflow",
+      "workflowPath": ".ci/workflows/ci.yml",
+      "workflowName": "CI",
+      "runNumber": 4,
+      "runAttempt": 1,
+      "eventName": "push",
+      "headCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "gitRef": "refs/heads/main",
+      "status": "completed",
+      "conclusion": "success",
+      "createdAtMs": 10,
+      "updatedAtMs": 20,
+      "finishedAtMs": 20,
+      "jobs": [
+        {
+          "id": "job",
+          "logicalKey": "build",
+          "displayName": "Build",
+          "createdAtMs": 10,
+          "jobIr": null,
+          "runtimeContext": null,
+          "latestAttempt": {
+            "id": "attempt",
+            "number": 1,
+            "lifecycle": "succeeded",
+            "queuedAtMs": 11,
+            "startedAtMs": 12,
+            "finishedAtMs": 20,
+            "runner": { "id": "runner", "name": "linux" },
+            "result": {
+              "schema_version": 1,
+              "attempt_id": "00000000-0000-0000-0000-000000000007",
+              "conclusion": "success",
+              "secret_exposure": "secretless",
+              "outputs": {
+                "answer": { "sensitivity": "public", "value": "42" }
+              },
+              "steps": [
+                {
+                  "step_id": "build",
+                  "outcome": "success",
+                  "conclusion": "success",
+                  "started_at": 12,
+                  "completed_at": 20,
+                  "summary_markdown": "# summary",
+                  "annotations": [
+                    {
+                      "level": "notice",
+                      "message": "compiled",
+                      "properties": [
+                        { "name": "file", "value": "src/main.rs" }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "completed_at": 20
+            }
+          }
+        }
+      ],
+      "artifacts": [
+        {
+          "name": "bundle",
+          "mimeType": "application/zip",
+          "size": 3,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "expiresAtSeconds": null,
+          "finalizedAtSeconds": 30
+        }
+      ]
+    }
+  ]
+}

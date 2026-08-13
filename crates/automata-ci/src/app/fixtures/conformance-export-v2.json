@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "delivery": {
+    "id": "delivery",
+    "externalId": "external-delivery",
+    "state": "completed",
+    "attempts": 1,
+    "acceptedAtMs": 10,
+    "completedAtMs": { "state": "present", "value": 20 },
+    "workflows": [
+      {
+        "path": ".ci/workflows/ci.yml",
+        "outcome": { "kind": "admitted", "runId": "run" }
+      }
+    ]
+  },
+  "runs": [
+    {
+      "id": "run",
+      "workflowId": "workflow",
+      "workflowPath": ".ci/workflows/ci.yml",
+      "workflowName": { "state": "present", "value": "CI" },
+      "runNumber": 4,
+      "runAttempt": 1,
+      "eventName": "push",
+      "headCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "gitRef": { "state": "present", "value": "refs/heads/main" },
+      "status": "completed",
+      "conclusion": { "state": "present", "value": "success" },
+      "createdAtMs": 10,
+      "updatedAtMs": 20,
+      "finishedAtMs": { "state": "present", "value": 20 },
+      "jobs": [
+        {
+          "id": "job",
+          "logicalKey": "build",
+          "displayName": "Build",
+          "createdAtMs": 10,
+          "jobIr": { "state": "unavailable", "reason": "not_produced" },
+          "runtimeContext": { "state": "unavailable", "reason": "not_produced" },
+          "latestAttempt": {
+            "state": "present",
+            "value": {
+              "id": "attempt",
+              "number": 1,
+              "lifecycle": "succeeded",
+              "queuedAtMs": 11,
+              "startedAtMs": { "state": "present", "value": 12 },
+              "finishedAtMs": { "state": "present", "value": 20 },
+              "runner": {
+                "state": "present",
+                "value": { "id": "runner", "name": "linux" }
+              },
+              "result": {
+                "state": "present",
+                "value": {
+                  "schemaVersion": 1,
+                  "attemptId": "00000000-0000-0000-0000-000000000007",
+                  "conclusion": "success",
+                  "secretExposure": "secretless",
+                  "outputs": {
+                    "answer": { "sensitivity": "public", "value": "42" }
+                  },
+                  "steps": [
+                    {
+                      "id": "build",
+                      "outcome": "success",
+                      "conclusion": "success",
+                      "startedAtMs": 12,
+                      "completedAtMs": 20,
+                      "outputs": {
+                        "state": "unavailable",
+                        "reason": "not_retained_by_schema"
+                      },
+                      "summaryMarkdown": { "state": "present", "value": "# summary" },
+                      "annotations": [
+                        {
+                          "level": "notice",
+                          "message": "compiled",
+                          "properties": [
+                            { "name": "file", "value": "src/main.rs" }
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "completedAtMs": 20
+                }
+              }
+            }
+          },
+          "logs": {
+            "state": "present",
+            "value": {
+              "streamId": "00000000-0000-0000-0000-000000000008",
+              "attemptId": "00000000-0000-0000-0000-000000000007",
+              "schemaVersion": 1,
+              "openedAtMs": 12,
+              "closedAtMs": { "state": "present", "value": 20 },
+              "segments": [
+                {
+                  "firstSequence": 0,
+                  "lastSequence": 0,
+                  "objectKey": "logs/segment-0",
+                  "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "encodedSize": 3,
+                  "uncompressedSize": 3,
+                  "mediaType": "application/vnd.automata.log-segment.v1+jsonl",
+                  "storedAtMs": 20,
+                  "endOfStream": true,
+                  "frames": [
+                    {
+                      "schema_version": 1,
+                      "stream_id": "00000000-0000-0000-0000-000000000008",
+                      "attempt_id": "00000000-0000-0000-0000-000000000007",
+                      "sequence": 0,
+                      "emitted_at": 19,
+                      "channel": "stdout",
+                      "payload": [111, 107, 10],
+                      "end_of_stream": true
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "artifacts": [
+        {
+          "name": "bundle",
+          "mimeType": "application/zip",
+          "size": 3,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "expiresAtSeconds": { "state": "unavailable", "reason": "not_produced" },
+          "finalizedAtSeconds": 30
+        }
+      ],
+      "services": { "state": "unavailable", "reason": "not_retained_by_schema" },
+      "caches": { "state": "unavailable", "reason": "not_retained_by_schema" },
+      "effectiveAuthority": { "state": "unavailable", "reason": "not_retained_by_schema" },
+      "cleanup": { "state": "unavailable", "reason": "not_retained_by_schema" }
+    }
+  ]
+}

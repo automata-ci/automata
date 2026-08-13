@@ -14,10 +14,11 @@ use crate::{
     ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, CommitGithubRuntimeAuthority,
     ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
-    GithubRepositoryId, GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
-    GithubRuntimeAuthorityClaimFence, GithubRuntimeAuthorityCommitDisposition,
-    GithubRuntimeAuthorityCorruptionKind, GithubRuntimeAuthorityEnvelopeMetadata,
-    GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubRepositoryId, GithubRepositoryName,
+    GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityClaimFence,
+    GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
+    GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,
+    GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
     GithubRuntimeAuthorityMaterializationSelectionTail, GithubRuntimeAuthorityNamespace,
     GithubRuntimeAuthorityPreparationSelectionTail, GithubRuntimeAuthorityReceipt,
     GithubRuntimeAuthorityReconciliationReport, GithubRuntimeAuthorityRepository,
@@ -42,12 +43,16 @@ const MINT_COMMIT_OPERATION: &str = "mint_commit";
 const QUARANTINE_OPERATION: &str = "quarantine";
 const REVOCATION_OUTCOME_OPERATION: &str = "revocation_outcome";
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const MINT_COMMIT_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.mint-commit.v4\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const QUARANTINE_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.quarantine.v4\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const REVOCATION_OUTCOME_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.revocation-outcome.v4\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const ENVELOPE_DIGEST_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-envelope.v1\0";
 
 pub(super) fn github_manifest_origin_is_closed(origin_kind: &str) -> bool {
@@ -3376,8 +3381,7 @@ async fn lock_exact_authority_graph(
           AND manifest.runner_policy_object_key = 'github/runner-policy/v1/'
               || pg_catalog.encode(manifest.runner_policy_digest, 'hex') || '.json'
           AND manifest.runner_policy_size_bytes = pg_catalog.octet_length(policy.canonical_policy)
-          AND manifest.runner_policy_media_type =
-              'application/vnd.automata.github-runner-policy+json'
+          AND manifest.runner_policy_media_type = $14
           AND policy.state = 'sealed'
           AND logical_job.runtime_policy_revision = pin.policy_revision
           AND logical_job.runtime_policy_digest = pin.policy_digest
@@ -3421,6 +3425,7 @@ async fn lock_exact_authority_graph(
     .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
     .bind(identity.configuration_fingerprint().as_bytes().as_slice())
     .bind(identity.job_id().as_uuid())
+    .bind(GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;

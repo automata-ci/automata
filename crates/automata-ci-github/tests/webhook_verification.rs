@@ -141,6 +141,11 @@ fn body_limit_is_enforced_before_and_while_buffering() {
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
     let mut exact = encode(&valid_payload());
     exact.resize(MAX_GITHUB_WEBHOOK_BODY_BYTES, b' ');
+    let minus_one = &exact[..MAX_GITHUB_WEBHOOK_BODY_BYTES - 1];
+    let minus_one_headers = signed_headers(SECRET, minus_one, "push", "delivery-limit-minus-one");
+    verifier
+        .verify(&minus_one_headers, Bytes::copy_from_slice(minus_one))
+        .expect("one byte below the limit is accepted");
     let exact_headers = signed_headers(SECRET, &exact, "push", "delivery-limit");
     verifier
         .verify(&exact_headers, Bytes::copy_from_slice(&exact))
@@ -148,6 +153,7 @@ fn body_limit_is_enforced_before_and_while_buffering() {
 
     let mut oversized = exact;
     oversized.push(b' ');
+    assert_eq!(oversized.len(), MAX_GITHUB_WEBHOOK_BODY_BYTES + 1);
     assert_eq!(
         verifier
             .verify(&exact_headers, Bytes::copy_from_slice(&oversized))

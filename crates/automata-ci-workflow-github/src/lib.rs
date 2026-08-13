@@ -29,6 +29,7 @@ pub use frontend::{
     FrontendReport, GithubFrontendReport, GithubWorkflowFrontend, ParseWorkflowRequest,
     WorkflowFrontend,
 };
+#[allow(deprecated)]
 pub use model::{
     ActionStep, BooleanValue, Concurrency, ConcurrencyQueue, ContainerCredentials,
     ContainerEnvironment, ContainerSequence, Defaults, DetailedConcurrency, DetailedContainer,
@@ -44,8 +45,8 @@ pub use model::{
     MergeGroupFilter, Needs, PermissionEntry, PermissionLevel, Permissions, PreservedField,
     PushPullRequestFilter, RepositoryDispatchFilter, ReusableWorkflowCall, ReusableWorkflowInputs,
     ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunDefaults, RunStep, RunnerSelection,
-    ScalarValue, Step, StepExecution, StepId, StrategyMatrix, TriggerConfiguration, TriggerSet,
-    ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
+    SOURCE_PLAN_SCHEMA_VERSION, ScalarValue, Step, StepExecution, StepId, StrategyMatrix,
+    TriggerConfiguration, TriggerSet, ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
 };
 pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,

@@ -59,15 +59,19 @@ pub use tls::{ClientTlsConfig, ServerTlsConfig};
 pub const PROTOBUF_CONTENT_TYPE: &str = "application/protobuf";
 
 /// Pre-negotiation runner handshake endpoint.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const HANDSHAKE_PATH: &str = "/automata.runner.v1.RunnerControl/Handshake";
 
 /// Post-handshake request/reply and long-poll endpoint.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const SYNC_PATH: &str = "/automata.runner.v1.RunnerControl/Sync";
 
 /// Private value-bearing route on the dedicated mTLS runner listener.
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 pub const EPHEMERAL_SECRETS_PATH: &str = "/automata.runner.v1.RunnerEphemeralSecrets/Exchange";
 
 /// Exact media type for the bounded ephemeral-secret binary contract.
+// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 pub const EPHEMERAL_SECRETS_CONTENT_TYPE: &str =
     "application/vnd.automata.runner-ephemeral-secrets.v1";
 
@@ -78,4 +82,5 @@ pub const MAX_EPHEMERAL_REQUEST_BYTES: usize = 128 * 1024;
 pub const MAX_EPHEMERAL_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Stable verifier-key identity for managed-secret delivery bearer digests.
+// foundation-governance: derived-contract owner=protocol kind=storage-namespace
 pub const MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID: &str = "managed-secret-delivery-v1";

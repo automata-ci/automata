@@ -15,6 +15,7 @@ const MAXIMUM_PRIVATE_KEY_PEM_BYTES: usize = 64 * 1_024;
 const MAXIMUM_RSA_MODULUS_BYTES: usize = 1_024;
 const MINIMUM_RSA_MODULUS_BITS: usize = 2_048;
 const MAXIMUM_RSA_MODULUS_BITS: usize = 8_192;
+// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const PAIR_VALIDATION_MESSAGE: &[u8] = b"automata-ci-oidc-github/rs256-key-pair/v1";
 
 /// Sanitized RS256 key loading, rotation, or signing failure.

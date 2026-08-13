@@ -20,10 +20,49 @@ use crate::{
 };
 
 const CACHE_BLOCK_MEDIA_TYPE: &str = "application/octet-stream";
+// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const CACHE_BLOCK_LIST_DOMAIN: &[u8] = b"automata-results-cache-block-list-v1\0";
-const MAXIMUM_DURABLE_CACHE_BLOCK_BYTES: u64 = 128 * 1024 * 1024;
+// foundation-governance: parity-limit
+const MAXIMUM_DURABLE_CACHE_BLOCK_BYTES: u64 = 134_217_728;
+// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_CACHE_BLOCKS: usize = 50_000;
-const MAXIMUM_DURABLE_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+// foundation-governance: parity-limit
+const MAXIMUM_DURABLE_CACHE_BYTES: u64 = 10_737_418_240;
+// foundation-governance: parity-limit
+const MAXIMUM_CACHE_KEYS: usize = 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheServiceLimitRejection {
+    BlockBytes,
+    Blocks,
+    AggregateBytes,
+    Keys,
+}
+
+const fn cache_block_byte_rejection(observed: u64) -> Option<CacheServiceLimitRejection> {
+    if observed > MAXIMUM_DURABLE_CACHE_BLOCK_BYTES {
+        return Some(CacheServiceLimitRejection::BlockBytes);
+    }
+    None
+}
+const fn cache_block_count_rejection(observed: usize) -> Option<CacheServiceLimitRejection> {
+    if observed > MAXIMUM_DURABLE_CACHE_BLOCKS {
+        return Some(CacheServiceLimitRejection::Blocks);
+    }
+    None
+}
+const fn cache_aggregate_byte_rejection(observed: u64) -> Option<CacheServiceLimitRejection> {
+    if observed > MAXIMUM_DURABLE_CACHE_BYTES {
+        return Some(CacheServiceLimitRejection::AggregateBytes);
+    }
+    None
+}
+const fn cache_key_count_rejection(observed: usize) -> Option<CacheServiceLimitRejection> {
+    if observed > MAXIMUM_CACHE_KEYS {
+        return Some(CacheServiceLimitRejection::Keys);
+    }
+    None
+}
 
 /// Current cache-v2 resource and retention policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,13 +95,13 @@ impl CacheLimits {
             || maximum_entry_bytes == 0
             || repository_quota_bytes == 0
             || maximum_entry_bytes > repository_quota_bytes
-            || maximum_block_bytes > MAXIMUM_DURABLE_CACHE_BLOCK_BYTES
-            || maximum_blocks > MAXIMUM_DURABLE_CACHE_BLOCKS
-            || maximum_entry_bytes > MAXIMUM_DURABLE_CACHE_BYTES
-            || repository_quota_bytes > MAXIMUM_DURABLE_CACHE_BYTES
+            || cache_block_byte_rejection(maximum_block_bytes).is_some()
+            || cache_block_count_rejection(maximum_blocks).is_some()
+            || cache_aggregate_byte_rejection(maximum_entry_bytes).is_some()
+            || cache_aggregate_byte_rejection(repository_quota_bytes).is_some()
             || repository_quota_bytes > i64::MAX as u64
             || maximum_total_keys == 0
-            || maximum_total_keys > 10
+            || cache_key_count_rejection(maximum_total_keys).is_some()
             || inactivity_seconds == 0
             || inactivity_seconds > i64::MAX as u64
         {
@@ -663,4 +702,64 @@ const fn map_blob_error(error: BlobStoreError) -> CacheServiceError {
         BlobStoreErrorKind::Unavailable => CacheServiceErrorKind::Unavailable,
         BlobStoreErrorKind::InvalidResponse => CacheServiceErrorKind::Internal,
     })
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn cache_block_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_block_byte_rejection(MAXIMUM_DURABLE_CACHE_BLOCK_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            cache_block_byte_rejection(MAXIMUM_DURABLE_CACHE_BLOCK_BYTES),
+            None
+        );
+        assert_eq!(
+            cache_block_byte_rejection(MAXIMUM_DURABLE_CACHE_BLOCK_BYTES + 1),
+            Some(CacheServiceLimitRejection::BlockBytes)
+        );
+    }
+    #[test]
+    fn cache_block_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_block_count_rejection(MAXIMUM_DURABLE_CACHE_BLOCKS - 1),
+            None
+        );
+        assert_eq!(
+            cache_block_count_rejection(MAXIMUM_DURABLE_CACHE_BLOCKS),
+            None
+        );
+        assert_eq!(
+            cache_block_count_rejection(MAXIMUM_DURABLE_CACHE_BLOCKS + 1),
+            Some(CacheServiceLimitRejection::Blocks)
+        );
+    }
+    #[test]
+    fn cache_aggregate_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_aggregate_byte_rejection(MAXIMUM_DURABLE_CACHE_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            cache_aggregate_byte_rejection(MAXIMUM_DURABLE_CACHE_BYTES),
+            None
+        );
+        assert_eq!(
+            cache_aggregate_byte_rejection(MAXIMUM_DURABLE_CACHE_BYTES + 1),
+            Some(CacheServiceLimitRejection::AggregateBytes)
+        );
+    }
+    #[test]
+    fn cache_key_count_limit_has_exact_boundaries() {
+        assert_eq!(cache_key_count_rejection(MAXIMUM_CACHE_KEYS - 1), None);
+        assert_eq!(cache_key_count_rejection(MAXIMUM_CACHE_KEYS), None);
+        assert_eq!(
+            cache_key_count_rejection(MAXIMUM_CACHE_KEYS + 1),
+            Some(CacheServiceLimitRejection::Keys)
+        );
+    }
 }

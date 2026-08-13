@@ -1,6 +1,6 @@
 use automata_ci_results_github::{
-    ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactManifest, ArtifactManifestBlock,
-    MAXIMUM_ARTIFACT_MANIFEST_BYTES,
+    ARTIFACT_MANIFEST_MEDIA_TYPE, ARTIFACT_MANIFEST_SCHEMA_VERSION, ArtifactManifest,
+    ArtifactManifestBlock, MAXIMUM_ARTIFACT_MANIFEST_BYTES,
 };
 
 const UPLOAD_ID: &str = "018f8f4a-54f2-7a8d-9d3a-7f5bd5f6f501";
@@ -75,6 +75,16 @@ fn manifest_and_block_reject_unknown_fields() {
 
     assert!(serde_json::from_str::<ArtifactManifest>(&manifest_with_unknown_field).is_err());
     assert!(serde_json::from_str::<ArtifactManifest>(&block_with_unknown_field).is_err());
+}
+
+#[test]
+fn artifact_manifest_reader_rejects_noncurrent_schema_versions() {
+    for schema in [0, ARTIFACT_MANIFEST_SCHEMA_VERSION + 1] {
+        let mut manifest = representative_manifest();
+        manifest.schema = schema;
+        assert!(manifest.validate_schema().is_err());
+    }
+    assert!(representative_manifest().validate_schema().is_ok());
 }
 
 #[test]

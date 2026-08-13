@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,22 @@ STAGE_STATUSES = {
     "rejected",
     "unverified",
 }
+COMPATIBILITY_STATUSES = {
+    "Component complete",
+    "Experimental",
+    "Partial",
+    "Unsupported",
+}
+EVALUATION_PHASES = {
+    "admission",
+    "compile",
+    "job-activation",
+    "job-execution",
+    "job-finalization",
+    "publication",
+    "runner-admission",
+    "scheduler",
+}
 REFERENCE_CATEGORIES = {
     "action_runtimes",
     "contexts",
@@ -44,12 +63,20 @@ REFERENCE_CATEGORIES = {
     "syntax",
     "variables",
 }
+REVIEW_DECISIONS = {
+    "approved-baseline",
+    "approved-delta-without-baseline-advance",
+}
 CAPABILITY = re.compile(
     r"^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*/"
     r"[a-z][a-z0-9-]*@v[1-9][0-9]*$"
 )
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+GITHUB_OWNER = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+GITHUB_REPOSITORY = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
+GITHUB_REVISION = rf"{GITHUB_OWNER}/{GITHUB_REPOSITORY}@[0-9a-f]{{40}}"
+GITHUB_SOURCE_REVISIONS = re.compile(rf"^{GITHUB_REVISION}(?:\+{GITHUB_REVISION})*$")
 TEST_ATTRIBUTE = re.compile(r"#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\([^]]*\))?\s*\]")
 
 
@@ -117,6 +144,68 @@ def repository_file(root: Path, value: Any, context: str) -> Path:
     return path
 
 
+def git_text(root: Path, revision: str, relative: str, context: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{relative}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        fail(f"cannot read {context} from {revision}: {result.stderr.strip()}")
+    return result.stdout
+
+
+def diagnostic_baseline_revision(root: Path) -> str:
+    candidates: list[str] = []
+    github_base = os.environ.get("GITHUB_BASE_REF")
+    if github_base:
+        candidates.extend([f"origin/{github_base}", github_base])
+    candidates.extend(["upstream/main", "origin/main", "main"])
+    for candidate in candidates:
+        result = subprocess.run(
+            ["git", "merge-base", "HEAD", candidate],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if shallow.stdout.strip() == "true":
+        fail(
+            "cannot resolve the main-branch merge base for diagnostic history: "
+            "the checkout is shallow; use actions/checkout with fetch-depth: 0"
+        )
+    fail("cannot resolve the main-branch merge base for diagnostic history")
+
+
+def initial_capability_registry_revision(root: Path) -> str:
+    result = subprocess.run(
+        ["git", "log", "--format=%H", "--reverse", "HEAD", "--", REGISTRY.as_posix()],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    revisions = result.stdout.splitlines() if result.returncode == 0 else []
+    if not revisions:
+        fail("cannot resolve the initial capability-registry revision")
+    return revisions[0]
+
+
 def some_match_fields(source: str) -> set[str]:
     fields: set[str] = set()
     pattern = re.compile(
@@ -127,6 +216,15 @@ def some_match_fields(source: str) -> set[str]:
     for match in pattern.finditer(source):
         fields.update(re.findall(r'\"([A-Za-z][A-Za-z0-9-]*)\"', match.group(1)))
     return fields
+
+
+def rust_function_source(source: str, function: str, context: str) -> str:
+    declaration = re.search(
+        rf"(?ms)^fn {re.escape(function)}\(.*?(?=^fn |\Z)", source
+    )
+    if declaration is None:
+        fail(f"{context} function {function!r} is missing")
+    return declaration.group(0)
 
 
 def action_metadata_fields(source: str) -> set[str]:
@@ -168,7 +266,99 @@ def trigger_names(source: str) -> set[str]:
     return names
 
 
-def attributed_test(source: str, function: str, context: str) -> None:
+def rust_enum_variants(source: str, enum_name: str, context: str) -> set[str]:
+    declaration = re.search(
+        rf"(?m)^pub enum {re.escape(enum_name)}\s*\{{(?P<body>.*?)^\}}",
+        source,
+        re.DOTALL,
+    )
+    if declaration is None:
+        fail(f"{context} enum is missing")
+    return set(
+        re.findall(
+            r"^\s{4}([A-Z][A-Za-z0-9]+)\s*(?:,|\(|\{)",
+            declaration["body"],
+            re.MULTILINE,
+        )
+    )
+
+
+def rust_block(source: str, opening: int, context: str) -> str:
+    """Return one balanced Rust block while ignoring literals and comments."""
+    if opening >= len(source) or source[opening] != "{":
+        fail(f"{context} has no function body")
+    depth = 0
+    index = opening
+    state = "code"
+    block_comment_depth = 0
+    raw_hashes = 0
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if state == "line-comment":
+            if character == "\n":
+                state = "code"
+        elif state == "block-comment":
+            if character == "/" and following == "*":
+                block_comment_depth += 1
+                index += 1
+            elif character == "*" and following == "/":
+                block_comment_depth -= 1
+                index += 1
+                if block_comment_depth == 0:
+                    state = "code"
+        elif state == "string":
+            if character == "\\":
+                index += 1
+            elif character == '"':
+                state = "code"
+        elif state == "character":
+            if character == "\\":
+                index += 1
+            elif character == "'":
+                state = "code"
+        elif state == "raw-string":
+            terminator = '"' + ("#" * raw_hashes)
+            if source.startswith(terminator, index):
+                index += len(terminator) - 1
+                state = "code"
+        else:
+            if character == "/" and following == "/":
+                state = "line-comment"
+                index += 1
+            elif character == "/" and following == "*":
+                state = "block-comment"
+                block_comment_depth = 1
+                index += 1
+            elif character == '"':
+                state = "string"
+            elif character == "'" and re.match(r"(?:\\.|[^\\'])'", source[index + 1 :]):
+                state = "character"
+            elif character == "r":
+                raw = re.match(r'r(?P<hashes>#{0,255})"', source[index:])
+                if raw is not None:
+                    raw_hashes = len(raw.group("hashes"))
+                    index += raw.end() - 1
+                    state = "raw-string"
+            if state == "code":
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return source[opening : index + 1]
+        index += 1
+    fail(f"{context} has an unbalanced function body")
+
+
+def attributed_test(
+    source: str,
+    function: str,
+    context: str,
+    required_fragments: list[str],
+    *,
+    allow_ignored: bool = False,
+) -> None:
     matches = list(
         re.finditer(
             rf"(?m)^(?P<attrs>(?:\s*#\[[^\r\n]+\][^\r\n]*\r?\n)+)"
@@ -178,6 +368,119 @@ def attributed_test(source: str, function: str, context: str) -> None:
     )
     if len(matches) != 1 or TEST_ATTRIBUTE.search(matches[0].group("attrs")) is None:
         fail(f"{context} must bind exactly one attributed Rust test")
+    attributes = matches[0].group("attrs")
+    ignored = re.search(r"#\[\s*ignore(?:\s*=|\s*\])", attributes) is not None
+    if ignored and not allow_ignored:
+        fail(
+            f"{context} must bind a normally executed Rust test or declare its "
+            "machine-checked CI lane"
+        )
+    if allow_ignored and not ignored:
+        fail(f"{context} declares an ignored-test CI lane for a normal Rust test")
+    if re.search(r"#\[\s*cfg(?:_attr)?\s*\(", attributes):
+        fail(f"{context} must not bind a cfg-disabled Rust test")
+    body_open = source.find("{", matches[0].end())
+    body = rust_block(source, body_open, context)
+    body_without_comments = re.sub(r"(?s)/\*.*?\*/|//[^\r\n]*", "", body[1:-1]).strip()
+    if not body_without_comments:
+        fail(f"{context} must not bind an empty no-op Rust test")
+    if re.fullmatch(
+        r"(?:todo|unimplemented)!\s*\([^)]*\)\s*;?", body_without_comments
+    ):
+        fail(f"{context} must not bind an unimplemented Rust test")
+    for fragment in required_fragments:
+        if fragment not in body:
+            fail(f"{context} is missing required semantic fragment {fragment!r}")
+
+
+def acceptance_ci_lane(root: Path, value: Any, context: str) -> None:
+    lane = exact_object(
+        value,
+        {"package", "runner", "selection", "workflow"},
+        context,
+    )
+    package = string(lane["package"], f"{context}.package")
+    selection = string(lane["selection"], f"{context}.selection")
+    if selection != "--tests" and re.fullmatch(r"--test [A-Za-z0-9_-]+", selection) is None:
+        fail(f"{context}.selection must be --tests or one exact --test target")
+    runner = repository_file(root, lane["runner"], f"{context}.runner")
+    workflow = repository_file(root, lane["workflow"], f"{context}.workflow")
+    runner_source = runner.read_text(encoding="utf-8")
+    commands = re.findall(
+        r"(?ms)^run_bounded_tests cargo test \\\n(?P<body>.*?)(?=\n\n|\Z)",
+        runner_source,
+    )
+    package_flag = re.compile(
+        rf"(?m)^\s*-p\s+{re.escape(package)}\s*(?:\\)?$"
+    )
+    selection_flag = re.compile(
+        rf"(?m)^\s*{re.escape(selection)}\s*(?:\\)?$"
+    )
+    if not any(
+        package_flag.search(command)
+        and selection_flag.search(command)
+        and re.search(r"(?m)^\s*--ignored\s*(?:\\)?$", command)
+        for command in commands
+    ):
+        fail(f"{context} does not run {package} {selection} with --ignored")
+    invocation = f"run: ./{runner.relative_to(root).as_posix()}"
+    if invocation not in workflow.read_text(encoding="utf-8"):
+        fail(f"{context}.workflow does not invoke the declared runner")
+
+
+def acceptance_fixtures(root: Path, value: Any, context: str) -> None:
+    acceptance = value if isinstance(value, dict) else {}
+    allowed = {"additional", "ci_lane", "function", "path", "required_fragments"}
+    required = {"function", "path", "required_fragments"}
+    if not required.issubset(acceptance) or not set(acceptance).issubset(allowed):
+        fail(
+            f"{context} must contain function, path, required_fragments, and only "
+            "optional additional/ci_lane evidence"
+        )
+    fixtures = [acceptance]
+    additional = acceptance.get("additional", [])
+    if not isinstance(additional, list):
+        fail(f"{context}.additional must be an array")
+    fixtures.extend(additional)
+    identities: set[tuple[str, str]] = set()
+    for index, raw in enumerate(fixtures):
+        fixture_context = context if index == 0 else f"{context}.additional[{index - 1}]"
+        fixture = raw
+        if index > 0:
+            if not isinstance(raw, dict):
+                fail(f"{fixture_context} must be an object")
+            fixture_allowed = {"ci_lane", "function", "path", "required_fragments"}
+            if not required.issubset(raw) or not set(raw).issubset(fixture_allowed):
+                fail(
+                    f"{fixture_context} must contain function, path, required_fragments, "
+                    "and optional ci_lane"
+                )
+        test_path = repository_file(root, fixture["path"], f"{fixture_context}.path")
+        function = string(fixture["function"], f"{fixture_context}.function")
+        identity = (test_path.relative_to(root).as_posix(), function)
+        if identity in identities:
+            fail(f"{context} contains duplicate acceptance fixtures")
+        identities.add(identity)
+        fragments = [
+            string(fragment, f"{fixture_context}.required_fragments")
+            for fragment in array(
+                fixture["required_fragments"],
+                f"{fixture_context}.required_fragments",
+                nonempty=True,
+            )
+        ]
+        if fragments != sorted(set(fragments)):
+            fail(f"{fixture_context}.required_fragments must be sorted and unique")
+        ci_lane = fixture.get("ci_lane")
+        attributed_test(
+            test_path.read_text(encoding="utf-8"),
+            function,
+            fixture_context,
+            fragments,
+            allow_ignored=ci_lane is not None,
+        )
+        if ci_lane is not None:
+            acceptance_ci_lane(root, ci_lane, f"{fixture_context}.ci_lane")
 
 
 def compatibility_rows(source: str) -> dict[str, str]:
@@ -308,16 +611,52 @@ def validate_reviewed_deltas(path: Path, reference_ids: set[str]) -> None:
             },
             f"reviewed_deltas[{index}]",
         )
-        identifiers.append(string(delta["id"], "reviewed delta id"))
-        reviewers = array(delta["reviewers"], "reviewers", nonempty=True)
-        if len(reviewers) < 2 or len(reviewers) != len(set(reviewers)):
-            fail(f"reviewed_deltas[{index}] requires two distinct reviewers")
-        categories = array(delta["categories"], "delta categories", nonempty=True)
+        context = f"reviewed_deltas[{index}]"
+        identifier = string(delta["id"], f"{context}.id")
+        if IDENTIFIER.fullmatch(identifier) is None:
+            fail(f"{context}.id is not canonical")
+        identifiers.append(identifier)
+        decision = string(delta["decision"], f"{context}.decision")
+        if decision not in REVIEW_DECISIONS:
+            fail(f"{context}.decision is not an allowed reviewed decision")
+        reviewed_at = string(delta["reviewed_at"], f"{context}.reviewed_at")
+        try:
+            if datetime.date.fromisoformat(reviewed_at).isoformat() != reviewed_at:
+                raise ValueError
+        except ValueError:
+            fail(f"{context}.reviewed_at must be a canonical ISO 8601 date")
+        source_revision = string(delta["source_revision"], f"{context}.source_revision")
+        if GITHUB_SOURCE_REVISIONS.fullmatch(source_revision) is None:
+            fail(
+                f"{context}.source_revision must contain canonical immutable GitHub revisions"
+            )
+        reviewers = [
+            string(reviewer, f"{context}.reviewers")
+            for reviewer in array(delta["reviewers"], f"{context}.reviewers", nonempty=True)
+        ]
+        if any(IDENTIFIER.fullmatch(reviewer) is None for reviewer in reviewers):
+            fail(f"{context}.reviewers must be canonical human reviewer IDs")
+        if len(reviewers) < 2 or reviewers != sorted(set(reviewers)):
+            fail(f"{context} requires two distinct sorted reviewers")
+        categories = [
+            string(category, f"{context}.categories")
+            for category in array(delta["categories"], f"{context}.categories", nonempty=True)
+        ]
         if any(category not in REFERENCE_CATEGORIES for category in categories):
-            fail(f"reviewed_deltas[{index}] contains an unknown category")
-        references = set(array(delta["reference_ids"], "delta reference_ids"))
+            fail(f"{context} contains an unknown category")
+        if categories != sorted(set(categories)):
+            fail(f"{context}.categories must be sorted and unique")
+        reference_values = [
+            string(reference, f"{context}.reference_ids")
+            for reference in array(
+                delta["reference_ids"], f"{context}.reference_ids", nonempty=True
+            )
+        ]
+        if reference_values != sorted(set(reference_values)):
+            fail(f"{context}.reference_ids must be sorted and unique")
+        references = set(reference_values)
         if not references <= reference_ids:
-            fail(f"reviewed_deltas[{index}] references an unknown source")
+            fail(f"{context} references an unknown source")
         covered.update(references)
     if identifiers != sorted(identifiers) or len(identifiers) != len(set(identifiers)):
         fail("reviewed delta IDs must be sorted and unique")
@@ -331,11 +670,14 @@ def verify(root: Path, registry_path: Path) -> None:
         {
             "compatibility_document",
             "decoder_inventory",
+            "diagnostic_history",
             "diagnostic_migrations",
             "features",
             "late_rejections",
+            "provider_event_inventory",
             "reference_snapshot",
             "reviewed_deltas",
+            "runner_runtime_inventories",
             "schema_version",
             "stage_profiles",
             "unsupported_diagnostics",
@@ -358,6 +700,8 @@ def verify(root: Path, registry_path: Path) -> None:
     features = array(registry["features"], "features", nonempty=True)
     feature_ids: set[str] = set()
     claims: dict[str, str] = {}
+    feature_sources: dict[str, str] = {}
+    feature_unsupported: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(features):
         feature = exact_object(
             raw,
@@ -380,27 +724,31 @@ def verify(root: Path, registry_path: Path) -> None:
         feature_ids.add(identifier)
         area = string(feature["area"], f"features[{index}].area")
         status = string(feature["status"], f"features[{index}].status")
+        if status not in COMPATIBILITY_STATUSES:
+            fail(f"{identifier} contains unknown compatibility status {status!r}")
+        evaluation_phase = string(
+            feature["evaluation_phase"], f"features[{index}].evaluation_phase"
+        )
+        if evaluation_phase not in EVALUATION_PHASES:
+            fail(f"{identifier} contains unknown evaluation phase {evaluation_phase!r}")
         if area in claims:
             fail(f"multiple feature entries claim compatibility area {area!r}")
         claims[area] = status
         if feature["stage_profile"] not in profiles:
             fail(f"{identifier} references an unknown stage profile")
+        if feature["stage_profile"] != identifier:
+            fail(f"{identifier} must use its own stage profile")
         for capability in array(feature["capabilities"], f"{identifier}.capabilities"):
             if CAPABILITY.fullmatch(string(capability, "capability identifier")) is None:
                 fail(f"{identifier} contains invalid capability {capability!r}")
         source_binding = exact_object(feature["source"], {"contains", "path"}, f"{identifier}.source")
         source_path = repository_file(root, source_binding["path"], f"{identifier}.source.path")
+        feature_sources[identifier] = source_path.relative_to(root).as_posix()
         source = source_path.read_text(encoding="utf-8")
         fragment = string(source_binding["contains"], f"{identifier}.source.contains")
         if source.count(fragment) != 1:
             fail(f"{identifier} source fragment must occur exactly once")
-        acceptance = exact_object(feature["acceptance"], {"function", "path"}, f"{identifier}.acceptance")
-        test_path = repository_file(root, acceptance["path"], f"{identifier}.acceptance.path")
-        attributed_test(
-            test_path.read_text(encoding="utf-8"),
-            string(acceptance["function"], f"{identifier}.acceptance.function"),
-            f"{identifier}.acceptance",
-        )
+        acceptance_fixtures(root, feature["acceptance"], f"{identifier}.acceptance")
         unsupported = feature["unsupported"]
         if unsupported is not None:
             unsupported = exact_object(
@@ -408,6 +756,14 @@ def verify(root: Path, registry_path: Path) -> None:
             )
             string(unsupported["code"], f"{identifier}.unsupported.code")
             string(unsupported["span_policy"], f"{identifier}.unsupported.span_policy")
+            feature_unsupported[identifier] = unsupported
+
+    if set(profiles) != feature_ids:
+        fail(
+            "stage profile inventory drifted: "
+            f"missing={sorted(feature_ids - set(profiles))}, "
+            f"stale={sorted(set(profiles) - feature_ids)}"
+        )
 
     compatibility_path = repository_file(
         root, registry["compatibility_document"], "compatibility_document"
@@ -421,9 +777,15 @@ def verify(root: Path, registry_path: Path) -> None:
 
     inventories = array(registry["decoder_inventory"], "decoder_inventory", nonempty=True)
     inventory_ids: set[str] = set()
+    inventory_paths: set[str] = set()
+    trigger_feature_mapping: dict[str, str] | None = None
     for index, raw in enumerate(inventories):
+        extractor = raw.get("extractor") if isinstance(raw, dict) else None
+        keys = {"extractor", "fields", "id", "path"}
+        if extractor == "function-some-match-arms":
+            keys.add("function")
         inventory = exact_object(
-            raw, {"extractor", "fields", "id", "path"}, f"decoder_inventory[{index}]"
+            raw, keys, f"decoder_inventory[{index}]"
         )
         identifier = string(inventory["id"], f"decoder_inventory[{index}].id")
         if identifier in inventory_ids:
@@ -436,10 +798,15 @@ def verify(root: Path, registry_path: Path) -> None:
         if unknown_features:
             fail(f"{identifier} references unknown features {sorted(unknown_features)}")
         path = repository_file(root, inventory["path"], f"{identifier}.path")
+        inventory_paths.add(path.relative_to(root).as_posix())
         source = path.read_text(encoding="utf-8")
-        extractor = inventory["extractor"]
         if extractor == "some-match-arms":
             actual = some_match_fields(source)
+        elif extractor == "function-some-match-arms":
+            function = string(inventory["function"], f"{identifier}.function")
+            actual = some_match_fields(
+                rust_function_source(source, function, identifier)
+            )
         elif extractor == "action-metadata":
             actual = action_metadata_fields(source)
         elif extractor == "action-runtimes":
@@ -454,6 +821,77 @@ def verify(root: Path, registry_path: Path) -> None:
                 f"{identifier} decoder coverage drifted: "
                 f"missing={sorted(actual - expected)}, stale={sorted(expected - actual)}"
             )
+        if extractor == "trigger-names":
+            if trigger_feature_mapping is not None:
+                fail("trigger names may be inventoried only once")
+            trigger_feature_mapping = dict(fields)
+
+    workflow_decoder_root = root / "crates/automata-ci-workflow-github/src/decode"
+    governed_decoder_paths = {
+        path.relative_to(root).as_posix()
+        for path in workflow_decoder_root.glob("*.rs")
+        if path.name != "mod.rs"
+    }
+    governed_decoder_paths.add("crates/automata-ci-action-github/src/decoder.rs")
+    if inventory_paths != governed_decoder_paths:
+        fail(
+            "governed decoder source inventory drifted: "
+            f"missing={sorted(governed_decoder_paths - inventory_paths)}, "
+            f"stale={sorted(inventory_paths - governed_decoder_paths)}"
+        )
+
+    provider_inventory = exact_object(
+        registry["provider_event_inventory"],
+        {"events", "path"},
+        "provider_event_inventory",
+    )
+    provider_events = provider_inventory["events"]
+    if not isinstance(provider_events, dict) or not provider_events:
+        fail("provider_event_inventory.events must be a non-empty object")
+    if set(provider_events.values()) - feature_ids:
+        fail("provider_event_inventory references an unknown feature")
+    provider_path = repository_file(
+        root, provider_inventory["path"], "provider_event_inventory.path"
+    )
+    provider_source = provider_path.read_text(encoding="utf-8")
+    normalize = re.search(
+        r"pub fn normalize\(self\).*?\{(?P<body>.*?)\n    \}\n\n    fn into_verified_push",
+        provider_source,
+        re.DOTALL,
+    )
+    if normalize is None:
+        fail("provider webhook normalize function is missing")
+    actual_provider_events = set(
+        re.findall(r'^\s*"([a-z][a-z0-9_]*)"\s*=>', normalize["body"], re.MULTILINE)
+    )
+    if actual_provider_events != set(provider_events):
+        fail(
+            "provider event inventory drifted: "
+            f"missing={sorted(actual_provider_events - set(provider_events))}, "
+            f"stale={sorted(set(provider_events) - actual_provider_events)}"
+        )
+    if trigger_feature_mapping is None:
+        fail("trigger event inventory is missing")
+    required_trigger_features = dict(provider_events)
+    required_trigger_features.update(
+        {
+            "schedule": "scheduled-workflows",
+            "workflow_call": "reusable-workflows",
+            "workflow_dispatch": "workflow-dispatch-inputs-and-base-context",
+        }
+    )
+    for event in set(trigger_feature_mapping) - set(required_trigger_features):
+        required_trigger_features[event] = "decoder-only-provider-events"
+    changed_trigger_features = sorted(
+        event
+        for event, feature in trigger_feature_mapping.items()
+        if required_trigger_features.get(event) != feature
+    )
+    if changed_trigger_features:
+        fail(
+            "trigger feature partition drifted for events "
+            f"{changed_trigger_features}"
+        )
 
     diagnostics = array(
         registry["unsupported_diagnostics"], "unsupported_diagnostics", nonempty=True
@@ -496,6 +934,84 @@ def verify(root: Path, registry_path: Path) -> None:
         if emitted_diagnostics[code] != {source}:
             fail(f"unsupported diagnostic {code} moved without a registry update")
 
+    diagnostics_by_code = {diagnostic["code"]: diagnostic for diagnostic in diagnostics}
+    for feature_id, unsupported in feature_unsupported.items():
+        code = unsupported["code"]
+        diagnostic = diagnostics_by_code.get(code)
+        if diagnostic is None:
+            fail(f"{feature_id}.unsupported references unregistered diagnostic {code}")
+        if diagnostic["feature"] != feature_id:
+            fail(
+                f"{feature_id}.unsupported diagnostic {code} belongs to "
+                f"{diagnostic['feature']}"
+            )
+        if diagnostic["source"] != feature_sources[feature_id]:
+            fail(f"{feature_id}.unsupported source differs from diagnostic {code}")
+        if diagnostic["span_policy"] != unsupported["span_policy"]:
+            fail(f"{feature_id}.unsupported span policy differs from diagnostic {code}")
+
+    runtime_inventories = array(
+        registry["runner_runtime_inventories"],
+        "runner_runtime_inventories",
+        nonempty=True,
+    )
+    inventory_ids: list[str] = []
+    inventory_enums: set[tuple[str, str]] = set()
+    for index, raw in enumerate(runtime_inventories):
+        inventory = exact_object(
+            raw,
+            {"enum", "id", "path", "variants"},
+            f"runner_runtime_inventories[{index}]",
+        )
+        inventory_id = string(inventory["id"], "runner runtime inventory ID")
+        if IDENTIFIER.fullmatch(inventory_id) is None:
+            fail(f"invalid runner runtime inventory ID {inventory_id!r}")
+        inventory_ids.append(inventory_id)
+        enum_name = string(inventory["enum"], f"{inventory_id}.enum")
+        source_path = repository_file(root, inventory["path"], f"{inventory_id}.path")
+        enum_binding = (source_path.relative_to(root).as_posix(), enum_name)
+        if enum_binding in inventory_enums:
+            fail(f"runner runtime enum {enum_name} is inventoried more than once")
+        inventory_enums.add(enum_binding)
+        variants = inventory["variants"]
+        if not isinstance(variants, dict) or not variants:
+            fail(f"{inventory_id}.variants must be a non-empty object")
+        for variant, raw_classification in variants.items():
+            if re.fullmatch(r"[A-Z][A-Za-z0-9]+", variant) is None:
+                fail(f"{inventory_id} contains invalid Rust variant {variant!r}")
+            classification = exact_object(
+                raw_classification,
+                {"classification", "feature"},
+                f"{inventory_id}.variants.{variant}",
+            )
+            stable_classification = string(
+                classification["classification"],
+                f"{inventory_id}.variants.{variant}.classification",
+            )
+            if IDENTIFIER.fullmatch(stable_classification) is None:
+                fail(
+                    f"{inventory_id}.variants.{variant}.classification is not canonical"
+                )
+            if classification["feature"] not in feature_ids:
+                fail(
+                    f"{inventory_id}.variants.{variant} references unknown feature "
+                    f"{classification['feature']!r}"
+                )
+        actual_variants = rust_enum_variants(
+            source_path.read_text(encoding="utf-8"), enum_name, inventory_id
+        )
+        expected_variants = set(variants)
+        if actual_variants != expected_variants:
+            fail(
+                f"{inventory_id} enum coverage drifted: "
+                f"missing={sorted(actual_variants - expected_variants)}, "
+                f"stale={sorted(expected_variants - actual_variants)}"
+            )
+    if inventory_ids != sorted(inventory_ids) or len(inventory_ids) != len(
+        set(inventory_ids)
+    ):
+        fail("runner runtime inventory IDs must be sorted and unique")
+
     migrations = array(registry["diagnostic_migrations"], "diagnostic_migrations")
     migrated_codes: list[str] = []
     for index, raw in enumerate(migrations):
@@ -514,6 +1030,79 @@ def verify(root: Path, registry_path: Path) -> None:
         set(migrated_codes)
     ):
         fail("diagnostic migration sources must be sorted and unique")
+
+    diagnostic_history_path = repository_file(
+        root, registry["diagnostic_history"], "diagnostic_history"
+    )
+    diagnostic_history_document = exact_object(
+        load_canonical(diagnostic_history_path),
+        {"codes", "schema_version"},
+        "diagnostic history",
+    )
+    if diagnostic_history_document["schema_version"] != 1:
+        fail("diagnostic history schema_version must be integer 1")
+    diagnostic_history = array(
+        diagnostic_history_document["codes"], "diagnostic history codes", nonempty=True
+    )
+    for index, code in enumerate(diagnostic_history):
+        string(code, f"diagnostic_history[{index}]")
+    if diagnostic_history != sorted(set(diagnostic_history)):
+        fail("diagnostic_history must be sorted and unique")
+    history_relative = diagnostic_history_path.relative_to(root).as_posix()
+    baseline_revision = diagnostic_baseline_revision(root)
+    try:
+        baseline_history = json.loads(
+            git_text(root, baseline_revision, history_relative, "diagnostic history")
+        )
+        baseline_codes_value = baseline_history.get("codes")
+        baseline_context = "baseline diagnostic history codes"
+    except json.JSONDecodeError as error:
+        fail(f"baseline diagnostic history is invalid JSON: {error}")
+    except CapabilityError:
+        registry_revision = baseline_revision
+        try:
+            baseline_registry = json.loads(
+                git_text(
+                    root,
+                    registry_revision,
+                    REGISTRY.as_posix(),
+                    "capability registry",
+                )
+            )
+        except CapabilityError:
+            registry_revision = initial_capability_registry_revision(root)
+            try:
+                baseline_registry = json.loads(
+                    git_text(
+                        root,
+                        registry_revision,
+                        REGISTRY.as_posix(),
+                        "initial capability registry",
+                    )
+                )
+            except json.JSONDecodeError as error:
+                fail(f"initial capability registry is invalid JSON: {error}")
+        except json.JSONDecodeError as error:
+            fail(f"baseline capability registry is invalid JSON: {error}")
+        baseline_codes_value = [
+            diagnostic["code"]
+            for diagnostic in baseline_registry.get("unsupported_diagnostics", [])
+        ]
+        baseline_context = "baseline active diagnostic codes"
+    baseline_codes = set(array(baseline_codes_value, baseline_context))
+    removed_history = baseline_codes - set(diagnostic_history)
+    if removed_history:
+        fail(
+            "diagnostic_history is append-only; restored or migrated codes required: "
+            f"{sorted(removed_history)}"
+        )
+    accounted_diagnostics = set(registered_diagnostics) | set(migrated_codes)
+    if set(diagnostic_history) != accounted_diagnostics:
+        fail(
+            "diagnostic history is not fully accounted for: "
+            f"missing_migration={sorted(set(diagnostic_history) - accounted_diagnostics)}, "
+            f"unrecorded={sorted(accounted_diagnostics - set(diagnostic_history))}"
+        )
 
     late_rejections = array(registry["late_rejections"], "late_rejections", nonempty=True)
     rejection_ids: list[str] = []

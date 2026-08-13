@@ -10,10 +10,13 @@ use thiserror::Error;
 use crate::repository_path::{has_ascii_case_insensitive_suffix, is_valid_component};
 
 /// Maximum exact webhook body accepted by workflow admission.
-pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 25 * 1024 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 26_214_400;
 /// Maximum configured GitHub webhook secret size.
-pub const MAX_GITHUB_WEBHOOK_SECRET_BYTES: usize = 16 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_GITHUB_WEBHOOK_SECRET_BYTES: usize = 16_384;
 /// Maximum commit summaries GitHub documents in one push webhook.
+// foundation-governance: parity-limit
 pub const MAX_GITHUB_PUSH_COMMITS: usize = 2_048;
 /// Exact durable media type required for a stored authenticated GitHub push.
 pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
@@ -28,13 +31,63 @@ pub const X_GITHUB_EVENT: &str = "x-github-event";
 /// GitHub's provider delivery identifier header.
 pub const X_GITHUB_DELIVERY: &str = "x-github-delivery";
 
+// foundation-governance: parity-limit
 const MAX_DELIVERY_ID_BYTES: usize = 128;
+// foundation-governance: parity-limit
 const MAX_GIT_REF_BYTES: usize = 1_024;
+// foundation-governance: parity-limit
 const MAX_GITHUB_PATH_FILTER_COMMITS: usize = 1_000;
 const SHA256_SIGNATURE_PREFIX: &[u8] = b"sha256=";
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
+// foundation-governance: derived-contract owner=control-plane kind=digest-domain
 const WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN: &[u8] =
     b"automata.store.github-webhook-verifier-fingerprint.v1\0";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubWebhookLimitRejection {
+    SecretBytes,
+    DeliveryIdBytes,
+    GitRefBytes,
+    PushCommitCount,
+    PathFilterCommitCount,
+}
+
+const fn webhook_secret_byte_rejection(observed: usize) -> Option<GithubWebhookLimitRejection> {
+    if observed > MAX_GITHUB_WEBHOOK_SECRET_BYTES {
+        return Some(GithubWebhookLimitRejection::SecretBytes);
+    }
+    None
+}
+
+const fn delivery_id_byte_rejection(observed: usize) -> Option<GithubWebhookLimitRejection> {
+    if observed > MAX_DELIVERY_ID_BYTES {
+        return Some(GithubWebhookLimitRejection::DeliveryIdBytes);
+    }
+    None
+}
+
+const fn git_ref_byte_rejection(observed: usize) -> Option<GithubWebhookLimitRejection> {
+    if observed > MAX_GIT_REF_BYTES {
+        return Some(GithubWebhookLimitRejection::GitRefBytes);
+    }
+    None
+}
+
+const fn push_commit_count_rejection(observed: usize) -> Option<GithubWebhookLimitRejection> {
+    if observed > MAX_GITHUB_PUSH_COMMITS {
+        return Some(GithubWebhookLimitRejection::PushCommitCount);
+    }
+    None
+}
+
+const fn path_filter_commit_count_rejection(
+    observed: usize,
+) -> Option<GithubWebhookLimitRejection> {
+    if observed > MAX_GITHUB_PATH_FILTER_COMMITS {
+        return Some(GithubWebhookLimitRejection::PathFilterCommitCount);
+    }
+    None
+}
 
 /// Public, domain-separated identity of one configured webhook verifier key.
 ///
@@ -459,7 +512,7 @@ impl GithubWebhookVerifier {
     /// Rejects an empty secret or one larger than the bounded configuration
     /// limit.
     pub fn new(secret: &[u8]) -> Result<Self, GithubWebhookError> {
-        if secret.is_empty() || secret.len() > MAX_GITHUB_WEBHOOK_SECRET_BYTES {
+        if secret.is_empty() || webhook_secret_byte_rejection(secret.len()).is_some() {
             return Err(GithubWebhookError::InvalidSecret);
         }
         let mut fingerprint = digest::Context::new(&digest::SHA256);
@@ -496,7 +549,7 @@ impl GithubWebhookVerifier {
         raw_body: Bytes,
     ) -> Result<AuthenticatedGithubWebhook, GithubWebhookError> {
         if raw_body.len() > MAX_GITHUB_WEBHOOK_BODY_BYTES {
-            return Err(GithubWebhookError::BodyTooLarge);
+            return Err(GithubWebhookError::BodyTooLarge); // stable webhook-body-limit reason
         }
         let headers = VerifiedHeaders::parse(headers)?;
         self.authenticate_bounded(headers, raw_body)
@@ -1064,7 +1117,7 @@ fn valid_event_name(value: &[u8]) -> bool {
 
 fn valid_delivery_id(value: &[u8]) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_DELIVERY_ID_BYTES
+        && delivery_id_byte_rejection(value.len()).is_none()
         && value
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -1180,7 +1233,11 @@ impl<'de> de::Visitor<'de> for BoundedCommitVisitor {
     {
         let mut commits = Vec::new();
         while let Some(commit) = sequence.next_element::<PushCommitPayload>()? {
-            if commits.len() == MAX_GITHUB_PUSH_COMMITS {
+            let projected = commits
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| de::Error::custom("push commit count exceeds limit"))?;
+            if push_commit_count_rejection(projected).is_some() {
                 return Err(de::Error::custom("push commit count exceeds limit"));
             }
             commits.push(commit);
@@ -1252,8 +1309,9 @@ fn normalize_pushed_commits(
     }
 
     let commit_count = revisions.len();
-    let complete =
-        (commit_count <= MAX_GITHUB_PATH_FILTER_COMMITS).then(|| revisions.into_boxed_slice());
+    let complete = path_filter_commit_count_rejection(commit_count)
+        .is_none()
+        .then(|| revisions.into_boxed_slice());
     Ok(NormalizedPushedCommits {
         count: commit_count,
         complete_revisions: complete,
@@ -1351,7 +1409,7 @@ fn validate_repository_component(value: &str) -> Result<(), GithubWebhookError> 
 }
 
 pub(crate) fn parse_git_ref(value: String) -> Result<GithubPushRef, GithubWebhookError> {
-    if value.len() > MAX_GIT_REF_BYTES {
+    if git_ref_byte_rejection(value.len()).is_some() {
         return Err(GithubWebhookError::InvalidPayload);
     }
     let (kind, short_name_offset) = if value.starts_with("refs/heads/") {
@@ -1376,7 +1434,7 @@ pub(crate) fn normalize_branch_name(value: String) -> Result<Box<str>, GithubWeb
     if value
         .len()
         .checked_add("refs/heads/".len())
-        .is_none_or(|length| length > MAX_GIT_REF_BYTES)
+        .is_none_or(|length| git_ref_byte_rejection(length).is_some())
         || !valid_git_ref_name(&value)
     {
         return Err(GithubWebhookError::InvalidPayload);
@@ -1432,4 +1490,74 @@ fn is_commit_sha(value: &str) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn webhook_secret_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            webhook_secret_byte_rejection(MAX_GITHUB_WEBHOOK_SECRET_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            webhook_secret_byte_rejection(MAX_GITHUB_WEBHOOK_SECRET_BYTES),
+            None
+        );
+        assert_eq!(
+            webhook_secret_byte_rejection(MAX_GITHUB_WEBHOOK_SECRET_BYTES + 1),
+            Some(GithubWebhookLimitRejection::SecretBytes)
+        );
+    }
+
+    #[test]
+    fn delivery_id_byte_limit_has_exact_boundaries() {
+        assert_eq!(delivery_id_byte_rejection(MAX_DELIVERY_ID_BYTES - 1), None);
+        assert_eq!(delivery_id_byte_rejection(MAX_DELIVERY_ID_BYTES), None);
+        assert_eq!(
+            delivery_id_byte_rejection(MAX_DELIVERY_ID_BYTES + 1),
+            Some(GithubWebhookLimitRejection::DeliveryIdBytes)
+        );
+    }
+
+    #[test]
+    fn git_ref_byte_limit_has_exact_boundaries() {
+        assert_eq!(git_ref_byte_rejection(MAX_GIT_REF_BYTES - 1), None);
+        assert_eq!(git_ref_byte_rejection(MAX_GIT_REF_BYTES), None);
+        assert_eq!(
+            git_ref_byte_rejection(MAX_GIT_REF_BYTES + 1),
+            Some(GithubWebhookLimitRejection::GitRefBytes)
+        );
+    }
+
+    #[test]
+    fn push_commit_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            push_commit_count_rejection(MAX_GITHUB_PUSH_COMMITS - 1),
+            None
+        );
+        assert_eq!(push_commit_count_rejection(MAX_GITHUB_PUSH_COMMITS), None);
+        assert_eq!(
+            push_commit_count_rejection(MAX_GITHUB_PUSH_COMMITS + 1),
+            Some(GithubWebhookLimitRejection::PushCommitCount)
+        );
+    }
+
+    #[test]
+    fn path_filter_commit_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            path_filter_commit_count_rejection(MAX_GITHUB_PATH_FILTER_COMMITS - 1),
+            None
+        );
+        assert_eq!(
+            path_filter_commit_count_rejection(MAX_GITHUB_PATH_FILTER_COMMITS),
+            None
+        );
+        assert_eq!(
+            path_filter_commit_count_rejection(MAX_GITHUB_PATH_FILTER_COMMITS + 1),
+            Some(GithubWebhookLimitRejection::PathFilterCommitCount)
+        );
+    }
 }

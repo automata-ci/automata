@@ -97,16 +97,22 @@ fn catalog_rejects_mutability_drift_and_ambiguous_order() {
 }
 
 #[test]
-fn hermetic_evidence_cannot_claim_live_prerequisites() {
-    let mut hermetic = entry("hermetic", EvidenceClass::HermeticProduct);
-    hermetic.external_prerequisites.push(ExternalPrerequisite {
-        identity: "github-app".to_owned(),
-        immutable_revision: "installation:42".to_owned(),
-    });
-    assert!(matches!(
-        FixtureCatalog::new(vec![hermetic]),
-        Err(CatalogError::HermeticFixtureHasExternalPrerequisite)
-    ));
+fn only_live_evidence_can_claim_external_prerequisites() {
+    for class in [
+        EvidenceClass::Contract,
+        EvidenceClass::ProviderEmulator,
+        EvidenceClass::HermeticProduct,
+    ] {
+        let mut non_live = entry("non-live", class);
+        non_live.external_prerequisites.push(ExternalPrerequisite {
+            identity: "github-app".to_owned(),
+            immutable_revision: "installation:42".to_owned(),
+        });
+        assert!(matches!(
+            FixtureCatalog::new(vec![non_live]),
+            Err(CatalogError::NonLiveFixtureHasExternalPrerequisite)
+        ));
+    }
 
     let mut live = entry("live", EvidenceClass::LiveAutomata);
     live.external_prerequisites.push(ExternalPrerequisite {

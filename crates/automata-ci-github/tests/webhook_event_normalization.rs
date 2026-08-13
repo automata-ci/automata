@@ -474,6 +474,10 @@ fn durable_event_v1_rehydrates_each_supported_kind_without_reserialization() {
 
 #[test]
 fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
+    assert_eq!(
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        "application/vnd.automata.github-authenticated-event+json"
+    );
     let body = encode(&pull_request_payload());
     let wrong_event = stored_event_v1(&body, "merge_group", "durable-pr-7");
     assert_eq!(

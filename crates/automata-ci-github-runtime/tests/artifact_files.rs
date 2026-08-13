@@ -1,7 +1,7 @@
 use automata_ci_github_runtime::{
-    ArtifactDeclaration, ArtifactSubject, ArtifactSubjectCommandFile, ArtifactSubjectKind,
-    CommandFileDecoder, CommandFileError, CommandFileKind, CommandFilePlatform,
-    CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
+    ARTIFACT_LIST_SCHEMA_VERSION, ArtifactDeclaration, ArtifactSubject, ArtifactSubjectCommandFile,
+    ArtifactSubjectKind, CommandFileDecoder, CommandFileError, CommandFileKind,
+    CommandFilePlatform, CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
     GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState,
     MAX_ARTIFACT_DECLARATION_FILE_BYTES, MAX_ARTIFACT_SUBJECTS, OutputCommandFile,
     ParsedCommandFile, PathCommandFile, PhaseApplicationError, StateCommandFile, StepId, StepPhase,
@@ -143,6 +143,7 @@ fn declaration_file_has_the_fixed_one_mibibyte_ceiling() {
 
 #[test]
 fn aggregation_is_atomic_sorted_deduplicated_and_conflict_checked() {
+    assert_eq!(ARTIFACT_LIST_SCHEMA_VERSION, 1);
     let applicator = GithubCompletedStepApplicator::default();
     let initial = JobCommandState::new(CommandFilePlatform::Unix);
     let first = completed(vec![

@@ -9,17 +9,56 @@ use uuid::Uuid;
 use crate::cache_model::CacheAuthority;
 
 const INVALID_ARTIFACT_NAME_BYTES: &[u8] = b"\"\\/:<>|*?";
+// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_NAME_BYTES: usize = 255;
+// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_BLOCK_BYTES: u64 = 4_294_967_296;
+// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_BLOCKS: usize = 100_000;
 /// Maximum encoded size of one canonical immutable artifact manifest.
-pub const MAXIMUM_ARTIFACT_MANIFEST_BYTES: u64 = 1024 * 1024;
+// foundation-governance: parity-limit
+pub const MAXIMUM_ARTIFACT_MANIFEST_BYTES: u64 = 1_048_576;
 /// Maximum duration of one renewable artifact-finalization claim.
+// foundation-governance: operational-limit
 pub const MAXIMUM_ARTIFACT_FINALIZATION_LEASE_SECONDS: u64 = 60 * 60;
 // The default 100 GiB run ceiling holds 12,800 full 8 MiB blocks. This leaves
 // bounded slack for small tail blocks without allowing zero-byte row growth to
 // approach the 500-artifact by 2,048-block per-artifact product.
+// foundation-governance: operational-limit
 const DEFAULT_MAXIMUM_RUN_ARTIFACT_BLOCKS: usize = 16_384;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResultsArtifactLimitRejection {
+    NameBytes,
+    BlockBytes,
+    Blocks,
+    ManifestBytes,
+}
+
+const fn artifact_name_byte_rejection(observed: usize) -> Option<ResultsArtifactLimitRejection> {
+    if observed > MAXIMUM_DURABLE_NAME_BYTES {
+        return Some(ResultsArtifactLimitRejection::NameBytes);
+    }
+    None
+}
+const fn artifact_block_byte_rejection(observed: u64) -> Option<ResultsArtifactLimitRejection> {
+    if observed > MAXIMUM_DURABLE_BLOCK_BYTES {
+        return Some(ResultsArtifactLimitRejection::BlockBytes);
+    }
+    None
+}
+const fn artifact_block_count_rejection(observed: usize) -> Option<ResultsArtifactLimitRejection> {
+    if observed > MAXIMUM_DURABLE_BLOCKS {
+        return Some(ResultsArtifactLimitRejection::Blocks);
+    }
+    None
+}
+const fn artifact_manifest_byte_rejection(observed: u64) -> Option<ResultsArtifactLimitRejection> {
+    if observed > MAXIMUM_ARTIFACT_MANIFEST_BYTES {
+        return Some(ResultsArtifactLimitRejection::ManifestBytes);
+    }
+    None
+}
 
 /// Stable database identity presented by the GitHub Results API.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -585,6 +624,9 @@ pub struct PublishedArtifactMetadata {
 }
 
 /// Canonical immutable artifact manifest. Blocks are replayed in this order.
+pub const ARTIFACT_MANIFEST_SCHEMA_VERSION: u16 = 1;
+
+/// Canonical immutable artifact manifest. Blocks are replayed in this order.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactManifest {
@@ -631,12 +673,25 @@ pub struct ArtifactManifestBlock {
 }
 
 impl ArtifactManifest {
+    /// Requires the exact current immutable-manifest schema.
+    ///
+    /// # Errors
+    ///
+    /// Rejects legacy and forward schemas before their fields can be consumed.
+    pub const fn validate_schema(&self) -> Result<(), ArtifactManifestSchemaError> {
+        if self.schema == ARTIFACT_MANIFEST_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(ArtifactManifestSchemaError)
+        }
+    }
+
     /// Builds the current manifest schema from verified block metadata.
     #[must_use]
     pub fn from_committed(artifact: &CommittedArtifact, digest: Sha256Digest) -> Self {
         let authority = artifact.authority;
         Self {
-            schema: 1,
+            schema: ARTIFACT_MANIFEST_SCHEMA_VERSION,
             artifact_id: artifact.artifact_id.get(),
             upload_id: artifact.upload_id.to_string(),
             run_id: authority.run_id().to_string(),
@@ -661,6 +716,11 @@ impl ArtifactManifest {
         }
     }
 }
+
+/// A canonical artifact manifest declares a legacy or forward schema.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("artifact manifest schema is unsupported")]
+pub struct ArtifactManifestSchemaError;
 
 /// Resource limits independently configurable at the Results boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -697,11 +757,11 @@ impl ResultsLimits {
             || maximum_manifest_bytes == 0
             || maximum_retention_seconds == 0
             || maximum_artifact_bytes < maximum_block_bytes
-            || maximum_name_bytes > MAXIMUM_DURABLE_NAME_BYTES
-            || maximum_block_bytes > MAXIMUM_DURABLE_BLOCK_BYTES
+            || artifact_name_byte_rejection(maximum_name_bytes).is_some()
+            || artifact_block_byte_rejection(maximum_block_bytes).is_some()
             || maximum_artifact_bytes > i64::MAX as u64
-            || maximum_blocks > MAXIMUM_DURABLE_BLOCKS
-            || maximum_manifest_bytes > MAXIMUM_ARTIFACT_MANIFEST_BYTES
+            || artifact_block_count_rejection(maximum_blocks).is_some()
+            || artifact_manifest_byte_rejection(maximum_manifest_bytes).is_some()
             || maximum_retention_seconds > i64::MAX as u64
         {
             return Err(ResultsLimitsError);
@@ -740,11 +800,11 @@ impl ResultsLimits {
         maximum_run_artifact_blocks: usize,
     ) -> Result<Self, ResultsLimitsError> {
         if maximum_artifacts_per_run == 0
-            || maximum_artifacts_per_run > MAXIMUM_DURABLE_BLOCKS
+            || artifact_block_count_rejection(maximum_artifacts_per_run).is_some()
             || maximum_run_artifact_bytes < self.artifact_bytes
             || maximum_run_artifact_bytes > i64::MAX as u64
             || maximum_run_artifact_blocks < self.blocks
-            || maximum_run_artifact_blocks > MAXIMUM_DURABLE_BLOCKS
+            || artifact_block_count_rejection(maximum_run_artifact_blocks).is_some()
         {
             return Err(ResultsLimitsError);
         }
@@ -829,3 +889,66 @@ impl Default for ResultsLimits {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("Results limits must be nonzero and internally consistent")]
 pub struct ResultsLimitsError;
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_name_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_name_byte_rejection(MAXIMUM_DURABLE_NAME_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            artifact_name_byte_rejection(MAXIMUM_DURABLE_NAME_BYTES),
+            None
+        );
+        assert_eq!(
+            artifact_name_byte_rejection(MAXIMUM_DURABLE_NAME_BYTES + 1),
+            Some(ResultsArtifactLimitRejection::NameBytes)
+        );
+    }
+    #[test]
+    fn artifact_block_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_block_byte_rejection(MAXIMUM_DURABLE_BLOCK_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            artifact_block_byte_rejection(MAXIMUM_DURABLE_BLOCK_BYTES),
+            None
+        );
+        assert_eq!(
+            artifact_block_byte_rejection(MAXIMUM_DURABLE_BLOCK_BYTES + 1),
+            Some(ResultsArtifactLimitRejection::BlockBytes)
+        );
+    }
+    #[test]
+    fn artifact_block_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_block_count_rejection(MAXIMUM_DURABLE_BLOCKS - 1),
+            None
+        );
+        assert_eq!(artifact_block_count_rejection(MAXIMUM_DURABLE_BLOCKS), None);
+        assert_eq!(
+            artifact_block_count_rejection(MAXIMUM_DURABLE_BLOCKS + 1),
+            Some(ResultsArtifactLimitRejection::Blocks)
+        );
+    }
+    #[test]
+    fn artifact_manifest_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            artifact_manifest_byte_rejection(MAXIMUM_ARTIFACT_MANIFEST_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            artifact_manifest_byte_rejection(MAXIMUM_ARTIFACT_MANIFEST_BYTES),
+            None
+        );
+        assert_eq!(
+            artifact_manifest_byte_rejection(MAXIMUM_ARTIFACT_MANIFEST_BYTES + 1),
+            Some(ResultsArtifactLimitRejection::ManifestBytes)
+        );
+    }
+}

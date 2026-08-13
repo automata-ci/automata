@@ -7,8 +7,11 @@ use thiserror::Error;
 /// Current immutable fixture-catalog schema.
 pub const FIXTURE_CATALOG_SCHEMA_VERSION: u16 = 1;
 
+// foundation-governance: operational-limit
 const MAX_CATALOG_ENTRIES: usize = 4_096;
+// foundation-governance: operational-limit
 const MAX_LOCKS_PER_FIXTURE: usize = 4_096;
+// foundation-governance: operational-limit
 const MAX_EXTERNAL_PREREQUISITES: usize = 128;
 
 /// Evidence class produced by one fixture execution.
@@ -72,7 +75,7 @@ pub struct ContentLock {
     pub sha256: String,
 }
 
-/// Exact external prerequisite for a non-hermetic fixture.
+/// Exact external prerequisite for a live-provider fixture.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExternalPrerequisite {
@@ -117,7 +120,7 @@ impl FixtureCatalog {
     /// # Errors
     ///
     /// Rejects unbounded, unsorted, duplicate, mutable, or malformed locks and
-    /// rejects external prerequisites on hermetic evidence.
+    /// rejects external prerequisites on non-live evidence.
     pub fn new(entries: Vec<FixtureCatalogEntry>) -> Result<Self, CatalogError> {
         let catalog = Self {
             schema_version: FIXTURE_CATALOG_SCHEMA_VERSION,
@@ -207,10 +210,12 @@ impl FixtureCatalog {
             validate_locks(&entry.actions, false)?;
             validate_sha256(&entry.expected_evidence_sha256)?;
             validate_prerequisites(&entry.external_prerequisites)?;
-            if matches!(entry.evidence_class, EvidenceClass::HermeticProduct)
-                && !entry.external_prerequisites.is_empty()
+            if !matches!(
+                entry.evidence_class,
+                EvidenceClass::LiveGithub | EvidenceClass::LiveAutomata
+            ) && !entry.external_prerequisites.is_empty()
             {
-                return Err(CatalogError::HermeticFixtureHasExternalPrerequisite);
+                return Err(CatalogError::NonLiveFixtureHasExternalPrerequisite);
             }
         }
         Ok(())
@@ -407,6 +412,6 @@ pub enum CatalogError {
     PrerequisitesNotSorted,
     #[error("fixture external prerequisite revision is not immutable")]
     InvalidImmutableRevision,
-    #[error("hermetic fixture declares an external prerequisite")]
-    HermeticFixtureHasExternalPrerequisite,
+    #[error("non-live fixture declares an external prerequisite")]
+    NonLiveFixtureHasExternalPrerequisite,
 }

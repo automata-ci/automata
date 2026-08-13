@@ -14,6 +14,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const ENVIRONMENT_TEMPLATE_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow.deployment-environment-template.v1\0";
 

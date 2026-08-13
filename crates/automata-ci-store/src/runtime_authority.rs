@@ -65,9 +65,13 @@ const MAX_GITHUB_REPOSITORY_NAME_BYTES: usize =
 const MAX_GITHUB_AUTHORITY_NAMESPACE_BYTES: usize = 128;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const PROTECTED_PAYLOAD_SCHEMA: u16 = 1;
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const AAD_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-aad.v3\0";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const WRAPPING_AAD_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-wrapping-aad.v3\0";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const ENCRYPTION_PURPOSE: &str = "control-plane/github-runtime-authority:v3";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const WRAPPING_ENCRYPTION_PURPOSE: &str = "control-plane/github-runtime-authority-wrapping:v3";
 
 /// Stable key of one authority issuance.

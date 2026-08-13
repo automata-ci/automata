@@ -8,14 +8,18 @@ use automata_ci_key_management::{
 use sqlx::{PgPool, Row as _};
 
 use crate::{
-    MAX_SECRET_CUSTODY_CONFIGURED_KEYS, SecretCustodyCanaryBinding, SecretCustodyCanaryGeneration,
-    SecretCustodyKeySet, SecretCustodyRepository, SecretCustodyRepositoryError,
-    SecretCustodyRequirements, VerifiedSecretCustody, VerifySecretCustody,
-    VerifySecretCustodyOutcome,
+    MAX_SECRET_CUSTODY_CONFIGURED_KEYS, SECRET_CUSTODY_CANARY_GENERATION,
+    SecretCustodyCanaryBinding, SecretCustodyCanaryGeneration, SecretCustodyKeySet,
+    SecretCustodyRepository, SecretCustodyRepositoryError, SecretCustodyRequirements,
+    VerifiedSecretCustody, VerifySecretCustody, VerifySecretCustodyOutcome,
 };
 
+use super::durable_schema::{current_durable_schemas, is_current_secret_custody_canary_schema};
+
 const CANARY_CONTEXT_TENANT: &str = "automata-ci";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const CANARY_PURPOSE: &str = "actions/secrets/custody-canary:v1";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const CANARY_PLAINTEXT: &[u8] = b"automata-ci-secret-custody-canary-v1";
 const REQUIRED_KEY_QUERY_BOUND: i64 = 33;
 const _: () = assert!(MAX_SECRET_CUSTODY_CONFIGURED_KEYS == 32);
@@ -374,6 +378,7 @@ async fn insert_canary(
     key_id: &KeyId,
     envelope: &EncryptedEnvelope,
 ) -> Result<(), SecretCustodyRepositoryError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO secret_custody_key_canaries (
@@ -381,7 +386,7 @@ async fn insert_canary(
             ciphertext, nonce, wrapped_data_key, envelope_schema,
             created_at_ms
         ) VALUES (
-            $1, 1, 1, $2, $3, $4, $5,
+            $1, $6, $7, $2, $3, $4, $5,
             floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
         )
         ON CONFLICT (wrapping_key_id) DO NOTHING
@@ -392,6 +397,8 @@ async fn insert_canary(
     .bind(envelope.nonce().as_slice())
     .bind(envelope.wrapped_data_key().ciphertext())
     .bind(i32::from(envelope.schema()))
+    .bind(i64::try_from(SECRET_CUSTODY_CANARY_GENERATION).expect("canary generation fits BIGINT"))
+    .bind(schemas.secret_custody_canary_i32)
     .execute(pool)
     .await
     .map_err(operation_error)?;
@@ -521,11 +528,10 @@ fn decode_canary(
             SecretCustodyCanaryGeneration::new(value)
                 .map_err(|_| SecretCustodyRepositoryError::CorruptData)
         })?;
-    if row
-        .try_get::<i32, _>("canary_schema")
-        .map_err(|_| SecretCustodyRepositoryError::CorruptData)?
-        != 1
-    {
+    if !is_current_secret_custody_canary_schema(
+        row.try_get::<i32, _>("canary_schema")
+            .map_err(|_| SecretCustodyRepositoryError::CorruptData)?,
+    ) {
         return Err(SecretCustodyRepositoryError::CorruptData);
     }
     let envelope_schema = row

@@ -1,8 +1,9 @@
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::SecretBinding;
 use automata_ci_job_executor_github::{
-    EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError, MAX_EPHEMERAL_JOB_SECRETS,
-    NoSecrets, PortErrorKind, SecretPort,
+    EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError,
+    MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS, NoSecrets, PortErrorKind,
+    SecretPort, validate_ephemeral_job_secret_bytes,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -116,6 +117,16 @@ fn ephemeral_secret_count_boundaries() {
     assert_eq!(
         EphemeralJobSecrets::new(entries(MAX_EPHEMERAL_JOB_SECRETS + 1)).unwrap_err(),
         EphemeralJobSecretsError::TooManyBindings
+    );
+}
+
+#[test]
+fn ephemeral_secret_plaintext_byte_boundaries() {
+    assert!(validate_ephemeral_job_secret_bytes(MAX_EPHEMERAL_JOB_SECRET_BYTES - 1).is_ok());
+    assert!(validate_ephemeral_job_secret_bytes(MAX_EPHEMERAL_JOB_SECRET_BYTES).is_ok());
+    assert_eq!(
+        validate_ephemeral_job_secret_bytes(MAX_EPHEMERAL_JOB_SECRET_BYTES + 1),
+        Err(EphemeralJobSecretsError::AggregatePlaintextTooLarge)
     );
 }
 

@@ -116,7 +116,18 @@ const fuzzableStringFields: readonly (readonly PathSegment[])[] = [
   ["page", "artifacts", "items", 0, "name"],
 ];
 
+function rejectsNoncurrentRenderRequestSchema(): void {
+  const input = cloneRequest(runDetailRequest);
+  setPath(input, ["schemaVersion"], 2);
+  expect(() => validateRenderRequest(input)).toThrow("at $.schemaVersion");
+}
+
 describe("render request validation", () => {
+  it(
+    "rejects a noncurrent render-request schema",
+    rejectsNoncurrentRenderRequestSchema,
+  );
+
   it.each([
     ["repository-directory", repositoryDirectoryRequest],
     ["repository-directory-secrets", repositorySecretsDirectoryRequest],

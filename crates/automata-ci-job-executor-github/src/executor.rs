@@ -10,13 +10,13 @@ use std::{
 
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
-    ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
-    MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
-    MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity, RuntimeBoolean,
-    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, StepAnnotation,
-    StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis, ValueSource,
-    ValueTemplate,
+    ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
+    JobIrEnvelope, JobLifecycle, JobResult, JobResultOutput, JobResultValidationError,
+    JobRuntimeContext, MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES,
+    MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity,
+    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
+    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis,
+    ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -68,13 +68,17 @@ use crate::{
 use automata_ci_workflow_github::GithubConditionCompiler;
 
 const DIRECTORY_MODE: &str = "0700";
+// foundation-governance: parity-limit
 const MAX_ACTION_NESTING_DEPTH: usize = 10;
+// foundation-governance: parity-limit
 const MAX_COMPOSITE_CHILD_STEPS: usize = 10_000;
+// foundation-governance: parity-limit
 const MAX_ACTION_INVOCATIONS: u32 = 10_000;
-const MAX_COMPOSITE_DERIVED_BYTES: usize = automata_ci_execution::MAX_COPY_BYTES;
+// foundation-governance: parity-limit
+const MAX_COMPOSITE_DERIVED_BYTES: usize = 16_777_216;
+// foundation-governance: parity-limit
+const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
-const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
-    "application/vnd.automata.job-runtime-context.protobuf";
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
@@ -419,7 +423,7 @@ impl GithubJobExecutor {
         let workspace =
             job_workspace(job, &environment).map_err(|_| AdmissionRejection::InvalidJob)?;
         let event = job.execution().event();
-        if event.media_type() != "application/json"
+        if event.media_type() != WORKFLOW_EVENT_MEDIA_TYPE
             || event.encoded_size() > automata_ci_execution::MAX_COPY_BYTES as u64
         {
             return Err(AdmissionRejection::InvalidJob);
@@ -5555,10 +5559,7 @@ struct ActionGraphPlanner {
 
 impl ActionGraphPlanner {
     fn enter(&mut self, key: String) -> bool {
-        if self.active.len() >= MAX_ACTION_NESTING_DEPTH
-            || self.occurrences >= MAX_ACTION_INVOCATIONS
-            || self.active.iter().any(|active| active == &key)
-        {
+        if action_budget_rejection(&self.active, self.occurrences, &key).is_some() {
             return false;
         }
         self.occurrences += 1;
@@ -5705,10 +5706,7 @@ impl ActionExecutionBudget {
     }
 
     fn enter(&mut self, key: String) -> bool {
-        if self.active.len() >= MAX_ACTION_NESTING_DEPTH
-            || self.invocations >= MAX_ACTION_INVOCATIONS
-            || self.active.iter().any(|active| active == &key)
-        {
+        if action_budget_rejection(&self.active, self.invocations, &key).is_some() {
             return false;
         }
         self.invocations += 1;
@@ -5721,7 +5719,11 @@ impl ActionExecutionBudget {
     }
 
     fn composite_step(&mut self) -> Result<u32, ExecutorAdapterError> {
-        if self.composite_steps >= MAX_COMPOSITE_CHILD_STEPS {
+        let projected = self
+            .composite_steps
+            .checked_add(1)
+            .ok_or_else(resource_exhausted)?;
+        if composite_child_step_rejection(projected).is_some() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::ResourceExhausted,
             ));
@@ -5750,15 +5752,74 @@ impl ActionExecutionBudget {
     }
 
     fn charge_derived(&mut self, bytes: usize) -> Result<(), ExecutorAdapterError> {
-        self.derived_bytes = self
+        let projected = self
             .derived_bytes
             .checked_add(bytes)
             .ok_or_else(resource_exhausted)?;
-        if self.derived_bytes > MAX_COMPOSITE_DERIVED_BYTES {
+        if composite_derived_bytes_rejection(projected).is_some() {
             return Err(resource_exhausted());
         }
+        self.derived_bytes = projected;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionBudgetRejection {
+    NestingDepth,
+    InvocationCount,
+    CompositeChildSteps,
+    CompositeDerivedBytes,
+    EventDepth,
+    Recursion,
+}
+
+fn action_budget_rejection(
+    active: &[String],
+    invocations: u32,
+    key: &str,
+) -> Option<ActionBudgetRejection> {
+    if active.len() >= MAX_ACTION_NESTING_DEPTH {
+        return Some(ActionBudgetRejection::NestingDepth);
+    }
+    let Some(projected) = invocations.checked_add(1) else {
+        return Some(ActionBudgetRejection::InvocationCount);
+    };
+    if action_invocation_count_rejection(projected).is_some() {
+        return Some(ActionBudgetRejection::InvocationCount);
+    }
+    if active.iter().any(|active| active == key) {
+        return Some(ActionBudgetRejection::Recursion);
+    }
+    None
+}
+
+const fn action_invocation_count_rejection(projected: u32) -> Option<ActionBudgetRejection> {
+    if projected > MAX_ACTION_INVOCATIONS {
+        return Some(ActionBudgetRejection::InvocationCount); // stable invocation-limit reason
+    }
+    None
+}
+
+const fn composite_child_step_rejection(projected: usize) -> Option<ActionBudgetRejection> {
+    if projected > MAX_COMPOSITE_CHILD_STEPS {
+        return Some(ActionBudgetRejection::CompositeChildSteps);
+    }
+    None
+}
+
+const fn composite_derived_bytes_rejection(projected: usize) -> Option<ActionBudgetRejection> {
+    if projected > MAX_COMPOSITE_DERIVED_BYTES {
+        return Some(ActionBudgetRejection::CompositeDerivedBytes);
+    }
+    None
+}
+
+const fn event_depth_rejection(depth: usize) -> Option<ActionBudgetRejection> {
+    if depth > MAX_EVENT_DEPTH {
+        return Some(ActionBudgetRejection::EventDepth);
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -6863,8 +6924,7 @@ fn github_value_from_json(
     value: &serde_json::Value,
     depth: usize,
 ) -> Result<GithubValue, ExecutorAdapterError> {
-    const MAX_EVENT_DEPTH: usize = 128;
-    if depth > MAX_EVENT_DEPTH {
+    if event_depth_rejection(depth).is_some() {
         return Err(ExecutorAdapterError::new(
             ExecutorAdapterErrorKind::InvalidJob,
         ));
@@ -7039,11 +7099,13 @@ mod tests {
     use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionCancellationReason};
 
     use super::{
-        ActionExecutionBudget, CleanupCancellation, ExecutorAdapterErrorKind, GithubStatus,
-        JobConclusion, MAX_ACTION_INVOCATIONS, MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS,
-        MAX_COMPOSITE_DERIVED_BYTES, SecretMasker, encode_action_outputs, github_value_from_json,
-        parse_output_with_cancellation, reconcile_cancelled_operation, reconcile_post_operation,
-        resource_exhausted,
+        ActionBudgetRejection, ActionExecutionBudget, CleanupCancellation,
+        ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
+        MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
+        MAX_EVENT_DEPTH, SecretMasker, action_invocation_count_rejection,
+        composite_child_step_rejection, composite_derived_bytes_rejection, encode_action_outputs,
+        event_depth_rejection, github_value_from_json, parse_output_with_cancellation,
+        reconcile_cancelled_operation, reconcile_post_operation, resource_exhausted,
     };
 
     #[test]
@@ -7090,9 +7152,12 @@ mod tests {
     #[test]
     fn composite_runtime_budgets_fail_before_unbounded_work() {
         let mut budget = ActionExecutionBudget::new();
-        for depth in 0..MAX_ACTION_NESTING_DEPTH {
+        for depth in 0..(MAX_ACTION_NESTING_DEPTH - 1) {
             assert!(budget.enter(format!("action-{depth}")));
         }
+        assert_eq!(budget.active.len(), MAX_ACTION_NESTING_DEPTH - 1);
+        assert!(budget.enter("at-depth-limit".to_owned()));
+        assert_eq!(budget.active.len(), MAX_ACTION_NESTING_DEPTH);
         assert!(!budget.enter("one-too-deep".to_owned()));
         for _ in 0..MAX_ACTION_NESTING_DEPTH {
             budget.leave();
@@ -7113,6 +7178,64 @@ mod tests {
             .charge_derived(MAX_COMPOSITE_DERIVED_BYTES)
             .expect("exact derived-text budget");
         assert!(budget.charge_derived(1).is_err());
+    }
+
+    #[test]
+    fn action_invocation_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS - 1),
+            None
+        );
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS),
+            None
+        );
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS + 1),
+            Some(ActionBudgetRejection::InvocationCount)
+        );
+    }
+
+    #[test]
+    fn composite_child_step_limit_has_exact_boundaries() {
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS - 1),
+            None
+        );
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS),
+            None
+        );
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS + 1),
+            Some(ActionBudgetRejection::CompositeChildSteps)
+        );
+    }
+
+    #[test]
+    fn composite_derived_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES),
+            None
+        );
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES + 1),
+            Some(ActionBudgetRejection::CompositeDerivedBytes)
+        );
+    }
+
+    #[test]
+    fn event_depth_limit_has_exact_boundaries() {
+        assert_eq!(event_depth_rejection(MAX_EVENT_DEPTH - 1), None);
+        assert_eq!(event_depth_rejection(MAX_EVENT_DEPTH), None);
+        assert_eq!(
+            event_depth_rejection(MAX_EVENT_DEPTH + 1),
+            Some(ActionBudgetRejection::EventDepth)
+        );
     }
 
     #[test]

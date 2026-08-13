@@ -17,7 +17,22 @@ pub const GITHUB_EXPRESSION_DIALECT: &str = "github-actions";
 /// Semantics version implemented by this parser/compiler.
 pub const GITHUB_EXPRESSION_DIALECT_VERSION: u16 = 1;
 /// Upstream runner limit, measured as .NET UTF-16 code units.
+// foundation-governance: parity-limit
 pub const GITHUB_EXPRESSION_MAX_UTF16_UNITS: usize = 21_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubExpressionLimitRejection {
+    Utf16Units,
+}
+
+const fn github_expression_utf16_units_rejection(
+    observed: usize,
+) -> Option<GithubExpressionLimitRejection> {
+    if observed > GITHUB_EXPRESSION_MAX_UTF16_UNITS {
+        return Some(GithubExpressionLimitRejection::Utf16Units);
+    }
+    None
+}
 
 /// Planning phase whose context and function availability is enforced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -533,7 +548,7 @@ fn enforce_source_limits(
 
 fn enforce_github_length(source: &str, range: ByteRange) -> Result<(), GithubExpressionError> {
     let utf16_units = source[range.start..range.end].encode_utf16().count();
-    if utf16_units > GITHUB_EXPRESSION_MAX_UTF16_UNITS {
+    if github_expression_utf16_units_rejection(utf16_units).is_some() {
         return Err(resource_error(
             "github.expression.github_length_limit",
             format!(
@@ -1837,5 +1852,29 @@ fn internal_error(message: impl Into<String>) -> GithubExpressionError {
         message: message.into(),
         byte_offset: 0,
         byte_length: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GITHUB_EXPRESSION_MAX_UTF16_UNITS, GithubExpressionLimitRejection,
+        github_expression_utf16_units_rejection,
+    };
+
+    #[test]
+    fn github_expression_utf16_units_has_exact_boundaries() {
+        assert_eq!(
+            github_expression_utf16_units_rejection(GITHUB_EXPRESSION_MAX_UTF16_UNITS - 1),
+            None
+        );
+        assert_eq!(
+            github_expression_utf16_units_rejection(GITHUB_EXPRESSION_MAX_UTF16_UNITS),
+            None
+        );
+        assert_eq!(
+            github_expression_utf16_units_rejection(GITHUB_EXPRESSION_MAX_UTF16_UNITS + 1),
+            Some(GithubExpressionLimitRejection::Utf16Units)
+        );
     }
 }

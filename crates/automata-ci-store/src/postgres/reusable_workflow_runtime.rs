@@ -8,7 +8,7 @@ use automata_ci_core::{
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     AdmissionObject, AdmittedReusableInputKind, CompleteReusableWorkflowCall,
     LogicalActivationPreparationStoreError, LogicalActivationPreparationTarget,
@@ -68,7 +68,7 @@ const NEXT_REUSABLE_CALL_SQL: &str = r"
       AND marker.state IN ('pending', 'active')
       AND marker.admission_graph_sealed_at_ms IS NOT NULL
       AND run.status IN ('queued', 'in_progress')
-      AND run.admission_epoch = 1 AND run.plan_schema = 1
+      AND run.admission_epoch = $1 AND run.plan_schema = $1
       AND publication.run_id IS NULL
       AND automata_logical_workflow_invocation_published(
           caller.run_id, caller.invocation_id
@@ -240,7 +240,9 @@ async fn load_next_call(
     store: &PostgresStore,
 ) -> Result<Option<ReadyReusableWorkflowCall>, ReusableWorkflowRuntimeStoreError> {
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    let schemas = current_durable_schemas();
     let row = sqlx::query(NEXT_REUSABLE_CALL_SQL)
+        .bind(schemas.workflow_plan_i32)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(operation_error)?;
@@ -1024,6 +1026,7 @@ async fn insert_publication(
     transaction: &mut Transaction<'_, Postgres>,
     request: &PublishReusableWorkflowCall,
 ) -> Result<(), ReusableWorkflowRuntimeStoreError> {
+    let schemas = current_durable_schemas();
     let context_size = i64::try_from(request.runtime_context().encoded_size())
         .map_err(|_| corrupt("runtime context size is not representable"))?;
     let mapping_count = i32::try_from(request.output_mappings().len())
@@ -1042,8 +1045,7 @@ async fn insert_publication(
             authority_profile, published_at_ms, child_graph_sealed_at_ms
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11, $12,
-            $13, $14,
-            'application/vnd.automata.job-runtime-context.protobuf', 1,
+            $13, $14, $22, $23,
             $15, $16, $17, $18, $19, $20, 'credential_free', $21, NULL
         )
         ",
@@ -1069,6 +1071,8 @@ async fn insert_publication(
     .bind(request.runtime_policy().revision().as_i64())
     .bind(request.runtime_policy().digest().as_bytes().as_slice())
     .bind(request.published_at().get())
+    .bind(request.runtime_context().media_type())
+    .bind(schemas.runtime_context_i16)
     .execute(&mut **transaction)
     .await
     .map_err(classify_publication_error)?;
@@ -1796,6 +1800,7 @@ async fn insert_call_result(
     context: &CompletionContext,
     aggregate: &CompletionAggregate,
 ) -> Result<(), ReusableWorkflowRuntimeStoreError> {
+    let schemas = current_durable_schemas();
     let publication = request.publication();
     let child_job_count = i32::try_from(if context.condition_matched {
         context.planned_child_job_count
@@ -1819,7 +1824,7 @@ async fn insert_call_result(
             parent_outputs_digest, parent_commit_digest, completed_at_ms,
             sealed_at_ms
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12,
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $25, $11, $12,
             $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
             $24, NULL
         )
@@ -1859,6 +1864,7 @@ async fn insert_call_result(
     .bind(aggregate.parent_outputs_digest.as_bytes().as_slice())
     .bind(aggregate.parent_commit_digest.as_bytes().as_slice())
     .bind(request.completed_at().get())
+    .bind(schemas.core_i16)
     .execute(&mut **transaction)
     .await
     .map_err(classify_completion_error)?;

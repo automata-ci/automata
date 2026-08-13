@@ -49,11 +49,15 @@ use crate::{
     },
 };
 
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const REQUEST_DIGEST_DOMAIN_V4: &[u8] = b"automata.workflow-admission.request.v4\0";
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5: &[u8] =
     b"automata.workflow-admission.request.v5\0";
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6: &[u8] =
     b"automata.workflow-admission.request.v6.control-plane-dispatch\0";
+// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7: &[u8] =
     b"automata.workflow-admission.request.v7.scheduled-github\0";
 const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
@@ -231,7 +235,7 @@ impl WorkflowAdmissionService {
         else {
             return Ok(None);
         };
-        if source.source().media_type() != GITHUB_WORKFLOW_MEDIA_TYPE {
+        if !crate::github_workflow_media_type_is_current(source.source().media_type()) {
             return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
         }
         let descriptor = BlobDescriptor::new(

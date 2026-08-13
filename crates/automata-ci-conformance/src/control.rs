@@ -14,7 +14,9 @@ use thiserror::Error;
 use crate::catalog::hex_digest;
 
 /// Maximum parallel shards admitted by one fixture plan.
+// foundation-governance: operational-limit
 pub const MAX_CONFORMANCE_SHARDS: u16 = 256;
+// foundation-governance: operational-limit
 const MAX_FAULTS: usize = 1_024;
 
 /// Clock used by product conformance composition.
@@ -68,6 +70,77 @@ pub enum FaultTarget {
     ObjectStorage,
 }
 
+/// Exact product operation at which a conformance fault may be injected.
+///
+/// Operations are deliberately more precise than [`FaultTarget`]. A script can
+/// therefore fail a Results mutation without being consumed by an earlier
+/// Results read, or fail an object write without intercepting an object read.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultOperation {
+    /// Fetch immutable repository source.
+    SourceFetch,
+    /// Issue a repository-scoped credential.
+    TokenIssue,
+    /// Handle a runner's pre-session handshake.
+    RunnerHandshake,
+    /// Handle a runner's fenced session operation.
+    RunnerSync,
+    /// Read and verify an immutable object.
+    ObjectRead,
+    /// Publish an immutable object.
+    ObjectWrite,
+    /// Mutate Results metadata before finalization.
+    ResultsMutation,
+    /// Claim, verify, or complete Results finalization.
+    ResultsFinalization,
+    /// Read published Results metadata.
+    ResultsRead,
+    /// Acquire the credential for a GitHub Checks publication.
+    ChecksCredential,
+}
+
+impl FaultOperation {
+    /// Returns the independently configurable external boundary containing the operation.
+    #[must_use]
+    pub const fn target(self) -> FaultTarget {
+        match self {
+            Self::SourceFetch => FaultTarget::Source,
+            Self::TokenIssue => FaultTarget::Token,
+            Self::RunnerHandshake | Self::RunnerSync => FaultTarget::Runner,
+            Self::ObjectRead | Self::ObjectWrite => FaultTarget::ObjectStorage,
+            Self::ResultsMutation | Self::ResultsFinalization | Self::ResultsRead => {
+                FaultTarget::Results
+            }
+            Self::ChecksCredential => FaultTarget::Checks,
+        }
+    }
+
+    const fn accepts_mode(self, mode: &FaultMode) -> bool {
+        match mode {
+            FaultMode::Unavailable | FaultMode::CorruptResponse => true,
+            FaultMode::CredentialRejected => matches!(
+                self,
+                Self::SourceFetch
+                    | Self::TokenIssue
+                    | Self::ObjectRead
+                    | Self::ObjectWrite
+                    | Self::ResultsMutation
+                    | Self::ResultsFinalization
+                    | Self::ResultsRead
+                    | Self::ChecksCredential
+            ),
+            FaultMode::RateLimited { .. } => {
+                matches!(self, Self::SourceFetch | Self::TokenIssue)
+            }
+            FaultMode::IndeterminateMutation => matches!(
+                self,
+                Self::ObjectWrite | Self::ResultsMutation | Self::ResultsFinalization
+            ),
+        }
+    }
+}
+
 /// Closed behavior of one injected fault.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -79,9 +152,40 @@ pub enum FaultMode {
     CorruptResponse,
 }
 
-/// Ordered one-shot fault script. Ordinary product construction uses an empty plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScheduledFault {
+    transition: DurableTransition,
+    mode: FaultMode,
+}
+
+/// A pending fault was invoked at a checkpoint other than the one scripted.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("fault is armed for {expected:?}, not the current {actual:?} transition")]
+pub struct FaultNotDue {
+    expected: DurableTransition,
+    actual: DurableTransition,
+}
+
+impl FaultNotDue {
+    /// Returns the exact checkpoint named by the next operation-specific entry.
+    #[must_use]
+    pub const fn expected(self) -> DurableTransition {
+        self.expected
+    }
+
+    /// Returns the checkpoint at which the operation was attempted.
+    #[must_use]
+    pub const fn actual(self) -> DurableTransition {
+        self.actual
+    }
+}
+
+/// Ordered operation- and checkpoint-specific one-shot fault script.
+///
+/// Ordinary product construction uses an empty plan. Entries for different
+/// operations never consume one another, even when they share a broad target.
 #[derive(Debug, Default)]
-pub struct FaultPlan(Mutex<BTreeMap<FaultTarget, VecDeque<FaultMode>>>);
+pub struct FaultPlan(Mutex<BTreeMap<FaultOperation, VecDeque<ScheduledFault>>>);
 
 impl FaultPlan {
     /// Builds a bounded deterministic plan.
@@ -90,42 +194,70 @@ impl FaultPlan {
     ///
     /// Rejects an unbounded script or zero rate-limit duration.
     pub fn new(
-        faults: impl IntoIterator<Item = (FaultTarget, FaultMode)>,
+        faults: impl IntoIterator<Item = (FaultOperation, DurableTransition, FaultMode)>,
     ) -> Result<Self, FixtureControlError> {
-        let mut plan = BTreeMap::<FaultTarget, VecDeque<FaultMode>>::new();
+        let mut plan = BTreeMap::<FaultOperation, VecDeque<ScheduledFault>>::new();
         let mut count = 0_usize;
-        for (target, mode) in faults {
+        for (operation, transition, mode) in faults {
             count = count
                 .checked_add(1)
                 .ok_or(FixtureControlError::TooManyFaults)?;
             if count > MAX_FAULTS {
                 return Err(FixtureControlError::TooManyFaults);
             }
-            if matches!(
-                mode,
-                FaultMode::RateLimited {
-                    retry_after_millis: 0
-                }
-            ) {
+            if !operation.accepts_mode(&mode)
+                || matches!(
+                    mode,
+                    FaultMode::RateLimited {
+                        retry_after_millis: 0
+                    }
+                )
+            {
                 return Err(FixtureControlError::InvalidFault);
             }
-            plan.entry(target).or_default().push_back(mode);
+            plan.entry(operation)
+                .or_default()
+                .push_back(ScheduledFault { transition, mode });
         }
         Ok(Self(Mutex::new(plan)))
     }
 
-    /// Consumes exactly the next fault for one boundary.
+    /// Consumes the next fault only for the exact operation and checkpoint.
+    ///
+    /// An operation with no pending entry delegates normally at every
+    /// checkpoint. An entry attempted at the wrong checkpoint remains armed so
+    /// a fixture cannot silently consume it at an unintended durable boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the expected and actual checkpoints when this operation has a
+    /// pending entry that is not due yet.
     ///
     /// # Panics
     ///
     /// Panics only if another thread panicked while holding the private plan lock.
-    #[must_use]
-    pub fn take(&self, target: FaultTarget) -> Option<FaultMode> {
-        self.0
+    pub fn take_due(
+        &self,
+        operation: FaultOperation,
+        actual: DurableTransition,
+    ) -> Result<Option<FaultMode>, FaultNotDue> {
+        let mut plan = self
+            .0
             .lock()
-            .expect("fault plan lock is not exposed to callbacks")
-            .get_mut(&target)
-            .and_then(VecDeque::pop_front)
+            .expect("fault plan lock is not exposed to callbacks");
+        let Some(faults) = plan.get_mut(&operation) else {
+            return Ok(None);
+        };
+        let Some(next) = faults.front() else {
+            return Ok(None);
+        };
+        if next.transition != actual {
+            return Err(FaultNotDue {
+                expected: next.transition,
+                actual,
+            });
+        }
+        Ok(faults.pop_front().map(|fault| fault.mode))
     }
 
     #[must_use]
@@ -196,6 +328,26 @@ impl DurableTransition {
             .iter()
             .position(|value| *value == self)
             .expect("closed transition")
+    }
+
+    /// Returns the exact service restarts required after this checkpoint.
+    ///
+    /// The schedule covers every boundary in the canonical push lifecycle.
+    /// `CleanupVerified` is terminal and therefore has no following restart.
+    #[must_use]
+    pub const fn required_restart_services(self) -> &'static [ProductService] {
+        match self {
+            Self::Provisioned => &[ProductService::Ingress],
+            Self::WebhookAccepted => &[ProductService::DeliveryWorker],
+            Self::DeliverySelected => &[ProductService::WorkflowService],
+            Self::WorkflowAdmitted => &[ProductService::Scheduler],
+            Self::JobQueued | Self::JobResultCommitted => &[ProductService::ControlPlane],
+            Self::LeaseCommitted => &[ProductService::Runner],
+            Self::RunFinalized => &[ProductService::Results],
+            Self::ResultsPublished => &[ProductService::ChecksPublisher],
+            Self::CheckPublished => &[ProductService::ObjectStorage],
+            Self::CleanupVerified => &[],
+        }
     }
 }
 
@@ -429,7 +581,7 @@ fn domain_digest(domain: &[u8], material: &[u8]) -> String {
 /// Deterministic controls owned by one reusable product fixture.
 #[derive(Debug)]
 pub struct FixtureControl {
-    clock: Arc<ManualConformanceClock>,
+    clock: Arc<dyn ConformanceClock>,
     faults: Arc<FaultPlan>,
     shard: ShardIdentity,
     state: Mutex<FixtureState>,
@@ -439,7 +591,20 @@ pub struct FixtureControl {
 struct FixtureState {
     transition: DurableTransition,
     restarted_after_current: BTreeSet<ProductService>,
+    restart_in_progress: Option<RestartReservation>,
     restarts: Vec<RestartRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RestartReservation {
+    after: DurableTransition,
+    service: ProductService,
+}
+
+#[derive(Debug)]
+struct RestartCycle {
+    stopped: ServiceObservation,
+    started: ServiceObservation,
 }
 
 impl FixtureControl {
@@ -449,7 +614,7 @@ impl FixtureControl {
     ///
     /// Rejects an ordinal not present in the plan.
     pub fn for_shard(
-        clock: Arc<ManualConformanceClock>,
+        clock: Arc<dyn ConformanceClock>,
         faults: Arc<FaultPlan>,
         plan: &ShardPlan,
         ordinal: u16,
@@ -462,6 +627,7 @@ impl FixtureControl {
             state: Mutex::new(FixtureState {
                 transition: DurableTransition::Provisioned,
                 restarted_after_current: BTreeSet::new(),
+                restart_in_progress: None,
                 restarts: Vec::new(),
             }),
         })
@@ -488,13 +654,64 @@ impl FixtureControl {
         service: ProductService,
         probe: &dyn ServiceRestartProbe,
     ) -> Result<(), FixtureControlError> {
+        let reservation = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| FixtureControlError::Poisoned)?;
+            if !state
+                .transition
+                .required_restart_services()
+                .contains(&service)
+            {
+                return Err(FixtureControlError::UnexpectedRestartService);
+            }
+            if state.restarted_after_current.contains(&service) {
+                return Err(FixtureControlError::DuplicateRestart);
+            }
+            if state.restart_in_progress.is_some() {
+                return Err(FixtureControlError::RestartInProgress);
+            }
+            let reservation = RestartReservation {
+                after: state.transition,
+                service,
+            };
+            state.restart_in_progress = Some(reservation);
+            reservation
+        };
+
+        // Probe implementations are external process adapters. Never invoke
+        // them while the fixture state is locked: they may safely inspect this
+        // control while carrying out a slow stop/start cycle.
+        let outcome = Self::perform_restart(service, probe);
+        let at_millis = self.clock.now_millis();
+
         let mut state = self
             .state
             .lock()
             .map_err(|_| FixtureControlError::Poisoned)?;
-        if state.restarted_after_current.contains(&service) {
-            return Err(FixtureControlError::DuplicateRestart);
+        if state.restart_in_progress != Some(reservation) || state.transition != reservation.after {
+            return Err(FixtureControlError::RestartReservationChanged);
         }
+        state.restart_in_progress = None;
+        let cycle = outcome?;
+        state.restarted_after_current.insert(service);
+        state.restarts.push(RestartRecord {
+            after: reservation.after,
+            service,
+            at_millis,
+            stopped_generation: cycle.stopped.generation,
+            started_generation: cycle.started.generation,
+            stopped_instance: cycle.stopped.instance,
+            started_instance: cycle.started.instance,
+        });
+        Ok(())
+    }
+
+    fn perform_restart(
+        service: ProductService,
+        probe: &dyn ServiceRestartProbe,
+    ) -> Result<RestartCycle, FixtureControlError> {
         let before = probe.observe(service)?;
         if before.state != ServiceState::Running {
             return Err(FixtureControlError::ServiceNotRunning);
@@ -519,28 +736,18 @@ impl FixtureControl {
         {
             return Err(FixtureControlError::RestartDidNotAdvance);
         }
-        state.restarted_after_current.insert(service);
-        let after = state.transition;
-        state.restarts.push(RestartRecord {
-            after,
-            service,
-            at_millis: self.clock.now_millis(),
-            stopped_generation: stopped.generation,
-            started_generation: started.generation,
-            stopped_instance: stopped.instance,
-            started_instance: started.instance,
-        });
-        Ok(())
+        Ok(RestartCycle { stopped, started })
     }
 
-    /// Advances exactly one durable checkpoint after at least one service restart.
+    /// Advances exactly one durable checkpoint after its scheduled service restarts.
     ///
     /// Requiring a restart at every boundary makes restart determinism a fixture
     /// invariant instead of an optional scenario convention.
     ///
     /// # Errors
     ///
-    /// Rejects noncontiguous transitions, missing restarts, and poisoned state.
+    /// Rejects noncontiguous transitions, in-progress or missing scheduled
+    /// restarts, and poisoned state.
     pub fn transition(&self, next: DurableTransition) -> Result<(), FixtureControlError> {
         let mut state = self
             .state
@@ -549,7 +756,15 @@ impl FixtureControl {
         if next.ordinal() != state.transition.ordinal() + 1 {
             return Err(FixtureControlError::NonContiguousTransition);
         }
-        if state.restarted_after_current.is_empty() {
+        if state.restart_in_progress.is_some() {
+            return Err(FixtureControlError::RestartInProgress);
+        }
+        if !state
+            .transition
+            .required_restart_services()
+            .iter()
+            .all(|service| state.restarted_after_current.contains(service))
+        {
             return Err(FixtureControlError::RestartRequired);
         }
         state.transition = next;
@@ -608,6 +823,12 @@ pub enum FixtureControlError {
     Poisoned,
     #[error("service was restarted twice at one checkpoint")]
     DuplicateRestart,
+    #[error("service is not scheduled for restart at the current checkpoint")]
+    UnexpectedRestartService,
+    #[error("a service restart is already in progress")]
+    RestartInProgress,
+    #[error("the reserved restart checkpoint changed unexpectedly")]
+    RestartReservationChanged,
     #[error("durable fixture transition is not contiguous")]
     NonContiguousTransition,
     #[error("a service restart is required before the next durable transition")]

@@ -23,10 +23,13 @@ use crate::{
     observer::{NoopResultsObserver, ResultsHttpObservation},
 };
 
+// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const CREATE_CACHE_PATH: &str =
     "/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry";
+// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const FINALIZE_CACHE_PATH: &str =
     "/twirp/github.actions.results.api.v1.CacheService/FinalizeCacheEntryUpload";
+// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const GET_CACHE_PATH: &str =
     "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL";
 const CACHE_UPLOAD_PATH: &str = "/_apis/results/caches/{entry_id}/blob";

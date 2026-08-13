@@ -4,26 +4,26 @@
     {
       "extractor": "action-metadata",
       "fields": {
-        "args": "javascript-and-local-composite-actions",
+        "args": "container-actions",
         "continue-on-error": "javascript-and-local-composite-actions",
         "default": "javascript-and-local-composite-actions",
         "deprecationMessage": "javascript-and-local-composite-actions",
         "description": "javascript-and-local-composite-actions",
-        "entrypoint": "job-and-service-containers",
+        "entrypoint": "container-actions",
         "env": "javascript-and-local-composite-actions",
         "id": "javascript-and-local-composite-actions",
         "if": "javascript-and-local-composite-actions",
-        "image": "job-and-service-containers",
+        "image": "container-actions",
         "inputs": "javascript-and-local-composite-actions",
         "main": "javascript-and-local-composite-actions",
         "name": "javascript-and-local-composite-actions",
         "outputs": "javascript-and-local-composite-actions",
         "plugin": "javascript-and-local-composite-actions",
         "post": "javascript-and-local-composite-actions",
-        "post-entrypoint": "job-and-service-containers",
+        "post-entrypoint": "container-actions",
         "post-if": "javascript-and-local-composite-actions",
         "pre": "javascript-and-local-composite-actions",
-        "pre-entrypoint": "job-and-service-containers",
+        "pre-entrypoint": "container-actions",
         "pre-if": "javascript-and-local-composite-actions",
         "required": "javascript-and-local-composite-actions",
         "run": "javascript-and-local-composite-actions",
@@ -43,7 +43,7 @@
       "extractor": "action-runtimes",
       "fields": {
         "composite": "javascript-and-local-composite-actions",
-        "docker": "job-and-service-containers",
+        "docker": "container-actions",
         "node12": "javascript-and-local-composite-actions",
         "node16": "javascript-and-local-composite-actions",
         "node20": "javascript-and-local-composite-actions",
@@ -55,14 +55,14 @@
     {
       "extractor": "some-match-arms",
       "fields": {
-        "credentials": "job-and-service-containers",
-        "env": "job-and-service-containers",
-        "image": "job-and-service-containers",
-        "options": "job-and-service-containers",
-        "password": "job-and-service-containers",
-        "ports": "job-and-service-containers",
-        "username": "job-and-service-containers",
-        "volumes": "job-and-service-containers"
+        "credentials": "service-containers",
+        "env": "service-containers",
+        "image": "service-containers",
+        "options": "service-containers",
+        "password": "service-containers",
+        "ports": "service-containers",
+        "username": "service-containers",
+        "volumes": "service-containers"
       },
       "id": "container-fields",
       "path": "crates/automata-ci-workflow-github/src/decode/container.rs"
@@ -82,43 +82,92 @@
       "path": "crates/automata-ci-workflow-github/src/decode/event.rs"
     },
     {
-      "extractor": "some-match-arms",
+      "extractor": "function-some-match-arms",
       "fields": {
-        "concurrency": "reusable-environments-schedules-reruns-and-permissions",
-        "container": "job-and-service-containers",
+        "name": "deployment-environments",
+        "url": "deployment-environments"
+      },
+      "function": "job_environment",
+      "id": "job-environment-fields",
+      "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
+    },
+    {
+      "extractor": "function-some-match-arms",
+      "fields": {
+        "concurrency": "job-level-concurrency",
+        "container": "job-containers",
         "continue-on-error": "matrices-dependencies-conditions-and-outputs",
-        "cpu": "per-job-resource-requests-and-limits",
         "defaults": "workflow-parsing-and-planning",
         "env": "workflow-parsing-and-planning",
-        "environment": "reusable-environments-schedules-reruns-and-permissions",
-        "ephemeral-storage": "per-job-resource-requests-and-limits",
-        "gpu": "per-job-resource-requests-and-limits",
-        "group": "scheduling-and-runner-execution",
-        "id": "workflow-parsing-and-planning",
+        "environment": "deployment-environments",
         "if": "matrices-dependencies-conditions-and-outputs",
-        "labels": "scheduling-and-runner-execution",
-        "limits": "per-job-resource-requests-and-limits",
-        "memory": "per-job-resource-requests-and-limits",
         "name": "workflow-parsing-and-planning",
         "needs": "matrices-dependencies-conditions-and-outputs",
         "outputs": "matrices-dependencies-conditions-and-outputs",
-        "permissions": "authentication-permissions-and-ui",
-        "requests": "per-job-resource-requests-and-limits",
+        "permissions": "permissions-semantics",
         "resources": "per-job-resource-requests-and-limits",
-        "run": "workflow-parsing-and-planning",
         "runs-on": "scheduling-and-runner-execution",
-        "secrets": "reusable-environments-schedules-reruns-and-permissions",
-        "services": "job-and-service-containers",
-        "shell": "workflow-parsing-and-planning",
+        "secrets": "reusable-workflows",
+        "services": "service-containers",
         "steps": "workflow-parsing-and-planning",
         "strategy": "matrices-dependencies-conditions-and-outputs",
         "timeout-minutes": "workflow-parsing-and-planning",
-        "url": "reusable-environments-schedules-reruns-and-permissions",
+        "uses": "reusable-workflows",
+        "with": "reusable-workflows"
+      },
+      "function": "job",
+      "id": "job-fields",
+      "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
+    },
+    {
+      "extractor": "function-some-match-arms",
+      "fields": {
+        "limits": "per-job-resource-requests-and-limits",
+        "requests": "per-job-resource-requests-and-limits"
+      },
+      "function": "job_resources",
+      "id": "job-resource-fields",
+      "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
+    },
+    {
+      "extractor": "function-some-match-arms",
+      "fields": {
+        "cpu": "per-job-resource-requests-and-limits",
+        "ephemeral-storage": "per-job-resource-requests-and-limits",
+        "gpu": "per-job-resource-requests-and-limits",
+        "memory": "per-job-resource-requests-and-limits"
+      },
+      "function": "resource_vector",
+      "id": "resource-vector-fields",
+      "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
+    },
+    {
+      "extractor": "function-some-match-arms",
+      "fields": {
+        "group": "scheduling-and-runner-execution",
+        "labels": "scheduling-and-runner-execution"
+      },
+      "function": "runner_selection",
+      "id": "runner-selection-fields",
+      "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
+    },
+    {
+      "extractor": "function-some-match-arms",
+      "fields": {
+        "continue-on-error": "matrices-dependencies-conditions-and-outputs",
+        "env": "workflow-parsing-and-planning",
+        "id": "workflow-parsing-and-planning",
+        "if": "matrices-dependencies-conditions-and-outputs",
+        "name": "workflow-parsing-and-planning",
+        "run": "workflow-parsing-and-planning",
+        "shell": "workflow-parsing-and-planning",
+        "timeout-minutes": "workflow-parsing-and-planning",
         "uses": "javascript-and-local-composite-actions",
-        "with": "reusable-environments-schedules-reruns-and-permissions",
+        "with": "javascript-and-local-composite-actions",
         "working-directory": "workflow-parsing-and-planning"
       },
-      "id": "job-and-step-fields",
+      "function": "step",
+      "id": "step-fields",
       "path": "crates/automata-ci-workflow-github/src/decode/job.rs"
     },
     {
@@ -134,38 +183,38 @@
     {
       "extractor": "trigger-names",
       "fields": {
-        "branch_protection_rule": "github-provider",
-        "check_run": "github-provider",
-        "check_suite": "github-provider",
-        "create": "github-provider",
-        "delete": "github-provider",
-        "deployment": "github-provider",
-        "deployment_status": "github-provider",
-        "discussion": "github-provider",
-        "discussion_comment": "github-provider",
-        "fork": "github-provider",
-        "gollum": "github-provider",
-        "issue_comment": "github-provider",
-        "issues": "github-provider",
-        "label": "github-provider",
+        "branch_protection_rule": "decoder-only-provider-events",
+        "check_run": "decoder-only-provider-events",
+        "check_suite": "decoder-only-provider-events",
+        "create": "decoder-only-provider-events",
+        "delete": "decoder-only-provider-events",
+        "deployment": "decoder-only-provider-events",
+        "deployment_status": "decoder-only-provider-events",
+        "discussion": "decoder-only-provider-events",
+        "discussion_comment": "decoder-only-provider-events",
+        "fork": "decoder-only-provider-events",
+        "gollum": "decoder-only-provider-events",
+        "issue_comment": "decoder-only-provider-events",
+        "issues": "decoder-only-provider-events",
+        "label": "decoder-only-provider-events",
         "merge_group": "github-provider",
-        "milestone": "github-provider",
-        "page_build": "github-provider",
-        "public": "github-provider",
+        "milestone": "decoder-only-provider-events",
+        "page_build": "decoder-only-provider-events",
+        "public": "decoder-only-provider-events",
         "pull_request": "github-provider",
-        "pull_request_review": "github-provider",
-        "pull_request_review_comment": "github-provider",
-        "pull_request_target": "github-provider",
+        "pull_request_review": "decoder-only-provider-events",
+        "pull_request_review_comment": "decoder-only-provider-events",
+        "pull_request_target": "decoder-only-provider-events",
         "push": "github-provider",
-        "registry_package": "github-provider",
-        "release": "github-provider",
+        "registry_package": "decoder-only-provider-events",
+        "release": "decoder-only-provider-events",
         "repository_dispatch": "repository-dispatch-trigger-and-event-context",
-        "schedule": "reusable-environments-schedules-reruns-and-permissions",
-        "status": "github-provider",
-        "watch": "github-provider",
-        "workflow_call": "reusable-environments-schedules-reruns-and-permissions",
+        "schedule": "scheduled-workflows",
+        "status": "decoder-only-provider-events",
+        "watch": "decoder-only-provider-events",
+        "workflow_call": "reusable-workflows",
         "workflow_dispatch": "workflow-dispatch-inputs-and-base-context",
-        "workflow_run": "github-provider"
+        "workflow_run": "decoder-only-provider-events"
       },
       "id": "trigger-event-names",
       "path": "crates/automata-ci-workflow-github/src/decode/event.rs"
@@ -192,39 +241,46 @@
         "jobs": "workflow-parsing-and-planning",
         "name": "workflow-parsing-and-planning",
         "on": "github-provider",
-        "permissions": "authentication-permissions-and-ui",
+        "permissions": "permissions-semantics",
         "run-name": "workflow-parsing-and-planning"
       },
       "id": "workflow-fields",
       "path": "crates/automata-ci-workflow-github/src/decode/workflow.rs"
     }
   ],
+  "diagnostic_history": "docs/governance/github-actions-diagnostic-history-v1.json",
   "diagnostic_migrations": [],
   "features": [
     {
       "acceptance": {
         "function": "unmatched_human_api_paths_use_the_sanitized_json_envelope",
-        "path": "crates/automata-ci/tests/http.rs"
+        "path": "crates/automata-ci/tests/http.rs",
+        "required_fragments": [
+          "/api/v1/missing",
+          "StatusCode::NOT_FOUND"
+        ]
       },
       "area": "Arbitrary GitHub REST fallback",
       "capabilities": [],
       "evaluation_phase": "admission",
       "id": "arbitrary-github-rest-fallback",
       "source": {
-        "contains": "Unknown compatibility routes fail closed.",
-        "path": "docs/compatibility.md"
+        "contains": "async fn api_routing_not_found() -> Response {",
+        "path": "crates/automata-ci/src/app/http.rs"
       },
-      "stage_profile": "unsupported-product-surface",
+      "stage_profile": "arbitrary-github-rest-fallback",
       "status": "Unsupported",
-      "unsupported": {
-        "code": "http.route_not_found",
-        "span_policy": "not-applicable-http-route"
-      }
+      "unsupported": null
     },
     {
       "acceptance": {
-        "function": "official_actions_artifact_6_2_client_completes_the_full_protocol",
-        "path": "crates/automata-ci-results-github/tests/http_compatibility.rs"
+        "function": "exact_v7_twirp_and_azure_block_upload_flow_succeeds",
+        "path": "crates/automata-ci-results-github/tests/http_compatibility.rs",
+        "required_fragments": [
+          "ArtifactService/CreateArtifact",
+          "ArtifactService/FinalizeArtifact",
+          "GetSignedArtifactURL"
+        ]
       },
       "area": "Artifacts and Results API",
       "capabilities": [
@@ -236,31 +292,39 @@
         "contains": "pub struct GithubResultsApi",
         "path": "crates/automata-ci-results-github/src/http.rs"
       },
-      "stage_profile": "runtime-component",
+      "stage_profile": "artifacts-and-results-api",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
-        "function": "service_rejects_repository_issuance_whose_signed_interval_exceeds_configured_lifetime",
-        "path": "crates/automata-ci-oidc-github/tests/service.rs"
+        "function": "permission_operation_is_explicit_and_never_a_toggle",
+        "path": "crates/automata-ci/src/app/rbac_management.rs",
+        "required_fragments": [
+          "VerifiedRbacManagementForm::SetRolePermission",
+          "operation=toggle"
+        ]
       },
-      "area": "Authentication, permissions, and UI",
+      "area": "Authentication and UI",
       "capabilities": [],
       "evaluation_phase": "admission",
-      "id": "authentication-permissions-and-ui",
+      "id": "authentication-and-ui",
       "source": {
-        "contains": "fn compile_permission_snapshot(",
-        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+        "contains": "pub(crate) fn router(state: GithubAuthHttpState) -> Router {",
+        "path": "crates/automata-ci/src/app/github_auth.rs"
       },
-      "stage_profile": "product-component",
+      "stage_profile": "authentication-and-ui",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
-        "function": "buildkit_capability_requires_the_attempt_api_and_a_successful_local_probe",
-        "path": "crates/automata-ci-sandbox-podman/tests/api.rs"
+        "function": "buildkit_configuration_requires_the_attempt_scoped_docker_api",
+        "path": "crates/automata-ci-sandbox-podman/src/provider.rs",
+        "required_fragments": [
+          "JobContainerEngine::AttemptScopedDockerApi",
+          "JobContainerEngine::Disabled"
+        ]
       },
       "area": "Buildx and BuildKit",
       "capabilities": [
@@ -273,14 +337,20 @@
         "contains": "declared_capabilities.push(SandboxCapability::BuildKit);",
         "path": "crates/automata-ci-sandbox-podman/src/provider.rs"
       },
-      "stage_profile": "runtime-experimental",
+      "stage_profile": "buildx-and-buildkit",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
-        "function": "exact_v7_twirp_and_azure_block_upload_flow_succeeds",
-        "path": "crates/automata-ci-results-github/tests/http_compatibility.rs"
+        "function": "snake_case_cache_v2_round_trip_replays_races_and_supports_ranges",
+        "path": "crates/automata-ci-results-github/tests/cache_http.rs",
+        "required_fragments": [
+          "CacheService/CreateCacheEntry",
+          "CacheService/FinalizeCacheEntryUpload",
+          "CacheService/GetCacheEntryDownloadURL",
+          "StatusCode::PARTIAL_CONTENT"
+        ]
       },
       "area": "CacheService v2",
       "capabilities": [],
@@ -290,14 +360,42 @@
         "contains": "pub struct GithubCacheApi {",
         "path": "crates/automata-ci-results-github/src/cache_http.rs"
       },
-      "stage_profile": "runtime-component",
+      "stage_profile": "cacheservice-v2",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
+        "function": "decoder_only_provider_event_is_rejected_during_compilation_with_its_name_span",
+        "path": "crates/automata-ci-workflow-github/tests/early_capability_rejection.rs",
+        "required_fragments": [
+          "github.compile.provider_event_unavailable",
+          "issues"
+        ]
+      },
+      "area": "Decoder-only GitHub provider events",
+      "capabilities": [],
+      "evaluation_phase": "compile",
+      "id": "decoder-only-provider-events",
+      "source": {
+        "contains": "github.compile.provider_event_unavailable",
+        "path": "crates/automata-ci-workflow-github/src/compiler.rs"
+      },
+      "stage_profile": "decoder-only-provider-events",
+      "status": "Unsupported",
+      "unsupported": {
+        "code": "github.compile.provider_event_unavailable",
+        "span_policy": "exact-event-name"
+      }
+    },
+    {
+      "acceptance": {
         "function": "repository_dispatch_types_select_only_the_exact_custom_event",
-        "path": "crates/automata-ci-workflow-github/tests/trigger_selection.rs"
+        "path": "crates/automata-ci-workflow-github/tests/trigger_selection.rs",
+        "required_fragments": [
+          "GithubEventMetadata::repository_dispatch",
+          "WorkflowNotSelectedReason::EventFiltersNotMatched"
+        ]
       },
       "area": "GitHub provider",
       "capabilities": [],
@@ -307,37 +405,92 @@
         "contains": "pub fn with_event_metadata(mut self, metadata: GithubEventMetadata) -> Self {",
         "path": "crates/automata-ci-workflow-github/src/compiler.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "github-provider",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
-        "function": "docker_api_capability_is_advertised_only_when_explicitly_enabled",
-        "path": "crates/automata-ci-sandbox-podman/tests/api.rs"
+        "function": "job_concurrency_is_rejected_during_compilation_with_its_value_span",
+        "path": "crates/automata-ci-workflow-github/tests/early_capability_rejection.rs",
+        "required_fragments": [
+          "github.compile.job_concurrency_unavailable",
+          "queued-${{ github.ref }}"
+        ]
       },
-      "area": "Job and service containers",
+      "area": "Job-level concurrency",
+      "capabilities": [],
+      "evaluation_phase": "compile",
+      "id": "job-level-concurrency",
+      "source": {
+        "contains": "github.compile.job_concurrency_unavailable",
+        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+      },
+      "stage_profile": "job-level-concurrency",
+      "status": "Unsupported",
+      "unsupported": {
+        "code": "github.compile.job_concurrency_unavailable",
+        "span_policy": "exact-concurrency-value"
+      }
+    },
+    {
+      "acceptance": {
+        "function": "job_container_is_rejected_during_compilation_with_its_value_span",
+        "path": "crates/automata-ci-workflow-github/tests/early_capability_rejection.rs",
+        "required_fragments": [
+          "github.compile.job_container",
+          "ubuntu:24.04"
+        ]
+      },
+      "area": "Job containers",
       "capabilities": [
-        "automata.core/job-containers@v1",
-        "automata.core/service-containers@v1"
+        "automata.core/job-containers@v1"
       ],
-      "evaluation_phase": "publication",
-      "id": "job-and-service-containers",
+      "evaluation_phase": "compile",
+      "id": "job-containers",
       "source": {
         "contains": "github.compile.job_container",
         "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
       },
-      "stage_profile": "runtime-experimental",
-      "status": "Experimental",
+      "stage_profile": "job-containers",
+      "status": "Unsupported",
       "unsupported": {
         "code": "github.compile.job_container",
-        "span_policy": "exact-source-value"
+        "span_policy": "exact-container-value"
+      }
+    },
+    {
+      "acceptance": {
+        "function": "direct_container_action_is_rejected_during_compilation_with_its_reference_span",
+        "path": "crates/automata-ci-workflow-github/tests/early_capability_rejection.rs",
+        "required_fragments": [
+          "docker://alpine:3.23",
+          "github.compile.container_action_unavailable"
+        ]
+      },
+      "area": "Container actions",
+      "capabilities": [],
+      "evaluation_phase": "job-execution",
+      "id": "container-actions",
+      "source": {
+        "contains": "github.compile.container_action_unavailable",
+        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+      },
+      "stage_profile": "container-actions",
+      "status": "Unsupported",
+      "unsupported": {
+        "code": "github.compile.container_action_unavailable",
+        "span_policy": "exact-action-reference"
       }
     },
     {
       "acceptance": {
         "function": "using_values_and_input_metadata_names_are_case_insensitive",
-        "path": "crates/automata-ci-action-github/tests/compatibility_behavior.rs"
+        "path": "crates/automata-ci-action-github/tests/compatibility_behavior.rs",
+        "required_fragments": [
+          "JavascriptRuntime::Node24",
+          "deprecation_message"
+        ]
       },
       "area": "JavaScript and local composite actions",
       "capabilities": [
@@ -350,17 +503,42 @@
         "contains": "JavascriptRuntime::Node24",
         "path": "crates/automata-ci-action-github/src/decoder.rs"
       },
-      "stage_profile": "runtime-component",
+      "stage_profile": "javascript-and-local-composite-actions",
       "status": "Component complete",
-      "unsupported": {
-        "code": "github.compile.container_action_unavailable",
-        "span_policy": "exact-action-reference"
-      }
+      "unsupported": null
+    },
+    {
+      "acceptance": {
+        "function": "service_specs_cross_the_fenced_sandbox_boundary_and_cleanup_with_the_job",
+        "path": "crates/automata-ci-job-executor-github/tests/service_containers.rs",
+        "required_fragments": [
+          "CleanupRequest::new",
+          "ServiceHealthPolicy::Override",
+          "fixture.provider.counts()"
+        ]
+      },
+      "area": "Service containers",
+      "capabilities": [
+        "automata.core/service-containers@v1"
+      ],
+      "evaluation_phase": "job-execution",
+      "id": "service-containers",
+      "source": {
+        "contains": "fn compile_service(",
+        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+      },
+      "stage_profile": "service-containers",
+      "status": "Experimental",
+      "unsupported": null
     },
     {
       "acceptance": {
         "function": "capabilities_include_only_cluster_enforcement_that_was_attested",
-        "path": "crates/automata-ci-sandbox-kubernetes/tests/provider.rs"
+        "path": "crates/automata-ci-sandbox-kubernetes/tests/provider.rs",
+        "required_fragments": [
+          "SandboxCapability::DeviceLimits",
+          "VerifiedNetworkIsolation"
+        ]
       },
       "area": "Kubernetes sandbox provider",
       "capabilities": [
@@ -372,14 +550,61 @@
         "contains": "pub struct KubernetesSandboxProvider",
         "path": "crates/automata-ci-sandbox-kubernetes/src/provider.rs"
       },
-      "stage_profile": "runtime-experimental",
+      "stage_profile": "kubernetes-sandbox-provider",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
+        "additional": [
+          {
+            "ci_lane": {
+              "package": "automata-ci-secret-postgres",
+              "runner": "scripts/ci/run-postgres-tests.sh",
+              "selection": "--tests",
+              "workflow": ".ci/workflows/ci.yml"
+            },
+            "function": "replacement_stage_preserves_predecessor_until_atomic_confirmation",
+            "path": "crates/automata-ci-secret-postgres/tests/postgres_provider.rs",
+            "required_fragments": [
+              "ConfirmRepositorySecretVersionMutation::new",
+              "ProviderErrorKind::Unavailable",
+              "reserve_replace("
+            ]
+          },
+          {
+            "function": "complete_custody_is_masked_and_acknowledged_before_provider_work",
+            "path": "crates/automata-ci-job-executor-github/tests/runtime_context.rs",
+            "required_fragments": [
+              "PreExecutionAcknowledger",
+              "acknowledger.calls.load",
+              "fixture.provider.counts()"
+            ]
+          },
+          {
+            "function": "value_free_managed_secret_overlay_survives_journal_recovery_exactly",
+            "path": "crates/automata-ci-runner-journal/tests/durable_payloads.rs",
+            "required_fragments": [
+              "managed_secret_bindings()",
+              "recovered.digest()",
+              "with_managed_secret_bindings"
+            ]
+          }
+        ],
+        "ci_lane": {
+          "package": "automata-ci-secret-postgres",
+          "runner": "scripts/ci/run-postgres-tests.sh",
+          "selection": "--tests",
+          "workflow": ".ci/workflows/ci.yml"
+        },
         "function": "encrypted_create_stays_unresolvable_until_management_confirmation",
-        "path": "crates/automata-ci-secret-postgres/tests/postgres_provider.rs"
+        "path": "crates/automata-ci-secret-postgres/tests/postgres_provider.rs",
+        "required_fragments": [
+          ".complete_builtin_secret_cleanup(",
+          ".delete_repository_secret(",
+          ".resolve_version(",
+          "reserve_create("
+        ]
       },
       "area": "Managed secrets",
       "capabilities": [],
@@ -389,14 +614,19 @@
         "contains": "PostgresSecretProvider",
         "path": "crates/automata-ci-secret-postgres/src/lib.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "managed-secrets",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "structured_matrix_preserves_axis_and_patch_order_with_typed_values",
-        "path": "crates/automata-ci-workflow-github/tests/logical_compiler.rs"
+        "path": "crates/automata-ci-workflow-github/tests/logical_compiler.rs",
+        "required_fragments": [
+          "MatrixAxisValues::Static",
+          "MatrixPatchSet::Static",
+          "PlanMatrixValue::Object"
+        ]
       },
       "area": "Matrices, dependencies, conditions, and outputs",
       "capabilities": [],
@@ -406,14 +636,19 @@
         "contains": "fn compile_strategy(",
         "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
       },
-      "stage_profile": "product-component",
+      "stage_profile": "matrices-dependencies-conditions-and-outputs",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "compiles_literal_and_matrix_resource_quantities",
-        "path": "crates/automata-ci-workflow-github/tests/job_resources.rs"
+        "path": "crates/automata-ci-workflow-github/tests/job_resources.rs",
+        "required_fragments": [
+          "CompiledValueTemplate::Expression",
+          "ExpressionContext::Matrix",
+          "ephemeral-storage: 4Gi"
+        ]
       },
       "area": "Per-job resource requests and limits",
       "capabilities": [],
@@ -423,34 +658,131 @@
         "contains": "fn compile_job_resources(",
         "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
       },
-      "stage_profile": "product-component",
+      "stage_profile": "per-job-resource-requests-and-limits",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
-        "function": "reusable_workflow_semantics_are_not_dropped_by_job_projection",
-        "path": "crates/automata-ci-workflow-service/tests/logical_projection.rs"
+        "function": "deployment_environment_is_rejected_during_compilation_with_its_value_span",
+        "path": "crates/automata-ci-workflow-github/tests/early_capability_rejection.rs",
+        "required_fragments": [
+          "github.compile.deployment_environment_unavailable",
+          "production"
+        ]
       },
-      "area": "Reusable workflows, environments, schedules, reruns, job-level concurrency, and complete permissions semantics",
+      "area": "Deployment environments",
       "capabilities": [],
-      "evaluation_phase": "publication",
-      "id": "reusable-environments-schedules-reruns-and-permissions",
+      "evaluation_phase": "compile",
+      "id": "deployment-environments",
       "source": {
-        "contains": "github.compile.job_concurrency_unavailable",
+        "contains": "github.compile.deployment_environment_unavailable",
         "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
       },
-      "stage_profile": "product-partial",
-      "status": "Partial",
+      "stage_profile": "deployment-environments",
+      "status": "Unsupported",
       "unsupported": {
-        "code": "github.compile.job_concurrency_unavailable",
-        "span_policy": "exact-source-value"
+        "code": "github.compile.deployment_environment_unavailable",
+        "span_policy": "exact-environment-name-or-environment-value"
       }
     },
     {
       "acceptance": {
+        "function": "permission_requests_resolve_shorthands_and_job_precedence_without_source_spans",
+        "path": "crates/automata-ci-workflow-service/tests/logical_projection.rs",
+        "required_fragments": [
+          "JobPermissionRequest::mapping",
+          "PermissionLevel::Read",
+          "encoded[\"mode\"]"
+        ]
+      },
+      "area": "Permissions semantics",
+      "capabilities": [],
+      "evaluation_phase": "publication",
+      "id": "permissions-semantics",
+      "source": {
+        "contains": "fn compile_permission_snapshot(",
+        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+      },
+      "stage_profile": "permissions-semantics",
+      "status": "Partial",
+      "unsupported": null
+    },
+    {
+      "acceptance": {
+        "function": "reusable_workflow_semantics_are_not_dropped_by_job_projection",
+        "path": "crates/automata-ci-workflow-service/tests/logical_projection.rs",
+        "required_fragments": [
+          "GithubLogicalJobProjector::new",
+          "ReusableWorkflowJob",
+          "synthetic/reusable"
+        ]
+      },
+      "area": "Reusable workflows",
+      "capabilities": [],
+      "evaluation_phase": "publication",
+      "id": "reusable-workflows",
+      "source": {
+        "contains": "fn compile_reusable_invocation(",
+        "path": "crates/automata-ci-workflow-github/src/compiler/logical.rs"
+      },
+      "stage_profile": "reusable-workflows",
+      "status": "Partial",
+      "unsupported": null
+    },
+    {
+      "acceptance": {
+        "function": "schedule_admission_requires_the_exact_firing_cron",
+        "path": "crates/automata-ci-workflow-github/tests/event_configuration.rs",
+        "required_fragments": [
+          "GithubEventMetadata::schedule",
+          "WorkflowNotSelectedReason::ScheduleNotConfigured",
+          "github.compile.event_metadata_required"
+        ]
+      },
+      "area": "Scheduled workflows",
+      "capabilities": [],
+      "evaluation_phase": "admission",
+      "id": "scheduled-workflows",
+      "source": {
+        "contains": "pub struct GithubScheduleService {",
+        "path": "crates/automata-ci-github-delivery/src/schedule.rs"
+      },
+      "stage_profile": "scheduled-workflows",
+      "status": "Experimental",
+      "unsupported": null
+    },
+    {
+      "acceptance": {
+        "function": "rerun_subject_identity_has_one_closed_physical_origin",
+        "path": "crates/automata-ci-store/tests/github_checks_api.rs",
+        "required_fragments": [
+          "GithubCheckSubjectIdentity::new_rerun",
+          "identity.delivery_id()",
+          "identity.schedule_fire_id()"
+        ]
+      },
+      "area": "Workflow reruns",
+      "capabilities": [],
+      "evaluation_phase": "admission",
+      "id": "workflow-reruns",
+      "source": {
+        "contains": "pub struct WorkflowRerunService {",
+        "path": "crates/automata-ci-workflow-service/src/workflow_rerun.rs"
+      },
+      "stage_profile": "workflow-reruns",
+      "status": "Experimental",
+      "unsupported": null
+    },
+    {
+      "acceptance": {
         "function": "ready_job_loads_exact_plan_and_commits_terminal_projection",
-        "path": "crates/automata-ci-workflow-service/tests/result_projection.rs"
+        "path": "crates/automata-ci-workflow-service/tests/result_projection.rs",
+        "required_fragments": [
+          "JobConclusion::Skipped",
+          "LogicalResultProjectionOutcome::Job",
+          "jobs.committed"
+        ]
       },
       "area": "Runtime identity and result projection",
       "capabilities": [],
@@ -460,14 +792,19 @@
         "contains": "pub struct LogicalResultProjectionService {",
         "path": "crates/automata-ci-workflow-service/src/result_projection.rs"
       },
-      "stage_profile": "runtime-component",
+      "stage_profile": "runtime-identity-and-result-projection",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "admission_resolves_max_queue_concurrency_from_safe_context",
-        "path": "crates/automata-ci-workflow-service/tests/projection.rs"
+        "path": "crates/automata-ci-workflow-service/tests/projection.rs",
+        "required_fragments": [
+          "QueuePolicy::Max",
+          "cancel_in_progress",
+          "normalized_key"
+        ]
       },
       "area": "Scheduling and runner execution",
       "capabilities": [
@@ -479,14 +816,19 @@
         "contains": "pub struct WorkflowAdmissionService",
         "path": "crates/automata-ci-workflow-service/src/service.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "scheduling-and-runner-execution",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "typed_contract_resolves_exact_payload_types_and_defaults",
-        "path": "crates/automata-ci-workflow-github/tests/workflow_dispatch_inputs.rs"
+        "path": "crates/automata-ci-workflow-github/tests/workflow_dispatch_inputs.rs",
+        "required_fragments": [
+          "ContextValue::as_boolean",
+          "GithubWorkflowDispatchInputValue::String",
+          "Some(\"ready\")"
+        ]
       },
       "area": "`workflow_dispatch` inputs and base context",
       "capabilities": [],
@@ -496,14 +838,19 @@
         "contains": "fn compile_workflow_dispatch_contract(",
         "path": "crates/automata-ci-workflow-github/src/compiler/trigger.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "workflow-dispatch-inputs-and-base-context",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "default_compiler_retains_dynamic_activation_execution_and_finalization_templates",
-        "path": "crates/automata-ci-workflow-github/tests/logical_compiler.rs"
+        "path": "crates/automata-ci-workflow-github/tests/logical_compiler.rs",
+        "required_fragments": [
+          "LogicalJobKind::Steps",
+          "WorkflowPlanVersion::v1",
+          "execute.execution()"
+        ]
       },
       "area": "Workflow parsing and planning",
       "capabilities": [],
@@ -513,7 +860,7 @@
         "contains": "pub struct GithubWorkflowCompiler",
         "path": "crates/automata-ci-workflow-github/src/compiler.rs"
       },
-      "stage_profile": "source-component",
+      "stage_profile": "workflow-parsing-and-planning",
       "status": "Component complete",
       "unsupported": {
         "code": "github.compile.unsupported_field",
@@ -523,7 +870,12 @@
     {
       "acceptance": {
         "function": "admission_resolves_max_queue_concurrency_from_safe_context",
-        "path": "crates/automata-ci-workflow-service/tests/projection.rs"
+        "path": "crates/automata-ci-workflow-service/tests/projection.rs",
+        "required_fragments": [
+          "QueuePolicy::Max",
+          "cancel_in_progress",
+          "normalized_key"
+        ]
       },
       "area": "Workflow-level concurrency",
       "capabilities": [],
@@ -533,14 +885,19 @@
         "contains": "fn resolve_workflow_concurrency(",
         "path": "crates/automata-ci-workflow-service/src/service.rs"
       },
-      "stage_profile": "product-component",
+      "stage_profile": "workflow-level-concurrency",
       "status": "Component complete",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "service_mints_verified_rs256_claims_and_exact_unexpired_replay",
-        "path": "crates/automata-ci-oidc-github/tests/service.rs"
+        "path": "crates/automata-ci-oidc-github/tests/service.rs",
+        "required_fragments": [
+          ".mint(",
+          "RS256",
+          "token_signature_is_valid"
+        ]
       },
       "area": "Workload OIDC",
       "capabilities": [
@@ -552,14 +909,19 @@
         "contains": "pub struct OidcService {",
         "path": "crates/automata-ci-oidc-github/src/service.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "workload-oidc",
       "status": "Experimental",
       "unsupported": null
     },
     {
       "acceptance": {
         "function": "repository_dispatch_types_select_only_the_exact_custom_event",
-        "path": "crates/automata-ci-workflow-github/tests/trigger_selection.rs"
+        "path": "crates/automata-ci-workflow-github/tests/trigger_selection.rs",
+        "required_fragments": [
+          "GithubEventMetadata::repository_dispatch",
+          "WorkflowNotSelectedReason::EventFiltersNotMatched",
+          "synthetic_signal"
+        ]
       },
       "area": "`repository_dispatch` trigger and event context",
       "capabilities": [],
@@ -569,7 +931,7 @@
         "contains": "\"repository_dispatch\" => EventName::RepositoryDispatch,",
         "path": "crates/automata-ci-workflow-github/src/decode/event.rs"
       },
-      "stage_profile": "product-experimental",
+      "stage_profile": "repository-dispatch-trigger-and-event-context",
       "status": "Experimental",
       "unsupported": null
     }
@@ -618,50 +980,97 @@
       "variant": "ReusableWorkflowOutput"
     }
   ],
+  "provider_event_inventory": {
+    "events": {
+      "merge_group": "github-provider",
+      "pull_request": "github-provider",
+      "push": "github-provider",
+      "repository_dispatch": "repository-dispatch-trigger-and-event-context"
+    },
+    "path": "crates/automata-ci-github/src/webhook.rs"
+  },
   "reference_snapshot": "docs/governance/github-actions-reference-snapshot-v1.json",
   "reviewed_deltas": "docs/governance/github-actions-reviewed-deltas-v1.json",
+  "runner_runtime_inventories": [
+    {
+      "enum": "ExecutorErrorKind",
+      "id": "executor-error-kinds",
+      "path": "crates/automata-ci-runner-runtime/src/port.rs",
+      "variants": {
+        "Cancelled": {
+          "classification": "cancelled",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "Internal": {
+          "classification": "internal",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "InvalidJob": {
+          "classification": "invalid-job",
+          "feature": "workflow-parsing-and-planning"
+        },
+        "PermissionDenied": {
+          "classification": "permission-denied",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "ResourceExhausted": {
+          "classification": "resource-exhausted",
+          "feature": "per-job-resource-requests-and-limits"
+        },
+        "TimedOut": {
+          "classification": "timed-out",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "Unavailable": {
+          "classification": "unavailable",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "Unsupported": {
+          "classification": "unsupported",
+          "feature": "scheduling-and-runner-execution"
+        }
+      }
+    },
+    {
+      "enum": "AdmissionRejection",
+      "id": "runner-admission-rejections",
+      "path": "crates/automata-ci-runner-runtime/src/port.rs",
+      "variants": {
+        "CapabilityChanged": {
+          "classification": "capability-changed",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "CapacityChanged": {
+          "classification": "capacity-changed",
+          "feature": "scheduling-and-runner-execution"
+        },
+        "InvalidJob": {
+          "classification": "invalid-job",
+          "feature": "workflow-parsing-and-planning"
+        },
+        "ShuttingDown": {
+          "classification": "shutting-down",
+          "feature": "scheduling-and-runner-execution"
+        }
+      }
+    }
+  ],
   "schema_version": 1,
   "stage_profiles": {
-    "product-component": {
-      "admission": "component",
-      "compile": "available",
-      "decode": "available",
-      "differential": "unverified",
-      "kubernetes": "component",
-      "linux": "component",
-      "projection": "component",
-      "publication": "component",
-      "results": "component",
-      "scheduler": "component",
-      "windows": "unverified"
+    "arbitrary-github-rest-fallback": {
+      "admission": "rejected",
+      "compile": "not-applicable",
+      "decode": "not-applicable",
+      "differential": "not-applicable",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "rejected",
+      "publication": "rejected",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
     },
-    "product-experimental": {
-      "admission": "available",
-      "compile": "available",
-      "decode": "available",
-      "differential": "unverified",
-      "kubernetes": "partial",
-      "linux": "partial",
-      "projection": "available",
-      "publication": "available",
-      "results": "partial",
-      "scheduler": "available",
-      "windows": "unverified"
-    },
-    "product-partial": {
-      "admission": "partial",
-      "compile": "partial",
-      "decode": "available",
-      "differential": "unverified",
-      "kubernetes": "unverified",
-      "linux": "partial",
-      "projection": "partial",
-      "publication": "partial",
-      "results": "partial",
-      "scheduler": "partial",
-      "windows": "unverified"
-    },
-    "runtime-component": {
+    "artifacts-and-results-api": {
       "admission": "component",
       "compile": "not-applicable",
       "decode": "component",
@@ -674,7 +1083,20 @@
       "scheduler": "component",
       "windows": "unverified"
     },
-    "runtime-experimental": {
+    "authentication-and-ui": {
+      "admission": "component",
+      "compile": "not-applicable",
+      "decode": "not-applicable",
+      "differential": "unverified",
+      "kubernetes": "component",
+      "linux": "component",
+      "projection": "not-applicable",
+      "publication": "component",
+      "results": "not-applicable",
+      "scheduler": "not-applicable",
+      "windows": "unverified"
+    },
+    "buildx-and-buildkit": {
       "admission": "available",
       "compile": "component",
       "decode": "available",
@@ -687,7 +1109,280 @@
       "scheduler": "available",
       "windows": "unverified"
     },
-    "source-component": {
+    "cacheservice-v2": {
+      "admission": "component",
+      "compile": "not-applicable",
+      "decode": "component",
+      "differential": "unverified",
+      "kubernetes": "unverified",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "container-actions": {
+      "admission": "partial",
+      "compile": "partial",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "partial",
+      "publication": "partial",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
+    },
+    "decoder-only-provider-events": {
+      "admission": "rejected",
+      "compile": "rejected",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "rejected",
+      "publication": "rejected",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
+    },
+    "deployment-environments": {
+      "admission": "rejected",
+      "compile": "rejected",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "rejected",
+      "publication": "rejected",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
+    },
+    "github-provider": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "javascript-and-local-composite-actions": {
+      "admission": "component",
+      "compile": "not-applicable",
+      "decode": "component",
+      "differential": "unverified",
+      "kubernetes": "unverified",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "job-containers": {
+      "admission": "rejected",
+      "compile": "rejected",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "rejected",
+      "publication": "rejected",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
+    },
+    "job-level-concurrency": {
+      "admission": "rejected",
+      "compile": "rejected",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "rejected",
+      "linux": "rejected",
+      "projection": "rejected",
+      "publication": "rejected",
+      "results": "rejected",
+      "scheduler": "rejected",
+      "windows": "rejected"
+    },
+    "kubernetes-sandbox-provider": {
+      "admission": "available",
+      "compile": "component",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "managed-secrets": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "matrices-dependencies-conditions-and-outputs": {
+      "admission": "component",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "component",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "per-job-resource-requests-and-limits": {
+      "admission": "component",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "component",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "permissions-semantics": {
+      "admission": "partial",
+      "compile": "partial",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "unverified",
+      "linux": "partial",
+      "projection": "partial",
+      "publication": "partial",
+      "results": "partial",
+      "scheduler": "partial",
+      "windows": "unverified"
+    },
+    "repository-dispatch-trigger-and-event-context": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "reusable-workflows": {
+      "admission": "partial",
+      "compile": "partial",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "unverified",
+      "linux": "partial",
+      "projection": "partial",
+      "publication": "partial",
+      "results": "partial",
+      "scheduler": "partial",
+      "windows": "unverified"
+    },
+    "runtime-identity-and-result-projection": {
+      "admission": "component",
+      "compile": "not-applicable",
+      "decode": "component",
+      "differential": "unverified",
+      "kubernetes": "unverified",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "scheduled-workflows": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "scheduling-and-runner-execution": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "service-containers": {
+      "admission": "available",
+      "compile": "component",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "workflow-dispatch-inputs-and-base-context": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "workflow-level-concurrency": {
+      "admission": "component",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "component",
+      "linux": "component",
+      "projection": "component",
+      "publication": "component",
+      "results": "component",
+      "scheduler": "component",
+      "windows": "unverified"
+    },
+    "workflow-parsing-and-planning": {
       "admission": "component",
       "compile": "component",
       "decode": "available",
@@ -700,30 +1395,43 @@
       "scheduler": "component",
       "windows": "unverified"
     },
-    "unsupported-product-surface": {
-      "admission": "rejected",
+    "workflow-reruns": {
+      "admission": "available",
       "compile": "not-applicable",
       "decode": "not-applicable",
-      "differential": "not-applicable",
-      "kubernetes": "rejected",
-      "linux": "rejected",
-      "projection": "rejected",
-      "publication": "rejected",
-      "results": "rejected",
-      "scheduler": "rejected",
-      "windows": "rejected"
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
+    },
+    "workload-oidc": {
+      "admission": "available",
+      "compile": "available",
+      "decode": "available",
+      "differential": "unverified",
+      "kubernetes": "partial",
+      "linux": "partial",
+      "projection": "available",
+      "publication": "available",
+      "results": "partial",
+      "scheduler": "available",
+      "windows": "unverified"
     }
   },
   "unsupported_diagnostics": [
     {
       "code": "github.compile.container_action_unavailable",
-      "feature": "javascript-and-local-composite-actions",
+      "feature": "container-actions",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-action-reference"
     },
     {
       "code": "github.compile.deployment_environment_unavailable",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "deployment-environments",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-environment-name-or-environment-value"
     },
@@ -741,25 +1449,25 @@
     },
     {
       "code": "github.compile.dynamic_reusable_workflow_reference",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "reusable-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-workflow-reference"
     },
     {
       "code": "github.compile.dynamic_service_image",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-image"
     },
     {
       "code": "github.compile.dynamic_service_options",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-options"
     },
     {
       "code": "github.compile.dynamic_service_port",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-port"
     },
@@ -777,13 +1485,13 @@
     },
     {
       "code": "github.compile.job_concurrency_unavailable",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "job-level-concurrency",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-concurrency-value"
     },
     {
       "code": "github.compile.job_container",
-      "feature": "job-and-service-containers",
+      "feature": "job-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-container-value"
     },
@@ -795,7 +1503,7 @@
     },
     {
       "code": "github.compile.mutable_service_image",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-image"
     },
@@ -812,32 +1520,38 @@
       "span_policy": "exact-number"
     },
     {
+      "code": "github.compile.provider_event_unavailable",
+      "feature": "decoder-only-provider-events",
+      "source": "crates/automata-ci-workflow-github/src/compiler.rs",
+      "span_policy": "exact-event-name"
+    },
+    {
       "code": "github.compile.reusable_secret_binding_shape",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "reusable-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-secret-binding"
     },
     {
       "code": "github.compile.schedule_configuration",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "scheduled-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/trigger.rs",
       "span_policy": "exact-schedule-configuration"
     },
     {
       "code": "github.compile.service_credentials",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-credentials"
     },
     {
       "code": "github.compile.service_options",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-options"
     },
     {
       "code": "github.compile.service_volumes",
-      "feature": "job-and-service-containers",
+      "feature": "service-containers",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-service-volume"
     },
@@ -855,19 +1569,19 @@
     },
     {
       "code": "github.compile.workflow_call_configuration",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "reusable-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/trigger.rs",
       "span_policy": "exact-workflow-call-configuration"
     },
     {
       "code": "github.compile.workflow_call_definition_field",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "reusable-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-definition-field-key"
     },
     {
       "code": "github.compile.workflow_call_output_reference_shape",
-      "feature": "reusable-environments-schedules-reruns-and-permissions",
+      "feature": "reusable-workflows",
       "source": "crates/automata-ci-workflow-github/src/compiler/logical.rs",
       "span_policy": "exact-output-reference"
     },

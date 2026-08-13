@@ -140,6 +140,7 @@ run_bounded_tests cargo test \
 printf 'PostgreSQL lane: end-to-end provider matrix\n' >&2
 run_bounded_tests cargo test \
   -p automata-ci \
+  --test conformance_shard \
   --test github_provider_end_to_end_matrix \
   --all-features \
   --locked \

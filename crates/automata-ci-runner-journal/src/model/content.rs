@@ -7,6 +7,20 @@ use crate::{
     MAX_TERMINAL_RESULT_CONTENT_BYTES,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalResultContentLimitRejection {
+    ContentBytes,
+}
+
+const fn terminal_result_content_bytes_rejection(
+    observed: u64,
+) -> Option<TerminalResultContentLimitRejection> {
+    if observed > MAX_TERMINAL_RESULT_CONTENT_BYTES {
+        return Some(TerminalResultContentLimitRejection::ContentBytes);
+    }
+    None
+}
+
 /// Exact negotiated schema and durable immutable bytes for one `JobIR`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -147,10 +161,34 @@ impl TerminalResultRecord {
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         if self.content.kind() != ContentKind::TerminalResult
             || self.content.size() == 0
-            || self.content.size() > MAX_TERMINAL_RESULT_CONTENT_BYTES
+            || terminal_result_content_bytes_rejection(self.content.size()).is_some()
         {
             return Err(JournalInvariantError::InvalidTerminalResultContent);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_TERMINAL_RESULT_CONTENT_BYTES, TerminalResultContentLimitRejection,
+        terminal_result_content_bytes_rejection,
+    };
+
+    #[test]
+    fn terminal_result_content_bytes_has_exact_boundaries() {
+        assert_eq!(
+            terminal_result_content_bytes_rejection(MAX_TERMINAL_RESULT_CONTENT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            terminal_result_content_bytes_rejection(MAX_TERMINAL_RESULT_CONTENT_BYTES),
+            None
+        );
+        assert_eq!(
+            terminal_result_content_bytes_rejection(MAX_TERMINAL_RESULT_CONTENT_BYTES + 1),
+            Some(TerminalResultContentLimitRejection::ContentBytes)
+        );
     }
 }

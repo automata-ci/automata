@@ -2,10 +2,38 @@
 
 use thiserror::Error;
 
+use super::{
+    logical::{MAX_LOGICAL_FIELD_BYTES, logical_field_byte_rejection},
+    strategy::{MAX_MATRIX_TEXT_BYTES, matrix_text_byte_rejection},
+    template::{MAX_TEMPLATE_BYTES, workflow_template_byte_rejection},
+};
+
 /// Maximum cumulative number of semantic nodes in one logical-workflow plan.
+// foundation-governance: parity-limit
 pub const MAX_LOGICAL_PLAN_NODES: usize = 65_536;
 /// Maximum cumulative UTF-8 text retained by one logical-workflow plan.
-pub const MAX_LOGICAL_PLAN_TEXT_BYTES: usize = 4 * 1024 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_LOGICAL_PLAN_TEXT_BYTES: usize = 4_194_304;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogicalPlanLimitRejection {
+    Nodes,
+    TextBytes,
+}
+
+const fn logical_plan_node_rejection(observed: usize) -> Option<LogicalPlanLimitRejection> {
+    if observed > MAX_LOGICAL_PLAN_NODES {
+        return Some(LogicalPlanLimitRejection::Nodes);
+    }
+    None
+}
+
+const fn logical_plan_text_byte_rejection(observed: usize) -> Option<LogicalPlanLimitRejection> {
+    if observed > MAX_LOGICAL_PLAN_TEXT_BYTES {
+        return Some(LogicalPlanLimitRejection::TextBytes);
+    }
+    None
+}
 
 pub(super) struct LogicalPlanBudget {
     nodes: usize,
@@ -28,7 +56,7 @@ impl LogicalPlanBudget {
                 field,
                 maximum: MAX_LOGICAL_PLAN_NODES,
             })?;
-        if self.nodes > MAX_LOGICAL_PLAN_NODES {
+        if logical_plan_node_rejection(self.nodes).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field,
                 maximum: MAX_LOGICAL_PLAN_NODES,
@@ -43,7 +71,14 @@ impl LogicalPlanBudget {
         value: &str,
         item_maximum: usize,
     ) -> Result<(), WorkflowPlanError> {
-        if value.len() > item_maximum {
+        if (item_maximum == MAX_LOGICAL_FIELD_BYTES
+            && logical_field_byte_rejection(value.len()).is_some())
+            || (item_maximum == MAX_MATRIX_TEXT_BYTES
+                && matrix_text_byte_rejection(value.len()).is_some())
+            || (item_maximum == MAX_TEMPLATE_BYTES
+                && workflow_template_byte_rejection(value.len()).is_some())
+            || value.len() > item_maximum
+        {
             return Err(WorkflowPlanError::LimitExceeded {
                 field,
                 maximum: item_maximum,
@@ -56,13 +91,50 @@ impl LogicalPlanBudget {
                     field: "logical plan text",
                     maximum: MAX_LOGICAL_PLAN_TEXT_BYTES,
                 })?;
-        if self.text_bytes > MAX_LOGICAL_PLAN_TEXT_BYTES {
+        if logical_plan_text_byte_rejection(self.text_bytes).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "logical plan text",
                 maximum: MAX_LOGICAL_PLAN_TEXT_BYTES,
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        LogicalPlanLimitRejection, MAX_LOGICAL_PLAN_NODES, MAX_LOGICAL_PLAN_TEXT_BYTES,
+        logical_plan_node_rejection, logical_plan_text_byte_rejection,
+    };
+
+    #[test]
+    fn logical_plan_node_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_plan_node_rejection(MAX_LOGICAL_PLAN_NODES - 1),
+            None
+        );
+        assert_eq!(logical_plan_node_rejection(MAX_LOGICAL_PLAN_NODES), None);
+        assert_eq!(
+            logical_plan_node_rejection(MAX_LOGICAL_PLAN_NODES + 1),
+            Some(LogicalPlanLimitRejection::Nodes)
+        );
+    }
+
+    #[test]
+    fn logical_plan_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            logical_plan_text_byte_rejection(MAX_LOGICAL_PLAN_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            logical_plan_text_byte_rejection(MAX_LOGICAL_PLAN_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            logical_plan_text_byte_rejection(MAX_LOGICAL_PLAN_TEXT_BYTES + 1),
+            Some(LogicalPlanLimitRejection::TextBytes)
+        );
     }
 }
 

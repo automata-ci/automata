@@ -10,11 +10,28 @@ use thiserror::Error;
 use crate::{GithubWorkflowSourcePlan, TriggerConfiguration, YamlMappingEntry, YamlNode};
 
 /// Maximum schedule entries accepted from one workflow.
+// foundation-governance: parity-limit
 pub const MAX_GITHUB_SCHEDULE_ENTRIES: usize = 64;
 /// Maximum decoded bytes in one exact five-field cron expression.
+// foundation-governance: limit-alias
 pub const MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES: usize = MAX_CRON_EXPRESSION_BYTES;
 /// Maximum bytes in one IANA timezone identifier.
+// foundation-governance: limit-alias
 pub const MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES: usize = MAX_IANA_TIMEZONE_BYTES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubScheduleLimitRejection {
+    EntryCount,
+}
+
+const fn github_schedule_entry_count_rejection(
+    observed: usize,
+) -> Option<GithubScheduleLimitRejection> {
+    if observed > MAX_GITHUB_SCHEDULE_ENTRIES {
+        return Some(GithubScheduleLimitRejection::EntryCount);
+    }
+    None
+}
 
 /// One validated five-field GitHub schedule expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,7 +145,7 @@ pub fn extract_github_schedule_entries(
         let entries = configuration
             .as_sequence()
             .ok_or(GithubScheduleError::InvalidConfiguration)?;
-        if entries.is_empty() || entries.len() > MAX_GITHUB_SCHEDULE_ENTRIES {
+        if entries.is_empty() || github_schedule_entry_count_rejection(entries.len()).is_some() {
             return Err(GithubScheduleError::InvalidConfiguration);
         }
         for entry in entries {
@@ -221,4 +238,38 @@ fn scalar_text(node: &YamlNode) -> Option<&str> {
 
 fn mapping_key(entry: &YamlMappingEntry) -> Option<&str> {
     scalar_text(entry.key())
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn github_schedule_entry_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            github_schedule_entry_count_rejection(MAX_GITHUB_SCHEDULE_ENTRIES - 1),
+            None
+        );
+        assert_eq!(
+            github_schedule_entry_count_rejection(MAX_GITHUB_SCHEDULE_ENTRIES),
+            None
+        );
+        assert_eq!(
+            github_schedule_entry_count_rejection(MAX_GITHUB_SCHEDULE_ENTRIES + 1),
+            Some(GithubScheduleLimitRejection::EntryCount)
+        );
+    }
+
+    #[test]
+    fn github_schedule_expression_limit_matches_scheduler_limit() {
+        assert_eq!(
+            MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES,
+            MAX_CRON_EXPRESSION_BYTES
+        );
+    }
+
+    #[test]
+    fn github_schedule_timezone_limit_matches_scheduler_limit() {
+        assert_eq!(MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES, MAX_IANA_TIMEZONE_BYTES);
+    }
 }

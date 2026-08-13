@@ -293,6 +293,54 @@ pub struct GithubProviderRuntimeBuilder {
     blobs: Arc<dyn ImmutableBlobStore>,
     admission_observer: Option<Arc<dyn WorkflowAdmissionObserver>>,
     policy: GithubProviderRuntimePolicy,
+    #[cfg(any(test, feature = "conformance-test-support"))]
+    clocks: Option<GithubProviderRuntimeClocks>,
+}
+
+/// Explicit time ports for the provider aggregate.
+///
+/// Ordinary product composition leaves these absent and uses the hardened
+/// non-regressing system clock. The crate-internal conformance factory installs
+/// one deterministic clock through this boundary; there is no CLI or server
+/// configuration switch that can select it.
+pub(crate) struct GithubProviderRuntimeClocks {
+    pub(crate) delivery: Arc<dyn GithubDeliveryClock>,
+    pub(crate) credential: Arc<dyn GithubServerServiceCoordinatorClock>,
+    pub(crate) schedule: Arc<dyn GithubScheduleClock>,
+    pub(crate) runtime_authority: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
+}
+
+impl GithubProviderRuntimeClocks {
+    #[cfg(any(test, feature = "conformance-test-support"))]
+    pub(crate) fn new(
+        delivery: Arc<dyn GithubDeliveryClock>,
+        credential: Arc<dyn GithubServerServiceCoordinatorClock>,
+        schedule: Arc<dyn GithubScheduleClock>,
+        runtime_authority: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
+    ) -> Self {
+        Self {
+            delivery,
+            credential,
+            schedule,
+            runtime_authority,
+        }
+    }
+
+    fn system() -> Self {
+        let clock = Arc::new(NonRegressingGithubProviderClock::default());
+        Self {
+            delivery: clock.clone(),
+            credential: clock.clone(),
+            schedule: clock.clone(),
+            runtime_authority: clock,
+        }
+    }
+}
+
+impl fmt::Debug for GithubProviderRuntimeClocks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubProviderRuntimeClocks([configured])")
+    }
 }
 
 impl GithubProviderRuntimeBuilder {
@@ -319,6 +367,8 @@ impl GithubProviderRuntimeBuilder {
             blobs,
             admission_observer: None,
             policy: GithubProviderRuntimePolicy::default(),
+            #[cfg(any(test, feature = "conformance-test-support"))]
+            clocks: None,
         }
     }
 
@@ -333,6 +383,16 @@ impl GithubProviderRuntimeBuilder {
     #[must_use]
     pub fn with_policy(mut self, policy: GithubProviderRuntimePolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Installs explicit product-internal provider time ports.
+    ///
+    /// This is crate-private by design: normal server configuration cannot
+    /// enable a deterministic conformance clock.
+    #[cfg(any(test, feature = "conformance-test-support"))]
+    pub(crate) fn with_clocks(mut self, clocks: GithubProviderRuntimeClocks) -> Self {
+        self.clocks = Some(clocks);
         self
     }
 
@@ -358,13 +418,20 @@ impl GithubProviderRuntimeBuilder {
             blobs,
             admission_observer,
             policy,
+            #[cfg(any(test, feature = "conformance-test-support"))]
+            clocks,
         } = self;
         let shape = GithubProviderRuntimeShape::from_config(&config);
-        let clock = Arc::new(NonRegressingGithubProviderClock::default());
-        let delivery_clock: Arc<dyn GithubDeliveryClock> = clock.clone();
-        let credential_clock: Arc<dyn GithubServerServiceCoordinatorClock> = clock.clone();
-        let schedule_clock: Arc<dyn GithubScheduleClock> = clock.clone();
-        let runtime_authority_clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock> = clock;
+        #[cfg(any(test, feature = "conformance-test-support"))]
+        let clocks = clocks.unwrap_or_else(GithubProviderRuntimeClocks::system);
+        #[cfg(not(any(test, feature = "conformance-test-support")))]
+        let clocks = GithubProviderRuntimeClocks::system();
+        let GithubProviderRuntimeClocks {
+            delivery: delivery_clock,
+            credential: credential_clock,
+            schedule: schedule_clock,
+            runtime_authority: runtime_authority_clock,
+        } = clocks;
         let applied_at = credential_clock.now();
 
         let verifier = GithubWebhookVerifier::new(&webhook_secret)
@@ -847,6 +914,16 @@ impl fmt::Debug for GithubProviderRuntimeBuilder {
             .field("blobs", &"[IMMUTABLE BLOB STORE]")
             .field("admission_observer", &self.admission_observer.is_some())
             .field("policy", &self.policy)
+            .field("explicit_clocks", &{
+                #[cfg(any(test, feature = "conformance-test-support"))]
+                {
+                    self.clocks.is_some()
+                }
+                #[cfg(not(any(test, feature = "conformance-test-support")))]
+                {
+                    false
+                }
+            })
             .finish()
     }
 }

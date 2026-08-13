@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 use super::{GithubProviderAuthorityConfig, GithubProviderConfig, GithubProviderRepositoryConfig};
 
+// foundation-governance: derived-contract owner=integration kind=digest-domain
 const AUTHORITY_CONFIGURATION_FINGERPRINT_DOMAIN: &[u8] =
     b"automata-ci/product/github-server-service-configuration/v1\0";
 

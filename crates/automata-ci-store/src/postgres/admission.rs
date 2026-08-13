@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::{
     CurrentAttemptOutputSafety, PostgresStore, RunnerPayloadEncryption,
+    durable_schema::current_durable_schemas,
     github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
 };
 use crate::{
@@ -23,10 +24,11 @@ use crate::{
 
 const CONCURRENCY_CANCELLATION_ACTOR: &str = "automata.concurrency";
 const CONCURRENCY_CANCELLATION_REASON: &str = "superseded by a newer workflow run";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const CANCELLATION_INTENT_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-intent.v1";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const CANCELLATION_COMMAND_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-command.v1";
 const PUBLICATION_SAFETY_REASON: &str = "repository_policy";
-const PUBLICATION_SAFETY_SCHEMA: i32 = 1;
 pub(super) const MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP: i64 = 4_096;
 
 pub(super) const fn queue_policy_name(policy: automata_ci_core::QueuePolicy) -> &'static str {
@@ -93,7 +95,7 @@ impl RunPublicationSnapshot {
         )?;
         if effective_dashboard != Some(snapshot.dashboard())
             || safety_reason != Some(PUBLICATION_SAFETY_REASON)
-            || safety_schema != Some(PUBLICATION_SAFETY_SCHEMA)
+            || safety_schema != Some(crate::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
         {
             return Err(StoreError::corrupt_data(
                 "workflow run publication snapshot is malformed",
@@ -487,12 +489,13 @@ async fn resolve_snapshot(
     command: &AdmitWorkflowRun,
 ) -> Result<(), WorkflowAdmissionStoreError> {
     let source = command.source();
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO workflow_snapshots (
             id, workflow_id, source_digest, source_object_key, frontend_schema,
             created_at_ms, admission_epoch, source_size_bytes, source_media_type
-        ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)
+        ) VALUES ($1,$2,$3,$4,$9,$5,$6,$7,$8)
         ON CONFLICT (workflow_id, source_digest) DO NOTHING
         ",
     )
@@ -504,6 +507,7 @@ async fn resolve_snapshot(
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(size_i64(source)?)
     .bind(source.media_type())
+    .bind(schemas.workflow_plan_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -531,7 +535,7 @@ async fn resolve_snapshot(
         && row
             .try_get::<i16, _>("frontend_schema")
             .map_err(operation_error)?
-            == 1
+            == schemas.workflow_plan_i16
         && row
             .try_get::<i32, _>("admission_epoch")
             .map_err(operation_error)?
@@ -700,7 +704,7 @@ async fn insert_run(
     .bind(publication.logs())
     .bind(publication.artifacts())
     .bind(PUBLICATION_SAFETY_REASON)
-    .bind(PUBLICATION_SAFETY_SCHEMA)
+    .bind(crate::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .execute(&mut **transaction)
     .await

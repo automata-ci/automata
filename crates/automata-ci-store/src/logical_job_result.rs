@@ -29,11 +29,17 @@ pub const LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE: &str = "application/vnd.automata.w
 /// Maximum duration of one logical-job result claim.
 pub const MAX_LOGICAL_JOB_RESULT_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DOMAIN: &[u8] = b"automata.store.logical-job-result-descriptor.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const INSTANCES_DOMAIN: &[u8] = b"automata.store.logical-job-result-instances.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const PREREQUISITES_DOMAIN: &[u8] = b"automata.store.logical-job-result-prerequisites.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const INSTANCE_OUTPUTS_DOMAIN: &[u8] = b"automata.store.logical-instance-result-outputs.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const OUTPUTS_DOMAIN: &[u8] = b"automata.store.logical-job-result-outputs.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMIT_DOMAIN: &[u8] = b"automata.store.logical-job-result-commit.v1\0";
 
 /// Non-nil durable identity of one logical-result worker.

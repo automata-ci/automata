@@ -20,8 +20,11 @@ use crate::{LogicalWorkflowInvocationId, LogicalWorkflowJobId, StoreError, Tenan
 /// Maximum duration of one run-finalization claim.
 pub const MAX_LOGICAL_RUN_FINALIZATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const EVIDENCE_DOMAIN: &[u8] = b"automata.store.logical-run-finalization-evidence.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DOMAIN: &[u8] = b"automata.store.logical-run-finalization-descriptor.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMIT_DOMAIN: &[u8] = b"automata.store.logical-run-finalization-commit.v1\0";
 
 /// Non-nil durable identity of one run-finalization worker.

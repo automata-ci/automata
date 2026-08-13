@@ -24,6 +24,7 @@ use crate::{
 
 mod admission;
 mod conformance;
+mod durable_schema;
 mod g1;
 mod github_checks;
 mod github_job_runtime_authority;
@@ -92,7 +93,9 @@ pub enum PostgresTransportSecurity {
     LoopbackPlaintext,
 }
 
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const RUNNER_COMMAND_ENCRYPTION_PURPOSE: &str = "control-plane/runner-command:v1";
+// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const RUNNER_RPC_RESPONSE_ENCRYPTION_PURPOSE: &str = "control-plane/runner-rpc-response:v1";
 
 /// Immutable safety fields written by current admission or copied by retry.
@@ -223,7 +226,7 @@ impl CurrentAttemptOutputSafety {
             } else {
                 "repository_policy"
             },
-            output_safety_schema: 1,
+            output_safety_schema: crate::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
         })
     }
 }
@@ -240,7 +243,7 @@ const fn valid_raw_log_policy(
     disposition: &str,
     schema: i32,
 ) -> bool {
-    schema == 1
+    crate::human_output_publication_safety_schema_is_current(schema)
         && matches!(
             exposure,
             SecretExposureClass::Secretless

@@ -11,14 +11,22 @@ use flate2::read::MultiGzDecoder;
 
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_BLOCK_BYTES_U64: u64 = 512;
-const MAX_COMPRESSED_BYTES: u64 = 4 * 1_024 * 1_024 * 1_024;
-const MAX_DECOMPRESSED_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
+// foundation-governance: parity-limit
+const MAX_COMPRESSED_BYTES: u64 = 4_294_967_296;
+// foundation-governance: parity-limit
+const MAX_DECOMPRESSED_BYTES: u64 = 17_179_869_184;
+// foundation-governance: parity-limit
 const MAX_ENTRY_COUNT: usize = 1_000_000;
-const MAX_EXPANDED_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
-const MAX_ENTRY_PATH_BYTES: usize = 16 * 1_024;
+// foundation-governance: parity-limit
+const MAX_EXPANDED_BYTES: u64 = 17_179_869_184;
+// foundation-governance: parity-limit
+const MAX_ENTRY_PATH_BYTES: usize = 16_384;
+// foundation-governance: parity-limit
 const MAX_WORKFLOW_COUNT: usize = 1_024;
-const MAX_WORKFLOW_BYTES: u64 = 16 * 1_024 * 1_024;
-const MAX_GLOBAL_PAX_BYTES: u64 = 64 * 1_024;
+// foundation-governance: parity-limit
+const MAX_WORKFLOW_BYTES: u64 = 16_777_216;
+// foundation-governance: parity-limit
+const MAX_GLOBAL_PAX_BYTES: u64 = 65_536;
 const OBSERVED_STREAM_TAIL_BYTES: usize = 2 * 1_024;
 
 /// Maximum byte length of a workflow path returned by repository discovery.
@@ -26,7 +34,70 @@ const OBSERVED_STREAM_TAIL_BYTES: usize = 2 * 1_024;
 /// This must remain exactly aligned with the durable provider-delivery
 /// workflow-outcome path bound. It is defined here as well because this
 /// source-level frontend must not depend on the persistence crate.
+// foundation-governance: parity-limit
 pub const MAX_REPOSITORY_WORKFLOW_PATH_BYTES: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryArchiveLimitRejection {
+    CompressedBytes,
+    DecompressedBytes,
+    EntryCount,
+    ExpandedBytes,
+    EntryPathBytes,
+    WorkflowCount,
+    WorkflowBytes,
+    GlobalPaxBytes,
+    WorkflowPathBytes,
+}
+
+const fn archive_policy_limit_rejection(
+    compressed_bytes: u64,
+    decompressed_bytes: u64,
+    entries: usize,
+    expanded_bytes: u64,
+    entry_path_bytes: usize,
+    workflows: usize,
+    workflow_bytes: u64,
+) -> Option<RepositoryArchiveLimitRejection> {
+    if compressed_bytes > MAX_COMPRESSED_BYTES {
+        return Some(RepositoryArchiveLimitRejection::CompressedBytes);
+    }
+    if decompressed_bytes > MAX_DECOMPRESSED_BYTES {
+        return Some(RepositoryArchiveLimitRejection::DecompressedBytes);
+    }
+    if entries > MAX_ENTRY_COUNT {
+        return Some(RepositoryArchiveLimitRejection::EntryCount);
+    }
+    if expanded_bytes > MAX_EXPANDED_BYTES {
+        return Some(RepositoryArchiveLimitRejection::ExpandedBytes);
+    }
+    if entry_path_bytes > MAX_ENTRY_PATH_BYTES {
+        return Some(RepositoryArchiveLimitRejection::EntryPathBytes);
+    }
+    if workflows > MAX_WORKFLOW_COUNT {
+        return Some(RepositoryArchiveLimitRejection::WorkflowCount);
+    }
+    if workflow_bytes > MAX_WORKFLOW_BYTES {
+        return Some(RepositoryArchiveLimitRejection::WorkflowBytes);
+    }
+    None
+}
+
+const fn global_pax_byte_rejection(observed: u64) -> Option<RepositoryArchiveLimitRejection> {
+    if observed > MAX_GLOBAL_PAX_BYTES {
+        return Some(RepositoryArchiveLimitRejection::GlobalPaxBytes);
+    }
+    None
+}
+
+const fn repository_workflow_path_byte_rejection(
+    observed: usize,
+) -> Option<RepositoryArchiveLimitRejection> {
+    if observed > MAX_REPOSITORY_WORKFLOW_PATH_BYTES {
+        return Some(RepositoryArchiveLimitRejection::WorkflowPathBytes);
+    }
+    None
+}
 
 /// Independent resource ceilings for repository workflow discovery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,20 +127,23 @@ impl RepositoryWorkflowDiscoveryLimits {
         maximum_workflow_bytes: u64,
     ) -> Result<Self, RepositoryWorkflowDiscoveryLimitsError> {
         if maximum_compressed_bytes == 0
-            || maximum_compressed_bytes > MAX_COMPRESSED_BYTES
             || maximum_decompressed_bytes == 0
-            || maximum_decompressed_bytes > MAX_DECOMPRESSED_BYTES
             || maximum_entries == 0
-            || maximum_entries > MAX_ENTRY_COUNT
             || maximum_expanded_bytes == 0
-            || maximum_expanded_bytes > MAX_EXPANDED_BYTES
             || maximum_entry_path_bytes == 0
-            || maximum_entry_path_bytes > MAX_ENTRY_PATH_BYTES
             || maximum_workflows == 0
-            || maximum_workflows > MAX_WORKFLOW_COUNT
             || maximum_workflow_bytes == 0
-            || maximum_workflow_bytes > MAX_WORKFLOW_BYTES
             || maximum_workflow_bytes > maximum_expanded_bytes
+            || archive_policy_limit_rejection(
+                maximum_compressed_bytes,
+                maximum_decompressed_bytes,
+                maximum_entries,
+                maximum_expanded_bytes,
+                maximum_entry_path_bytes,
+                maximum_workflows,
+                maximum_workflow_bytes,
+            )
+            .is_some()
         {
             return Err(RepositoryWorkflowDiscoveryLimitsError);
         }
@@ -351,7 +425,7 @@ impl ArchiveInspection {
         }
 
         if is_workflow {
-            if relative_path.len() > MAX_REPOSITORY_WORKFLOW_PATH_BYTES {
+            if repository_workflow_path_byte_rejection(relative_path.len()).is_some() {
                 return Err(RepositoryWorkflowDiscoveryError::ResourceLimit);
             }
             self.insert_workflow(
@@ -573,6 +647,9 @@ fn validate_global_pax<R: io::Read>(
     declared_size: u64,
     limit_state: &ReadLimitState,
 ) -> Result<(), RepositoryWorkflowDiscoveryError> {
+    if global_pax_byte_rejection(declared_size).is_some() {
+        return Err(RepositoryWorkflowDiscoveryError::ResourceLimit);
+    }
     let bytes = read_entry(entry, declared_size, MAX_GLOBAL_PAX_BYTES, limit_state)?;
     let mut offset = 0_usize;
     let mut keys = BTreeSet::new();
@@ -844,3 +921,168 @@ impl fmt::Display for RepositoryWorkflowDiscoveryError {
 }
 
 impl Error for RepositoryWorkflowDiscoveryError {}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES, MAX_ENTRY_COUNT, MAX_ENTRY_PATH_BYTES,
+        MAX_EXPANDED_BYTES, MAX_GLOBAL_PAX_BYTES, MAX_REPOSITORY_WORKFLOW_PATH_BYTES,
+        MAX_WORKFLOW_BYTES, MAX_WORKFLOW_COUNT, RepositoryArchiveLimitRejection,
+        archive_policy_limit_rejection, global_pax_byte_rejection,
+        repository_workflow_path_byte_rejection,
+    };
+
+    #[test]
+    fn archive_compressed_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(MAX_COMPRESSED_BYTES - 1, 1, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(MAX_COMPRESSED_BYTES, 1, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(MAX_COMPRESSED_BYTES + 1, 1, 1, 1, 1, 1, 1),
+            Some(RepositoryArchiveLimitRejection::CompressedBytes)
+        );
+    }
+
+    #[test]
+    fn archive_decompressed_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(1, MAX_DECOMPRESSED_BYTES - 1, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, MAX_DECOMPRESSED_BYTES, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, MAX_DECOMPRESSED_BYTES + 1, 1, 1, 1, 1, 1),
+            Some(RepositoryArchiveLimitRejection::DecompressedBytes)
+        );
+    }
+
+    #[test]
+    fn archive_entry_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, MAX_ENTRY_COUNT - 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, MAX_ENTRY_COUNT, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, MAX_ENTRY_COUNT + 1, 1, 1, 1, 1),
+            Some(RepositoryArchiveLimitRejection::EntryCount)
+        );
+    }
+
+    #[test]
+    fn archive_expanded_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, MAX_EXPANDED_BYTES - 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, MAX_EXPANDED_BYTES, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, MAX_EXPANDED_BYTES + 1, 1, 1, 1),
+            Some(RepositoryArchiveLimitRejection::ExpandedBytes)
+        );
+    }
+
+    #[test]
+    fn archive_entry_path_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES - 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES, 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES + 1, 1, 1),
+            Some(RepositoryArchiveLimitRejection::EntryPathBytes)
+        );
+    }
+
+    #[test]
+    fn archive_workflow_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, 1, MAX_WORKFLOW_COUNT - 1, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, 1, MAX_WORKFLOW_COUNT, 1),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, 1, 1, MAX_WORKFLOW_COUNT + 1, 1),
+            Some(RepositoryArchiveLimitRejection::WorkflowCount)
+        );
+    }
+
+    #[test]
+    fn archive_workflow_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            archive_policy_limit_rejection(
+                1,
+                1,
+                1,
+                MAX_EXPANDED_BYTES,
+                1,
+                1,
+                MAX_WORKFLOW_BYTES - 1
+            ),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(1, 1, 1, MAX_EXPANDED_BYTES, 1, 1, MAX_WORKFLOW_BYTES),
+            None
+        );
+        assert_eq!(
+            archive_policy_limit_rejection(
+                1,
+                1,
+                1,
+                MAX_EXPANDED_BYTES,
+                1,
+                1,
+                MAX_WORKFLOW_BYTES + 1
+            ),
+            Some(RepositoryArchiveLimitRejection::WorkflowBytes)
+        );
+    }
+
+    #[test]
+    fn archive_global_pax_byte_limit_has_exact_boundaries() {
+        assert_eq!(global_pax_byte_rejection(MAX_GLOBAL_PAX_BYTES - 1), None);
+        assert_eq!(global_pax_byte_rejection(MAX_GLOBAL_PAX_BYTES), None);
+        assert_eq!(
+            global_pax_byte_rejection(MAX_GLOBAL_PAX_BYTES + 1),
+            Some(RepositoryArchiveLimitRejection::GlobalPaxBytes)
+        );
+    }
+
+    #[test]
+    fn repository_workflow_path_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            repository_workflow_path_byte_rejection(MAX_REPOSITORY_WORKFLOW_PATH_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            repository_workflow_path_byte_rejection(MAX_REPOSITORY_WORKFLOW_PATH_BYTES),
+            None
+        );
+        assert_eq!(
+            repository_workflow_path_byte_rejection(MAX_REPOSITORY_WORKFLOW_PATH_BYTES + 1),
+            Some(RepositoryArchiveLimitRejection::WorkflowPathBytes)
+        );
+    }
+}

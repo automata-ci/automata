@@ -1,9 +1,42 @@
 use thiserror::Error;
 
-const MAX_SOURCE_BYTES: usize = 16 * 1_024 * 1_024;
+// foundation-governance: parity-limit
+const MAX_SOURCE_BYTES: usize = 16_777_216;
+// foundation-governance: parity-limit
 const MAX_DEPTH: usize = 256;
+// foundation-governance: parity-limit
 const MAX_NODES: usize = 1_000_000;
-const MAX_DECODED_TEXT_BYTES: usize = 32 * 1_024 * 1_024;
+// foundation-governance: parity-limit
+const MAX_DECODED_TEXT_BYTES: usize = 33_554_432;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubActionMetadataLimitRejection {
+    SourceBytes,
+    Depth,
+    Nodes,
+    DecodedTextBytes,
+}
+
+const fn metadata_limit_rejection(
+    source_bytes: usize,
+    depth: usize,
+    nodes: usize,
+    decoded_text_bytes: usize,
+) -> Option<GithubActionMetadataLimitRejection> {
+    if source_bytes > MAX_SOURCE_BYTES {
+        return Some(GithubActionMetadataLimitRejection::SourceBytes);
+    }
+    if depth > MAX_DEPTH {
+        return Some(GithubActionMetadataLimitRejection::Depth);
+    }
+    if nodes > MAX_NODES {
+        return Some(GithubActionMetadataLimitRejection::Nodes);
+    }
+    if decoded_text_bytes > MAX_DECODED_TEXT_BYTES {
+        return Some(GithubActionMetadataLimitRejection::DecodedTextBytes);
+    }
+    None
+}
 
 /// Independent ceilings applied before and during YAML decoding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,13 +60,16 @@ impl GithubActionMetadataLimits {
         maximum_decoded_text_bytes: usize,
     ) -> Result<Self, GithubActionMetadataLimitsError> {
         if maximum_source_bytes == 0
-            || maximum_source_bytes > MAX_SOURCE_BYTES
             || maximum_depth == 0
-            || maximum_depth > MAX_DEPTH
             || maximum_nodes == 0
-            || maximum_nodes > MAX_NODES
             || maximum_decoded_text_bytes == 0
-            || maximum_decoded_text_bytes > MAX_DECODED_TEXT_BYTES
+            || metadata_limit_rejection(
+                maximum_source_bytes,
+                maximum_depth,
+                maximum_nodes,
+                maximum_decoded_text_bytes,
+            )
+            .is_some()
         {
             return Err(GithubActionMetadataLimitsError);
         }
@@ -87,3 +123,60 @@ impl Default for GithubActionMetadataLimits {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("GitHub action metadata limit is zero or exceeds a hard safety ceiling")]
 pub struct GithubActionMetadataLimitsError;
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        GithubActionMetadataLimitRejection, MAX_DECODED_TEXT_BYTES, MAX_DEPTH, MAX_NODES,
+        MAX_SOURCE_BYTES, metadata_limit_rejection,
+    };
+
+    #[test]
+    fn metadata_source_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            metadata_limit_rejection(MAX_SOURCE_BYTES - 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(metadata_limit_rejection(MAX_SOURCE_BYTES, 1, 1, 1), None);
+        assert_eq!(
+            metadata_limit_rejection(MAX_SOURCE_BYTES + 1, 1, 1, 1),
+            Some(GithubActionMetadataLimitRejection::SourceBytes)
+        );
+    }
+
+    #[test]
+    fn metadata_depth_limit_has_exact_boundaries() {
+        assert_eq!(metadata_limit_rejection(1, MAX_DEPTH - 1, 1, 1), None);
+        assert_eq!(metadata_limit_rejection(1, MAX_DEPTH, 1, 1), None);
+        assert_eq!(
+            metadata_limit_rejection(1, MAX_DEPTH + 1, 1, 1),
+            Some(GithubActionMetadataLimitRejection::Depth)
+        );
+    }
+
+    #[test]
+    fn metadata_node_limit_has_exact_boundaries() {
+        assert_eq!(metadata_limit_rejection(1, 1, MAX_NODES - 1, 1), None);
+        assert_eq!(metadata_limit_rejection(1, 1, MAX_NODES, 1), None);
+        assert_eq!(
+            metadata_limit_rejection(1, 1, MAX_NODES + 1, 1),
+            Some(GithubActionMetadataLimitRejection::Nodes)
+        );
+    }
+
+    #[test]
+    fn metadata_decoded_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            metadata_limit_rejection(1, 1, 1, MAX_DECODED_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            metadata_limit_rejection(1, 1, 1, MAX_DECODED_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            metadata_limit_rejection(1, 1, 1, MAX_DECODED_TEXT_BYTES + 1),
+            Some(GithubActionMetadataLimitRejection::DecodedTextBytes)
+        );
+    }
+}

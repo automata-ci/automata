@@ -11,6 +11,7 @@ use automata_ci_core::OperationId;
 use crate::{CommitFaultInjector, CommitStage, JournalError, MAX_JOURNAL_BYTES, StateRoot};
 
 const STATE_FILE: &str = "runner-journal.json";
+// foundation-governance: derived-contract owner=protocol kind=storage-namespace
 const OBSOLETE_STATE_FILE: &str = "runner-journal-v1.json";
 const LOCK_FILE: &str = ".runner-journal.lock";
 const STAGING_PREFIX: &str = ".runner-journal.stage-";

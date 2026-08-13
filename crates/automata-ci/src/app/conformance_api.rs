@@ -24,10 +24,11 @@ use automata_ci_store::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
     ConformanceReadRepository, ConformanceWorkflowOutcome, HumanAuthorizationTarget,
     HumanJobAttempt, HumanJobScope, HumanLogSegmentCursor, HumanLogSegmentPageSize,
-    HumanLogSegmentQuery, HumanRunConclusion, HumanRunDetail, HumanRunScope,
-    HumanWorkflowReadRepository, JobIrMetadata, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
-    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderRepositoryId, RepositoryId, StoreError,
-    TenantScope, WorkflowRunStatus, github_provider_repository_id,
+    HumanLogSegmentQuery, HumanLogStream, HumanOutputPublication, HumanRunConclusion,
+    HumanRunDetail, HumanRunScope, HumanWorkflowReadRepository, JobIrMetadata,
+    LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
+    ProviderRepositoryId, RepositoryId, StoreError, TenantScope, WorkflowRunStatus,
+    github_provider_repository_id,
 };
 use axum::{
     Router,
@@ -42,16 +43,26 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 
-use super::web::codec::{LogSegmentExpectation, decode_log_segment};
+use super::web::{
+    codec::{LogSegmentExpectation, decode_log_segment},
+    log_stream_safety_is_valid,
+};
 
 const CONFORMANCE_READ_PERMISSION: &str = "conformance:read";
+// foundation-governance: operational-limit
 const MAX_CONFORMANCE_EXPORT_BLOB_BYTES: u64 = 128 * 1_048_576;
+// foundation-governance: operational-limit
 const MAX_CONFORMANCE_LOG_SEGMENTS: usize = 4_096;
+// foundation-governance: operational-limit
+const MAX_CONFORMANCE_LOG_PAGES: usize = MAX_CONFORMANCE_LOG_SEGMENTS + 1;
+const CONFORMANCE_EXPORT_V1_SCHEMA_VERSION: u16 = 1;
+const CONFORMANCE_EXPORT_V2_SCHEMA_VERSION: u16 = 2;
 
 /// Opt-in media type for the presence-aware complete export contract.
 pub(crate) const CONFORMANCE_EXPORT_V2_MEDIA_TYPE: &str =
     "application/vnd.automata.conformance.v2+json";
 
+// foundation-governance: derived-contract owner=conformance kind=wire-discriminator
 pub(crate) const GITHUB_DELIVERY_EXPORT_PATH: &str =
     "/api/v1/conformance/github/repositories/{provider_repository_id}/deliveries/{delivery_id}";
 
@@ -347,7 +358,7 @@ async fn export_document_internal(
         runs.push(export_run(state, &tenant, repository_id, detail, include_logs).await?);
     }
     Ok(ConformanceExportDocument {
-        schema_version: 1,
+        schema_version: CONFORMANCE_EXPORT_V1_SCHEMA_VERSION,
         delivery: DeliveryDocument::from_delivery(&delivery),
         runs,
     })
@@ -465,10 +476,10 @@ async fn load_log_evidence(
             AvailabilityReason::NotProduced,
         ));
     };
-    let scope = || HumanJobScope::new(tenant.clone(), repository_id, run_id, job_id);
+    let scope = HumanJobScope::new(tenant.clone(), repository_id, run_id, job_id);
     let detail = state
         .reads
-        .get_job(&scope())
+        .get_job(&scope)
         .await
         .map_err(|error| store_error(&error))?
         .ok_or(ApiError::Internal)?;
@@ -486,31 +497,72 @@ async fn load_log_evidence(
             AvailabilityReason::NotProduced,
         ));
     };
-    if stream.attempt_id != attempt.id {
+    if !conformance_log_stream_is_valid(detail.job.log_publication.as_ref(), attempt.id, &stream) {
         return Err(ApiError::Internal);
     }
-    let stream_id = stream.id;
+    let segments = load_log_segments(state, &scope, &stream, blob_budget).await?;
+    Ok(EvidenceAvailability::present(LogDocument {
+        stream_id: stream.id.as_uuid().to_string(),
+        attempt_id: stream.attempt_id.as_uuid().to_string(),
+        schema_version: stream.schema.get(),
+        opened_at_ms: stream.opened_at.get(),
+        closed_at_ms: availability(stream.closed_at.map(automata_ci_core::UnixMillis::get)),
+        segments,
+    }))
+}
+
+fn conformance_log_stream_is_valid(
+    job_publication: Option<&HumanOutputPublication>,
+    attempt_id: automata_ci_core::AttemptId,
+    stream: &HumanLogStream,
+) -> bool {
+    stream.attempt_id == attempt_id
+        && job_publication == Some(&stream.publication)
+        && log_stream_safety_is_valid(stream)
+}
+
+async fn load_log_segments(
+    state: &ConformanceApiState,
+    scope: &HumanJobScope,
+    stream: &HumanLogStream,
+    blob_budget: &mut u64,
+) -> Result<Vec<LogSegmentDocument>, ApiError> {
     let mut cursor: Option<HumanLogSegmentCursor> = None;
+    let mut observed_cursors = Vec::new();
     let mut segments = Vec::new();
+    let mut expected_first_sequence = 0_u64;
+    let mut end_of_stream_observed = false;
+    let mut page_count = 0_usize;
     loop {
+        page_count = page_count.checked_add(1).ok_or(ApiError::TooLarge)?;
+        if page_count > MAX_CONFORMANCE_LOG_PAGES {
+            return Err(ApiError::TooLarge);
+        }
         let page = state
             .reads
             .list_log_segments(&HumanLogSegmentQuery {
-                scope: scope(),
-                stream_id,
+                scope: scope.clone(),
+                stream_id: stream.id,
                 cursor,
                 limit: HumanLogSegmentPageSize::default(),
             })
             .await
             .map_err(|error| store_error(&error))?
             .ok_or(ApiError::Internal)?;
-        if page.stream.id != stream_id || page.stream.attempt_id != attempt.id {
+        if page.stream != *stream {
             return Err(ApiError::Internal);
         }
         if segments.len().saturating_add(page.segments.len()) > MAX_CONFORMANCE_LOG_SEGMENTS {
             return Err(ApiError::TooLarge);
         }
         for segment in page.segments {
+            validate_log_segment_order(
+                &mut expected_first_sequence,
+                &mut end_of_stream_observed,
+                segment.first_sequence.get(),
+                segment.last_sequence.get(),
+                segment.end_of_stream,
+            )?;
             *blob_budget = add_blob_budget(*blob_budget, segment.uncompressed_size)?;
             let blob = state
                 .blobs
@@ -547,19 +599,51 @@ async fn load_log_evidence(
         let Some(next) = page.newer_cursor else {
             break;
         };
-        if cursor == Some(next) {
-            return Err(ApiError::Internal);
-        }
-        cursor = Some(next);
+        advance_log_cursor(&mut cursor, &mut observed_cursors, next)?;
     }
-    Ok(EvidenceAvailability::present(LogDocument {
-        stream_id: stream.id.as_uuid().to_string(),
-        attempt_id: stream.attempt_id.as_uuid().to_string(),
-        schema_version: stream.schema.get(),
-        opened_at_ms: stream.opened_at.get(),
-        closed_at_ms: stream.closed_at.map(automata_ci_core::UnixMillis::get),
-        segments,
-    }))
+    validate_log_terminal_state(stream.closed_at.is_some(), end_of_stream_observed)?;
+    Ok(segments)
+}
+
+fn advance_log_cursor(
+    cursor: &mut Option<HumanLogSegmentCursor>,
+    observed: &mut Vec<HumanLogSegmentCursor>,
+    next: HumanLogSegmentCursor,
+) -> Result<(), ApiError> {
+    if *cursor == Some(next) || observed.contains(&next) {
+        return Err(ApiError::Internal);
+    }
+    observed.push(next);
+    *cursor = Some(next);
+    Ok(())
+}
+
+fn validate_log_segment_order(
+    expected_first_sequence: &mut u64,
+    end_of_stream_observed: &mut bool,
+    first_sequence: u64,
+    last_sequence: u64,
+    end_of_stream: bool,
+) -> Result<(), ApiError> {
+    if *end_of_stream_observed
+        || first_sequence != *expected_first_sequence
+        || last_sequence < first_sequence
+    {
+        return Err(ApiError::Internal);
+    }
+    *expected_first_sequence = last_sequence.checked_add(1).ok_or(ApiError::Internal)?;
+    *end_of_stream_observed = end_of_stream;
+    Ok(())
+}
+
+fn validate_log_terminal_state(
+    stream_is_closed: bool,
+    end_of_stream_observed: bool,
+) -> Result<(), ApiError> {
+    if stream_is_closed && !end_of_stream_observed {
+        return Err(ApiError::Internal);
+    }
+    Ok(())
 }
 
 fn add_blob_budget(current: u64, size: u64) -> Result<u64, ApiError> {
@@ -940,20 +1024,46 @@ struct ArtifactDocument {
 #[serde(rename_all = "camelCase")]
 struct ConformanceExportDocumentV2 {
     schema_version: u16,
-    delivery: DeliveryDocument,
+    delivery: DeliveryDocumentV2,
     runs: Vec<RunDocumentV2>,
 }
 
 impl ConformanceExportDocumentV2 {
     fn from_v1(document: ConformanceExportDocument) -> Self {
         Self {
-            schema_version: 2,
-            delivery: document.delivery,
+            schema_version: CONFORMANCE_EXPORT_V2_SCHEMA_VERSION,
+            delivery: DeliveryDocumentV2::from_v1(document.delivery),
             runs: document
                 .runs
                 .into_iter()
                 .map(RunDocumentV2::from_v1)
                 .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryDocumentV2 {
+    id: String,
+    external_id: String,
+    state: &'static str,
+    attempts: u16,
+    accepted_at_ms: i64,
+    completed_at_ms: EvidenceAvailability<i64>,
+    workflows: Vec<WorkflowDeliveryDocument>,
+}
+
+impl DeliveryDocumentV2 {
+    fn from_v1(delivery: DeliveryDocument) -> Self {
+        Self {
+            id: delivery.id,
+            external_id: delivery.external_id,
+            state: delivery.state,
+            attempts: delivery.attempts,
+            accepted_at_ms: delivery.accepted_at_ms,
+            completed_at_ms: availability(delivery.completed_at_ms),
+            workflows: delivery.workflows,
         }
     }
 }
@@ -969,14 +1079,14 @@ struct RunDocumentV2 {
     run_attempt: u32,
     event_name: String,
     head_commit: String,
-    git_ref: Option<String>,
+    git_ref: EvidenceAvailability<String>,
     status: &'static str,
-    conclusion: Option<&'static str>,
+    conclusion: EvidenceAvailability<&'static str>,
     created_at_ms: i64,
     updated_at_ms: i64,
-    finished_at_ms: Option<i64>,
+    finished_at_ms: EvidenceAvailability<i64>,
     jobs: Vec<JobDocumentV2>,
-    artifacts: Vec<ArtifactDocument>,
+    artifacts: Vec<ArtifactDocumentV2>,
     services: EvidenceAvailability<Vec<serde_json::Value>>,
     caches: EvidenceAvailability<Vec<serde_json::Value>>,
     effective_authority: EvidenceAvailability<serde_json::Value>,
@@ -994,20 +1104,48 @@ impl RunDocumentV2 {
             run_attempt: run.run_attempt,
             event_name: run.event_name,
             head_commit: run.head_commit,
-            git_ref: run.git_ref,
+            git_ref: availability(run.git_ref),
             status: run.status,
-            conclusion: run.conclusion,
+            conclusion: availability(run.conclusion),
             created_at_ms: run.created_at_ms,
             updated_at_ms: run.updated_at_ms,
-            finished_at_ms: run.finished_at_ms,
+            finished_at_ms: availability(run.finished_at_ms),
             jobs: run.jobs.into_iter().map(JobDocumentV2::from_v1).collect(),
-            artifacts: run.artifacts,
+            artifacts: run
+                .artifacts
+                .into_iter()
+                .map(ArtifactDocumentV2::from_v1)
+                .collect(),
             services: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
             caches: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
             effective_authority: EvidenceAvailability::unavailable(
                 AvailabilityReason::NotRetainedBySchema,
             ),
             cleanup: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactDocumentV2 {
+    name: String,
+    mime_type: String,
+    size: u64,
+    sha256: String,
+    expires_at_seconds: EvidenceAvailability<i64>,
+    finalized_at_seconds: i64,
+}
+
+impl ArtifactDocumentV2 {
+    fn from_v1(artifact: ArtifactDocument) -> Self {
+        Self {
+            name: artifact.name,
+            mime_type: artifact.mime_type,
+            size: artifact.size,
+            sha256: artifact.sha256,
+            expires_at_seconds: availability(artifact.expires_at_seconds),
+            finalized_at_seconds: artifact.finalized_at_seconds,
         }
     }
 }
@@ -1057,8 +1195,8 @@ struct AttemptDocumentV2 {
     number: u32,
     lifecycle: &'static str,
     queued_at_ms: i64,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
+    started_at_ms: EvidenceAvailability<i64>,
+    finished_at_ms: EvidenceAvailability<i64>,
     runner: EvidenceAvailability<RunnerDocument>,
     result: EvidenceAvailability<JobResultDocumentV2>,
 }
@@ -1070,12 +1208,12 @@ impl AttemptDocumentV2 {
             number: attempt.number,
             lifecycle: attempt.lifecycle,
             queued_at_ms: attempt.queued_at_ms,
-            started_at_ms: attempt.started_at_ms,
-            finished_at_ms: attempt.finished_at_ms,
+            started_at_ms: availability(attempt.started_at_ms),
+            finished_at_ms: availability(attempt.finished_at_ms),
             runner: availability(attempt.runner),
             result: match attempt.result {
                 Some(result) => {
-                    EvidenceAvailability::present(JobResultDocumentV2::from_result(result))
+                    EvidenceAvailability::present(JobResultDocumentV2::from_result(&result))
                 }
                 None => EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
             },
@@ -1096,7 +1234,7 @@ struct JobResultDocumentV2 {
 }
 
 impl JobResultDocumentV2 {
-    fn from_result(result: JobResult) -> Self {
+    fn from_result(result: &JobResult) -> Self {
         Self {
             schema_version: result.schema_version(),
             attempt_id: result.attempt_id().as_uuid().to_string(),
@@ -1151,7 +1289,7 @@ struct LogDocument {
     attempt_id: String,
     schema_version: u16,
     opened_at_ms: i64,
-    closed_at_ms: Option<i64>,
+    closed_at_ms: EvidenceAvailability<i64>,
     segments: Vec<LogSegmentDocument>,
 }
 
@@ -1229,6 +1367,273 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_log_stream(
+        attempt_id: automata_ci_core::AttemptId,
+    ) -> (HumanOutputPublication, HumanLogStream) {
+        let publication = HumanOutputPublication {
+            secret_exposure: automata_ci_auth::authorization::SecretExposureClass::Secretless,
+            requested_visibility: automata_ci_auth::authorization::OutputVisibility::Private,
+            effective_visibility: automata_ci_auth::authorization::OutputVisibility::Private,
+            safety_reason: "fixture".to_owned(),
+            safety_schema: u16::try_from(automata_ci_store::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
+                .expect("publication safety schema fits u16"),
+        };
+        let stream = HumanLogStream {
+            id: automata_ci_core::LogStreamId::new(),
+            attempt_id,
+            schema: automata_ci_store::DocumentSchema::new(1).expect("log schema"),
+            opened_at: automata_ci_core::UnixMillis::new(1),
+            closed_at: None,
+            raw_log_disposition: automata_ci_store::HumanRawLogDisposition::Persist,
+            publication: publication.clone(),
+        };
+        (publication, stream)
+    }
+
+    #[test]
+    fn conformance_logs_require_current_matching_publication_safety() {
+        let attempt_id = automata_ci_core::AttemptId::new();
+        let (publication, mut stream) = valid_log_stream(attempt_id);
+        assert!(conformance_log_stream_is_valid(
+            Some(&publication),
+            attempt_id,
+            &stream
+        ));
+        assert!(!conformance_log_stream_is_valid(
+            Some(&publication),
+            automata_ci_core::AttemptId::new(),
+            &stream
+        ));
+
+        stream.publication.safety_schema += 1;
+        let noncurrent = stream.publication.clone();
+        assert!(!conformance_log_stream_is_valid(
+            Some(&noncurrent),
+            attempt_id,
+            &stream
+        ));
+
+        let (mut mismatched, stream) = valid_log_stream(attempt_id);
+        mismatched.safety_reason = "different-fixture".to_owned();
+        assert!(!conformance_log_stream_is_valid(
+            Some(&mismatched),
+            attempt_id,
+            &stream
+        ));
+
+        let (_, mut stream) = valid_log_stream(attempt_id);
+        stream.publication.secret_exposure =
+            automata_ci_auth::authorization::SecretExposureClass::ReadableSecret;
+        stream.publication.effective_visibility =
+            automata_ci_auth::authorization::OutputVisibility::Authenticated;
+        let nonprivate = stream.publication.clone();
+        assert!(!conformance_log_stream_is_valid(
+            Some(&nonprivate),
+            attempt_id,
+            &stream
+        ));
+
+        stream.publication.effective_visibility =
+            automata_ci_auth::authorization::OutputVisibility::Private;
+        let private = stream.publication.clone();
+        assert!(conformance_log_stream_is_valid(
+            Some(&private),
+            attempt_id,
+            &stream
+        ));
+    }
+
+    fn representative_job_result(attempt_id: automata_ci_core::AttemptId) -> JobResult {
+        let step = automata_ci_core::StepResult::new(
+            automata_ci_core::StepId::new("build").expect("step ID"),
+            JobConclusion::Success,
+            JobConclusion::Success,
+            automata_ci_core::UnixMillis::new(12),
+            automata_ci_core::UnixMillis::new(20),
+        )
+        .with_summary_markdown("# summary")
+        .with_annotations(vec![automata_ci_core::StepAnnotation::new(
+            automata_ci_core::StepAnnotationLevel::Notice,
+            "compiled",
+            vec![automata_ci_core::StepAnnotationProperty::new(
+                "file",
+                "src/main.rs",
+            )],
+        )]);
+        JobResult::new(
+            attempt_id,
+            JobConclusion::Success,
+            automata_ci_core::JobSecretExposure::Secretless,
+            automata_ci_core::UnixMillis::new(20),
+        )
+        .with_outputs(BTreeMap::from([(
+            "answer".to_owned(),
+            automata_ci_core::JobResultOutput::public("42").expect("public output"),
+        )]))
+        .with_steps(vec![step])
+    }
+
+    fn representative_log_document(attempt_id: automata_ci_core::AttemptId) -> LogDocument {
+        let stream_id = automata_ci_core::LogStreamId::from_uuid(uuid::Uuid::from_u128(8));
+        let frame = automata_ci_core::LogFrame::new(
+            stream_id,
+            attempt_id,
+            automata_ci_core::LogSequence::new(0),
+            automata_ci_core::UnixMillis::new(19),
+            automata_ci_core::LogChannel::Stdout,
+            b"ok\n".to_vec(),
+            true,
+        )
+        .expect("log frame");
+        LogDocument {
+            stream_id: stream_id.as_uuid().to_string(),
+            attempt_id: attempt_id.as_uuid().to_string(),
+            schema_version: automata_ci_core::CORE_SCHEMA_VERSION,
+            opened_at_ms: 12,
+            closed_at_ms: EvidenceAvailability::present(20),
+            segments: vec![LogSegmentDocument {
+                first_sequence: 0,
+                last_sequence: 0,
+                object_key: "logs/segment-0".to_owned(),
+                sha256: "b".repeat(64),
+                encoded_size: 3,
+                uncompressed_size: 3,
+                media_type: "application/vnd.automata.log-segment.v1+jsonl".to_owned(),
+                stored_at_ms: 20,
+                end_of_stream: true,
+                frames: vec![frame],
+            }],
+        }
+    }
+
+    fn representative_job_evidence() -> (JobIrEnvelope, RuntimeContextDocument) {
+        let job_ir = JobIrEnvelope::new(
+            WorkflowId::from_uuid(uuid::Uuid::from_u128(1)),
+            automata_ci_core::JobSource::new(
+                "github",
+                "automata-ci/automata",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ".ci/workflows/ci.yml",
+                "push",
+            ),
+            automata_ci_core::JobExecutionContext::new(
+                "CI",
+                "refs/heads/main",
+                "/__w/automata/automata",
+                automata_ci_core::JobContentReference::new(
+                    "events/push.json",
+                    automata_ci_core::Sha256Digest::from_bytes([0x11; 32]),
+                    2,
+                    "application/json",
+                ),
+                automata_ci_core::JobContentReference::new(
+                    "contexts/build.pb",
+                    automata_ci_core::Sha256Digest::from_bytes([0x22; 32]),
+                    2,
+                    automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+                ),
+            ),
+            automata_ci_core::JobIr::new(
+                automata_ci_core::JobId::from_uuid(uuid::Uuid::from_u128(3)),
+                RunId::from_uuid(uuid::Uuid::from_u128(2)),
+                "Build",
+                automata_ci_core::RunnerRequirements::default(),
+                automata_ci_core::JobInstanceIdentity::new(
+                    "build",
+                    0,
+                    1,
+                    automata_ci_core::Sha256Digest::from_bytes([0x33; 32]),
+                )
+                .expect("job instance"),
+                false,
+                Vec::new(),
+            ),
+        );
+        job_ir.validate().expect("representative JobIR");
+        let runtime_context = RuntimeContextDocument {
+            matrix: ContextValue::empty_object(),
+            strategy: StrategyContext::new(true, 0, 1, 1).expect("strategy"),
+        };
+        (job_ir, runtime_context)
+    }
+
+    fn representative_export_document() -> ConformanceExportDocument {
+        let attempt_id = automata_ci_core::AttemptId::from_uuid(uuid::Uuid::from_u128(7));
+        let result = representative_job_result(attempt_id);
+        let logs = representative_log_document(attempt_id);
+        let (job_ir, runtime_context) = representative_job_evidence();
+
+        ConformanceExportDocument {
+            schema_version: CONFORMANCE_EXPORT_V1_SCHEMA_VERSION,
+            delivery: DeliveryDocument {
+                id: "delivery".to_owned(),
+                external_id: "external-delivery".to_owned(),
+                state: "completed",
+                attempts: 1,
+                accepted_at_ms: 10,
+                completed_at_ms: Some(20),
+                workflows: vec![WorkflowDeliveryDocument {
+                    path: ".ci/workflows/ci.yml".to_owned(),
+                    outcome: WorkflowDeliveryOutcomeDocument::Admitted {
+                        run_id: "run".to_owned(),
+                    },
+                }],
+            },
+            runs: vec![RunDocument {
+                id: "run".to_owned(),
+                workflow_id: "workflow".to_owned(),
+                workflow_path: ".ci/workflows/ci.yml".to_owned(),
+                workflow_name: "CI".to_owned(),
+                run_number: 4,
+                run_attempt: 1,
+                event_name: "push".to_owned(),
+                head_commit: "a".repeat(40),
+                git_ref: Some("refs/heads/main".to_owned()),
+                status: "completed",
+                conclusion: Some("success"),
+                created_at_ms: 10,
+                updated_at_ms: 20,
+                finished_at_ms: Some(20),
+                jobs: vec![JobDocument {
+                    id: "job".to_owned(),
+                    logical_key: "build".to_owned(),
+                    display_name: "Build".to_owned(),
+                    created_at_ms: 10,
+                    job_ir,
+                    runtime_context,
+                    latest_attempt: Some(AttemptDocument {
+                        id: "attempt".to_owned(),
+                        number: 1,
+                        lifecycle: "succeeded",
+                        queued_at_ms: 11,
+                        started_at_ms: Some(12),
+                        finished_at_ms: Some(20),
+                        runner: Some(RunnerDocument {
+                            id: "runner".to_owned(),
+                            name: "linux".to_owned(),
+                        }),
+                        result: Some(result),
+                    }),
+                    logs: EvidenceAvailability::present(logs),
+                }],
+                artifacts: vec![ArtifactDocument {
+                    name: "bundle".to_owned(),
+                    mime_type: "application/zip".to_owned(),
+                    size: 3,
+                    sha256: "c".repeat(64),
+                    expires_at_seconds: None,
+                    finalized_at_seconds: 30,
+                }],
+            }],
+        }
+    }
+
+    fn assert_export_golden(actual: impl Serialize, expected: &str) {
+        let actual = serde_json::to_value(actual).expect("export JSON");
+        let expected: serde_json::Value = serde_json::from_str(expected).expect("golden JSON");
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn provider_repository_ids_are_canonical_and_positive() {
@@ -1318,6 +1723,46 @@ mod tests {
     }
 
     #[test]
+    fn v1_export_remains_a_supported_prior_contract() {
+        assert_eq!(CONFORMANCE_EXPORT_V1_SCHEMA_VERSION, 1);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V1));
+    }
+
+    #[test]
+    fn v1_export_schema_is_the_exact_default_contract() {
+        assert_eq!(CONFORMANCE_EXPORT_V1_SCHEMA_VERSION, 1);
+        assert_eq!(
+            requested_export_version(&HeaderMap::new()),
+            Ok(ExportVersion::V1)
+        );
+    }
+
+    #[test]
+    fn v2_export_schema_is_selected_only_by_its_exact_media_type() {
+        assert_eq!(CONFORMANCE_EXPORT_V2_SCHEMA_VERSION, 2);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static(CONFORMANCE_EXPORT_V2_MEDIA_TYPE),
+        );
+        assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V2));
+    }
+
+    #[test]
+    fn v1_and_v2_exports_match_complete_wire_goldens() {
+        assert_export_golden(
+            representative_export_document(),
+            include_str!("fixtures/conformance-export-v1.json"),
+        );
+        assert_export_golden(
+            ConformanceExportDocumentV2::from_v1(representative_export_document()),
+            include_str!("fixtures/conformance-export-v2.json"),
+        );
+    }
+
+    #[test]
     fn v2_step_outputs_are_presence_aware_and_never_synthesized_empty() {
         let attempt_id = automata_ci_core::AttemptId::from_uuid(uuid::Uuid::from_u128(7));
         let step = automata_ci_core::StepResult::new(
@@ -1334,7 +1779,7 @@ mod tests {
             automata_ci_core::UnixMillis::new(20),
         )
         .with_steps(vec![step]);
-        let v2 = JobResultDocumentV2::from_result(result);
+        let v2 = JobResultDocumentV2::from_result(&result);
         let json = serde_json::to_value(v2).expect("v2 JSON");
         assert_eq!(json["steps"][0]["outputs"]["state"], "unavailable");
         assert_eq!(
@@ -1342,5 +1787,149 @@ mod tests {
             "not_retained_by_schema"
         );
         assert!(json["steps"][0]["outputs"].get("value").is_none());
+    }
+
+    #[test]
+    fn every_optional_v2_field_has_an_explicit_availability_state() {
+        let delivery = DeliveryDocumentV2::from_v1(DeliveryDocument {
+            id: "delivery".to_owned(),
+            external_id: "external".to_owned(),
+            state: "pending",
+            attempts: 0,
+            accepted_at_ms: 1,
+            completed_at_ms: None,
+            workflows: Vec::new(),
+        });
+        let (job_ir, runtime_context) = representative_job_evidence();
+        let v2 = RunDocumentV2::from_v1(RunDocument {
+            id: "run".to_owned(),
+            workflow_id: "workflow".to_owned(),
+            workflow_path: ".ci/workflows/ci.yml".to_owned(),
+            workflow_name: "CI".to_owned(),
+            run_number: 1,
+            run_attempt: 1,
+            event_name: "push".to_owned(),
+            head_commit: "a".repeat(40),
+            git_ref: None,
+            status: "queued",
+            conclusion: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            finished_at_ms: None,
+            jobs: vec![JobDocument {
+                id: "job".to_owned(),
+                logical_key: "build".to_owned(),
+                display_name: "build".to_owned(),
+                created_at_ms: 1,
+                job_ir,
+                runtime_context,
+                latest_attempt: Some(AttemptDocument {
+                    id: "attempt".to_owned(),
+                    number: 1,
+                    lifecycle: "queued",
+                    queued_at_ms: 1,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                    runner: None,
+                    result: None,
+                }),
+                logs: EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
+            }],
+            artifacts: vec![ArtifactDocument {
+                name: "artifact".to_owned(),
+                mime_type: "application/zip".to_owned(),
+                size: 1,
+                sha256: "b".repeat(64),
+                expires_at_seconds: None,
+                finalized_at_seconds: 1,
+            }],
+        });
+        let delivery = serde_json::to_value(delivery).expect("delivery JSON");
+        assert_eq!(delivery["completedAtMs"]["state"], "unavailable");
+        let json = serde_json::to_value(v2).expect("v2 JSON");
+        assert_eq!(json["workflowName"], "CI");
+        assert_eq!(json["jobs"][0]["jobIr"]["state"], "present");
+        assert_eq!(json["jobs"][0]["runtimeContext"]["state"], "present");
+        for pointer in [
+            "/gitRef",
+            "/conclusion",
+            "/finishedAtMs",
+            "/jobs/0/latestAttempt/value/startedAtMs",
+            "/jobs/0/latestAttempt/value/finishedAtMs",
+            "/jobs/0/latestAttempt/value/runner",
+            "/jobs/0/latestAttempt/value/result",
+            "/artifacts/0/expiresAtSeconds",
+            "/services",
+            "/caches",
+            "/effectiveAuthority",
+            "/cleanup",
+        ] {
+            assert_eq!(
+                json.pointer(pointer)
+                    .and_then(|value| value.get("state"))
+                    .and_then(serde_json::Value::as_str),
+                Some("unavailable"),
+                "missing explicit availability at {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn log_export_rejects_gaps_after_end_and_cursor_cycles() {
+        let mut expected = 0;
+        let mut ended = false;
+        assert_eq!(
+            validate_log_segment_order(&mut expected, &mut ended, 0, 2, false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_log_segment_order(&mut expected, &mut ended, 3, 4, true),
+            Ok(())
+        );
+        assert_eq!(
+            validate_log_segment_order(&mut expected, &mut ended, 5, 5, false),
+            Err(ApiError::Internal)
+        );
+
+        let cursor_a = HumanLogSegmentCursor {
+            sequence: automata_ci_core::LogSequence::new(2),
+            direction: automata_ci_store::HumanLogSegmentPageDirection::Newer,
+        };
+        let cursor_b = HumanLogSegmentCursor {
+            sequence: automata_ci_core::LogSequence::new(4),
+            direction: automata_ci_store::HumanLogSegmentPageDirection::Newer,
+        };
+        let mut cursor = None;
+        let mut observed = Vec::new();
+        assert_eq!(
+            advance_log_cursor(&mut cursor, &mut observed, cursor_a),
+            Ok(())
+        );
+        assert_eq!(
+            advance_log_cursor(&mut cursor, &mut observed, cursor_b),
+            Ok(())
+        );
+        assert_eq!(
+            advance_log_cursor(&mut cursor, &mut observed, cursor_a),
+            Err(ApiError::Internal)
+        );
+
+        let mut gap_expected = 0;
+        let mut gap_ended = false;
+        assert_eq!(
+            validate_log_segment_order(&mut gap_expected, &mut gap_ended, 1, 1, false),
+            Err(ApiError::Internal)
+        );
+    }
+
+    #[test]
+    fn closed_log_stream_requires_a_terminal_segment() {
+        assert_eq!(validate_log_terminal_state(false, false), Ok(()));
+        assert_eq!(validate_log_terminal_state(false, true), Ok(()));
+        assert_eq!(validate_log_terminal_state(true, true), Ok(()));
+        assert_eq!(
+            validate_log_terminal_state(true, false),
+            Err(ApiError::Internal)
+        );
     }
 }

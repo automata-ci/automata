@@ -1,6 +1,10 @@
+pub(crate) const SERVICE_PROXY_STATUS_SCHEMA_VERSION: u64 = 1;
+
 pub(crate) fn encode_startup_status(ports: &[u16]) -> String {
     let mut status = String::with_capacity(32 + ports.len() * 6);
-    status.push_str("{\"version\":1,\"ports\":[");
+    status.push_str(&format!(
+        "{{\"version\":{SERVICE_PROXY_STATUS_SCHEMA_VERSION},\"ports\":["
+    ));
     for (index, port) in ports.iter().enumerate() {
         if index != 0 {
             status.push(',');

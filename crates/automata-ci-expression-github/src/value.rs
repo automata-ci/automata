@@ -2,8 +2,32 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use thiserror::Error;
 
+// foundation-governance: parity-limit
 const MAX_CONSTRUCTION_ITEMS: usize = 65_536;
+// foundation-governance: parity-limit
 const MAX_KEY_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubValueLimitRejection {
+    ConstructionItems,
+    KeyBytes,
+}
+
+const fn github_value_construction_item_rejection(
+    observed: usize,
+) -> Option<GithubValueLimitRejection> {
+    if observed > MAX_CONSTRUCTION_ITEMS {
+        return Some(GithubValueLimitRejection::ConstructionItems);
+    }
+    None
+}
+
+const fn github_value_key_byte_rejection(observed: usize) -> Option<GithubValueLimitRejection> {
+    if observed > MAX_KEY_BYTES {
+        return Some(GithubValueLimitRejection::KeyBytes);
+    }
+    None
+}
 
 /// Invalid public expression-value construction.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -33,12 +57,12 @@ impl GithubObject {
     ///
     /// Returns [`GithubValueError`] for oversized keys, collisions, or item count.
     pub fn new(entries: Vec<(String, GithubValue)>) -> Result<Self, GithubValueError> {
-        if entries.len() > MAX_CONSTRUCTION_ITEMS {
+        if github_value_construction_item_rejection(entries.len()).is_some() {
             return Err(GithubValueError::TooManyItems);
         }
         let mut lookup = BTreeMap::new();
         for (index, (key, _)) in entries.iter().enumerate() {
-            if key.len() > MAX_KEY_BYTES {
+            if github_value_key_byte_rejection(key.len()).is_some() {
                 return Err(GithubValueError::InvalidKey);
             }
             if lookup
@@ -123,7 +147,7 @@ impl GithubValue {
     ///
     /// Returns [`GithubValueError::TooManyItems`] beyond the hard ceiling.
     pub fn array(values: Vec<Self>) -> Result<Self, GithubValueError> {
-        if values.len() > MAX_CONSTRUCTION_ITEMS {
+        if github_value_construction_item_rejection(values.len()).is_some() {
             return Err(GithubValueError::TooManyItems);
         }
         Ok(Self::Array(values.into()))
@@ -217,5 +241,39 @@ impl fmt::Debug for GithubValue {
                 .finish(),
             Self::Object(value) => value.fmt(formatter),
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        GithubValueLimitRejection, MAX_CONSTRUCTION_ITEMS, MAX_KEY_BYTES,
+        github_value_construction_item_rejection, github_value_key_byte_rejection,
+    };
+
+    #[test]
+    fn github_value_construction_item_limit_has_exact_boundaries() {
+        assert_eq!(
+            github_value_construction_item_rejection(MAX_CONSTRUCTION_ITEMS - 1),
+            None
+        );
+        assert_eq!(
+            github_value_construction_item_rejection(MAX_CONSTRUCTION_ITEMS),
+            None
+        );
+        assert_eq!(
+            github_value_construction_item_rejection(MAX_CONSTRUCTION_ITEMS + 1),
+            Some(GithubValueLimitRejection::ConstructionItems)
+        );
+    }
+
+    #[test]
+    fn github_value_key_byte_limit_has_exact_boundaries() {
+        assert_eq!(github_value_key_byte_rejection(MAX_KEY_BYTES - 1), None);
+        assert_eq!(github_value_key_byte_rejection(MAX_KEY_BYTES), None);
+        assert_eq!(
+            github_value_key_byte_rejection(MAX_KEY_BYTES + 1),
+            Some(GithubValueLimitRejection::KeyBytes)
+        );
     }
 }

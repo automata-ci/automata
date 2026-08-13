@@ -5,7 +5,7 @@ use automata_ci_core::{
 };
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,
     LogicalRunFinalizationClaimFence, LogicalRunFinalizationDescriptor,
@@ -40,13 +40,13 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
         JOIN repositories AS repository ON repository.id = run.repository_id
         LEFT JOIN logical_workflow_run_result_claims AS claim
           ON claim.run_id = marker.run_id
-        WHERE marker.orchestration_schema = 1
+        WHERE marker.orchestration_schema = $2
           AND marker.state IN ('pending', 'active')
           AND marker.revision < 9223372036854775807
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $3
           AND invocation.state IN ('pending', 'active')
           AND invocation.revision < 9223372036854775807
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND run.admission_epoch = $4 AND run.plan_schema = $4
           AND run.status IN ('queued', 'in_progress', 'cancelled')
           AND (
               claim.run_id IS NULL
@@ -354,8 +354,12 @@ async fn lock_ready_candidate(
     transaction: &mut Transaction<'_, Postgres>,
     database_now: i64,
 ) -> Result<Option<PgRow>, LogicalRunFinalizationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(LOCK_READY_CANDIDATE_QUERY)
         .bind(database_now)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.workflow_plan_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -406,6 +410,7 @@ async fn lock_commit_target(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalRunFinalizationTarget,
 ) -> Result<Option<PgRow>, LogicalRunFinalizationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         SELECT repository.tenant_id, marker.run_id, marker.root_invocation_id,
@@ -431,15 +436,18 @@ async fn lock_commit_target(
         WHERE repository.tenant_id = $1
           AND marker.run_id = $2
           AND marker.root_invocation_id = $3
-          AND marker.orchestration_schema = 1
-          AND invocation.plan_schema = 1
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND marker.orchestration_schema = $4
+          AND invocation.plan_schema = $5
+          AND run.admission_epoch = $6 AND run.plan_schema = $6
         FOR UPDATE OF marker, invocation, run, claim
         ",
     )
     .bind(target.tenant().as_str())
     .bind(target.run_id().as_uuid())
     .bind(target.root_invocation_id().as_uuid())
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.workflow_plan_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)

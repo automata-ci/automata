@@ -12,9 +12,49 @@ use super::{
 };
 
 /// Maximum definitions in each invocation contract namespace.
+// foundation-governance: parity-limit
 pub const MAX_INVOCATION_DEFINITIONS: usize = 256;
 /// Maximum bytes in an invocation description or string default.
-pub const MAX_INVOCATION_TEXT_BYTES: usize = 64 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_INVOCATION_TEXT_BYTES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowInvocationLimitRejection {
+    Definitions,
+    TextBytes,
+}
+
+const fn workflow_invocation_definition_rejection(
+    observed: usize,
+) -> Option<WorkflowInvocationLimitRejection> {
+    if observed > MAX_INVOCATION_DEFINITIONS {
+        return Some(WorkflowInvocationLimitRejection::Definitions);
+    }
+    None
+}
+
+const fn workflow_invocation_text_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowInvocationLimitRejection> {
+    if observed > MAX_INVOCATION_TEXT_BYTES {
+        return Some(WorkflowInvocationLimitRejection::TextBytes);
+    }
+    None
+}
+
+fn charge_invocation_text(
+    budget: &mut LogicalPlanBudget,
+    field: &'static str,
+    value: &str,
+) -> Result<(), WorkflowPlanError> {
+    if workflow_invocation_text_byte_rejection(value.len()).is_some() {
+        return Err(WorkflowPlanError::LimitExceeded {
+            field,
+            maximum: MAX_INVOCATION_TEXT_BYTES,
+        });
+    }
+    budget.charge_text(field, value, MAX_INVOCATION_TEXT_BYTES)
+}
 
 /// Declared input type for a reusable workflow.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -86,11 +126,9 @@ impl InvocationInputDefault {
                     Err(WorkflowPlanError::InvalidNumber(value.clone()))
                 }
             }
-            Self::String(value) => budget.charge_text(
-                "invocation string default",
-                value,
-                MAX_INVOCATION_TEXT_BYTES,
-            ),
+            Self::String(value) => {
+                charge_invocation_text(budget, "invocation string default", value)
+            }
         }
     }
 }
@@ -199,11 +237,7 @@ impl InvocationInputDefinition {
                 source_id,
                 "invocation input description",
             )?;
-            budget.charge_text(
-                "invocation input description",
-                description.value(),
-                MAX_INVOCATION_TEXT_BYTES,
-            )?;
+            charge_invocation_text(budget, "invocation input description", description.value())?;
         }
         Ok(())
     }
@@ -274,11 +308,7 @@ impl InvocationSecretDefinition {
                 source_id,
                 "invocation secret description",
             )?;
-            budget.charge_text(
-                "invocation secret description",
-                description.value(),
-                MAX_INVOCATION_TEXT_BYTES,
-            )?;
+            charge_invocation_text(budget, "invocation secret description", description.value())?;
         }
         Ok(())
     }
@@ -414,11 +444,7 @@ impl WorkflowOutputDefinition {
         }
         if let Some(description) = &self.description {
             validate_span_source(description.span(), source_id, "workflow output description")?;
-            budget.charge_text(
-                "workflow output description",
-                description.value(),
-                MAX_INVOCATION_TEXT_BYTES,
-            )?;
+            charge_invocation_text(budget, "workflow output description", description.value())?;
         }
         Ok(())
     }
@@ -521,13 +547,53 @@ impl WorkflowInvocationContract {
 }
 
 fn validate_count(field: &'static str, count: usize) -> Result<(), WorkflowPlanError> {
-    if count > MAX_INVOCATION_DEFINITIONS {
+    if workflow_invocation_definition_rejection(count).is_some() {
         return Err(WorkflowPlanError::LimitExceeded {
             field,
             maximum: MAX_INVOCATION_DEFINITIONS,
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_INVOCATION_DEFINITIONS, MAX_INVOCATION_TEXT_BYTES, WorkflowInvocationLimitRejection,
+        workflow_invocation_definition_rejection, workflow_invocation_text_byte_rejection,
+    };
+
+    #[test]
+    fn workflow_invocation_definition_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_invocation_definition_rejection(MAX_INVOCATION_DEFINITIONS - 1),
+            None
+        );
+        assert_eq!(
+            workflow_invocation_definition_rejection(MAX_INVOCATION_DEFINITIONS),
+            None
+        );
+        assert_eq!(
+            workflow_invocation_definition_rejection(MAX_INVOCATION_DEFINITIONS + 1),
+            Some(WorkflowInvocationLimitRejection::Definitions)
+        );
+    }
+
+    #[test]
+    fn workflow_invocation_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_invocation_text_byte_rejection(MAX_INVOCATION_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            workflow_invocation_text_byte_rejection(MAX_INVOCATION_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            workflow_invocation_text_byte_rejection(MAX_INVOCATION_TEXT_BYTES + 1),
+            Some(WorkflowInvocationLimitRejection::TextBytes)
+        );
+    }
 }
 
 fn valid_decimal(value: &str) -> bool {

@@ -10,11 +10,13 @@ The contracts enforce:
 - byte-canonical fixture catalogs with normalized HTTPS source coordinates,
   exact commits/content digests, and namespaced immutable prerequisite locks;
 - scenario admission derived from a catalog entry, including an explicit state
-  for every required external prerequisite;
+  for every required external prerequisite and a rule that only live evidence
+  classes may declare one;
 - evidence envelopes bound to the canonical catalog digest, fixture identity,
   evidence class, provider, operating system, and expected evidence digest;
-- structural evidence comparison without type coercion, ignored fields, or
-  implicit `null` values standing in for unavailable evidence;
+- structural evidence comparison without type coercion or ignored fields;
+  typed optional fields use `EvidenceAvailability`, while legitimate GitHub
+  scalar `null` values remain representable;
 - shard identities derived only by `ShardPlan`, then selected by
   `FixtureControl` rather than supplied by callers;
 - restart records produced only after a `ServiceRestartProbe` observes a

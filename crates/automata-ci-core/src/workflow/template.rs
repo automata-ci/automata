@@ -8,11 +8,89 @@ use super::{PlanExpression, WorkflowPlanError, validation::LogicalPlanBudget};
 use crate::{ExpressionInstruction, ExpressionLiteral, ExpressionProgram};
 
 /// Maximum bytes in one literal or compiled expression source.
-pub const MAX_TEMPLATE_BYTES: usize = 64 * 1024;
+// foundation-governance: parity-limit
+pub const MAX_TEMPLATE_BYTES: usize = 65_536;
 /// Maximum compiled segments in one expression template.
+// foundation-governance: parity-limit
 pub const MAX_TEMPLATE_SEGMENTS: usize = 512;
 /// Maximum declared context dependencies for one expression template.
+// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_CONTEXTS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkflowTemplateLimitRejection {
+    Bytes,
+    Segments,
+    Contexts,
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_template_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_template_byte_rejection(MAX_TEMPLATE_BYTES - 1),
+            None
+        );
+        assert_eq!(workflow_template_byte_rejection(MAX_TEMPLATE_BYTES), None);
+        assert_eq!(
+            workflow_template_byte_rejection(MAX_TEMPLATE_BYTES + 1),
+            Some(WorkflowTemplateLimitRejection::Bytes)
+        );
+    }
+    #[test]
+    fn workflow_template_segment_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS - 1),
+            None
+        );
+        assert_eq!(
+            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS),
+            None
+        );
+        assert_eq!(
+            workflow_template_segment_rejection(MAX_TEMPLATE_SEGMENTS + 1),
+            Some(WorkflowTemplateLimitRejection::Segments)
+        );
+    }
+    #[test]
+    fn expression_context_limit_has_exact_boundaries() {
+        assert_eq!(
+            expression_context_rejection(MAX_EXPRESSION_CONTEXTS - 1),
+            None
+        );
+        assert_eq!(expression_context_rejection(MAX_EXPRESSION_CONTEXTS), None);
+        assert_eq!(
+            expression_context_rejection(MAX_EXPRESSION_CONTEXTS + 1),
+            Some(WorkflowTemplateLimitRejection::Contexts)
+        );
+    }
+}
+
+pub(super) const fn workflow_template_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowTemplateLimitRejection> {
+    if observed > MAX_TEMPLATE_BYTES {
+        return Some(WorkflowTemplateLimitRejection::Bytes);
+    }
+    None
+}
+const fn workflow_template_segment_rejection(
+    observed: usize,
+) -> Option<WorkflowTemplateLimitRejection> {
+    if observed > MAX_TEMPLATE_SEGMENTS {
+        return Some(WorkflowTemplateLimitRejection::Segments);
+    }
+    None
+}
+const fn expression_context_rejection(observed: usize) -> Option<WorkflowTemplateLimitRejection> {
+    if observed > MAX_EXPRESSION_CONTEXTS {
+        return Some(WorkflowTemplateLimitRejection::Contexts);
+    }
+    None
+}
 
 /// Durable evaluation boundary for a compiled expression.
 ///
@@ -196,7 +274,7 @@ impl CompiledExpressionTemplate {
                 actual: self.phase.as_str(),
             });
         }
-        if self.contexts.len() > MAX_EXPRESSION_CONTEXTS {
+        if expression_context_rejection(self.contexts.len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "expression contexts",
                 maximum: MAX_EXPRESSION_CONTEXTS,
@@ -229,7 +307,7 @@ impl CompiledExpressionTemplate {
             self.expression.source(),
             MAX_TEMPLATE_BYTES,
         )?;
-        if self.expression.segments().len() > MAX_TEMPLATE_SEGMENTS {
+        if workflow_template_segment_rejection(self.expression.segments().len()).is_some() {
             return Err(WorkflowPlanError::LimitExceeded {
                 field: "expression segments",
                 maximum: MAX_TEMPLATE_SEGMENTS,
@@ -249,7 +327,7 @@ impl CompiledExpressionTemplate {
         }
         for segment in self.expression.segments() {
             budget.charge_node("expression segment")?;
-            if segment.source().len() > MAX_TEMPLATE_BYTES {
+            if workflow_template_byte_rejection(segment.source().len()).is_some() {
                 return Err(WorkflowPlanError::LimitExceeded {
                     field: "expression segment",
                     maximum: MAX_TEMPLATE_BYTES,

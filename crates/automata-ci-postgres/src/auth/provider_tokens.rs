@@ -22,6 +22,7 @@ use super::support::{
     is_integrity_violation, timestamp_from_milliseconds, timestamp_to_milliseconds,
 };
 
+// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const PROVIDER_TOKEN_PURPOSE: &str = "auth/provider-token:v1";
 const PROVIDER_TOKEN_PAYLOAD_SCHEMA: u8 = 1;
 

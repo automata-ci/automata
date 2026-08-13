@@ -54,8 +54,10 @@ const MAXIMUM_HMAC_KEY_BYTES: usize = 16 * 1_024;
 const MAXIMUM_RSA_PRIVATE_KEY_BYTES: usize = 64 * 1_024;
 const OIDC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_BEARER_AUDIENCE: &str = "automata-ci:github-oidc-mint";
+// foundation-governance: derived-contract owner=integration kind=digest-domain
 const SUBJECT_POLICY_FINGERPRINT_DOMAIN: &[u8] =
     b"automata/github-oidc/stable-owner-subject-policy:v1\0";
+// foundation-governance: derived-contract owner=integration kind=digest-domain
 const CONFIGURATION_FINGERPRINT_DOMAIN: &[u8] = b"automata/github-oidc/product-configuration:v1\0";
 
 const PRODUCT_SUPPORTED_CLAIMS: [&str; 11] = [

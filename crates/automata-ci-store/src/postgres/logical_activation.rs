@@ -7,7 +7,7 @@ use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{
-    PostgresStore,
+    PostgresStore, durable_schema::current_durable_schemas,
     logical_activation_preparation::load_bound_preparation_for_activation_in_transaction,
 };
 use crate::{
@@ -103,11 +103,15 @@ impl LogicalActivationRepository for PostgresStore {
         {
             return Err(LogicalActivationStoreError::ClaimRejected);
         }
+        let schemas = current_durable_schemas();
         let row = sqlx::query(claim_target_query())
             .bind(request.claim().tenant().as_str())
             .bind(request.claim().run_id().as_uuid())
             .bind(request.claim().invocation_id().as_uuid())
             .bind(request.claim().logical_job_id().as_uuid())
+            .bind(schemas.workflow_plan_i16)
+            .bind(schemas.logical_orchestration_i16)
+            .bind(schemas.workflow_plan_i32)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(operation_error)?
@@ -778,11 +782,15 @@ pub(super) async fn consume_selected_activation_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     selected: &SelectedLogicalJobOrchestration,
 ) -> Result<Option<ClaimedLogicalJobActivation>, LogicalActivationStoreError> {
+    let schemas = current_durable_schemas();
     let row = sqlx::query(claim_target_query())
         .bind(selected.target().tenant().as_str())
         .bind(selected.target().run_id().as_uuid())
         .bind(selected.target().invocation_id().as_uuid())
         .bind(selected.target().logical_job_id().as_uuid())
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -899,10 +907,11 @@ async fn lock_active_activation_graph(
     run_id: RunId,
     invocation_id: LogicalWorkflowInvocationId,
 ) -> Result<bool, LogicalActivationStoreError> {
+    let schemas = current_durable_schemas();
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 1 AND run.plan_schema = 1
+               AND run.admission_epoch = $3 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -911,6 +920,7 @@ async fn lock_active_activation_graph(
     )
     .bind(tenant.as_str())
     .bind(run_id.as_uuid())
+    .bind(schemas.workflow_plan_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -920,7 +930,7 @@ async fn lock_active_activation_graph(
     let marker_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = 1
+               AND marker.orchestration_schema = $3
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
@@ -932,6 +942,7 @@ async fn lock_active_activation_graph(
     )
     .bind(run_id.as_uuid())
     .bind(invocation_id.as_uuid())
+    .bind(schemas.logical_orchestration_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -941,7 +952,7 @@ async fn lock_active_activation_graph(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 1
+               AND invocation.plan_schema = $3
         FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
@@ -949,6 +960,7 @@ async fn lock_active_activation_graph(
     )
     .bind(run_id.as_uuid())
     .bind(invocation_id.as_uuid())
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -959,11 +971,15 @@ async fn lock_claim_target(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ClaimLogicalJobActivation,
 ) -> Result<Option<PgRow>, LogicalActivationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(claim_target_query())
         .bind(request.tenant().as_str())
         .bind(request.run_id().as_uuid())
         .bind(request.invocation_id().as_uuid())
         .bind(request.logical_job_id().as_uuid())
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -973,11 +989,15 @@ async fn lock_publication_target(
     transaction: &mut Transaction<'_, Postgres>,
     request: &PublishLogicalJobActivation,
 ) -> Result<Option<PgRow>, LogicalActivationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(claim_target_query())
         .bind(request.claim().tenant().as_str())
         .bind(request.claim().run_id().as_uuid())
         .bind(request.claim().invocation_id().as_uuid())
         .bind(request.claim().logical_job_id().as_uuid())
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1025,12 +1045,12 @@ fn claim_target_query() -> &'static str {
       AND job.invocation_id = $3
       AND job.id = $4
       AND job.execution_kind = 'steps'
-      AND invocation.plan_schema = 1
+      AND invocation.plan_schema = $5
       AND invocation.state IN ('pending', 'active')
-      AND marker.orchestration_schema = 1
+      AND marker.orchestration_schema = $6
       AND marker.state IN ('pending', 'active')
-      AND run.admission_epoch = 1
-      AND run.plan_schema = 1
+      AND run.admission_epoch = $7
+      AND run.plan_schema = $7
     FOR UPDATE OF job
     "
 }

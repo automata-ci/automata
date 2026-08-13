@@ -8,7 +8,10 @@ use automata_ci_core::{
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
-use super::{PostgresStore, workflow_runtime_policy::load_pinned_runtime_policy_for_run};
+use super::{
+    PostgresStore, durable_schema::current_durable_schemas,
+    workflow_runtime_policy::load_pinned_runtime_policy_for_run,
+};
 use crate::{
     AdmissionObject, BindLogicalActivationPreparation, ClaimLogicalActivationPreparation,
     ClaimedLogicalActivationPreparation, LogicalActivationAggregateStatus,
@@ -803,10 +806,11 @@ async fn lock_active_preparation_graph(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalActivationPreparationTarget,
 ) -> Result<bool, LogicalActivationPreparationStoreError> {
+    let schemas = current_durable_schemas();
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 1 AND run.plan_schema = 1
+               AND run.admission_epoch = $3 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -815,6 +819,7 @@ async fn lock_active_preparation_graph(
     )
     .bind(target.tenant().as_str())
     .bind(target.run_id().as_uuid())
+    .bind(schemas.workflow_plan_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -824,7 +829,7 @@ async fn lock_active_preparation_graph(
     let marker_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = 1
+               AND marker.orchestration_schema = $3
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
@@ -836,6 +841,7 @@ async fn lock_active_preparation_graph(
     )
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
+    .bind(schemas.logical_orchestration_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -845,7 +851,7 @@ async fn lock_active_preparation_graph(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 1
+               AND invocation.plan_schema = $3
         FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
@@ -853,6 +859,7 @@ async fn lock_active_preparation_graph(
     )
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1177,6 +1184,7 @@ fn build_descriptor(
     prefix: &str,
     prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
 ) -> Result<LogicalActivationPreparationDescriptor, LogicalActivationPreparationStoreError> {
+    let schemas = current_durable_schemas();
     let logical_key =
         WorkflowJobKey::new(get_string(row, prefix, "logical_key")?).map_err(corrupt_value)?;
     let source_order = u16::try_from(get_i32(row, prefix, "source_order")?)
@@ -1234,7 +1242,7 @@ fn build_descriptor(
     .map_err(corrupt_value)?;
     if !prefix.is_empty() {
         let exact = get_string(row, prefix, "base_context_kind")? == "admission"
-            && get_i16(row, prefix, "base_context_schema")? == 1
+            && get_i16(row, prefix, "base_context_schema")? == schemas.runtime_context_i16
             && usize::try_from(get_i32(row, prefix, "prerequisite_count")?).ok()
                 == Some(descriptor.prerequisites().len())
             && decode_prefixed_digest(row, prefix, "prerequisites_digest")?
@@ -1258,6 +1266,7 @@ async fn insert_claim(
     descriptor: &LogicalActivationPreparationDescriptor,
     origin_selection_id: Uuid,
 ) -> Result<bool, LogicalActivationPreparationStoreError> {
+    let schemas = current_durable_schemas();
     let rows = sqlx::query(
         r"
         INSERT INTO logical_workflow_activation_preparation_claims (
@@ -1278,7 +1287,7 @@ async fn insert_claim(
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
             $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-            'admission',$27,$28,$29,$30,1,$31,$32,$33,$34,$35,
+            'admission',$27,$28,$29,$30,$42,$31,$32,$33,$34,$35,
             $36,$37,'preparing',$38,1,$39,$40,$39,$39,$41
         )
         ON CONFLICT (logical_job_id) DO NOTHING
@@ -1332,6 +1341,7 @@ async fn insert_claim(
     .bind(request.observed_at().get())
     .bind(request.expires_at().get())
     .bind(origin_selection_id)
+    .bind(schemas.runtime_context_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -1440,6 +1450,7 @@ async fn insert_binding(
     request: &BindLogicalActivationPreparation,
 ) -> Result<(), LogicalActivationPreparationStoreError> {
     let claim_origin_selection_id = request.claim().selection_origin();
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO logical_workflow_activation_preparations (
@@ -1455,7 +1466,7 @@ async fn insert_binding(
             runtime_policy_revision, runtime_policy_digest,
             claim_origin_selection_id
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,$13,1,
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$23,$10,$11,$12,$13,$23,
             $14,$15,$16,$17,$18,$19,$20,$21,$22
         )
         ",
@@ -1511,6 +1522,7 @@ async fn insert_binding(
             .as_slice(),
     )
     .bind(claim_origin_selection_id.as_uuid())
+    .bind(schemas.runtime_context_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

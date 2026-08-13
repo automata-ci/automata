@@ -7,14 +7,15 @@ use automata_ci_core::{
     LogicalJobOutputSource, LogicalJobTemplate, LogicalOutputMergePolicy, LogicalResultReference,
     LogicalResultValue, LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind,
     LogicalStepTemplate, LogicalTimeoutTemplate, LogicalTimeoutUnit, MAX_INVOCATION_DEFINITIONS,
-    MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES, MAX_TEMPLATE_BYTES, MatrixAxis, MatrixAxisValues,
-    MatrixPatch, MatrixPatchSet, MatrixTemplate, MatrixValue, MatrixValueTemplate,
-    OutputSensitivity, PlanEvaluationPhase, PlanExpression, PlanSourceLocation, PlanSourceOrigin,
-    PlanSourceSpan, ReusableInputBinding, ReusableSecretBinding, ReusableSecretForwarding,
-    ReusableWorkflowInvocation, StepJobTemplate, WORKFLOW_PLAN_SCHEMA_VERSION,
-    WorkflowEventProvenance, WorkflowInputKey, WorkflowInvocationContract, WorkflowJobKey,
-    WorkflowOutputDefinition, WorkflowOutputKey, WorkflowPlan, WorkflowPlanVersion,
-    WorkflowSecretKey, WorkflowSourceProvenance, WorkflowStepKey, WorkflowStrategyTemplate,
+    MAX_MATRIX_EXPANSION, MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES, MAX_TEMPLATE_BYTES, MatrixAxis,
+    MatrixAxisValues, MatrixPatch, MatrixPatchSet, MatrixTemplate, MatrixValue,
+    MatrixValueTemplate, OutputSensitivity, PlanEvaluationPhase, PlanExpression,
+    PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, ReusableInputBinding,
+    ReusableSecretBinding, ReusableSecretForwarding, ReusableWorkflowInvocation, StepJobTemplate,
+    WORKFLOW_PLAN_SCHEMA_VERSION, WorkflowEventProvenance, WorkflowInputKey,
+    WorkflowInvocationContract, WorkflowJobKey, WorkflowOutputDefinition, WorkflowOutputKey,
+    WorkflowPlan, WorkflowPlanVersion, WorkflowSecretKey, WorkflowSourceProvenance,
+    WorkflowStepKey, WorkflowStrategyTemplate,
 };
 
 fn span() -> PlanSourceSpan {
@@ -401,6 +402,66 @@ fn only_the_current_version_and_required_logical_body_decode() {
 }
 
 #[test]
+fn nested_expression_and_strategy_versions_fail_closed() {
+    fn collect_nested_versions(
+        value: &serde_json::Value,
+        path: &mut Vec<String>,
+        found: &mut Vec<Vec<String>>,
+    ) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, child) in fields {
+                    path.push(key.clone());
+                    if key == "version" && path.len() > 1 {
+                        found.push(path.clone());
+                    }
+                    collect_nested_versions(child, path, found);
+                    path.pop();
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    path.push(index.to_string());
+                    collect_nested_versions(child, path, found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn replace_at_path(value: &mut serde_json::Value, path: &[String]) {
+        let mut current = value;
+        for component in &path[..path.len() - 1] {
+            current = match current {
+                serde_json::Value::Object(fields) => &mut fields[component],
+                serde_json::Value::Array(values) => {
+                    &mut values[component.parse::<usize>().expect("array index")]
+                }
+                _ => panic!("version path traverses a scalar"),
+            };
+        }
+        current[&path[path.len() - 1]] = serde_json::json!(2);
+    }
+
+    let encoded = serde_json::to_value(valid_plan()).expect("serialize");
+    let mut paths = Vec::new();
+    collect_nested_versions(&encoded, &mut Vec::new(), &mut paths);
+    assert!(
+        paths.len() >= 2,
+        "fixture must bind workflow expression and strategy versions"
+    );
+    for path in paths {
+        let mut noncurrent = encoded.clone();
+        replace_at_path(&mut noncurrent, &path);
+        assert!(
+            serde_json::from_value::<WorkflowPlan>(noncurrent).is_err(),
+            "nested workflow contract version must fail closed at {path:?}"
+        );
+    }
+}
+
+#[test]
 fn phase_and_declared_context_availability_are_revalidated() {
     let mut encoded = serde_json::to_value(valid_plan()).expect("serialize");
     encoded["logical"]["jobs"][1]["condition"]["value"]["phase"] = serde_json::json!("admission");
@@ -463,6 +524,28 @@ fn matrix_limits_and_source_order_are_enforced_before_activation() {
     let mut noncanonical_order = serde_json::to_value(valid_plan()).expect("serialize");
     noncanonical_order["logical"]["jobs"][1]["source_order"] = serde_json::json!(7);
     assert!(serde_json::from_value::<WorkflowPlan>(noncanonical_order).is_err());
+}
+
+#[test]
+fn matrix_expansion_limit_accepts_minus_one_and_boundary_but_rejects_plus_one() {
+    let matrix = MatrixTemplate::new(
+        vec![matrix_axis("axis", vec![MatrixValue::Boolean(true)])],
+        MatrixPatchSet::Static(Vec::new()),
+        MatrixPatchSet::Static(Vec::new()),
+        span(),
+    );
+    let boundary = u16::try_from(MAX_MATRIX_EXPANSION).expect("matrix limit fits u16");
+    assert!(
+        serde_json::from_value::<WorkflowPlan>(plan_value_with_matrix(&matrix, boundary - 1))
+            .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<WorkflowPlan>(plan_value_with_matrix(&matrix, boundary)).is_ok()
+    );
+    assert!(
+        serde_json::from_value::<WorkflowPlan>(plan_value_with_matrix(&matrix, boundary + 1))
+            .is_err()
+    );
 }
 
 #[test]

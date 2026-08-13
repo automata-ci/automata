@@ -25,7 +25,17 @@ use crate::{
     WorkflowRuntimePolicyRevision, WorkflowSnapshotId,
 };
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
+
+const AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION: i16 = 1;
+
+const fn authenticated_event_envelope_schema_is_current(version: i16) -> bool {
+    version == AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
+}
+
+fn workflow_plan_schema_is_current(version: i16) -> bool {
+    version == current_durable_schemas().workflow_plan_i16
+}
 
 #[derive(Debug)]
 struct CurrentManifestPin {
@@ -251,6 +261,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     require_exact_github_record_authority(transaction, request).await?;
     let subject_id = ensure_workflow_check_subject(transaction, request).await?;
     let subject_id = link_exact_check_to_run(transaction, request, subject_id).await?;
+    let schemas = current_durable_schemas();
     let inserted = sqlx::query(
         r"
         INSERT INTO github_workflow_run_subject_evidence (
@@ -396,8 +407,8 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
               evidence.authenticated_event_git_ref,
               manifest.git_ref
           )
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $24
+          AND run.plan_schema = $24
           AND run.plan_schema = invocation.plan_schema
           AND run.plan_digest = $16
           AND run.plan_digest = invocation.plan_digest
@@ -442,6 +453,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     .bind(request.admission_claim().claim().fence_i64())
     .bind(request.admission_claim().claimed_at().get())
     .bind(request.admission_claim().expires_at().get())
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -802,6 +814,7 @@ async fn link_exact_check_to_run(
     request: &RecordGithubWorkflowRunSubjectEvidence,
     subject_id: GithubCheckSubjectId,
 ) -> Result<GithubCheckSubjectId, GithubSubjectEvidenceStoreError> {
+    let schemas = current_durable_schemas();
     let subject_id = sqlx::query_scalar::<_, Uuid>(
         r"
         UPDATE github_check_subjects AS subject
@@ -868,8 +881,8 @@ async fn link_exact_check_to_run(
               manifest.git_ref
           )
           AND run.git_ref = $11
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $24
+          AND run.plan_schema = $24
           AND run.plan_digest = $12
           AND run.created_at_ms = $4
           AND workflow.repository_id = run.repository_id
@@ -945,6 +958,7 @@ async fn link_exact_check_to_run(
     .bind(request.admission_claim().claimed_at().get())
     .bind(request.admission_claim().expires_at().get())
     .bind(subject_id.as_uuid())
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -1173,7 +1187,7 @@ async fn insert_pending_repository_dispatch(
             private_source_authority_app_configuration_revision,
             private_source_authority_policy_revision
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,1,'repository_dispatch',$10,
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$19,'repository_dispatch',$10,
             $11,$12,$13,$14,$15,$16,$17,$18
         )
         ",
@@ -1202,6 +1216,7 @@ async fn insert_pending_repository_dispatch(
     .bind(private_digest)
     .bind(private_app_revision)
     .bind(private_policy_revision)
+    .bind(AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1274,7 +1289,7 @@ async fn insert_resolved_repository_dispatch_evidence(
             private_source_authority_policy_revision,
             github_check_subject_id, github_check_head_sha
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$26,
             'repository_dispatch',$14,$15,$16,$17,$18,$19,$20,$21,$22,
             $23,$24,$25,$15
         )
@@ -1322,6 +1337,7 @@ async fn insert_resolved_repository_dispatch_evidence(
     .bind(private_app_revision)
     .bind(private_policy_revision)
     .bind(subject_id)
+    .bind(AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1422,7 +1438,6 @@ async fn insert_delivery_evidence(
         .as_ref()
         .map(|selector| selector.policy_revision().as_i64());
     let authenticated_event = request.authenticated_event();
-    let authenticated_event_version = 1_i16;
     let authenticated_event_name = authenticated_event.kind().as_str();
     let authenticated_event_git_ref = authenticated_event.git_ref();
     let result = sqlx::query(
@@ -1470,7 +1485,7 @@ async fn insert_delivery_evidence(
             .as_slice(),
     )
     .bind(request.authenticated_webhook_verifier_revision().as_i64())
-    .bind(authenticated_event_version)
+    .bind(AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION)
     .bind(authenticated_event_name)
     .bind(authenticated_event_git_ref)
     .bind(pin.checks_authority.authority_id().as_uuid())
@@ -1753,7 +1768,9 @@ fn decode_pending_repository_dispatch(
     let git_ref: String = row
         .try_get("authenticated_event_git_ref")
         .map_err(operation_error)?;
-    if version != 1 || event_name != GithubAuthenticatedEventKind::RepositoryDispatch.as_str() {
+    if !authenticated_event_envelope_schema_is_current(version)
+        || event_name != GithubAuthenticatedEventKind::RepositoryDispatch.as_str()
+    {
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
     let event =
@@ -2002,7 +2019,9 @@ fn decode_delivery_event_evidence(
         source_revision,
         source_authority,
     ) {
-        (Some(1), Some(event_name), Some(git_ref), None, None) => {
+        (Some(version), Some(event_name), Some(git_ref), None, None)
+            if authenticated_event_envelope_schema_is_current(version) =>
+        {
             let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
             if kind == GithubAuthenticatedEventKind::RepositoryDispatch {
@@ -2025,12 +2044,12 @@ fn decode_delivery_event_evidence(
             )
         }
         (
-            Some(1),
+            Some(version),
             Some(event_name),
             Some(git_ref),
             Some(source_revision),
             Some(source_authority),
-        ) => {
+        ) if authenticated_event_envelope_schema_is_current(version) => {
             let kind = GithubAuthenticatedEventKind::from_durable(&event_name)
                 .filter(|kind| *kind == GithubAuthenticatedEventKind::RepositoryDispatch)
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
@@ -2059,6 +2078,28 @@ fn decode_delivery_event_evidence(
         _ => return Err(GithubSubjectEvidenceStoreError::CorruptData),
     };
     result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::{
+        AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION, authenticated_event_envelope_schema_is_current,
+    };
+
+    #[test]
+    fn authenticated_event_envelope_rejects_noncurrent_schemas() {
+        assert!(authenticated_event_envelope_schema_is_current(
+            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
+        ));
+        for version in [
+            0,
+            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
+                .checked_add(1)
+                .expect("schema version has room for a forward-version test"),
+        ] {
+            assert!(!authenticated_event_envelope_schema_is_current(version));
+        }
+    }
 }
 
 async fn load_run_evidence<'e, E>(
@@ -2147,7 +2188,7 @@ fn decode_run_evidence(
     let plan_schema: i16 = row
         .try_get("workflow_plan_schema")
         .map_err(operation_error)?;
-    if plan_schema != 1 {
+    if !workflow_plan_schema_is_current(plan_schema) {
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
     let request = RecordGithubWorkflowRunSubjectEvidence::new(

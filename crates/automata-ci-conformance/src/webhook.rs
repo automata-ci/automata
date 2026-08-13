@@ -4,6 +4,9 @@ use thiserror::Error;
 
 use crate::catalog::hex_digest;
 
+// foundation-governance: operational-limit
+const MAX_RAW_WEBHOOK_BODY_BYTES: usize = 25 * 1_048_576;
+
 /// Exact webhook bytes and headers injected into product ingress.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -53,7 +56,7 @@ impl RawWebhookFixture {
         {
             return Err(RawWebhookFixtureError::InvalidSignature);
         }
-        if body.is_empty() || body.len() > 25 * 1_048_576 {
+        if body.is_empty() || body.len() > MAX_RAW_WEBHOOK_BODY_BYTES {
             return Err(RawWebhookFixtureError::InvalidBody);
         }
         let body_sha256 = hex_digest(&Sha256::digest(&body));

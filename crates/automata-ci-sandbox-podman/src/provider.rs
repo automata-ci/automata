@@ -35,7 +35,7 @@ use crate::{
     provider_error,
     service::{ServiceHealthExpectation, ServiceManifest, ServiceManifestEntry},
     service_proxy::{
-        ENTRYPOINT as SERVICE_PROXY_ENTRYPOINT, SERVE_COMMAND as SERVICE_PROXY_SERVE_COMMAND,
+        ENTRYPOINT as SERVICE_PROXY_ENTRYPOINT, SERVICE_PROXY_SERVE_COMMAND,
         mapping_argument as service_proxy_mapping_argument,
         parse_service_address as parse_proxy_service_address,
         parse_status as parse_service_proxy_status,
@@ -62,6 +62,14 @@ const SERVICE_PROXY_CONFIG_FORMAT: &str =
 const CONTAINER_POD_FORMAT: &str = "{{.Pod}}";
 const POD_INFRA_CONTAINER_FORMAT: &str = "{{.InfraContainerID}}";
 const JOB_NETWORK_SYSCTL: &str = "net.ipv4.ip_unprivileged_port_start=0";
+
+#[cfg(any(target_os = "linux", test))]
+const fn buildkit_configuration_is_admissible(
+    engine: JobContainerEngine,
+    buildkit_configured: bool,
+) -> bool {
+    !buildkit_configured || matches!(engine, JobContainerEngine::AttemptScopedDockerApi)
+}
 const CREATE_COMMAND_FORMAT: &str = "{{json .CreateCommand}}";
 const ENDPOINT_CAPABILITIES: [SandboxCapability; 6] = [
     SandboxCapability::Exec,
@@ -176,9 +184,10 @@ impl RootlessPodmanProvider {
             if options.job_container_engine() == JobContainerEngine::AttemptScopedDockerApi {
                 declared_capabilities.push(SandboxCapability::DockerCompatibleApi);
             }
-            if options.buildkit_runtime().is_some()
-                && options.job_container_engine() != JobContainerEngine::AttemptScopedDockerApi
-            {
+            if !buildkit_configuration_is_admissible(
+                options.job_container_engine(),
+                options.buildkit_runtime().is_some(),
+            ) {
                 return Err(crate::PodmanConfigurationError::BuildKitUnavailable.into());
             }
             let capabilities = ProviderCapabilities::new(declared_capabilities.clone())
@@ -4862,4 +4871,25 @@ pub(crate) fn endpoint_error_from_provider(
         | ProviderErrorKind::InvalidState => ExecutionErrorKind::BackendRejected,
     };
     ExecutionError::new(kind, stage)
+}
+
+#[cfg(test)]
+mod capability_contract_tests {
+    use super::*;
+
+    #[test]
+    fn buildkit_configuration_requires_the_attempt_scoped_docker_api() {
+        assert!(buildkit_configuration_is_admissible(
+            JobContainerEngine::Disabled,
+            false,
+        ));
+        assert!(!buildkit_configuration_is_admissible(
+            JobContainerEngine::Disabled,
+            true,
+        ));
+        assert!(buildkit_configuration_is_admissible(
+            JobContainerEngine::AttemptScopedDockerApi,
+            true,
+        ));
+    }
 }

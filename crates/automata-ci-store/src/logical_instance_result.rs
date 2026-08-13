@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::{
     LogicalActivationObject, LogicalWorkflowInstanceId, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, MAX_TERMINAL_RESULT_BYTES, ObjectKey, StoreError, TenantScope,
+    LogicalWorkflowJobId, ObjectKey, StoreError, TenantScope,
+    value::terminal_result_bytes_rejection,
 };
 
 /// Exact media type of the current runner terminal-result object.
@@ -28,10 +29,14 @@ pub const LOGICAL_INSTANCE_RESULT_MEDIA_TYPE: &str = "application/vnd.automata.j
 /// Maximum duration of one logical-instance result claim.
 pub const MAX_LOGICAL_INSTANCE_RESULT_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-descriptor.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const SERVER_CANCELLATION_DESCRIPTOR_DOMAIN: &[u8] =
     b"automata.store.logical-instance-result.server-cancellation.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const OUTPUTS_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-outputs.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-commit.v1\0";
 
 /// Positive server-assigned completion order within one logical job.
@@ -320,7 +325,7 @@ impl LogicalTerminalResultObject {
         if schema != CORE_SCHEMA_VERSION {
             return Err(LogicalInstanceResultValueError::InvalidResultObject);
         }
-        if encoded_size == 0 || encoded_size > MAX_TERMINAL_RESULT_BYTES {
+        if encoded_size == 0 || terminal_result_bytes_rejection(encoded_size).is_some() {
             return Err(LogicalInstanceResultValueError::InvalidResultObject);
         }
         Ok(Self {

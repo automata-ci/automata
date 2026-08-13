@@ -14,7 +14,8 @@
     {
       "bytes": 67443,
       "categories": [
-        "events"
+        "events",
+        "limits"
       ],
       "id": "github-docs-events",
       "sha256": "b37e685c1bfc1302bea89b4df20046bb201c379b16a14924becf72ac04d03b33",
@@ -42,6 +43,7 @@
     {
       "bytes": 72444,
       "categories": [
+        "limits",
         "permissions",
         "syntax"
       ],

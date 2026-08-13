@@ -37,7 +37,9 @@ pub const MAX_GITHUB_SCHEDULE_CLAIM_MILLIS: i64 = 5 * 60 * 1_000;
 /// Maximum retry delay for one fire.
 pub const MAX_GITHUB_SCHEDULE_RETRY_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const ENTRY_DIGEST_DOMAIN: &[u8] = b"automata.store.github-schedule-entry.v1\0";
+// foundation-governance: derived-contract owner=store kind=digest-domain
 const INVENTORY_DIGEST_DOMAIN: &[u8] = b"automata.store.github-schedule-inventory.v1\0";
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_OBJECT_KEY_BYTES: usize = 1_024;
