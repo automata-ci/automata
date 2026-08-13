@@ -2,16 +2,16 @@ mod support;
 
 use automata_ci_core::{ContextValue, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubEventMetadataV1,
+    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubEventMetadata,
     GithubWorkflowCompiler, GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputType,
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsError,
-    GithubWorkflowDispatchInputsV1, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
+    GithubWorkflowDispatchInputsError, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
 };
 
 const JOB: &str = "jobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: true\n";
 
-fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputsV1>) -> CompilationReport {
+fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputs>) -> CompilationReport {
     let parsed = support::parse(source);
     assert!(
         parsed.is_accepted(),
@@ -26,9 +26,7 @@ fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputsV1>) -> Comp
             .with_git_ref("refs/heads/main"),
     );
     let request = match inputs {
-        Some(inputs) => {
-            request.with_event_metadata_v1(GithubEventMetadataV1::workflow_dispatch(inputs))
-        }
+        Some(inputs) => request.with_event_metadata(GithubEventMetadata::workflow_dispatch(inputs)),
         None => request,
     };
     GithubWorkflowCompiler::new().compile(request)
@@ -36,8 +34,8 @@ fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputsV1>) -> Comp
 
 fn payload(
     values: impl IntoIterator<Item = (&'static str, GithubWorkflowDispatchInputValue)>,
-) -> GithubWorkflowDispatchInputsV1 {
-    GithubWorkflowDispatchInputsV1::try_new(values).expect("bounded synthetic payload")
+) -> GithubWorkflowDispatchInputs {
+    GithubWorkflowDispatchInputs::try_new(values).expect("bounded synthetic payload")
 }
 
 fn assert_rejected_with(report: &CompilationReport, code: &str) {
@@ -219,7 +217,7 @@ fn malformed_or_unsupported_source_contracts_are_rejected() {
 
 #[test]
 fn verified_payload_wrapper_enforces_canonical_resource_bounds() {
-    let redacted = GithubWorkflowDispatchInputsV1::try_new([("token", "private-value")])
+    let redacted = GithubWorkflowDispatchInputs::try_new([("token", "private-value")])
         .expect("bounded payload");
     let debug = format!("{redacted:?}");
     assert!(!debug.contains("private-value"));
@@ -228,19 +226,19 @@ fn verified_payload_wrapper_enforces_canonical_resource_bounds() {
     let too_many =
         (0..=MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS).map(|index| (format!("input_{index}"), "value"));
     assert_eq!(
-        GithubWorkflowDispatchInputsV1::try_new(too_many),
+        GithubWorkflowDispatchInputs::try_new(too_many),
         Err(GithubWorkflowDispatchInputsError::TooManyInputs)
     );
     assert_eq!(
-        GithubWorkflowDispatchInputsV1::try_new([("duplicate", "first"), ("duplicate", "second")]),
+        GithubWorkflowDispatchInputs::try_new([("duplicate", "first"), ("duplicate", "second")]),
         Err(GithubWorkflowDispatchInputsError::DuplicateInputKey)
     );
     assert_eq!(
-        GithubWorkflowDispatchInputsV1::try_new([(" invalid ", "value")]),
+        GithubWorkflowDispatchInputs::try_new([(" invalid ", "value")]),
         Err(GithubWorkflowDispatchInputsError::InvalidInputKey)
     );
     assert_eq!(
-        GithubWorkflowDispatchInputsV1::try_new([(
+        GithubWorkflowDispatchInputs::try_new([(
             "value",
             "x".repeat(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)
         )]),
@@ -291,10 +289,10 @@ fn configured_dispatch_replay_accepts_exact_durable_input_evidence() {
 
     let parsed = support::parse(&source);
     let replay = GithubWorkflowCompiler::new().compile(
-        CompileWorkflowRequest::for_preselected_event_with_metadata_v1(
+        CompileWorkflowRequest::for_preselected_event_with_metadata(
             parsed.plan().expect("source plan"),
             initial.plan().expect("initial plan").event().clone(),
-            GithubEventMetadataV1::workflow_dispatch(durable_inputs),
+            GithubEventMetadata::workflow_dispatch(durable_inputs),
         ),
     );
     assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());

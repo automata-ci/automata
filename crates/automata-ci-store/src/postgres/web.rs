@@ -1315,7 +1315,6 @@ fn decode_log_stream(row: &PgRow) -> Result<HumanLogStream, StoreError> {
         .as_str()
     {
         "persist" => HumanRawLogDisposition::Persist,
-        "suppress_user_output" => HumanRawLogDisposition::SuppressUserOutput,
         _ => {
             return Err(StoreError::corrupt_data(
                 "attempt log raw-output disposition is unknown",

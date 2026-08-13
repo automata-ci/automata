@@ -85,7 +85,7 @@ const RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a","id":"github/ubuntu-24-04"},
     "selector":"ubuntu-latest"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
+  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 const WORKFLOW_SOURCE: &str = r"name: Autonomous CI
@@ -3210,7 +3210,7 @@ async fn malformed_and_noncanonical_runtime_contexts_quarantine_before_renewal_o
             load_activation_blob(&harness.blobs.inner, descriptor.runtime_context()).await;
         let (key, corrupted) = if noncanonical {
             let mut encoded = canonical.to_vec();
-            encoded.extend_from_slice(&[0x08, 0x02]);
+            encoded.extend_from_slice(&[0xf8, 0x07, 0x01]);
             let decoded = automata_ci_protocol_protobuf::decode_job_runtime_context(
                 &encoded,
                 &ProtocolLimits::default(),

@@ -5,8 +5,8 @@ use automata_ci_blob::BlobStoreErrorKind;
 use automata_ci_store::{LogicalWorkflowAdmissionStoreError, StoreError};
 use automata_ci_workflow_service::{
     DurableGithubWorkflowDispatchRequest, GithubWorkflowDispatchError,
-    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsV1,
-    GithubWorkflowDispatchService, WorkflowAdmissionError, WorkflowDispatchAuthorization,
+    GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs, GithubWorkflowDispatchService,
+    WorkflowAdmissionError, WorkflowDispatchAuthorization,
 };
 
 use crate::app::workflow_dispatch_api::{
@@ -60,7 +60,7 @@ impl WorkflowDispatchApiBackend for OperationalWorkflowDispatchBackend {
                 (key.as_str().to_owned(), value)
             })
             .collect::<Vec<_>>();
-        let inputs = GithubWorkflowDispatchInputsV1::try_new(inputs)
+        let inputs = GithubWorkflowDispatchInputs::try_new(inputs)
             .map_err(|_| WorkflowDispatchApiBackendError::InvalidRequest)?;
         let dispatch = DurableGithubWorkflowDispatchRequest::new(
             authorization,

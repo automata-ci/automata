@@ -37,20 +37,23 @@ fn tombstone_reasons_are_closed_stable_and_sanitized() {
 }
 
 #[test]
-fn migration_is_one_way_bounded_and_preserves_delivery_rows() {
-    assert!(MIGRATION.contains("payload_tombstone_reason IN ("));
-    assert!(MIGRATION.contains("'acknowledged', 'session_closed', 'session_superseded'"));
-    assert!(MIGRATION.contains("payload_tombstoned_at_ms >= created_at_ms"));
-    assert!(MIGRATION.contains("payload_tombstoned_at_ms >= committed_at_ms"));
-    assert!(MIGRATION.contains("runner_command_outbox_tombstone_immutable"));
-    assert!(MIGRATION.contains("runner_rpc_receipts_tombstone_immutable"));
-    assert!(MIGRATION.contains("runner_session_payload_retention"));
-    assert!(MIGRATION.contains("runner_cancellation_payload_retention"));
-    assert!(MIGRATION.contains("attempt_cancellation_intents IN ACCESS EXCLUSIVE MODE"));
-    assert!(MIGRATION.contains("runner_payload_tombstones_preexisting_expired_payloads"));
-    assert!(!MIGRATION.contains("DELETE FROM runner_command_outbox"));
-    assert!(!MIGRATION.contains("DELETE FROM runner_rpc_receipts"));
-    assert!(!MIGRATION.contains("DROP CONSTRAINT attempt_cancellation_delivery_command"));
-    assert!(!MIGRATION.contains("DROP CONSTRAINT runner_lease_offer_publications_command"));
+fn initial_schema_defines_bounded_tombstones_without_rewrite_paths() {
+    let normalized = MIGRATION.to_ascii_lowercase();
+    assert!(normalized.contains("runner_command_outbox_payload_lifecycle"));
+    assert!(normalized.contains("runner_rpc_receipts_payload_lifecycle"));
+    assert!(normalized.contains("payload_tombstone_reason = any (array["));
+    for reason in ["acknowledged", "session_closed", "session_superseded"] {
+        assert!(normalized.contains(&format!("'{reason}'::text")));
+    }
+    assert!(normalized.contains("payload_tombstoned_at_ms >= created_at_ms"));
+    assert!(normalized.contains("payload_tombstoned_at_ms >= committed_at_ms"));
+    assert!(normalized.contains("runner_command_outbox_tombstone_immutable"));
+    assert!(normalized.contains("runner_rpc_receipts_tombstone_immutable"));
+    assert!(normalized.contains("runner_session_payload_retention"));
+    assert!(normalized.contains("runner_cancellation_payload_retention"));
+    assert!(!normalized.contains("delete from runner_command_outbox"));
+    assert!(!normalized.contains("delete from runner_rpc_receipts"));
+    assert!(!normalized.contains("drop constraint attempt_cancellation_delivery_command"));
+    assert!(!normalized.contains("drop constraint runner_lease_offer_publications_command"));
     assert!(OBSERVABILITY.contains("WHERE command.payload_tombstone_reason IS NULL"));
 }

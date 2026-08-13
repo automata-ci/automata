@@ -15,9 +15,10 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
-    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
-    GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
+    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
@@ -48,12 +49,14 @@ use automata_ci_store::{
     ProviderDeliveryClaimRenewalRepository, ProviderDeliveryFailureKind, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RejectProviderDelivery,
-    RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
-    RetryProviderDelivery, TenantScope,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
+    RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
+    RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
 };
-use automata_ci_workflow_github::GithubChangedFilesV1;
+use automata_ci_workflow_github::GithubChangedFiles;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -551,7 +554,7 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.observations
             .lock()
@@ -570,7 +573,7 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
             self.renewal_apply_gate.mark_downstream_result_ready();
             return Err(first_error);
         }
-        Ok(GithubChangedFilesV1::complete(["README.md"]))
+        Ok(GithubChangedFiles::complete(["README.md"]))
     }
 }
 
@@ -934,6 +937,8 @@ struct RecordingRepository {
     completions: Mutex<Vec<CompleteProviderDelivery>>,
     retries: Mutex<Vec<RetryProviderDelivery>>,
     rejections: Mutex<Vec<RejectProviderDelivery>>,
+    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
+    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
     terminal_entered: Notify,
     terminal_release: CancellationToken,
     renewal_apply_gate: Arc<RenewalApplyGate>,
@@ -1045,6 +1050,56 @@ impl ProviderDeliveryRepository for RecordingRepository {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
         Ok(self.receipt(ProviderDeliveryState::Completed))
+    }
+
+    async fn register_provider_delivery_workflow_inventory(
+        &self,
+        request: RegisterProviderDeliveryWorkflowInventory,
+    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
+        let mut inventory = self.inventory.lock().expect("inventory lock");
+        match inventory.as_ref() {
+            Some(existing) if existing != request.inventory() => {
+                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+            }
+            Some(_) => {}
+            None => *inventory = Some(request.inventory().clone()),
+        }
+        ProviderDeliveryWorkflowInventoryReceipt::new(
+            inventory.as_ref().expect("inventory initialized").clone(),
+            self.progress.lock().expect("progress lock").clone(),
+        )
+        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+    }
+
+    async fn record_provider_delivery_workflow_progress(
+        &self,
+        request: RecordProviderDeliveryWorkflowProgress,
+    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
+        let inventory = self.inventory.lock().expect("inventory lock");
+        let Some(inventory) = inventory.as_ref() else {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        };
+        if inventory.digest() != request.inventory_digest()
+            || !inventory
+                .entries()
+                .iter()
+                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
+        {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+        let mut progress = self.progress.lock().expect("progress lock");
+        if let Some(existing) = progress
+            .iter()
+            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
+        {
+            return if existing == request.outcome() {
+                Ok(existing.clone())
+            } else {
+                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
+            };
+        }
+        progress.push(request.outcome().clone());
+        Ok(request.outcome().clone())
     }
 
     async fn retry_provider_delivery(
@@ -1257,6 +1312,8 @@ fn blocking_clock_harness(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate,
@@ -1381,6 +1438,8 @@ fn harness_with_stored_visibility(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1474,6 +1533,8 @@ fn snapshot_processor_harness_with_config(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1557,6 +1618,8 @@ fn changed_files_renewal_harness(
         completions: Mutex::new(Vec::new()),
         retries: Mutex::new(Vec::new()),
         rejections: Mutex::new(Vec::new()),
+        inventory: Mutex::new(None),
+        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1738,18 +1801,18 @@ fn delivery_template(
 ) -> (DeliveryTemplate, BlobDescriptor, Bytes) {
     let body = push_body(stored_visibility, deleted);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/push/sha256/{digest}.json");
+    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
         u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE).expect("media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
     let raw_event = AdmissionObject::new(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
-        GITHUB_PUSH_EVENT_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery ID");
@@ -2056,7 +2119,7 @@ async fn public_only_service_rehydrates_private_identity_before_applying_source_
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_push"
+        "github.raw_event.invalid_event"
     );
 }
 
@@ -2093,7 +2156,7 @@ async fn public_only_service_rejects_private_payload_before_anonymous_source() {
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_push"
+        "github.raw_event.invalid_event"
     );
 }
 

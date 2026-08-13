@@ -46,10 +46,10 @@ use automata_ci_store::{
     CommandCursor as StoreCommandCursor, CommandReplayDisposition,
     CommandSequence as StoreCommandSequence, DocumentSchema, DurableRunnerCommand,
     EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, LeaseRequestCompletion,
-    LeaseRequestKey, LeaseResponseAction, ObjectKey, RawLogDisposition, RevokedLeaseOfferFallback,
-    RoutingDocument, RunnerCommandOutbox as _, RunnerCommandPayload, RunnerGeneration,
-    RunnerOperationKind, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
-    RunnerSessionSnapshot, SessionEpoch, StableRunnerSlot,
+    LeaseRequestKey, LeaseResponseAction, ObjectKey, RevokedLeaseOfferFallback, RoutingDocument,
+    RunnerCommandOutbox as _, RunnerCommandPayload, RunnerGeneration, RunnerOperationKind,
+    RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot,
+    SessionEpoch, StableRunnerSlot,
 };
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -567,7 +567,8 @@ fn test_offer_response(
     lease: Lease,
 ) -> ServerToRunner {
     let authorities = claimed_runtime_authorities(&job, &lease);
-    ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
+    let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
+    let offer = LeaseOffer::new(
         ServerCommandHeader::new(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -578,7 +579,10 @@ fn test_offer_response(
         lease,
         job,
         authorities,
-    )))
+    )
+    .with_managed_secret_bindings(empty_overlay)
+    .expect("canonical managed-secret overlay");
+    ServerToRunner::LeaseOffer(Box::new(offer))
 }
 
 fn durable_test_response(response: &ServerToRunner) -> RunnerOperationResponse {
@@ -890,8 +894,8 @@ async fn retryable_claim_offer_failures_leave_the_current_poll_head_incomplete()
 }
 
 #[tokio::test]
-async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape() {
-    for schema in [2_u16, 3] {
+async fn durable_offer_replays_decode_their_exact_secret_overlay_shape() {
+    for include_binding in [false, true] {
         let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
         let fence = install_session(&harness, runner_id, generation);
         let slot = RunnerSlotOrdinal::new(1).expect("slot");
@@ -918,9 +922,7 @@ async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape
         .expect("managed-secret overlay");
         let operation_id = OperationId::new();
         let sequence = CommandSequence::new(1).expect("sequence");
-        let command = if schema == 2 {
-            test_offer_command(fence, operation_id, sequence, slot, &job, &lease)
-        } else {
+        let command = if include_binding {
             test_offer_command_with_bindings(
                 fence,
                 operation_id,
@@ -930,6 +932,8 @@ async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape
                 &lease,
                 &overlay,
             )
+        } else {
+            test_offer_command(fence, operation_id, sequence, slot, &job, &lease)
         };
         harness
             .commands
@@ -950,12 +954,15 @@ async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape
 
         let ServerToRunner::LeaseOffer(replayed) = exchange(&harness, &identity, &request).await
         else {
-            panic!("schema {schema} durable lease offer");
+            panic!("canonical durable lease offer");
         };
-        if schema == 2 {
-            assert_eq!(replayed.managed_secret_bindings(), None);
-        } else {
+        if include_binding {
             assert_eq!(replayed.managed_secret_bindings(), Some(&overlay));
+        } else {
+            assert_eq!(
+                replayed.managed_secret_bindings(),
+                Some(&ManagedSecretBindingOverlay::empty(&lease))
+            );
         }
     }
 }
@@ -2510,123 +2517,6 @@ async fn unsupported_current_variant_returns_sanitized_error_without_mutation() 
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn suppressed_user_and_mixed_log_batches_never_reach_blob_or_sql_commit() {
-    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
-    let fence = install_session(&harness, runner_id, generation);
-    *harness
-        .transactions
-        .log_secret_exposure
-        .lock()
-        .expect("log exposure lock") = SecretExposureClass::ReadableSecret;
-    *harness
-        .transactions
-        .raw_log_disposition
-        .lock()
-        .expect("raw log disposition lock") = RawLogDisposition::SuppressUserOutput;
-    let attempt_id = AttemptId::new();
-    let guard = LeaseGuard::new(LeaseId::new(), FencingToken::new(1).expect("fencing token"));
-    let cases = [
-        vec![LogChannel::Stdout],
-        vec![LogChannel::Stderr],
-        vec![LogChannel::System, LogChannel::Stdout],
-    ];
-    for channels in cases {
-        let stream_id = LogStreamId::new();
-        let last = channels.len() - 1;
-        let frames = channels
-            .into_iter()
-            .enumerate()
-            .map(|(index, channel)| {
-                LogFrame::new(
-                    stream_id,
-                    attempt_id,
-                    LogSequence::new(u64::try_from(index).expect("sequence")),
-                    UnixMillis::new(2_000),
-                    channel,
-                    b"untrusted user output".to_vec(),
-                    index == last,
-                )
-                .expect("log frame")
-            })
-            .collect();
-        let message = RunnerToServer::LogBatch(LogBatch::new(
-            MessageHeader::request(
-                SUPPORTED_PROTOCOL_RANGE.max(),
-                fence.session_id(),
-                OperationId::new(),
-            ),
-            guard,
-            frames,
-        ));
-        let validated =
-            ValidatedRunnerToServer::new(message, &ProtocolLimits::default()).expect("log batch");
-        let error = harness
-            .handler
-            .handle_sync(
-                &machine(&identity, 7),
-                &validated,
-                b"canonical suppressed log batch",
-                &CancellationToken::new(),
-            )
-            .await
-            .expect_err("suppressed user output must fail closed");
-        assert_eq!(error.kind(), ApplicationErrorKind::Conflict);
-    }
-    assert_eq!(
-        harness.transactions.log_admissions.load(Ordering::SeqCst),
-        3
-    );
-    assert_eq!(harness.ingress_objects.puts.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.transactions.log_segments.load(Ordering::SeqCst), 0);
-    assert!(
-        harness
-            .transactions
-            .receipts
-            .lock()
-            .expect("transaction receipts")
-            .is_empty()
-    );
-
-    let system_stream = LogStreamId::new();
-    let system_only = RunnerToServer::LogBatch(LogBatch::new(
-        MessageHeader::request(
-            SUPPORTED_PROTOCOL_RANGE.max(),
-            fence.session_id(),
-            OperationId::new(),
-        ),
-        guard,
-        vec![
-            LogFrame::new(
-                system_stream,
-                attempt_id,
-                LogSequence::new(0),
-                UnixMillis::new(2_000),
-                LogChannel::System,
-                b"trusted runner status".to_vec(),
-                true,
-            )
-            .expect("system log frame"),
-        ],
-    ));
-    let validated = ValidatedRunnerToServer::new(system_only, &ProtocolLimits::default())
-        .expect("system log batch");
-    let reply = harness
-        .handler
-        .handle_sync(
-            &machine(&identity, 7),
-            &validated,
-            b"canonical system log batch",
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("system-only log acknowledgement");
-    assert!(matches!(reply, ServerToRunner::LogAck(_)));
-    assert_eq!(harness.ingress_objects.puts.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.transactions.log_segments.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn rejected_durable_log_authority_fails_before_blob_or_sql_commit() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
@@ -3003,7 +2893,7 @@ async fn sync_fences_cross_session_and_cross_protocol_claims() {
         ApplicationErrorKind::StaleSession,
     );
 
-    *harness.sessions.snapshot.lock().expect("session lock") = Some(snapshot(fence, 1));
+    *harness.sessions.snapshot.lock().expect("session lock") = Some(snapshot(fence, 2));
     let cross_protocol = RunnerToServer::LeaseRequest(LeaseRequest::first(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),

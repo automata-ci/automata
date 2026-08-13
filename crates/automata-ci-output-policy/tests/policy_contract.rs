@@ -118,9 +118,8 @@ fn durable_policy_and_safety_snapshots_round_trip_canonically() {
     }
 
     assert_eq!(
-        serde_json::to_string(&RawLogDisposition::SuppressUserOutput)
-            .expect("serialize disposition"),
-        "\"suppress_user_output\""
+        serde_json::to_string(&RawLogDisposition::Persist).expect("serialize disposition"),
+        "\"persist\""
     );
 }
 

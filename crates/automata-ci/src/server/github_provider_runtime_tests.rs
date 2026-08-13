@@ -100,7 +100,7 @@ fn repository(
                 "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
                 "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
             },
-            "schema": 2
+            "schema": 1
         },
         "check_name": "Automata CI",
         "authorities": {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use automata_ci_core::{JobRuntimeContext, OperationId, WorkflowEventProvenance};
 use automata_ci_store::{TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
-    CompilationReport, CompileWorkflowRequest, GithubEventMetadataV1, GithubWorkflowCompiler,
+    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
     GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance,
     WorkflowFrontend as _,
 };
@@ -40,7 +40,7 @@ pub fn ci_request_at_path(
         compile_ci_at_path(
             workflow_path,
             "push",
-            Some(GithubEventMetadataV1::push(false)),
+            Some(GithubEventMetadata::push(false)),
         ),
     )
 }
@@ -55,7 +55,7 @@ pub fn push_request(tenant: &str) -> WorkflowAdmissionRequest {
 pub fn compile_ci_at_path(
     workflow_path: &str,
     event_name: &str,
-    metadata: Option<GithubEventMetadataV1>,
+    metadata: Option<GithubEventMetadata>,
 ) -> CompilationReport {
     let provenance = SourceProvenance::new(
         SourceId::new(workflow_path),
@@ -76,7 +76,7 @@ pub fn compile_ci_at_path(
             .with_git_ref(GIT_REF),
     );
     let request = match metadata {
-        Some(metadata) => request.with_event_metadata_v1(metadata),
+        Some(metadata) => request.with_event_metadata(metadata),
         None => request,
     };
     GithubWorkflowCompiler::new().compile(request)

@@ -36,7 +36,7 @@
       "runtime_policy_revision": 1,
       "authority_profile": "credential_free",
       "runner_policy": {
-        "schema": 2,
+        "schema": 1,
         "workspace": { "schema": 1, "root": "/__w", "derivation": 1 },
         "mappings": [
           {
@@ -144,7 +144,7 @@
       "runtime_policy_revision": 1,
       "authority_profile": "standard",
       "runner_policy": {
-        "schema": 2,
+        "schema": 1,
         "workspace": { "schema": 1, "root": "/__w", "derivation": 1 },
         "mappings": [
           {

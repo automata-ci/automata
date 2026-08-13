@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use automata_ci_workflow_github::{
     Diagnostic, DiagnosticKind, FrontendReport, GithubWorkflowFrontend, GithubWorkflowSourcePlan,
-    ParseWorkflowRequest, SOURCE_PLAN_SCHEMA_VERSION, SourceFile, SourceLocation,
-    SourcePlanVersion, SourceProvenance, SourceSpan, WorkflowFrontend,
+    ParseWorkflowRequest, SOURCE_PLAN_SCHEMA_VERSION, SourceFile, SourceLocation, SourceProvenance,
+    SourceSpan, WorkflowFrontend,
 };
 
 #[test]
@@ -22,9 +22,8 @@ fn workflow_frontend_is_object_safe_and_thread_safe() {
         "diagnostics: {:#?}",
         report.diagnostics()
     );
-    let plan = report.plan().expect("plan");
-    assert_eq!(plan.version(), SourcePlanVersion::V1);
-    assert_eq!(plan.version().as_u16(), SOURCE_PLAN_SCHEMA_VERSION);
+    report.plan().expect("plan");
+    assert_eq!(SOURCE_PLAN_SCHEMA_VERSION, 1);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

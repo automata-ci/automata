@@ -15,12 +15,11 @@ use automata_ci_blob::{
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::GithubPushRefKind;
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
-    GithubDeliverySourceAuthority, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
-    GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome,
-    GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
-    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
-    GithubDeliveryWorkflowRequest,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
+    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
+    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
+    GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
+    GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySnapshot,
@@ -703,20 +702,20 @@ impl FixtureSubjectEvidence {
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
-        let legacy = Self::from_claimed(claimed, check_head_sha).0;
+        let base = Self::from_claimed(claimed, check_head_sha).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
         let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            legacy.delivery_id(),
-            legacy.repository_owner_id(),
-            legacy.manifest().clone(),
-            legacy.authenticated_webhook_verifier_fingerprint(),
-            legacy.authenticated_webhook_verifier_revision(),
-            legacy.checks_authority().clone(),
-            legacy.private_source_authority().cloned(),
-            legacy.check_subject_id(),
-            legacy.check_head_sha(),
+            base.delivery_id(),
+            base.repository_owner_id(),
+            base.manifest().clone(),
+            base.authenticated_webhook_verifier_fingerprint(),
+            base.authenticated_webhook_verifier_revision(),
+            base.checks_authority().clone(),
+            base.private_source_authority().cloned(),
+            base.check_subject_id(),
+            base.check_head_sha(),
             event,
-            legacy.accepted_at(),
+            base.accepted_at(),
         )
         .expect("authenticated event evidence");
         Self(evidence)
@@ -901,18 +900,18 @@ fn claimed_fixture_with_visibility(
     let after = if deleted { ZERO } else { AFTER };
     let body = push_body(git_ref, after, deleted, visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/push/sha256/{digest}.json");
+    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
         u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE).expect("media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
     let raw_event = AdmissionObject::new(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
-        GITHUB_PUSH_EVENT_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery id");
@@ -1095,21 +1094,21 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
 fn pending_repository_dispatch_evidence(
     fixture: &ClaimedFixture,
 ) -> PendingGithubRepositoryDispatchEvidence {
-    let legacy = FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha).0;
+    let base = FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha).0;
     PendingGithubRepositoryDispatchEvidence::from_durable_parts(
-        legacy.delivery_id(),
-        legacy.repository_owner_id(),
-        legacy.manifest().clone(),
-        legacy.authenticated_webhook_verifier_fingerprint(),
-        legacy.authenticated_webhook_verifier_revision(),
-        legacy.checks_authority().clone(),
-        legacy.private_source_authority().cloned(),
+        base.delivery_id(),
+        base.repository_owner_id(),
+        base.manifest().clone(),
+        base.authenticated_webhook_verifier_fingerprint(),
+        base.authenticated_webhook_verifier_revision(),
+        base.checks_authority().clone(),
+        base.private_source_authority().cloned(),
         GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
         )
         .expect("dispatch coordinates"),
-        legacy.accepted_at(),
+        base.accepted_at(),
     )
     .expect("pending repository dispatch")
 }
@@ -1266,7 +1265,7 @@ fn append_archive_entry(
 }
 
 #[tokio::test]
-async fn exact_source_and_only_the_manifest_pinned_workflow_complete_deterministically() {
+async fn exact_source_and_all_direct_workflows_complete_deterministically() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let workflow_marker = b"private-workflow-marker\n".to_vec();
     let archive = archive(BTreeMap::from([
@@ -1332,12 +1331,15 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
         .collect::<Vec<_>>();
     assert_eq!(
         observed_paths,
-        [".ci/workflows/ci.yml", ".ci/workflows/ci.yml"]
+        [
+            ".ci/workflows/a.yml",
+            ".ci/workflows/ci.yml",
+            ".ci/workflows/large.yaml",
+        ]
     );
     assert!(workflow_observations.iter().all(|observation| {
         observation.ref_kind == GithubPushRefKind::Branch
             && observation.revision == AFTER
-            && observation.source_bytes == b"private-workflow-marker\n".len()
             && observation.manifest_revision == 1
             && observation.private_source_authority_present
             && !observation.debug.contains("private-workflow-marker")
@@ -1353,7 +1355,12 @@ async fn exact_source_and_only_the_manifest_pinned_workflow_complete_determinist
             .iter()
             .map(automata_ci_store::ProviderDeliveryWorkflowOutcome::workflow_path)
             .collect::<Vec<_>>(),
-        [".ci/workflows/ci.yml"]
+        [
+            ".ci/workflows/a.yml",
+            ".ci/workflows/ci.yml",
+            ".ci/workflows/empty.yml",
+            ".ci/workflows/large.yaml",
+        ]
     );
 }
 
@@ -1397,10 +1404,10 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
         )
         .await
         .expect("second workflow schedules a durable retry");
-    assert!(matches!(
-        first,
-        GithubDeliveryWorkerOutcome::RetryScheduled(_)
-    ));
+    assert!(
+        matches!(first, GithubDeliveryWorkerOutcome::RetryScheduled(_)),
+        "unexpected first outcome: {first:?}"
+    );
     assert!(
         deliveries
             .completions
@@ -1577,7 +1584,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
     assert_eq!(source_observations[0].revision, AFTER);
     assert!(source_observations[0].credential_matches);
     let workflow_observations = processor.event_observations();
-    assert_eq!(workflow_observations.len(), 2);
+    assert_eq!(workflow_observations.len(), 1);
     assert!(workflow_observations.iter().all(|observation| {
         observation.event_name == "repository_dispatch"
             && observation.git_ref == "refs/heads/main"
@@ -1696,7 +1703,7 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
 }
 
 #[tokio::test]
-async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
+async fn no_direct_workflows_completes_with_an_empty_outcome_set() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
         BTreeMap::from([("README.md", b"no workflow here\n".to_vec())]),
@@ -1727,13 +1734,7 @@ async fn missing_manifest_pinned_workflow_completes_with_one_failed_outcome() {
     let completions = deliveries.completions.lock().expect("completions lock");
     assert_eq!(completions.len(), 1);
     let outcomes = completions[0].outcomes();
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(outcomes[0].workflow_path(), ".ci/workflows/ci.yml");
-    let ProviderDeliveryWorkflowConclusion::Failed { failure_kind } = outcomes[0].conclusion()
-    else {
-        panic!("missing configured workflow must fail its Check subject");
-    };
-    assert_eq!(failure_kind.as_str(), "github.workflow.missing");
+    assert!(outcomes.is_empty());
 }
 
 #[tokio::test]
@@ -1789,7 +1790,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
     }
 
     let observations = processor.observations();
-    assert_eq!(observations.len(), 2);
+    assert_eq!(observations.len(), 1);
     assert!(observations.iter().all(|observation| {
         observation.manifest_revision == 2 && observation.private_source_authority_present
     }));

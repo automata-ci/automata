@@ -8,9 +8,9 @@ use automata_ci_core::{
 use automata_ci_store::ResolveAuthenticatedWorkflowDispatchSource;
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadataV1,
-    GithubWorkflowCompiler, GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputsError,
-    GithubWorkflowDispatchInputsV1, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId,
+    CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadata,
+    GithubWorkflowCompiler, GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
+    GithubWorkflowDispatchInputsError, GithubWorkflowFrontend, ParseWorkflowRequest, SourceId,
     SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use bytes::Bytes;
@@ -99,7 +99,7 @@ pub struct GithubWorkflowDispatchRequest {
     commit_sha: String,
     git_ref: String,
     workflow_name: String,
-    inputs: GithubWorkflowDispatchInputsV1,
+    inputs: GithubWorkflowDispatchInputs,
     operation_id: OperationId,
     vars: ContextValue,
     secrets: BTreeMap<String, SecretBinding>,
@@ -128,7 +128,7 @@ pub struct DurableGithubWorkflowDispatchRequest {
     authorization: WorkflowDispatchAuthorization,
     git_ref: String,
     commit_sha: String,
-    inputs: GithubWorkflowDispatchInputsV1,
+    inputs: GithubWorkflowDispatchInputs,
     operation_id: OperationId,
     display_title: Option<String>,
 }
@@ -152,7 +152,7 @@ impl DurableGithubWorkflowDispatchRequest {
         authorization: WorkflowDispatchAuthorization,
         git_ref: impl Into<String>,
         commit_sha: impl Into<String>,
-        inputs: GithubWorkflowDispatchInputsV1,
+        inputs: GithubWorkflowDispatchInputs,
         operation_id: OperationId,
     ) -> Self {
         Self {
@@ -188,7 +188,7 @@ impl GithubWorkflowDispatchRequest {
         source: Bytes,
         commit_sha: impl Into<String>,
         git_ref: impl Into<String>,
-        inputs: GithubWorkflowDispatchInputsV1,
+        inputs: GithubWorkflowDispatchInputs,
         operation_id: OperationId,
     ) -> Self {
         let workflow_path = workflow_path.into();
@@ -388,7 +388,7 @@ impl GithubWorkflowDispatchService {
                     .ok_or(GithubWorkflowDispatchError::InvalidSourcePlan)?,
                 event,
             )
-            .with_event_metadata_v1(GithubEventMetadataV1::workflow_dispatch(
+            .with_event_metadata(GithubEventMetadata::workflow_dispatch(
                 request.inputs.clone(),
             )),
         );
@@ -411,7 +411,7 @@ impl GithubWorkflowDispatchService {
             request.secrets.clone(),
         )
         .map_err(|_| GithubWorkflowDispatchError::InvalidBaseContext)?;
-        let evidence = GithubWorkflowDispatchEvidenceV1::new(&request)?;
+        let evidence = GithubWorkflowDispatchEvidence::new(&request)?;
         let event_bytes = evidence.encode()?;
         let mut admission = WorkflowAdmissionRequest::builder(
             tenant,
@@ -445,15 +445,15 @@ impl GithubWorkflowDispatchService {
 
 /// Canonical synthetic event retained as authenticated dispatch evidence.
 #[derive(Clone, Eq, PartialEq)]
-pub struct GithubWorkflowDispatchEvidenceV1 {
+pub struct GithubWorkflowDispatchEvidence {
     document: EvidenceDocument,
-    inputs: GithubWorkflowDispatchInputsV1,
+    inputs: GithubWorkflowDispatchInputs,
 }
 
-impl fmt::Debug for GithubWorkflowDispatchEvidenceV1 {
+impl fmt::Debug for GithubWorkflowDispatchEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GithubWorkflowDispatchEvidenceV1")
+            .debug_struct("GithubWorkflowDispatchEvidence")
             .field("repository_id", &self.document.repository.repository_id)
             .field("workflow_id", &self.document.workflow.workflow_id)
             .field("input_count", &self.inputs.values().len())
@@ -461,7 +461,7 @@ impl fmt::Debug for GithubWorkflowDispatchEvidenceV1 {
     }
 }
 
-impl GithubWorkflowDispatchEvidenceV1 {
+impl GithubWorkflowDispatchEvidence {
     fn new(
         request: &GithubWorkflowDispatchRequest,
     ) -> Result<Self, GithubWorkflowDispatchEvidenceError> {
@@ -513,7 +513,7 @@ impl GithubWorkflowDispatchEvidenceV1 {
                 (key.clone(), value)
             })
             .collect::<Vec<_>>();
-        let inputs = GithubWorkflowDispatchInputsV1::try_new(inputs)
+        let inputs = GithubWorkflowDispatchInputs::try_new(inputs)
             .map_err(GithubWorkflowDispatchEvidenceError::InvalidInputs)?;
         let evidence = Self::from_document(document, inputs)?;
         if evidence.encode()?.as_ref() != bytes {
@@ -524,7 +524,7 @@ impl GithubWorkflowDispatchEvidenceV1 {
 
     fn from_document(
         document: EvidenceDocument,
-        inputs: GithubWorkflowDispatchInputsV1,
+        inputs: GithubWorkflowDispatchInputs,
     ) -> Result<Self, GithubWorkflowDispatchEvidenceError> {
         let texts = [
             document.authority.tenant_id.as_str(),
@@ -562,8 +562,8 @@ impl GithubWorkflowDispatchEvidenceV1 {
             .map_err(|_| GithubWorkflowDispatchEvidenceError::InvalidEncoding)
     }
 
-    pub(crate) fn metadata(&self) -> GithubEventMetadataV1 {
-        GithubEventMetadataV1::workflow_dispatch(self.inputs.clone())
+    pub(crate) fn metadata(&self) -> GithubEventMetadata {
+        GithubEventMetadata::workflow_dispatch(self.inputs.clone())
     }
 
     pub(crate) fn matches_admission(&self, request: &WorkflowAdmissionRequest) -> bool {
@@ -651,7 +651,7 @@ enum EvidenceInputValue {
 }
 
 fn evidence_inputs(
-    inputs: &GithubWorkflowDispatchInputsV1,
+    inputs: &GithubWorkflowDispatchInputs,
 ) -> Result<BTreeMap<String, EvidenceInputValue>, GithubWorkflowDispatchEvidenceError> {
     inputs
         .values()

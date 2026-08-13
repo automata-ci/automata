@@ -417,7 +417,7 @@ async fn artifact_create_replay_rejects_schema_valid_safety_tampering() -> TestR
 
         for (name, effective_visibility, publication_safety_reason) in [
             ("narrowed", "private", "repository_policy"),
-            ("false-reason", "public", "administrative_restriction"),
+            ("false-reason", "public", "secret_exposure"),
         ] {
             sqlx::query(
                 r"
@@ -1411,11 +1411,7 @@ async fn active_attempt_with_safety(
     .bind(seed.job_id.as_uuid())
     .execute(database.pool())
     .await?;
-    let raw_log_disposition = if secret_exposure_class == "readable_secret" {
-        "suppress_user_output"
-    } else {
-        "persist"
-    };
+    let raw_log_disposition = "persist";
     sqlx::query(
         r"
         INSERT INTO job_attempts (

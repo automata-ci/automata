@@ -530,41 +530,43 @@ fn renewal_request_rejects_stale_or_inconsistent_evidence() {
 
 #[test]
 fn current_schema_distinguishes_bounded_renewal_from_crash_reclaim() {
+    let normalized = PROVIDER_DELIVERY_MIGRATION.to_ascii_lowercase();
     for required in [
-        "renewal_predecessor_expires_at_ms BIGINT",
-        "claim_expires_at_ms - state_updated_at_ms <= 900000",
-        "claim_expires_at_ms - claimed_at_ms <= 3600000",
-        "NEW.claim_fence = OLD.claim_fence + 1",
-        "NEW.claimed_at_ms IS NOT DISTINCT FROM OLD.claimed_at_ms",
-        "NEW.claim_expires_at_ms <= OLD.claim_expires_at_ms",
-        "NEW.state_updated_at_ms <= OLD.state_updated_at_ms",
-        "NEW.state_updated_at_ms >= OLD.claim_expires_at_ms",
-        "NEW.renewal_predecessor_expires_at_ms\n                    IS DISTINCT FROM OLD.claim_expires_at_ms",
+        "renewal_predecessor_expires_at_ms bigint",
+        "(claim_expires_at_ms - state_updated_at_ms) <= 900000",
+        "(claim_expires_at_ms - claimed_at_ms) <= 3600000",
+        "new.claim_fence = old.claim_fence + 1",
+        "new.claimed_at_ms is not distinct from old.claimed_at_ms",
+        "new.claim_expires_at_ms <= old.claim_expires_at_ms",
+        "new.state_updated_at_ms <= old.state_updated_at_ms",
+        "new.state_updated_at_ms >= old.claim_expires_at_ms",
+        "new.renewal_predecessor_expires_at_ms\n                    is distinct from old.claim_expires_at_ms",
         "provider_delivery_inbox_renewal_transition",
         "provider_delivery_inbox_reclaim_transition",
     ] {
         assert!(
-            PROVIDER_DELIVERY_MIGRATION.contains(required),
+            normalized.contains(required),
             "provider-delivery migration lost renewal invariant: {required}",
         );
     }
     assert!(
-        !PROVIDER_DELIVERY_MIGRATION
-            .contains("AND state_updated_at_ms = claimed_at_ms\n        ) OR ("),
+        !normalized.contains("and state_updated_at_ms = claimed_at_ms\n        ) or ("),
         "the claimed-state shape must permit a rotated-fence renewal timestamp",
     );
 }
 
 #[test]
 fn current_schema_persists_closed_immutable_repository_visibility() {
+    let normalized = PROVIDER_DELIVERY_MIGRATION.to_ascii_lowercase();
     for required in [
-        "repository_visibility TEXT COLLATE \"C\" NOT NULL",
-        "repository_visibility IN ('public', 'private')",
-        "NEW.repository_visibility IS DISTINCT FROM OLD.repository_visibility",
+        "repository_visibility text not null collate pg_catalog.\"c\"",
+        "provider_delivery_inbox_repository_visibility",
+        "repository_visibility = any (array['public'::text, 'private'::text])",
+        "new.repository_visibility is distinct from old.repository_visibility",
         "provider_delivery_inbox_evidence_immutable",
     ] {
         assert!(
-            PROVIDER_DELIVERY_MIGRATION.contains(required),
+            normalized.contains(required),
             "provider-delivery migration lost visibility invariant: {required}",
         );
     }

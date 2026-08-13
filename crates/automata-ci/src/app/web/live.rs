@@ -38,11 +38,11 @@ use super::{
     codec::{LogSegmentExpectation, decode_log_segment},
     data::{
         ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest,
-        JobNavigationItem, JobSummary, LogChannel, LogLine, LogOutputVisibility, Repository,
-        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositoryDirectoryRequest,
-        RepositoryPath, RepositorySettingsDestination, RepositorySettingsPage, RequestContext,
-        RunDetailPage, RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status,
-        StatusFilter, VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
+        JobNavigationItem, JobSummary, LogChannel, LogLine, Repository, RepositoryDirectoryItem,
+        RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
+        RepositorySettingsDestination, RepositorySettingsPage, RequestContext, RunDetailPage,
+        RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter,
+        VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
     },
     text::is_safe_display_text,
 };
@@ -1316,42 +1316,13 @@ fn publication_target(
     )
 }
 
-const fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
-    match stream.publication.safety_schema {
-        1 => matches!(
-            (
-                stream.publication.secret_exposure,
-                stream.raw_log_disposition,
-                stream.publication.effective_visibility,
-            ),
-            (
-                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
-                HumanRawLogDisposition::Persist,
-                _,
-            ) | (
-                SecretExposureClass::ReadableSecret,
-                HumanRawLogDisposition::SuppressUserOutput,
-                OutputVisibility::Private,
-            )
-        ),
-        2 => matches!(
-            (
-                stream.publication.secret_exposure,
-                stream.raw_log_disposition,
-                stream.publication.effective_visibility,
-            ),
-            (
-                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
-                HumanRawLogDisposition::Persist,
-                _,
-            ) | (
-                SecretExposureClass::ReadableSecret,
-                HumanRawLogDisposition::Persist,
-                OutputVisibility::Private,
-            )
-        ),
-        _ => false,
-    }
+fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
+    stream.publication.safety_schema == 1
+        && stream.raw_log_disposition == HumanRawLogDisposition::Persist
+        && (!matches!(
+            stream.publication.secret_exposure,
+            SecretExposureClass::ReadableSecret
+        ) || stream.publication.effective_visibility == OutputVisibility::Private)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2040,8 +2011,6 @@ impl LiveWebData {
         let mut discarded_reverse_line = false;
         let mut next_exact = None;
         let mut saw_boundary = decoded_cursor.is_none();
-        let suppress_user_output =
-            log_stream.raw_log_disposition == HumanRawLogDisposition::SuppressUserOutput;
         'segments: for segment in &page.segments {
             let blob = self
                 .objects
@@ -2077,22 +2046,11 @@ impl LiveWebData {
                         if usize::try_from(cursor.line_ordinal)
                             .ok()
                             .is_none_or(|ordinal| ordinal >= candidates.len())
-                            && !(cursor.line_ordinal == 0
-                                && (frame.payload().is_empty()
-                                    || (suppress_user_output
-                                        && !matches!(
-                                            frame.channel(),
-                                            automata_ci_core::LogChannel::System
-                                        ))))
+                            && !(cursor.line_ordinal == 0 && frame.payload().is_empty())
                         {
                             return Ok(None);
                         }
                     }
-                }
-                if suppress_user_output
-                    && !matches!(frame.channel(), automata_ci_core::LogChannel::System)
-                {
-                    continue;
                 }
                 for candidate in candidates {
                     if !candidate_is_on_requested_side(&candidate, decoded_cursor) {
@@ -2188,11 +2146,6 @@ impl LiveWebData {
             previous_navigation_job_id,
             next_navigation_job_id,
             job: selected_job,
-            output_visibility: if suppress_user_output {
-                LogOutputVisibility::SystemOnly
-            } else {
-                LogOutputVisibility::Full
-            },
             lines,
             previous_cursor,
             next_cursor,
@@ -2848,9 +2801,9 @@ mod tests {
         RepositorySecretsPageRequest, RepositorySecretsReadOutcome, VerifiedRepositorySecretForm,
     };
     use crate::app::web::data::{
-        JobLogPage, JobLogRequest, LogOutputVisibility, REPOSITORY_PAGE_SIZE,
-        RepositoryDirectoryRequest, RepositoryPath, RepositorySettingsDestination, RequestContext,
-        RunListRequest, Status, StatusFilter, Viewer, WebData, WebDataError,
+        JobLogPage, JobLogRequest, REPOSITORY_PAGE_SIZE, RepositoryDirectoryRequest,
+        RepositoryPath, RepositorySettingsDestination, RequestContext, RunListRequest, Status,
+        StatusFilter, Viewer, WebData, WebDataError,
     };
 
     #[test]
@@ -3297,13 +3250,6 @@ mod tests {
             .await
     }
 
-    async fn fake_live_data_with_disposition(
-        allow_logs: bool,
-        raw_log_disposition: HumanRawLogDisposition,
-    ) -> (LiveWebData, RequestContext, RepositoryPath, RunId, JobId) {
-        fake_live_data_with_permissions(allow_logs, raw_log_disposition, true, true).await
-    }
-
     async fn fake_live_data_with_settings_permissions(
         allow_read: bool,
         allow_update: bool,
@@ -3534,15 +3480,8 @@ mod tests {
         allow_settings_read: bool,
         allow_settings_update: bool,
     ) -> (LiveWebData, RequestContext, RepositoryPath, RunId, JobId) {
-        let (log_visibility, log_exposure) = match raw_log_disposition {
-            HumanRawLogDisposition::Persist => {
-                (OutputVisibility::Public, SecretExposureClass::Secretless)
-            }
-            HumanRawLogDisposition::SuppressUserOutput => (
-                OutputVisibility::Private,
-                SecretExposureClass::ReadableSecret,
-            ),
-        };
+        let (log_visibility, log_exposure) =
+            (OutputVisibility::Public, SecretExposureClass::Secretless);
         let (data, context, repository, run_id, job_id, _) =
             fake_live_data_with_policy(FakeLivePolicy {
                 dashboard_visibility: OutputVisibility::Public,
@@ -3593,7 +3532,7 @@ mod tests {
         let run_id = RunId::new();
         let job_id = JobId::new();
         let attempt_id = AttemptId::new();
-        let mut log_publication = fixture_output_publication(
+        let log_publication = fixture_output_publication(
             policy.log_visibility,
             policy.log_exposure,
             if policy.log_exposure == SecretExposureClass::ReadableSecret {
@@ -3602,9 +3541,6 @@ mod tests {
                 "repository_policy"
             },
         );
-        if policy.raw_log_disposition == HumanRawLogDisposition::Persist {
-            log_publication.safety_schema = 2;
-        }
         let (detail, log_stream) = fixture_job_detail(
             fixture_run(run_id, policy.dashboard_visibility),
             job_id,
@@ -3909,64 +3845,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readable_secret_logs_are_private_and_suppress_all_user_output() {
-        let policy = FakeLivePolicy {
-            dashboard_visibility: OutputVisibility::Private,
-            log_visibility: OutputVisibility::Private,
-            log_exposure: SecretExposureClass::ReadableSecret,
-            raw_log_disposition: HumanRawLogDisposition::SuppressUserOutput,
-            allow_dashboard: false,
-            allow_logs: true,
-            allow_settings_read: false,
-            allow_settings_update: false,
-        };
-        let (data, anonymous, repository, run_id, job_id, calls) =
-            fake_live_data_with_policy(policy).await;
-        let request = first_log_page_request();
-        assert!(
-            WebData::job_log(&data, &anonymous, &repository, run_id, job_id, &request,)
-                .await
-                .expect("anonymous readable-secret denial")
-                .is_none()
-        );
-        {
-            let calls = calls.lock().expect("authorization calls");
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].durable_visibility, Some(OutputVisibility::Private));
-            assert_eq!(
-                calls[0].request.secret_exposure(),
-                SecretExposureClass::ReadableSecret
-            );
-        }
-
-        let page = WebData::job_log(
-            &data,
-            &authenticated_request_context(),
-            &repository,
-            run_id,
-            job_id,
-            &request,
-        )
-        .await
-        .expect("authenticated system-log lookup")
-        .expect("log-authorized viewer");
-        assert_eq!(page.output_visibility, LogOutputVisibility::SystemOnly);
-        assert!(page.lines.is_empty());
-
-        let (corrupt, anonymous, repository, run_id, job_id, calls) =
-            fake_live_data_with_policy(FakeLivePolicy {
-                log_visibility: OutputVisibility::Public,
-                ..policy
-            })
-            .await;
-        assert_eq!(
-            WebData::job_log(&corrupt, &anonymous, &repository, run_id, job_id, &request,).await,
-            Err(WebDataError::Corrupt)
-        );
-        assert!(calls.lock().expect("authorization calls").is_empty());
-    }
-
-    #[tokio::test]
     async fn masked_readable_secret_logs_are_private_and_preserve_user_output() {
         let policy = FakeLivePolicy {
             dashboard_visibility: OutputVisibility::Private,
@@ -4000,7 +3878,6 @@ mod tests {
         .expect("authenticated masked-log lookup")
         .expect("log-authorized viewer");
 
-        assert_eq!(page.output_visibility, LogOutputVisibility::Full);
         assert_eq!(page.lines.len(), 1);
         assert_eq!(page.lines[0].text, "checkout ok");
     }
@@ -4205,7 +4082,6 @@ mod tests {
         assert_eq!(page.job.status, Status::Lost);
         assert!(page.jobs[0].logs_available);
         assert!(!page.jobs[1].logs_available);
-        assert_eq!(page.output_visibility, LogOutputVisibility::Full);
         assert!(page.next_cursor.is_none());
     }
 
@@ -4363,25 +4239,6 @@ mod tests {
             .expect("forged positions are hidden");
             assert!(result.is_none());
         }
-    }
-
-    #[tokio::test]
-    async fn live_job_log_marks_and_suppresses_secret_bearing_user_output() {
-        let (data, _, repository, run_id, job_id) =
-            fake_live_data_with_disposition(true, HumanRawLogDisposition::SuppressUserOutput).await;
-        let context = authenticated_request_context();
-        let request = JobLogRequest {
-            cursor: None,
-            limit: 200,
-            maximum_decoded_bytes: super::super::data::LOG_PAGE_DECODED_BYTES,
-        };
-        let page = WebData::job_log(&data, &context, &repository, run_id, job_id, &request)
-            .await
-            .expect("read suppressed live log")
-            .expect("authorized suppressed log page");
-
-        assert_eq!(page.output_visibility, LogOutputVisibility::SystemOnly);
-        assert!(page.lines.is_empty());
     }
 
     #[test]

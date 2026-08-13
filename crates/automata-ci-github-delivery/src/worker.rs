@@ -219,6 +219,7 @@ pub struct GithubDeliveryWorkflowRequest<'a> {
     snapshot: GithubDeliveryClaimSnapshot,
     lease: &'a GithubDeliveryClaimLease,
     clock: &'a dyn GithubDeliveryClock,
+    private_credentials: Option<&'a dyn GithubDeliverySourceCredentialProvider>,
 }
 
 impl GithubDeliveryWorkflowRequest<'_> {
@@ -297,6 +298,12 @@ impl GithubDeliveryWorkflowRequest<'_> {
         self.clock
     }
 
+    pub(crate) const fn private_credentials(
+        &self,
+    ) -> Option<&dyn GithubDeliverySourceCredentialProvider> {
+        self.private_credentials
+    }
+
     /// Transfers one completed processor result together with the exact live
     /// lease-operation guard that validated it.
     pub async fn finish(
@@ -346,6 +353,10 @@ impl fmt::Debug for GithubDeliveryWorkflowRequest<'_> {
             .field("workflow_source_bytes", &self.workflow_source.len())
             .field("manifest_pinned_evidence", &"[redacted]")
             .field("snapshot", &self.snapshot)
+            .field(
+                "private_credentials",
+                &self.private_credentials.map(|_| "[credential broker]"),
+            )
             .finish()
     }
 }
@@ -1579,7 +1590,7 @@ impl GithubDeliveryWorker {
         prepared: &PreparedGithubDelivery,
         source: &RepositorySource,
         workflow: (&str, &[u8]),
-        _private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
+        private_credentials: Option<&dyn GithubDeliverySourceCredentialProvider>,
     ) -> Result<GithubDeliveryWorkflowProcessorCompletion, WorkerInterruption> {
         let snapshot = lease
             .require_live_at(self.clock.now())
@@ -1607,6 +1618,7 @@ impl GithubDeliveryWorker {
                     snapshot,
                     lease,
                     clock: self.clock.as_ref(),
+                    private_credentials,
                 })
                 .await),
             _ => Err(

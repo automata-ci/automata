@@ -1427,7 +1427,7 @@ fn only_the_current_product_schema_is_accepted() {
     let current: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     assert!(parse_value(&current).is_ok());
-    for unsupported in [0, 1, u16::MAX] {
+    for unsupported in [0, 2, u16::MAX] {
         let mut document = current.clone();
         document["schema_version"] = serde_json::json!(unsupported);
         assert_eq!(

@@ -295,7 +295,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     );
     assert_eq!(
         original.digest().to_string(),
-        "484d15f6bdc24c74fc9c3f8791cad45e5b7c7332c599cb2ea5396993a847943e"
+        "040637cf95b3f4e6d0aee57ef796f6b9c2fdea3f46153c8a183a7a77f128ca0a"
     );
     assert_eq!(
         credential_free.authority_profile(),
@@ -321,24 +321,24 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
 
 #[test]
 fn owner_binding_uses_an_independent_domain_and_preserves_the_base_digest() {
-    let legacy = manifest(1, 1, 1, [7; 32], "Automata CI");
-    let owner = legacy
+    let base = manifest(1, 1, 1, [7; 32], "Automata CI");
+    let owner = base
         .clone()
         .with_repository_owner_id(ProviderRepositoryOwnerId::new(404).expect("owner ID"));
-    let other_owner = legacy
+    let other_owner = base
         .clone()
         .with_repository_owner_id(ProviderRepositoryOwnerId::new(405).expect("owner ID"));
 
-    assert_eq!(legacy.github_repository_owner_id(), None);
+    assert_eq!(base.github_repository_owner_id(), None);
     assert_eq!(
         owner.github_repository_owner_id(),
         Some(ProviderRepositoryOwnerId::new(404).expect("owner ID"))
     );
-    assert_ne!(legacy.digest(), owner.digest());
+    assert_ne!(base.digest(), owner.digest());
     assert_ne!(owner.digest(), other_owner.digest());
     assert_eq!(
-        legacy.digest().to_string(),
-        "484d15f6bdc24c74fc9c3f8791cad45e5b7c7332c599cb2ea5396993a847943e"
+        base.digest().to_string(),
+        "040637cf95b3f4e6d0aee57ef796f6b9c2fdea3f46153c8a183a7a77f128ca0a"
     );
 }
 

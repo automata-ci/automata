@@ -18,12 +18,12 @@ const KIND: &str = "automata_github_schedule";
 /// The durable schedule-fire claim supplies the authoritative repository,
 /// source, and Check binding at admission time.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GithubScheduleEvidenceV1 {
+pub struct GithubScheduleEvidence {
     cron: String,
     scheduled_at: UnixMillis,
 }
 
-impl GithubScheduleEvidenceV1 {
+impl GithubScheduleEvidence {
     /// Creates evidence for one validated cron occurrence.
     ///
     /// # Errors
@@ -102,14 +102,14 @@ mod tests {
 
     #[test]
     fn schedule_evidence_is_canonical_and_never_uses_a_delivery_identity() {
-        let evidence = GithubScheduleEvidenceV1::new("0/5 * * * *", UnixMillis::new(42_000))
+        let evidence = GithubScheduleEvidence::new("0/5 * * * *", UnixMillis::new(42_000))
             .expect("valid schedule evidence");
         let bytes = evidence.encode().expect("canonical JSON");
         assert_eq!(
             bytes,
             br#"{"schema":1,"kind":"automata_github_schedule","cron":"0/5 * * * *","scheduled_at_ms":42000}"#
         );
-        assert_eq!(GithubScheduleEvidenceV1::decode(&bytes), Ok(evidence));
+        assert_eq!(GithubScheduleEvidence::decode(&bytes), Ok(evidence));
         assert!(
             !std::str::from_utf8(&bytes)
                 .expect("JSON")
@@ -119,8 +119,8 @@ mod tests {
 
     #[test]
     fn schedule_evidence_rejects_invalid_cron_and_unknown_fields() {
-        assert!(GithubScheduleEvidenceV1::new("* * * * *", UnixMillis::new(1)).is_err());
-        assert!(GithubScheduleEvidenceV1::decode(
+        assert!(GithubScheduleEvidence::new("* * * * *", UnixMillis::new(1)).is_err());
+        assert!(GithubScheduleEvidence::decode(
             br#"{"schema":1,"kind":"automata_github_schedule","cron":"0/5 * * * *","scheduled_at_ms":1,"delivery_id":"no"}"#
         )
         .is_err());

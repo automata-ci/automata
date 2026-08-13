@@ -16,6 +16,7 @@ struct SeededHuman {
 
 #[test]
 fn secrets_migration_is_ciphertext_only_and_fail_private() {
+    let normalized = SECRETS_MIGRATION.to_ascii_lowercase();
     for table in [
         "secret_providers",
         "secret_provider_configuration_envelopes",
@@ -35,29 +36,27 @@ fn secrets_migration_is_ciphertext_only_and_fail_private() {
         "secret_key_rotations",
     ] {
         assert!(
-            SECRETS_MIGRATION.contains(&format!("CREATE TABLE {table}")),
+            normalized.contains(&format!("create table {table}")),
             "missing durable table {table}"
         );
     }
-    assert!(SECRETS_MIGRATION.contains("octet_length(nonce) = 12"));
-    assert!(SECRETS_MIGRATION.contains("wrapped_data_key BYTEA NOT NULL"));
-    assert!(SECRETS_MIGRATION.contains("DEFAULT 'readable_secret'"));
-    assert!(SECRETS_MIGRATION.contains("DEFAULT 'suppress_user_output'"));
-    assert!(!SECRETS_MIGRATION.contains("value_hash"));
-    assert!(!SECRETS_MIGRATION.contains("value_digest"));
-    assert!(!SECRETS_MIGRATION.contains("provider_locator TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("provider_version_id TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("provider_lease_id TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("public_configuration JSONB"));
-    assert!(!SECRETS_MIGRATION.contains("credential_source_label TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("octet_length(resolution_reason)"));
-    assert!(!SECRETS_MIGRATION.contains("octet_length(revocation_reason)"));
-    assert!(!SECRETS_MIGRATION.contains("failure_kind ~"));
-    assert!(SECRETS_MIGRATION.contains("resolution_reason IN ("));
-    assert!(SECRETS_MIGRATION.contains("revocation_reason IN ("));
-    assert!(SECRETS_MIGRATION.contains("failure_kind IN ("));
-    assert!(SECRETS_MIGRATION.contains("create_request_id TEXT NOT NULL"));
-    assert!(SECRETS_MIGRATION.contains("secret_version_id UUID NOT NULL"));
+    assert!(normalized.contains("octet_length(nonce) = 12"));
+    assert!(normalized.contains("wrapped_data_key bytea not null"));
+    assert!(normalized.contains("default 'readable_secret'::text"));
+    assert!(normalized.contains("default 'persist'::text"));
+    assert!(!normalized.contains("provider_locator text"));
+    assert!(!normalized.contains("provider_version_id text"));
+    assert!(!normalized.contains("provider_lease_id text"));
+    assert!(!normalized.contains("public_configuration jsonb"));
+    assert!(!normalized.contains("credential_source_label text"));
+    assert!(normalized.contains("protected_environment_approval_requests_status_shape"));
+    assert!(normalized.contains("secret_provider_leases_revocation_shape"));
+    assert!(normalized.contains("secret_cleanup_outbox_failure_kind"));
+    assert!(normalized.contains("resolution_reason = any (array["));
+    assert!(normalized.contains("revocation_reason = any (array["));
+    assert!(normalized.contains("last_failure_kind = any (array["));
+    assert!(normalized.contains("create_request_id text not null"));
+    assert!(normalized.contains("secret_version_id uuid not null"));
 }
 
 #[tokio::test]
@@ -744,7 +743,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 effective_log_visibility, output_safety_reason, classified_at_ms
             ) VALUES (
                 $1, $2, 1, 'succeeded', 7, 1, 2, 'readable_secret',
-                'suppress_user_output', 'public', 'public',
+                'persist', 'public', 'public',
                 'repository_policy', 1
             )
             ",
@@ -785,7 +784,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 effective_log_visibility, output_safety_reason, classified_at_ms
             ) VALUES (
                 $1, $2, 2, 'succeeded', 8, 1, 2, 'readable_secret',
-                'suppress_user_output', 'public', 'private',
+                'persist', 'public', 'private',
                 'secret_exposure', 1
             )
             ",

@@ -8,8 +8,8 @@ use automata_ci_control::{
     AuthenticatedRunnerSession, ClaimedLeasePoll, LeaseClock, LeasePollError, LeasePollOutcome,
 };
 use automata_ci_core::{
-    JobAuthorityProfile, JobIrVersionRange, JobLifecycle, LogAck, LogChannel, OperationId,
-    Sha256Digest, UnixMillis,
+    JobAuthorityProfile, JobIrVersionRange, JobLifecycle, LogAck, OperationId, Sha256Digest,
+    UnixMillis,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
@@ -33,8 +33,8 @@ use automata_ci_store::{
     CommandSequence as StoreCommandSequence, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
     CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult, CompleteLeaseRequest,
     DocumentSchema, HeartbeatRunnerSession, LeaseRequestCompletion, LeaseRequestKey,
-    LeaseResponseAction, ObjectKey, OpenRunnerSession, RawLogDisposition, RenewLease,
-    ResumeRunnerSession, RevokedLeaseOfferFallback, RoutingDocument, RunnerCommandOutbox,
+    LeaseResponseAction, ObjectKey, OpenRunnerSession, RenewLease, ResumeRunnerSession,
+    RevokedLeaseOfferFallback, RoutingDocument, RunnerCommandOutbox,
     RunnerControlTransactionRepository, RunnerLeaseRequestRepository, RunnerLogAdmissionRequest,
     RunnerOperationKind, RunnerOperationReceipt, RunnerOperationReceiptRepository,
     RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
@@ -1691,14 +1691,6 @@ impl DurableRunnerControlHandler {
             .map_err(store_application_error)?;
         if admission.request() != &admission_request {
             return Err(app(ApplicationErrorKind::Internal));
-        }
-        if admission.raw_log_disposition() == RawLogDisposition::SuppressUserOutput
-            && batch
-                .frames()
-                .iter()
-                .any(|frame| matches!(frame.channel(), LogChannel::Stdout | LogChannel::Stderr))
-        {
-            return Err(app(ApplicationErrorKind::Conflict));
         }
         let uncompressed =
             serde_json::to_vec(batch.frames()).map_err(|_| app(ApplicationErrorKind::Internal))?;

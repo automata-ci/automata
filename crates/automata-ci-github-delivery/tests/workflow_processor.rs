@@ -15,7 +15,7 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
     GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
     GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
     GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
@@ -43,12 +43,14 @@ use automata_ci_store::{
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RejectProviderDelivery,
-    RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
+    RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::GithubChangedFilesV1;
+use automata_ci_workflow_github::GithubChangedFiles;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -168,6 +170,8 @@ impl LogicalWorkflowAdmissionRepository for LogicalAdmissions {
 struct DeliveryOutcomes {
     completions: Mutex<Vec<CompleteProviderDelivery>>,
     retries: Mutex<Vec<RetryProviderDelivery>>,
+    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
+    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
 }
 
 impl DeliveryOutcomes {
@@ -206,6 +210,56 @@ impl ProviderDeliveryRepository for DeliveryOutcomes {
             .expect("completions lock")
             .push(request);
         Ok(receipt)
+    }
+
+    async fn register_provider_delivery_workflow_inventory(
+        &self,
+        request: RegisterProviderDeliveryWorkflowInventory,
+    ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
+        let mut inventory = self.inventory.lock().expect("inventory lock");
+        match inventory.as_ref() {
+            Some(existing) if existing != request.inventory() => {
+                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+            }
+            Some(_) => {}
+            None => *inventory = Some(request.inventory().clone()),
+        }
+        ProviderDeliveryWorkflowInventoryReceipt::new(
+            inventory.as_ref().expect("inventory initialized").clone(),
+            self.progress.lock().expect("progress lock").clone(),
+        )
+        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+    }
+
+    async fn record_provider_delivery_workflow_progress(
+        &self,
+        request: RecordProviderDeliveryWorkflowProgress,
+    ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
+        let inventory = self.inventory.lock().expect("inventory lock");
+        let Some(inventory) = inventory.as_ref() else {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        };
+        if inventory.digest() != request.inventory_digest()
+            || !inventory
+                .entries()
+                .iter()
+                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
+        {
+            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
+        }
+        let mut progress = self.progress.lock().expect("progress lock");
+        if let Some(existing) = progress
+            .iter()
+            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
+        {
+            return if existing == request.outcome() {
+                Ok(existing.clone())
+            } else {
+                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
+            };
+        }
+        progress.push(request.outcome().clone());
+        Ok(request.outcome().clone())
     }
 
     async fn retry_provider_delivery(
@@ -247,21 +301,21 @@ impl FixtureSubjectEvidence {
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
-        let legacy = Self::from_claimed(claimed).0;
+        let base = Self::from_claimed(claimed).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
         Self(
             ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-                legacy.delivery_id(),
-                legacy.repository_owner_id(),
-                legacy.manifest().clone(),
-                legacy.authenticated_webhook_verifier_fingerprint(),
-                legacy.authenticated_webhook_verifier_revision(),
-                legacy.checks_authority().clone(),
-                legacy.private_source_authority().cloned(),
-                legacy.check_subject_id(),
-                legacy.check_head_sha(),
+                base.delivery_id(),
+                base.repository_owner_id(),
+                base.manifest().clone(),
+                base.authenticated_webhook_verifier_fingerprint(),
+                base.authenticated_webhook_verifier_revision(),
+                base.checks_authority().clone(),
+                base.private_source_authority().cloned(),
+                base.check_subject_id(),
+                base.check_head_sha(),
                 event,
-                legacy.accepted_at(),
+                base.accepted_at(),
             )
             .expect("authenticated event evidence"),
         )
@@ -436,13 +490,13 @@ struct ChangedFilesObservation {
 
 #[derive(Debug)]
 struct ChangedFiles {
-    result: Result<GithubChangedFilesV1, GithubPushChangedFilesError>,
+    result: Result<GithubChangedFiles, GithubPushChangedFilesError>,
     calls: AtomicUsize,
     observations: Mutex<Vec<ChangedFilesObservation>>,
 }
 
 impl ChangedFiles {
-    fn new(result: Result<GithubChangedFilesV1, GithubPushChangedFilesError>) -> Self {
+    fn new(result: Result<GithubChangedFiles, GithubPushChangedFilesError>) -> Self {
         Self {
             result,
             calls: AtomicUsize::new(0),
@@ -456,7 +510,7 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let (credential_present, credential_matches) = match request.authority() {
             GithubPushChangedFilesAuthority::PublicAnonymous => (false, false),
@@ -515,10 +569,10 @@ async fn harness_with_visibility(
 ) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = push_body(commit_count, visibility);
-    let raw_key = "provider-deliveries/github/push/fixture.json";
+    let raw_key = "provider-deliveries/github/event/fixture.json";
     let raw_payload = BlobPayload::from_bytes(
         BlobKey::new(raw_key).expect("raw key"),
-        MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE).expect("raw media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
         body.clone(),
     );
     let raw_descriptor = raw_payload.descriptor().clone();
@@ -530,7 +584,7 @@ async fn harness_with_visibility(
         raw_descriptor.digest(),
         ObjectKey::new(raw_key).expect("raw object key"),
         raw_descriptor.size(),
-        GITHUB_PUSH_EVENT_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let claimed = claimed(raw_event, visibility);
@@ -771,7 +825,7 @@ fn outcome_kind(conclusion: &ProviderDeliveryWorkflowConclusion) -> (&'static st
 }
 
 #[tokio::test]
-async fn accepted_path_admits_exact_evidence_and_replays_the_same_run() {
+async fn accepted_path_replays_durable_progress_without_readmission() {
     let harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, ACCEPTED_WORKFLOW)]),
         None,
@@ -789,11 +843,11 @@ async fn accepted_path_admits_exact_evidence_and_replays_the_same_run() {
     ));
 
     let commands = harness.logical.commands();
-    assert_eq!(commands.len(), 2);
+    assert_eq!(commands.len(), 1);
     assert_eq!(harness.logical.ordinary_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         harness.logical.delivery_ids(),
-        vec![harness.claimed.receipt().id(); 2]
+        vec![harness.claimed.receipt().id()]
     );
     let first = &commands[0];
     assert_eq!(first.tenant().as_str(), "tenant-private");
@@ -815,12 +869,7 @@ async fn accepted_path_admits_exact_evidence_and_replays_the_same_run() {
     let WorkflowAdmissionIdempotency::ProviderDelivery(idempotency) = first.idempotency() else {
         panic!("delivery processing must use provider idempotency");
     };
-    assert!(idempotency.starts_with("provider-delivery-v2:"));
-    assert_eq!(commands[0].idempotency(), commands[1].idempotency());
-    assert_eq!(commands[0].request_digest(), commands[1].request_digest());
-    assert_eq!(commands[0].run_id(), commands[1].run_id());
-    assert_eq!(commands[0].source(), commands[1].source());
-    assert_eq!(commands[0].event(), commands[1].event());
+    assert!(idempotency.starts_with("provider-delivery:"));
 
     let source = read_admission_object(&harness.blobs, first.source()).await;
     assert_eq!(source.as_ref(), ACCEPTED_WORKFLOW);
@@ -888,7 +937,7 @@ async fn read_admission_object(blobs: &MemoryBlobStore, object: &AdmissionObject
 
 #[tokio::test]
 async fn changed_files_are_requested_only_after_typed_compiler_demand() {
-    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
         "src/lib.rs",
     ]))));
     let harness = harness(
@@ -970,7 +1019,7 @@ async fn changed_files_are_requested_only_after_typed_compiler_demand() {
 
 #[tokio::test]
 async fn public_changed_files_are_anonymous_and_never_request_private_authority() {
-    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
         "src/lib.rs",
     ]))));
     let harness = harness_with_visibility(
@@ -1007,7 +1056,7 @@ async fn private_changed_files_reject_wrong_selector_or_action_before_provider_i
         DiffCredentialBehavior::WrongSelector,
         DiffCredentialBehavior::WrongAction,
     ] {
-        let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete([
+        let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
             "src/lib.rs",
         ]))));
         let harness = harness(
@@ -1100,7 +1149,7 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
 
 #[tokio::test]
 async fn changed_file_provider_failures_remain_closed_and_sanitized() {
-    let oversized = Arc::new(ChangedFiles::new(Ok(GithubChangedFilesV1::complete(
+    let oversized = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete(
         (0..=3_000).map(|index| format!("src/{index}.rs")),
     ))));
     let oversized_harness = harness(

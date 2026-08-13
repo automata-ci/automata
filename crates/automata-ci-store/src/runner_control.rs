@@ -672,8 +672,6 @@ impl CommitRunnerTerminalResult {
 pub enum RawLogDisposition {
     /// Runner-redacted standard output and standard error may be persisted.
     Persist,
-    /// Raw standard output and standard error must not be persisted.
-    SuppressUserOutput,
 }
 
 /// Exact runner log coordinates presented for authoritative durable admission.
@@ -796,8 +794,7 @@ impl RunnerLogAdmission {
     ///
     /// # Errors
     /// Rejects a raw-log disposition inconsistent with the immutable exposure ceiling.
-    /// Readable-secret attempts may carry the current masked-persistence policy
-    /// or a stricter immutable legacy suppression snapshot.
+    /// Every current attempt uses the masked-persistence policy.
     pub fn new(
         request: RunnerLogAdmissionRequest,
         tenant_id: TenantId,
@@ -805,18 +802,7 @@ impl RunnerLogAdmission {
         secret_exposure: SecretExposureClass,
         raw_log_disposition: RawLogDisposition,
     ) -> Result<Self, RunnerControlValueError> {
-        let consistent = matches!(
-            (secret_exposure, raw_log_disposition),
-            (
-                SecretExposureClass::Secretless
-                    | SecretExposureClass::CapabilityOnly
-                    | SecretExposureClass::ReadableSecret,
-                RawLogDisposition::Persist
-            ) | (
-                SecretExposureClass::ReadableSecret,
-                RawLogDisposition::SuppressUserOutput
-            )
-        );
+        let consistent = raw_log_disposition == RawLogDisposition::Persist;
         if !consistent {
             return Err(RunnerControlValueError::InconsistentLogSafetyPolicy);
         }

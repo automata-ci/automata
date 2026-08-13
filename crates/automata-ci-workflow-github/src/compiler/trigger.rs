@@ -6,8 +6,8 @@ use std::{
 use automata_ci_core::{ContextValue, PlanSourceSpan, WorkflowEventProvenance, WorkflowInputKey};
 
 use crate::{
-    EventName, GithubChangedFilesV1, GithubCronExpression, GithubEventMetadataV1,
-    GithubScheduleError, GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
+    EventName, GithubChangedFiles, GithubCronExpression, GithubEventMetadata, GithubScheduleError,
+    GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
     GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
     GithubWorkflowDispatchInputValue, MAX_GITHUB_SCHEDULE_ENTRIES,
     MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES, MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES,
@@ -115,7 +115,7 @@ pub(super) fn event_matches(
     event: &WorkflowEventProvenance,
     configuration: &TriggerConfiguration,
     workflow_dispatch_contract: Option<&GithubWorkflowDispatchContract>,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
@@ -143,12 +143,12 @@ pub(super) fn event_matches(
 
 fn repository_dispatch_matches(
     configuration: &TriggerConfiguration,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let event_type = match metadata {
-        Some(GithubEventMetadataV1::RepositoryDispatch { event_type }) => event_type.as_str(),
+        Some(GithubEventMetadata::RepositoryDispatch { event_type }) => event_type.as_str(),
         Some(_) => {
             metadata_mismatch("repository_dispatch", trigger_span, context);
             return TriggerSelection::Rejected;
@@ -214,12 +214,12 @@ fn valid_repository_dispatch_type(value: &str) -> bool {
 
 fn merge_group_matches(
     configuration: &TriggerConfiguration,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let (action, base_ref) = match metadata {
-        Some(GithubEventMetadataV1::MergeGroup { action, base_ref }) => {
+        Some(GithubEventMetadata::MergeGroup { action, base_ref }) => {
             (action.as_str(), base_ref.as_str())
         }
         Some(_) => {
@@ -661,7 +661,7 @@ fn dispatch_boolean(
 
 fn workflow_dispatch_matches(
     contract: Option<&GithubWorkflowDispatchContract>,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
@@ -669,7 +669,7 @@ fn workflow_dispatch_matches(
         return TriggerSelection::Rejected;
     };
     let inputs = match metadata {
-        Some(GithubEventMetadataV1::WorkflowDispatch { inputs }) => inputs,
+        Some(GithubEventMetadata::WorkflowDispatch { inputs }) => inputs,
         Some(_) => {
             metadata_mismatch("workflow_dispatch", trigger_span, context);
             return TriggerSelection::Rejected;
@@ -697,7 +697,7 @@ fn workflow_dispatch_matches(
 
 pub(super) fn compile_preselected_workflow_dispatch(
     contract: &GithubWorkflowDispatchContract,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> Option<CompiledWorkflowDispatch> {
@@ -720,7 +720,7 @@ pub(super) fn compile_preselected_workflow_dispatch(
 
 fn resolve_workflow_dispatch_inputs(
     contract: &GithubWorkflowDispatchContract,
-    payload: &crate::GithubWorkflowDispatchInputsV1,
+    payload: &crate::GithubWorkflowDispatchInputs,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> Option<ContextValue> {
@@ -1046,12 +1046,12 @@ fn validate_schedule_timezone(node: &YamlNode, context: &mut CompileContext<'_>)
 
 fn schedule_matches(
     configuration: &TriggerConfiguration,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let cron = match metadata {
-        Some(GithubEventMetadataV1::Schedule { cron }) => cron.as_str(),
+        Some(GithubEventMetadata::Schedule { cron }) => cron.as_str(),
         Some(_) => {
             metadata_mismatch("schedule", trigger_span, context);
             return TriggerSelection::Rejected;
@@ -1270,12 +1270,12 @@ fn validate_pattern_list(
 fn push_matches(
     event: &WorkflowEventProvenance,
     configuration: &TriggerConfiguration,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let (deleted, changed_files) = match metadata {
-        Some(GithubEventMetadataV1::Push {
+        Some(GithubEventMetadata::Push {
             deleted,
             changed_files,
         }) => (*deleted, changed_files.as_ref()),
@@ -1361,12 +1361,12 @@ fn push_matches(
 
 fn pull_request_matches(
     configuration: &TriggerConfiguration,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let (action, base_ref, changed_files) = match metadata {
-        Some(GithubEventMetadataV1::PullRequest {
+        Some(GithubEventMetadata::PullRequest {
             action,
             base_ref,
             changed_files,
@@ -1440,7 +1440,7 @@ fn pull_request_matches(
 
 fn path_filter_matches(
     filter: &PushPullRequestFilter,
-    changed_files: Option<&GithubChangedFilesV1>,
+    changed_files: Option<&GithubChangedFiles>,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> PathFilterSelection {
@@ -1450,7 +1450,7 @@ fn path_filter_matches(
     let Some(changed_files) = changed_files else {
         return PathFilterSelection::RequiresChangedFiles;
     };
-    let GithubChangedFilesV1::Complete(files) = changed_files else {
+    let GithubChangedFiles::Complete(files) = changed_files else {
         return PathFilterSelection::Matched(true);
     };
     if !valid_changed_files(files) {
@@ -1552,7 +1552,7 @@ fn missing_metadata(event_name: &str, span: &SourceSpan, context: &mut CompileCo
     context.semantic(
         "github.compile.event_metadata_required",
         format!(
-            "GitHub `{event_name}` selection requires versioned GithubEventMetadataV1 payload fields"
+            "GitHub `{event_name}` selection requires verified GithubEventMetadata payload fields"
         ),
         span.clone(),
     );
@@ -1561,7 +1561,7 @@ fn missing_metadata(event_name: &str, span: &SourceSpan, context: &mut CompileCo
 fn metadata_mismatch(event_name: &str, span: &SourceSpan, context: &mut CompileContext<'_>) {
     context.semantic(
         "github.compile.event_metadata_mismatch",
-        format!("GithubEventMetadataV1 does not describe the `{event_name}` event"),
+        format!("GithubEventMetadata does not describe the `{event_name}` event"),
         span.clone(),
     );
 }

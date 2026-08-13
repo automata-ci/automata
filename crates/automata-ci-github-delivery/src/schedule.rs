@@ -40,14 +40,14 @@ use automata_ci_store::{
     RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, WorkflowAdmissionIdempotency,
 };
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompileWorkflowRequest, GithubEventMetadataV1, GithubWorkflowCompiler,
+    CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
     GithubWorkflowFrontend, ParseWorkflowRequest, RepositoryWorkflowDiscoveryLimits, SourceId,
     SourceOrigin, SourceProvenance, WorkflowFrontend as _, discover_repository_workflows,
     extract_github_schedule_entries,
 };
 use automata_ci_workflow_service::{
     AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, AdmissionRepositoryCoordinates,
-    GithubScheduleEvidenceV1, RepositoryWorkflowSource, WorkflowAdmissionError,
+    GithubScheduleEvidence, RepositoryWorkflowSource, WorkflowAdmissionError,
     WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionService,
 };
 use bytes::Bytes;
@@ -930,11 +930,9 @@ impl GithubScheduleService {
     ) -> Result<automata_ci_core::RunId, FireFailure> {
         let (source, available) = self.load_claimed_workflow_sources(claimed).await?;
         let plan = compile_claimed_workflow(claimed, &source)?;
-        let evidence = GithubScheduleEvidenceV1::new(
-            claimed.entry().cron_expression(),
-            claimed.scheduled_at(),
-        )
-        .map_err(|_| FireFailure::InvalidRegistry)?;
+        let evidence =
+            GithubScheduleEvidence::new(claimed.entry().cron_expression(), claimed.scheduled_at())
+                .map_err(|_| FireFailure::InvalidRegistry)?;
         let event = Bytes::from(
             evidence
                 .encode()
@@ -1137,8 +1135,8 @@ fn compile_claimed_workflow(
         .with_commit_sha(claimed.source_revision())
         .with_git_ref(claimed.default_branch_ref());
     let report = GithubWorkflowCompiler::new().compile(
-        CompileWorkflowRequest::new(source_plan, event).with_event_metadata_v1(
-            GithubEventMetadataV1::schedule(claimed.entry().cron_expression()),
+        CompileWorkflowRequest::new(source_plan, event).with_event_metadata(
+            GithubEventMetadata::schedule(claimed.entry().cron_expression()),
         ),
     );
     match report.disposition() {
@@ -1395,7 +1393,7 @@ mod tests {
 
     #[test]
     fn canonical_schedule_event_evidence_is_never_a_webhook_delivery() {
-        let evidence = GithubScheduleEvidenceV1::new("0/5 * * * *", UnixMillis::new(42_000))
+        let evidence = GithubScheduleEvidence::new("0/5 * * * *", UnixMillis::new(42_000))
             .expect("canonical schedule evidence");
         let encoded = evidence.encode().expect("canonical evidence encoding");
         let text = std::str::from_utf8(&encoded).expect("UTF-8 JSON evidence");

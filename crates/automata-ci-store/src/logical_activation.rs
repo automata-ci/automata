@@ -1639,10 +1639,10 @@ mod tests {
     }
 
     #[test]
-    fn evidence_free_descriptor_retains_legacy_publication_digest() {
+    fn evidence_free_descriptor_has_canonical_publication_digest() {
         assert_eq!(
             digest(instance(None)).to_string(),
-            "a05f7087a3ced475fb5b9e37a66379be12793b004f4d104520fea8bf7c7fd1f1"
+            "9e354947a483da281cf6bde73e5a0b4e066237228e83c8879a9a2f75b4029b84"
         );
     }
 }

@@ -29,7 +29,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
+  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 fn test_file(name: &str) -> PathBuf {
@@ -193,11 +193,11 @@ fn runner_policy_preserves_raw_evidence_and_matches_store_codec_golden_values() 
     assert_eq!(repository.runner_policy().runtime_policy(), &expected);
     assert_eq!(
         expected.digest().to_string(),
-        "5b36186efd97f645401b5d777c91d31a15dce60669733b7e492ad8a8cd73d757"
+        "b24c4885061625287886fcce4a3573e74f5aae7d4c897de8d8212d46f3e2778b"
     );
     assert_eq!(
         expected.canonical_digest().to_string(),
-        "22f025b7ef17e89a66a70113709e41ff0dfe3a7fb87837c2ffda38a72476ad0c"
+        "bf7130335987454ba80f14395298519ec56f6b9bd14d8dff32466541fc4c2e0b"
     );
     assert_ne!(expected.digest(), expected.canonical_digest());
 

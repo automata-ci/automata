@@ -2675,7 +2675,6 @@ fn decode_runner_log_safety(
         .as_str()
     {
         "persist" => RawLogDisposition::Persist,
-        "suppress_user_output" => RawLogDisposition::SuppressUserOutput,
         _ => return Err(StoreError::corrupt_data("invalid raw log disposition")),
     };
     let requested_visibility: String = row
@@ -2696,15 +2695,8 @@ fn decode_runner_log_safety(
     ) || !matches!(
         effective_visibility.as_str(),
         "private" | "authenticated" | "public"
-    ) || !matches!(
-        reason.as_str(),
-        "legacy_restricted"
-            | "repository_policy"
-            | "secret_exposure"
-            | "missing_policy"
-            | "unsupported_policy_schema"
-            | "administrative_restriction"
-    ) || !matches!(schema, 1 | 2)
+    ) || !matches!(reason.as_str(), "repository_policy" | "secret_exposure")
+        || schema != 1
     {
         return Err(StoreError::corrupt_data(
             "invalid runner log output-safety snapshot",
@@ -2730,20 +2722,8 @@ fn decode_runner_log_safety(
 }
 
 fn runner_log_safety_is_consistent(safety: &DurableRunnerLogSafety) -> bool {
-    let raw_policy_is_consistent = match safety.schema {
-        1 => matches!(
-            (safety.secret_exposure, safety.raw_log_disposition),
-            (
-                SecretExposureClass::Secretless | SecretExposureClass::CapabilityOnly,
-                RawLogDisposition::Persist
-            ) | (
-                SecretExposureClass::ReadableSecret,
-                RawLogDisposition::SuppressUserOutput
-            )
-        ),
-        2 => safety.raw_log_disposition == RawLogDisposition::Persist,
-        _ => false,
-    };
+    let raw_policy_is_consistent =
+        safety.schema == 1 && safety.raw_log_disposition == RawLogDisposition::Persist;
     raw_policy_is_consistent
         && matches!(
             (
@@ -2885,7 +2865,6 @@ const fn secret_exposure_name(value: SecretExposureClass) -> &'static str {
 const fn raw_log_disposition_name(value: RawLogDisposition) -> &'static str {
     match value {
         RawLogDisposition::Persist => "persist",
-        RawLogDisposition::SuppressUserOutput => "suppress_user_output",
     }
 }
 

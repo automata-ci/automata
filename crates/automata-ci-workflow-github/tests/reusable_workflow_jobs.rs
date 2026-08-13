@@ -2,7 +2,7 @@ mod support;
 
 use automata_ci_core::{LogicalJobKind, ReusableSecretForwarding, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, DiagnosticKind, GithubEventMetadataV1, GithubWorkflowCompiler,
+    CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata, GithubWorkflowCompiler,
     ReusableWorkflowSecrets, ScalarResolution,
 };
 
@@ -333,7 +333,7 @@ jobs:
             parsed.plan().expect("source plan"),
             WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
         )
-        .with_event_metadata_v1(GithubEventMetadataV1::push(false)),
+        .with_event_metadata(GithubEventMetadata::push(false)),
     );
 
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());

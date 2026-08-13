@@ -12229,14 +12229,14 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION automata_reject_logical_workflow_legacy_dependency() RETURNS trigger
+CREATE FUNCTION automata_reject_logical_workflow_dependency() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM logical_workflow_runs WHERE run_id = NEW.run_id
     ) THEN
-        RAISE EXCEPTION 'logical workflow jobs do not use legacy job dependencies'
+        RAISE EXCEPTION 'logical workflow jobs do not use job dependencies'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
@@ -23253,7 +23253,7 @@ WITH header AS (
     FROM mapping_parts
 )
 SELECT pg_catalog.convert_to(
-    '{"schema":2,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":['
+    '{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":['
     || catalog.encoded || '],"permissions":'
     || pg_catalog.convert_from(header.permission_policy_canonical, 'UTF8')
     || ',"resources":'
@@ -23262,7 +23262,7 @@ SELECT pg_catalog.convert_to(
     'UTF8'
 )
 FROM header CROSS JOIN catalog
-WHERE header.policy_schema = 2
+WHERE header.policy_schema = 1
   AND header.workspace_root = '/__w'
   AND header.workspace_derivation_version = 1
   AND automata_workflow_runtime_permission_policy_digest(
@@ -23349,7 +23349,7 @@ SELECT pg_catalog.sha256(
     )
 )
 FROM header CROSS JOIN catalog
-WHERE header.policy_schema = 2
+WHERE header.policy_schema = 1
   AND automata_workflow_runtime_permission_policy_digest(
       header.permission_policy_canonical
   ) IS NOT NULL
@@ -23660,17 +23660,17 @@ CREATE TABLE attempt_log_streams (
     opened_at_ms bigint NOT NULL,
     closed_at_ms bigint,
     secret_exposure_class text DEFAULT 'readable_secret'::text NOT NULL,
-    raw_log_disposition text DEFAULT 'suppress_user_output'::text NOT NULL,
+    raw_log_disposition text DEFAULT 'persist'::text NOT NULL,
     requested_visibility text DEFAULT 'private'::text NOT NULL,
     effective_visibility text DEFAULT 'private'::text NOT NULL,
-    output_safety_reason text DEFAULT 'legacy_restricted'::text NOT NULL,
+    output_safety_reason text DEFAULT 'repository_policy'::text NOT NULL,
     output_safety_schema integer DEFAULT 1 NOT NULL,
     CONSTRAINT attempt_log_streams_close_monotonic CHECK (((closed_at_ms IS NULL) OR (closed_at_ms >= opened_at_ms))),
-    CONSTRAINT attempt_log_streams_exposure_safety CHECK ((((output_safety_schema = 1) AND (((secret_exposure_class = ANY (ARRAY['secretless'::text, 'capability_only'::text])) AND (raw_log_disposition = 'persist'::text)) OR ((secret_exposure_class = 'readable_secret'::text) AND (raw_log_disposition = 'suppress_user_output'::text) AND (effective_visibility = 'private'::text)))) OR ((output_safety_schema = 2) AND (raw_log_disposition = 'persist'::text) AND ((secret_exposure_class <> 'readable_secret'::text) OR (effective_visibility = 'private'::text))))),
+    CONSTRAINT attempt_log_streams_exposure_safety CHECK (((output_safety_schema = 1) AND (raw_log_disposition = 'persist'::text) AND ((secret_exposure_class <> 'readable_secret'::text) OR (effective_visibility = 'private'::text)))),
     CONSTRAINT attempt_log_streams_fence_positive CHECK ((fencing_token > 0)),
-    CONSTRAINT attempt_log_streams_output_safety_reason_code CHECK ((output_safety_reason = ANY (ARRAY['legacy_restricted'::text, 'repository_policy'::text, 'secret_exposure'::text, 'missing_policy'::text, 'unsupported_policy_schema'::text, 'administrative_restriction'::text]))),
-    CONSTRAINT attempt_log_streams_output_safety_schema CHECK ((output_safety_schema = ANY (ARRAY[1, 2]))),
-    CONSTRAINT attempt_log_streams_raw_log_disposition CHECK ((raw_log_disposition = ANY (ARRAY['persist'::text, 'suppress_user_output'::text]))),
+    CONSTRAINT attempt_log_streams_output_safety_reason_code CHECK ((output_safety_reason = ANY (ARRAY['repository_policy'::text, 'secret_exposure'::text]))),
+    CONSTRAINT attempt_log_streams_output_safety_schema CHECK ((output_safety_schema = 1)),
+    CONSTRAINT attempt_log_streams_raw_log_disposition CHECK ((raw_log_disposition = 'persist'::text)),
     CONSTRAINT attempt_log_streams_schema_range CHECK (((log_schema >= 1) AND (log_schema <= 65535))),
     CONSTRAINT attempt_log_streams_secret_exposure_class CHECK ((secret_exposure_class = ANY (ARRAY['secretless'::text, 'capability_only'::text, 'readable_secret'::text]))),
     CONSTRAINT attempt_log_streams_slot_range CHECK (((runner_slot >= 1) AND (runner_slot <= 65535))),
@@ -24737,7 +24737,7 @@ CREATE TABLE workflow_runs (
     effective_dashboard_visibility text DEFAULT 'private'::text NOT NULL,
     requested_log_visibility text DEFAULT 'private'::text NOT NULL,
     requested_artifact_visibility text DEFAULT 'private'::text NOT NULL,
-    publication_safety_reason text DEFAULT 'legacy_restricted'::text NOT NULL,
+    publication_safety_reason text DEFAULT 'repository_policy'::text NOT NULL,
     publication_safety_schema integer DEFAULT 1 NOT NULL,
     run_id_alias bigint NOT NULL,
     concurrency_queue_policy text,
@@ -24761,7 +24761,7 @@ CREATE TABLE workflow_runs (
     CONSTRAINT workflow_runs_number_positive CHECK ((run_number > 0)),
     CONSTRAINT workflow_runs_public_id_alias_positive CHECK (((public_run_id_alias IS NULL) OR ((public_run_id_alias >= 1) AND (public_run_id_alias <= '9007199254740991'::bigint)))),
     CONSTRAINT workflow_runs_publication_policy_revision_positive CHECK ((publication_policy_revision > 0)),
-    CONSTRAINT workflow_runs_publication_safety_reason_code CHECK ((publication_safety_reason = ANY (ARRAY['legacy_restricted'::text, 'repository_policy'::text, 'secret_exposure'::text, 'missing_policy'::text, 'unsupported_policy_schema'::text, 'administrative_restriction'::text]))),
+    CONSTRAINT workflow_runs_publication_safety_reason_code CHECK ((publication_safety_reason = ANY (ARRAY['repository_policy'::text, 'secret_exposure'::text]))),
     CONSTRAINT workflow_runs_publication_safety_schema CHECK ((publication_safety_schema = 1)),
     CONSTRAINT workflow_runs_requested_visibility CHECK (((requested_dashboard_visibility = ANY (ARRAY['private'::text, 'authenticated'::text, 'public'::text])) AND (requested_log_visibility = ANY (ARRAY['private'::text, 'authenticated'::text, 'public'::text])) AND (requested_artifact_visibility = ANY (ARRAY['private'::text, 'authenticated'::text, 'public'::text])))),
     CONSTRAINT workflow_runs_runner_requirements_schema CHECK ((runner_requirements_schema = 1)),
@@ -25049,10 +25049,10 @@ CREATE TABLE job_attempts (
     runner_generation bigint,
     runner_slot integer,
     secret_exposure_class text DEFAULT 'readable_secret'::text NOT NULL,
-    raw_log_disposition text DEFAULT 'suppress_user_output'::text NOT NULL,
+    raw_log_disposition text DEFAULT 'persist'::text NOT NULL,
     requested_log_visibility text DEFAULT 'private'::text NOT NULL,
     effective_log_visibility text DEFAULT 'private'::text NOT NULL,
-    output_safety_reason text DEFAULT 'legacy_restricted'::text NOT NULL,
+    output_safety_reason text DEFAULT 'repository_policy'::text NOT NULL,
     output_safety_schema integer DEFAULT 1 NOT NULL,
     classified_at_ms bigint DEFAULT 0 NOT NULL,
     started_at_ms bigint,
@@ -25060,7 +25060,7 @@ CREATE TABLE job_attempts (
     CONSTRAINT job_attempts_active_lease_fenced CHECK (((lease_id IS NULL) OR (fencing_token > 0))),
     CONSTRAINT job_attempts_active_observation_within_lease CHECK (((lease_id IS NULL) OR (lease_expires_at_ms <= lease_issued_at_ms) OR ((changed_at_ms >= lease_issued_at_ms) AND (changed_at_ms < lease_expires_at_ms)))),
     CONSTRAINT job_attempts_classification_time_nonnegative CHECK ((classified_at_ms >= 0)),
-    CONSTRAINT job_attempts_exposure_safety CHECK ((((output_safety_schema = 1) AND (((secret_exposure_class = ANY (ARRAY['secretless'::text, 'capability_only'::text])) AND (raw_log_disposition = 'persist'::text)) OR ((secret_exposure_class = 'readable_secret'::text) AND (raw_log_disposition = 'suppress_user_output'::text) AND (effective_log_visibility = 'private'::text)))) OR ((output_safety_schema = 2) AND (raw_log_disposition = 'persist'::text) AND ((secret_exposure_class <> 'readable_secret'::text) OR (effective_log_visibility = 'private'::text))))),
+    CONSTRAINT job_attempts_exposure_safety CHECK (((output_safety_schema = 1) AND (raw_log_disposition = 'persist'::text) AND ((secret_exposure_class <> 'readable_secret'::text) OR (effective_log_visibility = 'private'::text)))),
     CONSTRAINT job_attempts_failures_nonnegative CHECK ((lease_failures >= 0)),
     CONSTRAINT job_attempts_fence_nonnegative CHECK ((fencing_token >= 0)),
     CONSTRAINT job_attempts_lease_after_start CHECK (((lease_issued_at_ms IS NULL) OR ((started_at_ms IS NOT NULL) AND (lease_issued_at_ms >= started_at_ms)))),
@@ -25070,9 +25070,9 @@ CREATE TABLE job_attempts (
     CONSTRAINT job_attempts_log_visibility CHECK (((requested_log_visibility = ANY (ARRAY['private'::text, 'authenticated'::text, 'public'::text])) AND (effective_log_visibility = ANY (ARRAY['private'::text, 'authenticated'::text, 'public'::text])))),
     CONSTRAINT job_attempts_log_visibility_cap CHECK (((effective_log_visibility = 'private'::text) OR ((effective_log_visibility = 'authenticated'::text) AND (requested_log_visibility = ANY (ARRAY['authenticated'::text, 'public'::text]))) OR ((effective_log_visibility = 'public'::text) AND (requested_log_visibility = 'public'::text)))),
     CONSTRAINT job_attempts_number_positive CHECK ((attempt_number > 0)),
-    CONSTRAINT job_attempts_output_safety_reason_code CHECK ((output_safety_reason = ANY (ARRAY['legacy_restricted'::text, 'repository_policy'::text, 'secret_exposure'::text, 'missing_policy'::text, 'unsupported_policy_schema'::text, 'administrative_restriction'::text]))),
-    CONSTRAINT job_attempts_output_safety_schema CHECK ((output_safety_schema = ANY (ARRAY[1, 2]))),
-    CONSTRAINT job_attempts_raw_log_disposition CHECK ((raw_log_disposition = ANY (ARRAY['persist'::text, 'suppress_user_output'::text]))),
+    CONSTRAINT job_attempts_output_safety_reason_code CHECK ((output_safety_reason = ANY (ARRAY['repository_policy'::text, 'secret_exposure'::text]))),
+    CONSTRAINT job_attempts_output_safety_schema CHECK ((output_safety_schema = 1)),
+    CONSTRAINT job_attempts_raw_log_disposition CHECK ((raw_log_disposition = 'persist'::text)),
     CONSTRAINT job_attempts_runner_generation_positive CHECK (((runner_generation IS NULL) OR (runner_generation > 0))),
     CONSTRAINT job_attempts_runner_slot_range CHECK (((runner_slot IS NULL) OR ((runner_slot >= 1) AND (runner_slot <= 65535)))),
     CONSTRAINT job_attempts_secret_exposure_class CHECK ((secret_exposure_class = ANY (ARRAY['secretless'::text, 'capability_only'::text, 'readable_secret'::text]))),
@@ -26339,7 +26339,7 @@ CREATE TABLE workflow_artifacts (
     secret_exposure_class text DEFAULT 'readable_secret'::text NOT NULL,
     requested_visibility text DEFAULT 'private'::text NOT NULL,
     effective_visibility text DEFAULT 'private'::text NOT NULL,
-    publication_safety_reason text DEFAULT 'legacy_restricted'::text NOT NULL,
+    publication_safety_reason text DEFAULT 'repository_policy'::text NOT NULL,
     publication_safety_schema integer DEFAULT 1 NOT NULL,
     finalization_generation bigint DEFAULT 0 NOT NULL,
     finalization_claimed_size_bytes bigint,
@@ -26355,7 +26355,7 @@ CREATE TABLE workflow_artifacts (
     CONSTRAINT workflow_artifacts_mime_type_shape CHECK ((((octet_length(mime_type) >= 3) AND (octet_length(mime_type) <= 128)) AND (mime_type !~ '[[:space:][:cntrl:];]'::text))),
     CONSTRAINT workflow_artifacts_name_shape CHECK ((((octet_length(name) >= 1) AND (octet_length(name) <= 255)) AND (name !~ '[[:cntrl:]"/:<>|*?\\]'::text))),
     CONSTRAINT workflow_artifacts_protocol_version CHECK ((protocol_version = 1)),
-    CONSTRAINT workflow_artifacts_publication_safety_reason_code CHECK ((publication_safety_reason = ANY (ARRAY['legacy_restricted'::text, 'repository_policy'::text, 'secret_exposure'::text, 'missing_policy'::text, 'unsupported_policy_schema'::text, 'administrative_restriction'::text]))),
+    CONSTRAINT workflow_artifacts_publication_safety_reason_code CHECK ((publication_safety_reason = ANY (ARRAY['repository_policy'::text, 'secret_exposure'::text]))),
     CONSTRAINT workflow_artifacts_publication_safety_schema CHECK ((publication_safety_schema = 1)),
     CONSTRAINT workflow_artifacts_publication_shape CHECK (((((state = 'pending'::text) AND (manifest_state IS NULL) AND (content_digest IS NULL) AND (content_size_bytes IS NULL) AND (manifest_object_key IS NULL) AND (manifest_digest IS NULL) AND (manifest_size_bytes IS NULL) AND (manifest_media_type IS NULL) AND (manifest_bytes IS NULL) AND (manifest_reserved_at_seconds IS NULL) AND (finalized_at_seconds IS NULL)) OR ((state = 'pending'::text) AND (manifest_state = 'reserved'::text) AND (finalization_generation > 0) AND (finalization_claimed_size_bytes = content_size_bytes) AND ((finalization_claimed_digest IS NULL) OR (finalization_claimed_digest = content_digest)) AND (octet_length(content_digest) = 32) AND (content_size_bytes >= 0) AND ((octet_length(manifest_object_key) >= 1) AND (octet_length(manifest_object_key) <= 1024)) AND (manifest_object_key !~ '[[:cntrl:]]'::text) AND (octet_length(manifest_digest) = 32) AND ((manifest_size_bytes >= 1) AND (manifest_size_bytes <= 1048576)) AND (octet_length(manifest_bytes) = manifest_size_bytes) AND ((octet_length(manifest_media_type) >= 3) AND (octet_length(manifest_media_type) <= 128)) AND (manifest_media_type !~ '[[:space:][:cntrl:];]'::text) AND (manifest_reserved_at_seconds >= created_at_seconds) AND (finalized_at_seconds IS NULL)) OR ((state = 'finalized'::text) AND (manifest_state = 'ready'::text) AND (finalization_generation > 0) AND (finalization_claimed_size_bytes = content_size_bytes) AND ((finalization_claimed_digest IS NULL) OR (finalization_claimed_digest = content_digest)) AND (octet_length(content_digest) = 32) AND (content_size_bytes >= 0) AND ((octet_length(manifest_object_key) >= 1) AND (octet_length(manifest_object_key) <= 1024)) AND (manifest_object_key !~ '[[:cntrl:]]'::text) AND (octet_length(manifest_digest) = 32) AND ((manifest_size_bytes >= 1) AND (manifest_size_bytes <= 1048576)) AND (octet_length(manifest_bytes) = manifest_size_bytes) AND ((octet_length(manifest_media_type) >= 3) AND (octet_length(manifest_media_type) <= 128)) AND (manifest_media_type !~ '[[:space:][:cntrl:];]'::text) AND (manifest_reserved_at_seconds >= created_at_seconds) AND (finalized_at_seconds >= manifest_reserved_at_seconds))) IS TRUE)),
     CONSTRAINT workflow_artifacts_secret_exposure_class CHECK ((secret_exposure_class = ANY (ARRAY['secretless'::text, 'capability_only'::text, 'readable_secret'::text]))),
@@ -27786,7 +27786,7 @@ CREATE TABLE workflow_runtime_policy_revisions (
     resource_policy_canonical bytea CONSTRAINT workflow_runtime_policy_revi_resource_policy_canonical_not_null NOT NULL,
     permission_policy_canonical bytea CONSTRAINT workflow_runtime_policy_rev_permission_policy_canonica_not_null NOT NULL,
     CONSTRAINT workflow_runtime_policy_revisions_canonical_size CHECK (((octet_length(canonical_policy) >= 1) AND (octet_length(canonical_policy) <= 65536))),
-    CONSTRAINT workflow_runtime_policy_revisions_identity CHECK (((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (policy_revision > 0) AND (octet_length(policy_digest) = 32) AND (policy_schema = 2) AND ((octet_length(permission_policy_canonical) >= 1) AND (octet_length(permission_policy_canonical) <= 32768)) AND ((octet_length(resource_policy_canonical) >= 1) AND (octet_length(resource_policy_canonical) <= 8192)))),
+    CONSTRAINT workflow_runtime_policy_revisions_identity CHECK (((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (policy_revision > 0) AND (octet_length(policy_digest) = 32) AND (policy_schema = 1) AND ((octet_length(permission_policy_canonical) >= 1) AND (octet_length(permission_policy_canonical) <= 32768)) AND ((octet_length(resource_policy_canonical) >= 1) AND (octet_length(resource_policy_canonical) <= 8192)))),
     CONSTRAINT workflow_runtime_policy_revisions_lifecycle CHECK (((((state = 'staging'::text) AND (sealed_at_ms IS NULL)) OR ((state = 'sealed'::text) AND (sealed_at_ms = registered_at_ms))) IS TRUE)),
     CONSTRAINT workflow_runtime_policy_revisions_mapping_count CHECK (((mapping_count >= 1) AND (mapping_count <= 64))),
     CONSTRAINT workflow_runtime_policy_revisions_time CHECK ((registered_at_ms >= 0)),
@@ -30077,7 +30077,7 @@ CREATE TRIGGER logical_workflow_invocations_reject_result_source_truncate BEFORE
 
 CREATE TRIGGER logical_workflow_invocations_validate_root BEFORE INSERT OR UPDATE ON logical_workflow_invocations FOR EACH ROW EXECUTE FUNCTION automata_validate_logical_workflow_root();
 
-CREATE TRIGGER logical_workflow_job_dependencies_reject BEFORE INSERT OR UPDATE ON job_dependencies FOR EACH ROW EXECUTE FUNCTION automata_reject_logical_workflow_legacy_dependency();
+CREATE TRIGGER logical_workflow_job_dependencies_reject BEFORE INSERT OR UPDATE ON job_dependencies FOR EACH ROW EXECUTE FUNCTION automata_reject_logical_workflow_dependency();
 
 CREATE TRIGGER logical_workflow_job_environment_evidence_append_only BEFORE DELETE OR UPDATE ON logical_workflow_job_environment_evidence FOR EACH ROW EXECUTE FUNCTION automata_reject_job_environment_evidence_mutation();
 

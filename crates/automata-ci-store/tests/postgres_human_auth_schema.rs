@@ -10,22 +10,22 @@ const HUMAN_AUTH_MIGRATION: &str = include_str!("../migrations/0001_initial_sche
 
 #[test]
 fn human_auth_migration_keeps_publication_private_and_never_names_value_read() {
-    assert!(HUMAN_AUTH_MIGRATION.contains("dashboard_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("log_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("artifact_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("public_if_safe"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("octet_length(token_hash) = 32"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("security_audit_events_append_only"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("secrets.value.read"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("('runs:read'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("('repositories:read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("('runs.read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("('repositories.read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("device_user_code TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("verification_uri TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("access_token TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("refresh_token TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("metadata JSONB"));
+    let normalized = HUMAN_AUTH_MIGRATION.to_ascii_lowercase();
+    assert!(normalized.contains("dashboard_audience text default 'private'::text not null"));
+    assert!(normalized.contains("log_audience text default 'private'::text not null"));
+    assert!(normalized.contains("artifact_audience text default 'private'::text not null"));
+    assert!(normalized.contains("octet_length(token_hash) = 32"));
+    assert!(normalized.contains("security_audit_events_append_only"));
+    assert!(!normalized.contains("secrets.value.read"));
+    assert!(normalized.contains("('runs:read'"));
+    assert!(normalized.contains("('repositories:read'"));
+    assert!(!normalized.contains("('runs.read'"));
+    assert!(!normalized.contains("('repositories.read'"));
+    assert!(!normalized.contains("device_user_code text"));
+    assert!(!normalized.contains("verification_uri text"));
+    assert!(!normalized.contains("access_token text"));
+    assert!(!normalized.contains("refresh_token text"));
+    assert!(!normalized.contains("metadata jsonb"));
 }
 
 #[tokio::test]

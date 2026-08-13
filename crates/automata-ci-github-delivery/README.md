@@ -6,11 +6,10 @@ event in immutable blob storage, and records a credential-free descriptor in
 the provider inbox. A worker claims that entry, resolves public or explicitly
 authorized private source, and submits the workflow through normal admission.
 
-The legacy ingress accepts `push`. A versioned component boundary also
-normalizes authenticated `push`, `pull_request`, and `merge_group` evidence,
-including the selected ref and source revisions. The `automata server` webhook
-route still calls the legacy push-only ingress; the broader event path is not a
-product capability yet.
+One canonical ingress normalizes authenticated `push`, `pull_request`,
+`merge_group`, and `repository_dispatch` evidence, including the selected ref
+and source revisions. The `automata server` webhook route sends every supported
+event through this same durable path.
 
 The crate also contains the restart-safe GitHub Checks publisher port and its
 credential-custody interfaces. Provider credentials, webhook secrets, source

@@ -2201,12 +2201,12 @@ mod tests {
     use super::*;
     use crate::app::web::data::{
         ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobNavigationItem,
-        JobSummary, LogChannel, LogLine, LogOutputVisibility, RBAC_BINDING_PAGE_SIZE,
-        RBAC_ROLE_PAGE_SIZE, RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE,
-        RbacDirectBindingListPage, RbacRoleListPage, RbacUserDetailPage, RbacUserListPage,
-        Repository as DataRepository, RepositoryDirectoryItem, RepositoryDirectoryPage,
-        RepositorySettingsDestination, RepositorySettingsPage, RunDetailPage, RunListPage,
-        RunSummary, Status, Viewer, VisibleCollection, Workflow, WorkflowDefinition,
+        JobSummary, LogChannel, LogLine, RBAC_BINDING_PAGE_SIZE, RBAC_ROLE_PAGE_SIZE,
+        RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE, RbacDirectBindingListPage,
+        RbacRoleListPage, RbacUserDetailPage, RbacUserListPage, Repository as DataRepository,
+        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositorySettingsDestination,
+        RepositorySettingsPage, RunDetailPage, RunListPage, RunSummary, Status, Viewer,
+        VisibleCollection, Workflow, WorkflowDefinition,
     };
 
     const WORKFLOW_ID: &str = "11111111-1111-4111-8111-11111111111a";
@@ -2924,7 +2924,6 @@ mod tests {
             previous_navigation_job_id: None,
             next_navigation_job_id: None,
             job,
-            output_visibility: LogOutputVisibility::Full,
             lines: vec![
                 LogLine {
                     sequence: 38,

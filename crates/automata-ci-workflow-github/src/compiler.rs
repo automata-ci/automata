@@ -14,7 +14,7 @@ use automata_ci_core::{
 };
 
 use crate::{
-    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, GithubEventMetadataV1,
+    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, GithubEventMetadata,
     GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField, SourceOrigin,
     SourceSpan, TriggerConfiguration,
 };
@@ -31,8 +31,8 @@ pub struct CompileWorkflowRequest<'plan> {
 #[derive(Clone, Debug)]
 enum EventSelection {
     Unverified,
-    MetadataV1(GithubEventMetadataV1),
-    Preselected(Option<GithubEventMetadataV1>),
+    Metadata(GithubEventMetadata),
+    Preselected(Option<GithubEventMetadata>),
 }
 
 impl<'plan> CompileWorkflowRequest<'plan> {
@@ -40,7 +40,7 @@ impl<'plan> CompileWorkflowRequest<'plan> {
     /// GitHub trigger selection.
     ///
     /// Attach verified provider metadata with
-    /// [`Self::with_event_metadata_v1`] when the configured trigger requires it.
+    /// [`Self::with_event_metadata`] when the configured trigger requires it.
     #[must_use]
     pub const fn new(
         source_plan: &'plan GithubWorkflowSourcePlan,
@@ -53,11 +53,10 @@ impl<'plan> CompileWorkflowRequest<'plan> {
         }
     }
 
-    /// Attaches verified, versioned GitHub provider fields used for trigger
-    /// selection.
+    /// Attaches verified GitHub provider fields used for trigger selection.
     #[must_use]
-    pub fn with_event_metadata_v1(mut self, metadata: GithubEventMetadataV1) -> Self {
-        self.selection = EventSelection::MetadataV1(metadata);
+    pub fn with_event_metadata(mut self, metadata: GithubEventMetadata) -> Self {
+        self.selection = EventSelection::Metadata(metadata);
         self
     }
 
@@ -89,10 +88,10 @@ impl<'plan> CompileWorkflowRequest<'plan> {
     /// the metadata from immutable evidence already bound to admission, never
     /// reconstruct it from an unauthenticated request.
     #[must_use]
-    pub fn for_preselected_event_with_metadata_v1(
+    pub fn for_preselected_event_with_metadata(
         source_plan: &'plan GithubWorkflowSourcePlan,
         event: WorkflowEventProvenance,
-        metadata: GithubEventMetadataV1,
+        metadata: GithubEventMetadata,
     ) -> Self {
         Self {
             source_plan,
@@ -463,7 +462,7 @@ fn compile_event(
             selected.span(),
             context,
         ),
-        EventSelection::MetadataV1(metadata) => trigger::event_matches(
+        EventSelection::Metadata(metadata) => trigger::event_matches(
             &event,
             selected.configuration(),
             selected_dispatch_contract.as_ref(),
@@ -488,7 +487,7 @@ fn compile_preselected_event(
     event: WorkflowEventProvenance,
     workflow_dispatch: bool,
     dispatch_contract: Option<GithubWorkflowDispatchContract>,
-    metadata: Option<&GithubEventMetadataV1>,
+    metadata: Option<&GithubEventMetadata>,
     configured_span: &PlanSourceSpan,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,

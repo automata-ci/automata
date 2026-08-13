@@ -1,18 +1,18 @@
 use std::fmt;
 
-use super::GithubWorkflowDispatchInputsV1;
+use super::GithubWorkflowDispatchInputs;
 
 /// Provider-verified changed-file selection used by path-filter evaluation.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GithubChangedFilesV1 {
+pub enum GithubChangedFiles {
     /// The exact bounded file list considered by GitHub's diff selection.
     Complete(Vec<String>),
     /// GitHub bypassed path filtering because the diff could not be produced.
     BypassPathFilters,
 }
 
-impl GithubChangedFilesV1 {
+impl GithubChangedFiles {
     /// Creates a complete changed-file selection.
     #[must_use]
     pub fn complete(files: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -26,7 +26,7 @@ impl GithubChangedFilesV1 {
     }
 }
 
-impl fmt::Debug for GithubChangedFilesV1 {
+impl fmt::Debug for GithubChangedFiles {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Complete(files) => formatter
@@ -40,8 +40,8 @@ impl fmt::Debug for GithubChangedFilesV1 {
 
 /// Selection metadata from a verified GitHub event or provider invocation.
 ///
-/// This type is explicitly versioned because the neutral workflow event
-/// provenance intentionally does not carry provider-specific selector fields.
+/// The neutral workflow event provenance intentionally does not carry
+/// provider-specific selector fields.
 /// Keep the metadata attached to the compile request; it is not copied into
 /// the provider-neutral workflow plan. Until a future plan schema carries a
 /// canonical selection digest, admission must integrity-bind the verified raw
@@ -49,13 +49,13 @@ impl fmt::Debug for GithubChangedFilesV1 {
 /// fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GithubEventMetadataV1 {
+pub enum GithubEventMetadata {
     /// A GitHub `push` payload.
     Push {
         /// The payload's top-level `deleted` value.
         deleted: bool,
         /// Provider-verified diff selection, required only for path filters.
-        changed_files: Option<GithubChangedFilesV1>,
+        changed_files: Option<GithubChangedFiles>,
     },
     /// A GitHub `pull_request` payload.
     PullRequest {
@@ -64,7 +64,7 @@ pub enum GithubEventMetadataV1 {
         /// `pull_request.base.ref`, without a `refs/heads/` prefix.
         base_ref: String,
         /// Provider-verified diff selection, required only for path filters.
-        changed_files: Option<GithubChangedFilesV1>,
+        changed_files: Option<GithubChangedFiles>,
     },
     /// A GitHub `merge_group` payload.
     MergeGroup {
@@ -86,11 +86,11 @@ pub enum GithubEventMetadataV1 {
     /// A provider-verified `workflow_dispatch` invocation.
     WorkflowDispatch {
         /// Bounded raw input properties to validate against the selected source contract.
-        inputs: GithubWorkflowDispatchInputsV1,
+        inputs: GithubWorkflowDispatchInputs,
     },
 }
 
-impl GithubEventMetadataV1 {
+impl GithubEventMetadata {
     /// Creates metadata for a `push` payload.
     #[must_use]
     pub const fn push(deleted: bool) -> Self {
@@ -102,10 +102,7 @@ impl GithubEventMetadataV1 {
 
     /// Creates metadata for a `push` payload with verified diff selection.
     #[must_use]
-    pub const fn push_with_changed_files(
-        deleted: bool,
-        changed_files: GithubChangedFilesV1,
-    ) -> Self {
+    pub const fn push_with_changed_files(deleted: bool, changed_files: GithubChangedFiles) -> Self {
         Self::Push {
             deleted,
             changed_files: Some(changed_files),
@@ -127,7 +124,7 @@ impl GithubEventMetadataV1 {
     pub fn pull_request_with_changed_files(
         action: impl Into<String>,
         base_ref: impl Into<String>,
-        changed_files: GithubChangedFilesV1,
+        changed_files: GithubChangedFiles,
     ) -> Self {
         Self::PullRequest {
             action: action.into(),
@@ -165,7 +162,7 @@ impl GithubEventMetadataV1 {
     /// provider evidence; the compiler validates it against the exact workflow
     /// source contract before producing an `inputs` context.
     #[must_use]
-    pub const fn workflow_dispatch(inputs: GithubWorkflowDispatchInputsV1) -> Self {
+    pub const fn workflow_dispatch(inputs: GithubWorkflowDispatchInputs) -> Self {
         Self::WorkflowDispatch { inputs }
     }
 }

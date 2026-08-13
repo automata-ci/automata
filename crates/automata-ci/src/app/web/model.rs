@@ -31,7 +31,7 @@ use crate::app::repository_secrets::{
 
 use super::data::{
     ArtifactSummary, CollectionVisibility, JobLogPage as JobLogData, JobSummary, LOG_LINE_BYTES,
-    LOG_PAGE_DECODED_BYTES, LogChannel, LogOutputVisibility, REPOSITORY_PAGE_SIZE,
+    LOG_PAGE_DECODED_BYTES, LogChannel, REPOSITORY_PAGE_SIZE,
     RbacDirectBindingListPage as RbacDirectBindingListData, RbacRoleListPage as RbacRoleListData,
     RbacUserDetailPage as RbacUserDetailData, RbacUserListPage as RbacUserListData,
     Repository as RepositoryData, RepositoryDirectoryItem as RepositoryDirectoryItemData,
@@ -2022,7 +2022,7 @@ pub(super) fn job_log(
         label: pluralized(lines.len(), "log line", "log lines"),
     };
     let title = format!("{} logs · Automata", data.job.name);
-    let notice = job_log_notice(data.job.status, data.output_visibility);
+    let notice = job_log_notice(data.job.status);
     let return_path_candidate = job_log_href(&job_href, query, request_cursor);
     let return_path = login_return_path(return_path_candidate, job_href.clone())?;
 
@@ -2090,11 +2090,6 @@ fn valid_job_log_data(data: &JobLogData) -> bool {
                 && valid_log_text(&line.text)
                 && line.fragment.is_none_or(|fragment| fragment != 0)
         })
-        && (data.output_visibility != LogOutputVisibility::SystemOnly
-            || data
-                .lines
-                .iter()
-                .all(|line| line.channel == LogChannel::System))
         && all_unique(data.lines.iter().map(|line| (line.sequence, line.fragment)))
         && log_lines_are_strictly_ordered(&data.lines)
 }
@@ -2650,27 +2645,13 @@ fn status(value: DataStatus) -> Status {
     }
 }
 
-const fn job_log_notice(
-    status: DataStatus,
-    output_visibility: LogOutputVisibility,
-) -> Option<&'static str> {
-    match (output_visibility, status) {
-        (LogOutputVisibility::SystemOnly, DataStatus::Queued) => Some(
-            "Standard output and error will not be retained because this job can access readable secrets. Refresh to check for system logs.",
-        ),
-        (LogOutputVisibility::SystemOnly, DataStatus::InProgress) => Some(
-            "Standard output and error are not retained because this job can access readable secrets. Refresh to load newly committed system logs.",
-        ),
-        (LogOutputVisibility::SystemOnly, _) => Some(
-            "Standard output and error were not retained because this job could access readable secrets.",
-        ),
-        (LogOutputVisibility::Full, DataStatus::Queued) => {
-            Some("This job is queued. Refresh to check for logs.")
-        }
-        (LogOutputVisibility::Full, DataStatus::InProgress) => {
+const fn job_log_notice(status: DataStatus) -> Option<&'static str> {
+    match status {
+        DataStatus::Queued => Some("This job is queued. Refresh to check for logs."),
+        DataStatus::InProgress => {
             Some("This job is still running. Refresh to load newly committed logs.")
         }
-        (LogOutputVisibility::Full, _) => None,
+        _ => None,
     }
 }
 
@@ -4623,11 +4604,11 @@ mod tests {
     #[test]
     fn job_log_notice_tracks_lifecycle_instead_of_pagination() {
         assert_eq!(
-            job_log_notice(DataStatus::Queued, LogOutputVisibility::Full),
+            job_log_notice(DataStatus::Queued),
             Some("This job is queued. Refresh to check for logs.")
         );
         assert_eq!(
-            job_log_notice(DataStatus::InProgress, LogOutputVisibility::Full),
+            job_log_notice(DataStatus::InProgress),
             Some("This job is still running. Refresh to load newly committed logs.")
         );
         for terminal in [
@@ -4638,18 +4619,8 @@ mod tests {
             DataStatus::Skipped,
             DataStatus::Lost,
         ] {
-            assert_eq!(job_log_notice(terminal, LogOutputVisibility::Full), None);
+            assert_eq!(job_log_notice(terminal), None);
         }
-        assert!(
-            job_log_notice(DataStatus::Succeeded, LogOutputVisibility::SystemOnly)
-                .expect("suppressed output must have an explanatory notice")
-                .contains("readable secrets")
-        );
-        assert!(
-            job_log_notice(DataStatus::InProgress, LogOutputVisibility::SystemOnly)
-                .expect("active suppressed output must have an explanatory notice")
-                .contains("system logs")
-        );
     }
 
     fn repository_settings_fixture() -> (RequestContext, CsrfToken, RepositorySettingsData) {

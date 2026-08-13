@@ -65,7 +65,7 @@ const FIXTURE_RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
+  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 fn fixture_github_runtime_policy(
@@ -629,7 +629,7 @@ async fn one_public_router_accepts_mixed_repositories_outside_human_auth() {
 }
 
 #[tokio::test]
-async fn product_router_preserves_legacy_push_and_opts_supported_events_into_v1() {
+async fn product_router_routes_every_supported_event_through_one_canonical_ingress() {
     let (blobs, subjects) = default_ports();
     let app = app(Arc::clone(&blobs), Arc::clone(&subjects));
     for (event_name, delivery_id, body) in [

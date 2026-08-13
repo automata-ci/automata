@@ -8,7 +8,7 @@ use automata_ci_github::{
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use automata_ci_store::ProviderRepositoryVisibility;
-use automata_ci_workflow_github::GithubChangedFilesV1;
+use automata_ci_workflow_github::GithubChangedFiles;
 
 use crate::{
     GithubPushChangedFilesAuthority, GithubPushChangedFilesError, GithubPushChangedFilesProvider,
@@ -31,7 +31,7 @@ impl GithubRestPushChangedFilesProvider {
     async fn resolve(
         &self,
         request: &GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
         validate_delivery_binding(request)?;
         let repository = RepositoryId::new(request.push().repository().full_name())
             .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
@@ -68,7 +68,7 @@ impl GithubPushChangedFilesProvider for GithubRestPushChangedFilesProvider {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
         self.resolve(&request).await
     }
 }
@@ -152,11 +152,11 @@ fn push_authority<'credential>(
 
 fn translate_outcome(
     outcome: GithubPushDiffOutcome,
-) -> Result<GithubChangedFilesV1, GithubPushChangedFilesError> {
+) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
     match outcome {
-        GithubPushDiffOutcome::Complete(evidence) => Ok(GithubChangedFilesV1::complete(
-            evidence.into_changed_paths(),
-        )),
+        GithubPushDiffOutcome::Complete(evidence) => {
+            Ok(GithubChangedFiles::complete(evidence.into_changed_paths()))
+        }
         _ => Err(GithubPushChangedFilesError::InvalidEvidence),
     }
 }

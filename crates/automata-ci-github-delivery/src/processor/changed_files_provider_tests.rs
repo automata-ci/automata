@@ -18,7 +18,7 @@ use automata_ci_store::{
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryVisibility, TenantScope,
 };
-use automata_ci_workflow_github::GithubChangedFilesV1;
+use automata_ci_workflow_github::GithubChangedFiles;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -353,7 +353,7 @@ async fn public_request_is_anonymous_at_the_real_http_boundary() {
         ))
         .await
         .expect("public changed files");
-    assert_eq!(outcome, GithubChangedFilesV1::complete([CHANGED_PATH]));
+    assert_eq!(outcome, GithubChangedFiles::complete([CHANGED_PATH]));
 
     let captured = http.finish().await;
     assert_common_request(&captured);
@@ -375,7 +375,7 @@ async fn private_request_sends_only_the_exact_token_at_the_real_http_boundary() 
         ))
         .await
         .expect("private changed files");
-    assert_eq!(outcome, GithubChangedFilesV1::complete([CHANGED_PATH]));
+    assert_eq!(outcome, GithubChangedFiles::complete([CHANGED_PATH]));
 
     let captured = http.finish().await;
     assert_common_request(&captured);

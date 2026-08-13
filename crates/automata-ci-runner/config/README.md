@@ -18,7 +18,7 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v2 accepts exactly one sandbox provider. Host runners use the
+Product schema 1 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
 `state.podman`, `state.windows_native`, and `state.macos_native` and use a
 top-level `kubernetes` object. Native Windows and macOS runners use their
