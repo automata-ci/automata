@@ -298,7 +298,10 @@ class CapabilityRegistryTests(unittest.TestCase):
             )
             feature["acceptance"]["ci_lane"]["package"] = "automata-ci-secret"
 
-        self.reject(mutate, "does not run automata-ci-secret --tests with --ignored")
+        self.reject(
+            mutate,
+            "does not run automata-ci-secret --test secret_postgres with --ignored",
+        )
 
     def test_result_returning_empty_acceptance_test_is_rejected(self) -> None:
         value = copy.deepcopy(self.registry)

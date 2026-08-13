@@ -122,10 +122,12 @@ an explicit disposition. Add or update the inventory in the same change that
 introduces, renames, aliases, or changes an enforced limit.
 
 The repository's canonical Automata workflow invokes these checks through
-`verify-product-targets.sh`. The GitHub-hosted workflow under
-`.github/workflows` performs only scheduled/manual upstream-reference drift
-detection; it is not a GitHub pull-request validation lane. An empty GitHub PR
-check rollup is therefore not evidence that the governance checks ran.
+`verify-product-targets.sh`. The scheduled/manual upstream-reference drift
+detector is declared alongside that workflow at
+`.ci/workflows/github-actions-reference-drift.yml`; the checked-in contract is
+not evidence that scheduled production execution has been proven. It is also
+not a GitHub pull-request validation lane, so an empty GitHub PR check rollup is
+not evidence that the governance checks ran.
 
 ## Shared surfaces
 

@@ -559,9 +559,10 @@
         "additional": [
           {
             "ci_lane": {
+              "driver": "scripts/ci/run-rust-coverage.sh",
               "package": "automata-ci-secret-postgres",
               "runner": "scripts/ci/run-postgres-tests.sh",
-              "selection": "--tests",
+              "selection": "--test secret_postgres",
               "workflow": ".ci/workflows/ci.yml"
             },
             "function": "replacement_stage_preserves_predecessor_until_atomic_confirmation",
@@ -592,9 +593,10 @@
           }
         ],
         "ci_lane": {
+          "driver": "scripts/ci/run-rust-coverage.sh",
           "package": "automata-ci-secret-postgres",
           "runner": "scripts/ci/run-postgres-tests.sh",
-          "selection": "--tests",
+          "selection": "--test secret_postgres",
           "workflow": ".ci/workflows/ci.yml"
         },
         "function": "encrypted_create_stays_unresolvable_until_management_confirmation",

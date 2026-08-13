@@ -99,7 +99,10 @@ To replace a pin:
 4. Replace the snapshot metadata and run both registry checks. Never replace a
    digest solely because the detector reported drift.
 
-The weekly GitHub-hosted detector verifies the old immutable bytes first,
-compares the same files at the current documentation commit and latest stable
-runner release, and opens or updates one bounded review issue. That issue is a
-review prompt, not approval to move the baseline.
+The scheduled detector contract at
+`.ci/workflows/github-actions-reference-drift.yml` verifies the old immutable
+bytes first, compares the same files at the current documentation commit and
+latest stable runner release, and opens or updates one bounded review issue.
+Its presence does not claim that scheduled production execution has been
+proven. Any issue it produces is a review prompt, not approval to move the
+baseline.

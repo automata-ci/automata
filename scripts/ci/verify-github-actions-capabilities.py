@@ -396,7 +396,7 @@ def attributed_test(
 def acceptance_ci_lane(root: Path, value: Any, context: str) -> None:
     lane = exact_object(
         value,
-        {"package", "runner", "selection", "workflow"},
+        {"driver", "package", "runner", "selection", "workflow"},
         context,
     )
     package = string(lane["package"], f"{context}.package")
@@ -404,6 +404,7 @@ def acceptance_ci_lane(root: Path, value: Any, context: str) -> None:
     if selection != "--tests" and re.fullmatch(r"--test [A-Za-z0-9_-]+", selection) is None:
         fail(f"{context}.selection must be --tests or one exact --test target")
     runner = repository_file(root, lane["runner"], f"{context}.runner")
+    driver = repository_file(root, lane["driver"], f"{context}.driver")
     workflow = repository_file(root, lane["workflow"], f"{context}.workflow")
     runner_source = runner.read_text(encoding="utf-8")
     commands = re.findall(
@@ -423,9 +424,18 @@ def acceptance_ci_lane(root: Path, value: Any, context: str) -> None:
         for command in commands
     ):
         fail(f"{context} does not run {package} {selection} with --ignored")
-    invocation = f"run: ./{runner.relative_to(root).as_posix()}"
-    if invocation not in workflow.read_text(encoding="utf-8"):
-        fail(f"{context}.workflow does not invoke the declared runner")
+    runner_invocation = f"./{runner.relative_to(root).as_posix()}"
+    if re.search(
+        rf"(?m)^\s*{re.escape(runner_invocation)}(?:\s|$)",
+        driver.read_text(encoding="utf-8"),
+    ) is None:
+        fail(f"{context}.driver does not invoke the declared runner")
+    driver_invocation = f"./{driver.relative_to(root).as_posix()}"
+    if re.search(
+        rf"(?m)^\s*{re.escape(driver_invocation)}(?:\s|$)",
+        workflow.read_text(encoding="utf-8"),
+    ) is None:
+        fail(f"{context}.workflow does not invoke the declared driver")
 
 
 def acceptance_fixtures(root: Path, value: Any, context: str) -> None:
