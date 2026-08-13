@@ -793,7 +793,11 @@ mod tests {
     use axum::body::Body;
     use rcgen::{BasicConstraints, CertificateParams};
 
-    fn server_certificate_pem(ca_pem: &str, ca_key_pem: &str, hostname: &str) -> String {
+    fn server_certificate_chain_pem(
+        ca_pem: &str,
+        ca_key_pem: &str,
+        hostname: &str,
+    ) -> String {
         let issuer_key = KeyPair::from_pem(ca_key_pem).expect("server issuer key");
         let issuer = Issuer::from_ca_cert_pem(ca_pem, issuer_key).expect("server issuer");
         let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server key");
@@ -801,10 +805,11 @@ mod tests {
             CertificateParams::new(vec![hostname.to_owned()]).expect("server params");
         server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        server_params
+        let leaf = server_params
             .signed_by(&server_key, &issuer)
             .expect("server certificate")
-            .pem()
+            .pem();
+        format!("{leaf}{ca_pem}")
     }
 
     #[tokio::test]
@@ -918,7 +923,8 @@ mod tests {
         ];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem = server_certificate_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem =
+            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1002,7 +1008,8 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem = server_certificate_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem =
+            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1047,7 +1054,8 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem = server_certificate_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem =
+            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1080,7 +1088,7 @@ mod tests {
             .self_signed(&long_lived_key)
             .expect("long-lived CA");
         let long_lived_ca_pem = long_lived_ca.pem();
-        let wrong_hostname = server_certificate_pem(
+        let wrong_hostname = server_certificate_chain_pem(
             &long_lived_ca_pem,
             &long_lived_key_pem,
             "other.example.test",
@@ -1116,7 +1124,7 @@ mod tests {
             .self_signed(&expired_root_key)
             .expect("expired root");
         let expired_root_pem = expired_root.pem();
-        let expired_server_pem = server_certificate_pem(
+        let expired_server_pem = server_certificate_chain_pem(
             &expired_root_pem,
             &expired_root_key_pem,
             "runner.example.test",
@@ -1146,7 +1154,8 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem = server_certificate_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem =
+            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let endpoint = "https://runner.example.test/";
         let fixed_material_limit = MAX_REDEEM_RESPONSE_BYTES - MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES;
         let root_copies = (fixed_material_limit - ca_pem.len() - endpoint.len()) / ca_pem.len();
