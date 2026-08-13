@@ -65,13 +65,11 @@ use automata_ci_store::{
     github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
-
-const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 use uuid::Uuid;
 
 use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
-const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 
 async fn wait_for_direct_blocker(
     database: &TestDatabase,
