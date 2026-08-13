@@ -185,19 +185,17 @@ Tasks:
 - [x] Record the canonical greenfield migration inventory and fail CI if a
   parallel branch adds or reserves a numbered migration while that mode is
   active.
-- [ ] Keep schema changes in the canonical greenfield migration and its
-  inventory test until the first released schema creates supported durable
-  upgrade state.
-- [x] Record owners and exact source evidence for the current JobIR, protobuf,
-  core envelopes, workflow-plan, workflow-runtime-policy, protocol, message,
-  runner-requirements, and canonical store contracts.
+- [x] Record owners, exact version/evidence bindings, and named tests for the
+  current JobIR, protobuf, core envelopes, workflow plan, workflow runtime
+  policy/workspace/derivation, protocol, message, and runner requirements;
+  record the canonical store migration policy separately.
 - [ ] Complete the registry for every durable and wire format, including event
   evidence and provider-owned persistence.
 - [ ] Require compatibility readers for every durable or wire-format change.
 - [ ] Expand the seeded machine-readable inventory to every GitHub and stricter
   Automata limit, enforcement phase, and reason code.
-- [x] Require boundary-minus-one, boundary, and boundary-plus-one tests for
-  every registered limit.
+- [x] Require every registered limit to bind distinct boundary-minus-one,
+  boundary, and boundary-plus-one fragments inside an attributed Rust test.
 - [x] Define who updates root manifests, lockfiles, shared CI, and generated
   protobuf fixtures during each wave.
 
@@ -205,7 +203,6 @@ Acceptance:
 
 - [x] Migration inventory drift fails before parallel branches can claim a
   nonexistent next sequence.
-- [ ] Parallel schema branches coordinate changes to the canonical baseline.
 - [ ] No durable format changes without a version and compatibility test.
 - [ ] Limits have one owner and one enforcing phase.
 

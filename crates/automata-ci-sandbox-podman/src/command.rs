@@ -281,6 +281,8 @@ impl PodmanProcessEnvironment {
                 Some(port),
             )?;
         }
+        #[cfg(not(unix))]
+        let _ = port;
         Ok(())
     }
 

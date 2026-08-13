@@ -195,10 +195,11 @@ Six developers can start these packages concurrently with little file overlap:
 | C | `AUTH-01` permission catalog and effective defaults |
 | X | `FND-02` conformance fixture and exact-client catalog |
 
-The rotating integration owner also completes the small `FND-04` governance
-package before Wave 1 branches change the canonical schema, reserve format
-versions, or add limits. Migration-number reservation begins only after an
-explicit governance-mode transition enables durable upgrades.
+The rotating integration owner lands the `FND-04` bootstrap before Wave 1
+branches change the canonical schema, reserve format versions, or add limits.
+The package remains open until its full format/limit catalog and compatibility
+reader policy land. Migration-number reservation begins only after an explicit
+governance-mode transition enables durable upgrades.
 
 Exit criteria:
 

@@ -222,6 +222,17 @@ fn artifact_subject_count_boundaries() {
         .into_next_state();
     assert_eq!(state.artifact_subjects().len(), MAX_ARTIFACT_SUBJECTS);
 
+    assert_eq!(
+        applicator.apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope("overflow-direct"),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS + 1)),
+        ),
+        Err(PhaseApplicationError::TooManyArtifactSubjects {
+            maximum: MAX_ARTIFACT_SUBJECTS,
+        })
+    );
+
     assert!(
         applicator
             .apply_completed_step(
@@ -232,15 +243,5 @@ fn artifact_subject_count_boundaries() {
                 ]),
             )
             .is_ok()
-    );
-    assert_eq!(
-        applicator.apply_completed_step(
-            &state,
-            &scope("overflow"),
-            &completed(vec![subject("overflow", 'a', ArtifactSubjectKind::Oci)]),
-        ),
-        Err(PhaseApplicationError::TooManyArtifactSubjects {
-            maximum: MAX_ARTIFACT_SUBJECTS,
-        })
     );
 }

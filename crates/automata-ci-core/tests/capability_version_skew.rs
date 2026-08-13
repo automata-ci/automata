@@ -17,6 +17,15 @@ fn runner() -> RunnerCapabilities {
 }
 
 #[test]
+fn runner_requirements_reject_noncurrent_schema() {
+    let mut encoded: serde_json::Value =
+        serde_json::from_str(FUTURE_REQUIREMENTS_JSON).expect("decode fixture");
+    encoded["schema_version"] = serde_json::json!(u16::MAX);
+
+    assert!(serde_json::from_value::<RunnerRequirements>(encoded).is_err());
+}
+
+#[test]
 fn newer_optional_advertisements_are_preserved_and_ignored_by_old_requirements() {
     let future_sandbox =
         SandboxFeature::new("dev.firecracker/uffd-snapshot@v2").expect("valid future sandbox ID");

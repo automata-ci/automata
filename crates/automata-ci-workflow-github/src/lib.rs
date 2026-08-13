@@ -44,8 +44,8 @@ pub use model::{
     MergeGroupFilter, Needs, PermissionEntry, PermissionLevel, Permissions, PreservedField,
     PushPullRequestFilter, RepositoryDispatchFilter, ReusableWorkflowCall, ReusableWorkflowInputs,
     ReusableWorkflowSecretMap, ReusableWorkflowSecrets, RunDefaults, RunStep, RunnerSelection,
-    SOURCE_PLAN_SCHEMA_VERSION, ScalarValue, Step, StepExecution, StepId, StrategyMatrix,
-    TriggerConfiguration, TriggerSet, ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
+    ScalarValue, Step, StepExecution, StepId, StrategyMatrix, TriggerConfiguration, TriggerSet,
+    ValueMap, ValueMapEntry, WorkflowJob, WorkflowTriggers,
 };
 pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,

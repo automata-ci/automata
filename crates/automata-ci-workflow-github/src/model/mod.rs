@@ -32,7 +32,7 @@ pub use value::{
     EnvironmentVariables, PermissionEntry, PermissionLevel, Permissions, PreservedField,
     RunDefaults, ScalarValue, ValueMap, ValueMapEntry,
 };
-pub use workflow::{GithubWorkflow, GithubWorkflowSourcePlan, SOURCE_PLAN_SCHEMA_VERSION};
+pub use workflow::{GithubWorkflow, GithubWorkflowSourcePlan};
 pub use workflow_dispatch::{
     GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
     GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,

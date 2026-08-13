@@ -282,22 +282,22 @@ fn workflow_dispatch_input_count_boundaries() {
 
 #[test]
 fn workflow_dispatch_character_boundaries() {
-    let input = |value_characters| [("v", "x".repeat(value_characters))];
+    let input = |total_characters| [("v", "x".repeat(total_characters - 1))];
 
-    assert!(
-        GithubWorkflowDispatchInputs::try_new(input(
-            MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS - 2
-        ))
-        .is_ok()
-    );
     assert!(
         GithubWorkflowDispatchInputs::try_new(input(
             MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS - 1
         ))
         .is_ok()
     );
+    assert!(
+        GithubWorkflowDispatchInputs::try_new(input(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS))
+            .is_ok()
+    );
     assert_eq!(
-        GithubWorkflowDispatchInputs::try_new(input(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)),
+        GithubWorkflowDispatchInputs::try_new(input(
+            MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS + 1
+        )),
         Err(GithubWorkflowDispatchInputsError::PayloadTooLarge)
     );
 }

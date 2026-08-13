@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use automata_ci_core::{
-    Architecture, ContainerCapabilities, ContainerFeature, EnvironmentProfile,
-    EnvironmentProfileId, IsolationLevel, JobResourceAllocation, OperatingSystem,
-    RequirementMismatch, ResourceCapacity, ResourceKind, RunnerCapabilities, RunnerFeature,
-    RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, SandboxCapabilities,
-    SandboxFeature, SelectorError, Sha256Digest,
+    Architecture, CapabilityValidationError, ContainerCapabilities, ContainerFeature,
+    EnvironmentProfile, EnvironmentProfileId, IsolationLevel, JobResourceAllocation,
+    OperatingSystem, RequirementMismatch, ResourceCapacity, ResourceKind, RunnerCapabilities,
+    RunnerFeature, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements,
+    SandboxCapabilities, SandboxFeature, SelectorError, Sha256Digest,
 };
 
 fn label(value: &str) -> RunnerLabel {
@@ -46,6 +46,22 @@ fn capable_runner() -> RunnerCapabilities {
         ContainerFeature::SERVICE_CONTAINERS,
     ]))
     .with_features([RunnerFeature::SHELL_STEPS])
+}
+
+#[test]
+fn runner_capability_schema_rejects_noncurrent_version() {
+    let mut encoded = serde_json::to_value(capable_runner()).expect("serialize capabilities");
+    encoded["schema_version"] = serde_json::json!(u16::MAX);
+    let decoded: RunnerCapabilities =
+        serde_json::from_value(encoded).expect("decode structurally valid capabilities");
+
+    assert_eq!(
+        decoded.validate(),
+        Err(CapabilityValidationError::UnsupportedSchema {
+            supported: 1,
+            received: u16::MAX,
+        })
+    );
 }
 
 #[test]

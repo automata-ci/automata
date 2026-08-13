@@ -34,6 +34,7 @@ RUST_TEST_FUNCTION = (
 RUST_TEST_ATTRIBUTE = re.compile(
     r"#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\s*\([^]]*\))?\s*\]"
 )
+FORMAT_COMPATIBILITY_POLICIES = {"exact-current-only", "generated-v1-package"}
 
 
 class GovernanceError(ValueError):
@@ -168,25 +169,10 @@ def _load_registry(path: Path) -> dict[str, Any]:
     return _object(document, TOP_LEVEL_KEYS, "registry")
 
 
-def _validate_owner_reference(owner: Any, owner_ids: set[str], context: str) -> str:
+def _validate_owner_reference(owner: Any, owner_ids: set[str], context: str) -> None:
     identifier = _string(owner, context, identifier=True)
     if identifier not in owner_ids:
         _fail(f"{context} references unknown owner {identifier!r}")
-    return identifier
-
-
-def _validate_string_paths(
-    repository_root: Path,
-    values: Any,
-    context: str,
-) -> list[Path]:
-    paths = _array(values, context, nonempty=True)
-    texts = [_string(value, f"{context}[{index}]") for index, value in enumerate(paths)]
-    _sorted_unique(texts, context)
-    return [
-        _existing_path(repository_root, value, f"{context}[{index}]", kind="file")
-        for index, value in enumerate(texts)
-    ]
 
 
 def _validate_sources(
@@ -238,6 +224,145 @@ def _fragment_binds_integer(fragment: str, value: int) -> bool:
     return numeric_literal is not None or version_identifier is not None
 
 
+def _fragment_binds_reason(fragment: str, reason_code: str) -> bool:
+    if "::" not in reason_code:
+        return f'"{reason_code}"' in fragment
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(reason_code)}(?![A-Za-z0-9_])",
+            fragment,
+        )
+        is not None
+    )
+
+
+def _rust_test_section(source: str, function: str, context: str) -> str:
+    pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
+    match = pattern.search(source)
+    if match is None or RUST_TEST_ATTRIBUTE.search(match.group("attributes")) is None:
+        _fail(f"{context} names missing test function {function!r} with a test attribute")
+
+    body_start = source.find("{", match.end())
+    if body_start < 0:
+        _fail(f"{context} cannot locate body for test function {function!r}")
+
+    depth = 1
+    index = body_start + 1
+    while index < len(source) and depth:
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            comment_depth = 1
+            index += 2
+            while index < len(source) and comment_depth:
+                if source.startswith("/*", index):
+                    comment_depth += 1
+                    index += 2
+                elif source.startswith("*/", index):
+                    comment_depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            continue
+
+        raw_string = re.match(r'(?:b)?r(?P<hashes>#{0,255})"', source[index:])
+        if raw_string is not None:
+            terminator = '"' + raw_string.group("hashes")
+            end = source.find(terminator, index + raw_string.end())
+            index = len(source) if end < 0 else end + len(terminator)
+            continue
+        if source.startswith('b"', index) or source[index] == '"':
+            index += 2 if source.startswith('b"', index) else 1
+            while index < len(source):
+                if source[index] == "\\":
+                    index += 2
+                elif source[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        character = re.match(r"(?:b)?'(?:\\.|[^\\'\r\n])'", source[index:])
+        if character is not None:
+            index += character.end()
+            continue
+
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        _fail(f"{context} cannot locate body end for test function {function!r}")
+    end = index
+    return source[match.start() : end]
+
+
+def _validate_test_bindings(repository_root: Path, values: Any, context: str) -> None:
+    bindings = _array(values, context, nonempty=True)
+    identities: list[str] = []
+    for index, raw_binding in enumerate(bindings):
+        binding_context = f"{context}[{index}]"
+        binding = _object(raw_binding, {"contains", "function", "path"}, binding_context)
+        relative = _string(binding["path"], f"{binding_context}.path")
+        function = _string(binding["function"], f"{binding_context}.function")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function) is None:
+            _fail(f"{binding_context}.function must be a function name")
+        path = _existing_path(
+            repository_root,
+            relative,
+            f"{binding_context}.path",
+            kind="file",
+        )
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            _fail(f"cannot read format test {relative}: {error}")
+        section = _rust_test_section(source, function, binding_context)
+        fragment = _string(binding["contains"], f"{binding_context}.contains")
+        if section.count(fragment) != 1:
+            _fail(
+                f"{binding_context}.contains must occur exactly once in test "
+                f"{function!r}"
+            )
+        identities.append(f"{relative}::{function}")
+    _sorted_unique(identities, context)
+
+
+def _validate_format_sources(
+    repository_root: Path,
+    values: Any,
+    version: int,
+    context: str,
+) -> None:
+    sources = _array(values, context, nonempty=True)
+    identities: list[tuple[str, str]] = []
+    version_binding_count = 0
+    for index, raw_source in enumerate(sources):
+        source_context = f"{context}[{index}]"
+        source = _object(raw_source, {"contains", "path", "role"}, source_context)
+        role = _string(source["role"], f"{source_context}.role", identifier=True)
+        if role not in {"evidence", "version"}:
+            _fail(f"{source_context}.role must be 'evidence' or 'version'")
+        fragments = _validate_sources(
+            repository_root,
+            [{"contains": source["contains"], "path": source["path"]}],
+            source_context,
+        )
+        fragment = fragments[0]
+        if role == "version":
+            version_binding_count += 1
+            if not _fragment_binds_integer(fragment, version):
+                _fail(f"{source_context} does not bind declared version {version}")
+        identities.append((_string(source["path"], f"{source_context}.path"), fragment))
+    if version_binding_count == 0:
+        _fail(f"{context} must contain at least one version binding")
+    if len(identities) != len(set(identities)):
+        _fail(f"{context} contains duplicate source bindings")
+
+
 def _validate_owners(values: Any) -> set[str]:
     owners = _array(values, "owners", nonempty=True)
     owner_ids: list[str] = []
@@ -262,36 +387,25 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
         )
         format_ids.append(_string(format_contract["id"], f"{context}.id", identifier=True))
         _validate_owner_reference(format_contract["owner"], owner_ids, f"{context}.owner")
-        _string(
+        compatibility_policy = _string(
             format_contract["compatibility_policy"],
             f"{context}.compatibility_policy",
             identifier=True,
         )
+        if compatibility_policy not in FORMAT_COMPATIBILITY_POLICIES:
+            _fail(
+                f"{context}.compatibility_policy must be one of "
+                f"{sorted(FORMAT_COMPATIBILITY_POLICIES)}"
+            )
         version = _positive_integer(format_contract["version"], f"{context}.version", maximum=65535)
-        fragments = _validate_sources(repository_root, format_contract["sources"], f"{context}.sources")
-        if not any(_fragment_binds_integer(fragment, version) for fragment in fragments):
-            _fail(f"{context}.sources do not bind declared version {version}")
-        _validate_string_paths(repository_root, format_contract["tests"], f"{context}.tests")
+        _validate_format_sources(
+            repository_root,
+            format_contract["sources"],
+            version,
+            f"{context}.sources",
+        )
+        _validate_test_bindings(repository_root, format_contract["tests"], f"{context}.tests")
     _sorted_unique(format_ids, "format IDs")
-
-
-def _validate_reservations(values: Any, owner_ids: set[str]) -> list[int]:
-    reservations = _array(values, "migrations.reservations")
-    numbers: list[int] = []
-    for index, raw_reservation in enumerate(reservations):
-        context = f"migrations.reservations[{index}]"
-        reservation = _object(raw_reservation, {"issue", "number", "owner"}, context)
-        number = _positive_integer(reservation["number"], f"{context}.number")
-        if number < 2:
-            _fail(f"{context}.number must be 2 or greater")
-        numbers.append(number)
-        _string(reservation["issue"], f"{context}.issue")
-        _validate_owner_reference(reservation["owner"], owner_ids, f"{context}.owner")
-    if len(numbers) != len(set(numbers)):
-        _fail("migration reservation numbers must be unique")
-    if numbers != sorted(numbers):
-        _fail("migration reservations must be sorted by number")
-    return numbers
 
 
 def _validate_migrations(repository_root: Path, value: Any, owner_ids: set[str]) -> None:
@@ -331,8 +445,8 @@ def _validate_migrations(repository_root: Path, value: Any, owner_ids: set[str])
     if actual != current:
         _fail(f"migration inventory drift: registry has {current}, filesystem has {actual}")
 
-    _validate_reservations(migrations["reservations"], owner_ids)
-    if migrations["reservations"]:
+    reservations = _array(migrations["reservations"], "migrations.reservations")
+    if reservations:
         _fail("greenfield canonical baseline must not reserve migration numbers")
     if migrations["next_sequence"] is not None:
         _fail("greenfield canonical baseline migrations.next_sequence must be null")
@@ -355,7 +469,6 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
                 "reason_code",
                 "reason_source",
                 "source",
-                "tests",
                 "unit",
                 "value",
             },
@@ -390,7 +503,7 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
             [limit_contract["reason_source"]],
             f"{context}.reason_source_bindings",
         )
-        if reason_code not in reason_fragments[0]:
+        if not _fragment_binds_reason(reason_fragments[0], reason_code):
             _fail(f"{context}.reason_source does not bind declared reason code {reason_code!r}")
         _string(limit_contract["unit"], f"{context}.unit", identifier=True)
         value = _positive_integer(limit_contract["value"], f"{context}.value")
@@ -402,38 +515,43 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
         )
         if not _fragment_binds_integer(fragments[0], value):
             _fail(f"{context}.source does not bind declared value {value}")
-        test_paths = _validate_string_paths(
-            repository_root, limit_contract["tests"], f"{context}.tests"
-        )
-        test_sources: list[tuple[Path, str]] = []
-        for path in test_paths:
-            try:
-                test_sources.append((path, path.read_text(encoding="utf-8")))
-            except (OSError, UnicodeError) as error:
-                _fail(f"cannot read boundary test {path}: {error}")
-
         boundaries = _object(
             limit_contract["boundary_tests"],
             {"at", "minus_one", "plus_one"},
             f"{context}.boundary_tests",
         )
+        boundary_identities: list[tuple[str, str, str]] = []
         for label in ("minus_one", "at", "plus_one"):
-            function = _string(
-                boundaries[label], f"{context}.boundary_tests.{label}"
+            boundary_context = f"{context}.boundary_tests.{label}"
+            binding = _object(
+                boundaries[label],
+                {"contains", "function", "path"},
+                boundary_context,
             )
+            function = _string(binding["function"], f"{boundary_context}.function")
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function) is None:
-                _fail(f"{context}.boundary_tests.{label} must be a function name")
-            pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
-            matches = []
-            for path, source in test_sources:
-                match = pattern.search(source)
-                if match is not None and RUST_TEST_ATTRIBUTE.search(match.group("attributes")):
-                    matches.append(str(path))
-            if not matches:
+                _fail(f"{boundary_context}.function must be a function name")
+            relative = _string(binding["path"], f"{boundary_context}.path")
+            path = _existing_path(
+                repository_root,
+                relative,
+                f"{boundary_context}.path",
+                kind="file",
+            )
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                _fail(f"cannot read boundary test {relative}: {error}")
+            section = _rust_test_section(source, function, boundary_context)
+            fragment = _string(binding["contains"], f"{boundary_context}.contains")
+            if section.count(fragment) != 1:
                 _fail(
-                    f"{context}.boundary_tests.{label} names missing test function "
-                    f"{function!r} with a test attribute in the listed tests"
+                    f"{boundary_context}.contains must occur exactly once in test "
+                    f"{function!r}"
                 )
+            boundary_identities.append((relative, function, fragment))
+        if len(set(boundary_identities)) != 3:
+            _fail(f"{context}.boundary_tests must use three distinct bindings")
     _sorted_unique(limit_ids, "limit IDs")
     if len(reason_codes) != len(set(reason_codes)):
         _fail("limit reason codes must be unique")
@@ -468,11 +586,11 @@ def validate_repository(
     registry = _existing_path(root, registry_path.as_posix(), "registry path", kind="file")
     document = _load_registry(registry)
 
-    if document["schema_version"] != 1 or isinstance(document["schema_version"], bool):
+    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         _fail("schema_version must be integer 1")
     status = _string(document["status"], "status", identifier=True)
-    if status not in {"active", "bootstrap", "retired"}:
-        _fail("status must be 'bootstrap', 'active', or 'retired'")
+    if status != "bootstrap":
+        _fail("schema version 1 status must remain 'bootstrap'")
 
     owner_ids = _validate_owners(document["owners"])
     _validate_formats(root, document["formats"], owner_ids)

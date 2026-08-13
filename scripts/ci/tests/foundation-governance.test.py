@@ -34,13 +34,19 @@ class FoundationGovernanceTests(unittest.TestCase):
         files = {
             "Cargo.toml": "[workspace]\nmembers = []\n",
             "crates/automata-ci-core/src/version.rs": "pub const FORMAT_VERSION: u16 = 1;\n",
-            "crates/automata-ci-core/tests/version.rs": "fn exact_current_version_is_accepted() {}\n",
+            "crates/automata-ci-core/tests/version.rs": (
+                "#[test]\nfn exact_current_version_is_accepted() {}\n"
+            ),
             "crates/automata-ci-runtime/src/limits.rs": (
                 "pub const TEST_LIMIT: usize = 5;\n"
                 "return Err(TestLimitError::Exceeded);\n"
             ),
             "crates/automata-ci-runtime/tests/limits.rs": (
-                "#[test]\nfn test_limit_boundaries() {}\n"
+                "#[test]\nfn test_limit_boundaries() {\n"
+                "    assert!(accept(TEST_LIMIT - 1));\n"
+                "    assert!(accept(TEST_LIMIT));\n"
+                "    assert!(!accept(TEST_LIMIT + 1));\n"
+                "}\n"
             ),
             "crates/automata-ci-store/migrations/0001_initial_schema.sql": "SELECT 1;\n",
         }
@@ -59,18 +65,37 @@ class FoundationGovernanceTests(unittest.TestCase):
                         {
                             "contains": "pub const FORMAT_VERSION: u16 = 1;",
                             "path": "crates/automata-ci-core/src/version.rs",
+                            "role": "version",
                         }
                     ],
-                    "tests": ["crates/automata-ci-core/tests/version.rs"],
+                    "tests": [
+                        {
+                            "contains": "fn exact_current_version_is_accepted() {}",
+                            "function": "exact_current_version_is_accepted",
+                            "path": "crates/automata-ci-core/tests/version.rs",
+                        }
+                    ],
                     "version": 1,
                 }
             ],
             "limits": [
                 {
                     "boundary_tests": {
-                        "at": "test_limit_boundaries",
-                        "minus_one": "test_limit_boundaries",
-                        "plus_one": "test_limit_boundaries",
+                        "at": {
+                            "contains": "assert!(accept(TEST_LIMIT));",
+                            "function": "test_limit_boundaries",
+                            "path": "crates/automata-ci-runtime/tests/limits.rs",
+                        },
+                        "minus_one": {
+                            "contains": "assert!(accept(TEST_LIMIT - 1));",
+                            "function": "test_limit_boundaries",
+                            "path": "crates/automata-ci-runtime/tests/limits.rs",
+                        },
+                        "plus_one": {
+                            "contains": "assert!(!accept(TEST_LIMIT + 1));",
+                            "function": "test_limit_boundaries",
+                            "path": "crates/automata-ci-runtime/tests/limits.rs",
+                        },
                     },
                     "classification": "automata-stricter",
                     "enforcement_phase": "runtime",
@@ -85,7 +110,6 @@ class FoundationGovernanceTests(unittest.TestCase):
                         "contains": "pub const TEST_LIMIT: usize = 5;",
                         "path": "crates/automata-ci-runtime/src/limits.rs",
                     },
-                    "tests": ["crates/automata-ci-runtime/tests/limits.rs"],
                     "unit": "items",
                     "value": 5,
                 }
@@ -143,14 +167,19 @@ class FoundationGovernanceTests(unittest.TestCase):
 
         self.assert_invalid(r"fragment must occur exactly once.*found 0")
 
-    def test_duplicate_migration_reservation_is_rejected_before_mode_policy(self) -> None:
+    def test_greenfield_rejects_any_migration_reservation(self) -> None:
         self.registry["migrations"]["reservations"] = [
-            {"issue": "#101", "number": 2, "owner": "store"},
-            {"issue": "#102", "number": 2, "owner": "store"},
+            {"issue": "#101", "number": 2, "owner": "store"}
         ]
         self.write_registry()
 
-        self.assert_invalid("migration reservation numbers must be unique")
+        self.assert_invalid("must not reserve migration numbers")
+
+    def test_greenfield_rejects_a_next_migration_sequence(self) -> None:
+        self.registry["migrations"]["next_sequence"] = 2
+        self.write_registry()
+
+        self.assert_invalid("migrations.next_sequence must be null")
 
     def test_migration_inventory_drift_is_rejected(self) -> None:
         migration = (
@@ -176,6 +205,12 @@ class FoundationGovernanceTests(unittest.TestCase):
 
         self.assert_invalid(r"reason_source does not bind declared reason code")
 
+    def test_reason_code_prefix_does_not_bind_a_longer_variant(self) -> None:
+        self.registry["limits"][0]["reason_code"] = "TestLimitError::Exceed"
+        self.write_registry()
+
+        self.assert_invalid(r"reason_source does not bind declared reason code")
+
     def test_enforcement_phase_is_closed(self) -> None:
         self.registry["limits"][0]["enforcement_phase"] = "somewhere"
         self.write_registry()
@@ -186,15 +221,59 @@ class FoundationGovernanceTests(unittest.TestCase):
         self.registry["formats"][0]["version"] = 16
         self.write_registry()
 
-        self.assert_invalid(r"sources do not bind declared version 16")
+        self.assert_invalid(r"does not bind declared version 16")
+
+    def test_every_version_source_must_bind_the_declared_version(self) -> None:
+        evidence = self.root / "crates" / "automata-ci-core" / "src" / "other.rs"
+        evidence.write_text("pub const OTHER_VERSION: u16 = 2;\n", encoding="utf-8")
+        self.registry["formats"][0]["sources"].append(
+            {
+                "contains": "pub const OTHER_VERSION: u16 = 2;",
+                "path": "crates/automata-ci-core/src/other.rs",
+                "role": "version",
+            }
+        )
+        self.write_registry()
+
+        self.assert_invalid(r"does not bind declared version 1")
+
+    def test_compatibility_policy_is_closed(self) -> None:
+        self.registry["formats"][0]["compatibility_policy"] = "banana"
+        self.write_registry()
+
+        self.assert_invalid(r"compatibility_policy must be one of")
+
+    def test_registry_cannot_claim_active_before_completeness_is_defined(self) -> None:
+        self.registry["status"] = "active"
+        self.write_registry()
+
+        self.assert_invalid(r"status must remain 'bootstrap'")
+
+    def test_schema_version_must_be_an_integer(self) -> None:
+        self.registry["schema_version"] = 1.0
+        self.write_registry()
+
+        self.assert_invalid("schema_version must be integer 1")
 
     def test_noncanonical_registry_is_rejected(self) -> None:
         self.write_registry(canonical=False)
 
         self.assert_invalid("registry is not canonical JSON")
 
+    def test_duplicate_json_key_is_rejected(self) -> None:
+        contents = canonical_json(self.registry).replace(
+            '  "schema_version": 1,',
+            '  "schema_version": 1,\n  "schema_version": 1,',
+            1,
+        )
+        self.registry_path.write_text(contents, encoding="utf-8")
+
+        self.assert_invalid("duplicate JSON key 'schema_version'")
+
     def test_boundary_function_must_exist_in_a_listed_test(self) -> None:
-        self.registry["limits"][0]["boundary_tests"]["plus_one"] = "missing_boundary"
+        self.registry["limits"][0]["boundary_tests"]["plus_one"]["function"] = (
+            "missing_boundary"
+        )
         self.write_registry()
 
         self.assert_invalid(r"names missing test function 'missing_boundary'")
@@ -204,6 +283,48 @@ class FoundationGovernanceTests(unittest.TestCase):
         test.write_text("fn test_limit_boundaries() {}\n", encoding="utf-8")
 
         self.assert_invalid(r"names missing test function 'test_limit_boundaries'")
+
+    def test_each_boundary_fragment_must_remain_in_the_test(self) -> None:
+        self.registry["limits"][0]["boundary_tests"]["plus_one"]["contains"] = (
+            "assert!(!accept(TEST_LIMIT + 2));"
+        )
+        self.write_registry()
+
+        self.assert_invalid(r"contains must occur exactly once")
+
+    def test_boundary_bindings_must_be_distinct(self) -> None:
+        at = self.registry["limits"][0]["boundary_tests"]["at"]
+        self.registry["limits"][0]["boundary_tests"]["minus_one"] = dict(at)
+        self.registry["limits"][0]["boundary_tests"]["plus_one"] = dict(at)
+        self.write_registry()
+
+        self.assert_invalid(r"must use three distinct bindings")
+
+    def test_boundary_fragment_cannot_live_in_a_following_helper(self) -> None:
+        test = self.root / "crates" / "automata-ci-runtime" / "tests" / "limits.rs"
+        test.write_text(
+            "#[test]\nfn test_limit_boundaries() {}\n"
+            "fn helper() {\n"
+            "    assert!(accept(TEST_LIMIT - 1));\n"
+            "    assert!(accept(TEST_LIMIT));\n"
+            "    assert!(!accept(TEST_LIMIT + 1));\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.assert_invalid(r"contains must occur exactly once")
+
+    def test_format_test_must_be_an_attributed_test_function(self) -> None:
+        test = self.root / "crates" / "automata-ci-core" / "tests" / "version.rs"
+        test.write_text("fn exact_current_version_is_accepted() {}\n", encoding="utf-8")
+
+        self.assert_invalid(r"names missing test function 'exact_current_version_is_accepted'")
+
+    def test_format_test_must_bind_its_declared_evidence(self) -> None:
+        self.registry["formats"][0]["tests"][0]["contains"] = "assert!(false);"
+        self.write_registry()
+
+        self.assert_invalid(r"contains must occur exactly once")
 
     def test_unknown_schema_key_is_rejected(self) -> None:
         self.registry["limits"][0]["unexpected"] = True

@@ -9,7 +9,9 @@ first reviewed limit entries.
 The registry is deliberately a bootstrap inventory. Its `status` remains
 `bootstrap` until every durable/wire format and every GitHub or stricter
 Automata limit is cataloged. An entry documents an existing contract; it does
-not make an unsupported product surface available.
+not make an unsupported product surface available. Registry schema v1 accepts
+only `bootstrap`; a future status transition must first define and enforce its
+own completeness semantics.
 
 Run the validator before changing a registered source, migration, test, or
 shared surface:
@@ -21,16 +23,20 @@ python3 scripts/ci/tests/foundation-governance.test.py
 
 The validator rejects unknown fields, non-canonical JSON, duplicate or
 unsorted identifiers, missing owners and paths, source/version drift, migration
-inventory drift, and limit entries without bound reason codes and explicit
-boundary tests.
+inventory drift, and limit entries without exact attributed Rust tests. Each
+registered limit also binds its reason code and three distinct fragments in a
+real test for `limit - 1`, `limit`, and `limit + 1`.
 
 ## Changing a format
 
 The format owner coordinates the version, reader policy, fixtures, and tests
-in one change. Update the implementation first, then update the registry to
-the same exact source evidence. `exact-current-only` means a version change is
-breaking until an explicit compatibility reader policy is designed and
-recorded; it must not be inferred from permissive deserialization.
+in one change. Every `version` source must bind the declared version; `evidence`
+sources bind related generated or encoding material without masquerading as a
+version. Named, attributed Rust tests are part of each entry. Update the
+implementation first, then update the registry to the same exact evidence.
+`exact-current-only` means a version change is breaking until an explicit
+compatibility reader policy is designed and recorded; it must not be inferred
+from permissive deserialization.
 
 ## Changing the store schema
 
@@ -51,6 +57,11 @@ Each limit records whether it mirrors GitHub or is a stricter Automata safety
 boundary, its single owner, enforcement phase, stable reason code, source
 constant, and tests for `limit - 1`, `limit`, and `limit + 1`. Add the inventory
 entry in the same change that introduces a new enforced limit.
+
+The repository's canonical Automata workflow invokes these checks through
+`verify-product-targets.sh`. This repository does not currently install a
+GitHub-hosted workflow from `.github/workflows`, so an empty GitHub PR check
+rollup is not evidence that the governance checks ran.
 
 ## Shared surfaces
 
