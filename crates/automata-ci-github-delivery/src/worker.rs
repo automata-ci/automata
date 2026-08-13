@@ -2406,9 +2406,6 @@ const fn discovery_failure_kind(error: RepositoryWorkflowDiscoveryError) -> &'st
         RepositoryWorkflowDiscoveryError::DuplicatePath => {
             "github.repository_archive.duplicate_path"
         }
-        RepositoryWorkflowDiscoveryError::WorkflowPathCollision => {
-            "github.repository_archive.workflow_path_collision"
-        }
         RepositoryWorkflowDiscoveryError::UnsupportedArchiveEntry => {
             "github.repository_archive.unsupported_entry"
         }
@@ -2532,19 +2529,6 @@ fn processor_lease_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWork
         | GithubDeliveryWorkerError::Prerequisite(_) => {
             GithubDeliveryWorkflowProcessorError::InvariantViolation
         }
-    }
-}
-
-#[cfg(test)]
-mod discovery_tests {
-    use super::*;
-
-    #[test]
-    fn workflow_path_collisions_have_a_stable_rejection_kind() {
-        assert_eq!(
-            discovery_failure_kind(RepositoryWorkflowDiscoveryError::WorkflowPathCollision),
-            "github.repository_archive.workflow_path_collision"
-        );
     }
 }
 

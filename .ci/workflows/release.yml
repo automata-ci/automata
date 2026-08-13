@@ -198,7 +198,7 @@ jobs:
             exit 1
           }
 
-          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/automata-check-bridge.yml/runs"
+          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"
           # CI's distribution job runs after its verification fan-out, so a
           # tag pushed with the main commit can legitimately take about 75
           # minutes to reach a terminal workflow conclusion.
@@ -210,8 +210,8 @@ jobs:
                 -f branch=main \
                 -f event=push \
                 -f head_sha="$RELEASE_COMMIT" \
-                -f per_page=1 \
-                --jq '.workflow_runs[:1][] | [.id, .head_sha, .event, .head_branch, .status, (.conclusion // "-"), .html_url] | @tsv'
+                -f per_page=100 \
+                --jq '.workflow_runs[] | [.id, .status, (.conclusion // ""), .html_url] | @tsv'
             )"; then
               api_failures="$((api_failures + 1))"
               if (( api_failures >= 3 )); then
@@ -226,40 +226,29 @@ jobs:
             fi
             api_failures=0
 
-            run_id=""
-            head_sha=""
-            event=""
-            head_branch=""
-            status=""
-            conclusion=""
-            run_url=""
-            IFS=$'\t' read -r \
-              run_id head_sha event head_branch status conclusion run_url \
-              <<< "$runs"
-            if [[ -n "$run_id" ]] && {
-              [[ "$head_sha" != "$RELEASE_COMMIT" ]] ||
-                [[ "$event" != push ]] ||
-                [[ "$head_branch" != main ]] ||
-                [[ ! "$run_url" =~ ^https://github\.com/ ]]
-            }; then
-              printf 'error: GitHub returned an inexact native CI run for %s\n' \
-                "$RELEASE_COMMIT" >&2
-              exit 1
-            fi
-            if [[ "$status" == completed && "$conclusion" == success ]]; then
-              success_url="$run_url"
+            success_url=""
+            failed_url=""
+            pending=false
+            while IFS=$'\t' read -r run_id status conclusion run_url; do
+              [[ -n "$run_id" ]] || continue
+              if [[ "$status" == completed && "$conclusion" == success ]]; then
+                success_url="$run_url"
+                break
+              fi
+              if [[ "$status" == completed ]]; then
+                failed_url="$run_url"
+              else
+                pending=true
+              fi
+            done <<< "$runs"
+
+            if [[ -n "$success_url" ]]; then
               printf 'Release gate accepted CI run: %s\n' "$success_url"
               break
             fi
-            if [[ "$status" == completed ]]; then
+            if [[ -n "$failed_url" && "$pending" == false ]]; then
               printf 'error: CI did not pass for release commit %s: %s\n' \
-                "$RELEASE_COMMIT" "$run_url" >&2
-              exit 1
-            fi
-            if [[ -n "$run_id" ]] &&
-              [[ "$status" != queued && "$status" != in_progress ]]; then
-              printf 'error: native CI returned an invalid state for %s\n' \
-                "$RELEASE_COMMIT" >&2
+                "$RELEASE_COMMIT" "$failed_url" >&2
               exit 1
             fi
             printf 'Waiting for main CI on %s...\n' "$RELEASE_COMMIT"

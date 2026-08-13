@@ -103,7 +103,7 @@ function checkReleaseOrder(
 }
 
 function releaseJobs() {
-  const release = source(".github/workflows/release.yml");
+  const release = source(".ci/workflows/release.yml");
   return {
     crates: section(release, "\n  publish_crates:", "\n  finalize_release:"),
     finalize: release.slice(release.indexOf("\n  finalize_release:")),
@@ -115,7 +115,7 @@ function releaseJobs() {
 }
 
 function serviceProxyJobs() {
-  const workflow = source(".github/workflows/service-proxy-image.yml");
+  const workflow = source(".ci/workflows/service-proxy-image.yml");
   return {
     candidate: section(workflow, "\n  candidate:", "\n  promotion_verify:"),
     candidateBuild: section(
@@ -370,34 +370,6 @@ test("PostgreSQL runner cleans its owned namespace after an interrupted child st
   }
 });
 
-test("portable workflows merge beside native workflow files without overwrite", () => {
-  const executor = source(
-    "crates/automata-ci-job-executor-github/src/executor.rs",
-  );
-  assert.equal(existsSync(path.join(repositoryRoot, ".github/workflows/ci.yml")), false);
-  assert.equal(
-    existsSync(
-      path.join(
-        repositoryRoot,
-        ".github/workflows/automata-check-bridge.yml",
-      ),
-    ),
-    true,
-  );
-  assert.match(executor, /for source in \.ci\/workflows\/\*/);
-  assert.match(
-    executor,
-    /\[ -e \\"\$destination\\" \] \|\| \[ -L \\"\$destination\\" \]/,
-  );
-  assert.match(executor, /portable workflow path collides with native path/);
-  assert.match(executor, /Get-ChildItem -LiteralPath '\.ci\/workflows' -File/);
-  assert.match(
-    executor,
-    /\$null -ne \(Get-Item -LiteralPath \$destination -Force -ErrorAction SilentlyContinue\)/,
-  );
-  assert.doesNotMatch(executor, /cp -R -- \.ci\/workflows \.github\/workflows/);
-});
-
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".ci/workflows/ci.yml");
   const verify = section(ci, "\n  verify:", "\n  rust_coverage:");
@@ -452,7 +424,7 @@ test("CI executes documentation and committed script contract suites", () => {
   assert.match(shellContracts, /renderer-provenance\.test\.sh/);
   assert.match(shellContracts, /regenerate-renderer-atomicity\.test\.sh/);
   assert.match(shellContracts, /actionlint \.ci\/workflows\/\*\.yml/);
-  assert.match(shellContracts, /\.github\/workflows\/\*\.yml/);
+  assert.doesNotMatch(shellContracts, /\.github\/workflows/);
   assert.match(shellContracts, /deploy\/observability\/inventory\/\*\.sh/);
   assert.match(shellContracts, /inventory-scratch\.test\.sh/);
   assert.match(shellContracts, /release-handoff\.test\.py/);
@@ -490,75 +462,27 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
-test("native workflows bridge exact Automata Checks without duplicating portable CI", () => {
-  const bridge = source(".github/workflows/automata-check-bridge.yml");
-  const release = source(".github/workflows/release.yml");
-  const movedWorkflows = [
+test("Automata is the repository's only workflow runtime", () => {
+  const workflows = [
+    "ci.yml",
     "pages.yml",
     "profile-image.yml",
     "release.yml",
     "service-proxy-image.yml",
   ];
 
-  for (const workflow of movedWorkflows) {
+  assert.equal(
+    existsSync(path.join(repositoryRoot, ".github/workflows")),
+    false,
+    "the repository must not contain GitHub Actions workflows",
+  );
+  for (const workflow of workflows) {
     assert.equal(
       existsSync(path.join(repositoryRoot, ".ci/workflows", workflow)),
-      false,
-      `${workflow} must not be admitted as portable Automata CI`,
-    );
-    assert.equal(
-      existsSync(path.join(repositoryRoot, ".github/workflows", workflow)),
       true,
-      `${workflow} must remain a provider-native GitHub workflow`,
+      `${workflow} must be admitted as an Automata workflow`,
     );
   }
-
-  assert.match(bridge, /on:\n  push:\n    branches:\n      - main\n/);
-  assert.doesNotMatch(bridge, /\n  pull_request:/);
-  assert.doesNotMatch(bridge, /workflow_dispatch/);
-  assert.match(bridge, /group: native-ci-\$\{\{ github\.ref \}\}/);
-  assert.match(bridge, /permissions:\n  checks: read\n/);
-  assert.doesNotMatch(bridge, /contents:|packages:|id-token:|attestations:/);
-  assert.match(
-    bridge,
-    /AUTOMATA_CHECK_APP_ID: \$\{\{ vars\.AUTOMATA_CHECK_APP_ID \}\}/,
-  );
-  assert.match(bridge, /AUTOMATA_CHECK_NAME: Automata CI/);
-  assert.match(bridge, /EXPECTED_SHA: \$\{\{ github\.sha \}\}/);
-  assert.match(
-    bridge,
-    /repos\/\$\{GITHUB_REPOSITORY\}\/commits\/\$\{EXPECTED_SHA\}\/check-runs/,
-  );
-  assert.match(bridge, /-f app_id="\$AUTOMATA_CHECK_APP_ID"/);
-  assert.match(bridge, /-f check_name="\$AUTOMATA_CHECK_NAME"/);
-  assert.match(bridge, /-f filter=latest/);
-  assert.match(bridge, /run\.get\("head_sha"\) == expected_sha/);
-  assert.match(bridge, /run\.get\("name"\) == expected_name/);
-  assert.match(bridge, /app\.get\("id"\) == expected_app_id/);
-  assert.match(bridge, /automata-check:\[0-9a-f\]/);
-  assert.match(
-    bridge,
-    /status == "completed" and conclusion == "success"/,
-  );
-  assert.match(bridge, /timed out waiting for exact Automata Check Run/);
-  assert.match(bridge, /timeout-minutes: 90/);
-  assert.match(bridge, /deadline="\$\(\( \$\(date \+%s\) \+ 4500 \)\)"/);
-  assert.doesNotMatch(
-    bridge,
-    /actions\/checkout@|\bcargo\b|\brustc\b|run-rust-coverage|\bnpm\b/,
-  );
-
-  assert.match(release, /permissions:\n      actions: read\n      contents: read/);
-  assert.match(
-    release,
-    /actions\/workflows\/automata-check-bridge\.yml\/runs/,
-  );
-  assert.match(release, /-f branch=main/);
-  assert.match(release, /-f event=push/);
-  assert.match(release, /-f head_sha="\$RELEASE_COMMIT"/);
-  assert.match(release, /-f per_page=1/);
-  assert.match(release, /\.workflow_runs\[:1\]/);
-  assert.doesNotMatch(release, /commits\/\$\{RELEASE_COMMIT\}\/check-runs/);
 });
 
 test("repository workflows omit hosted Windows jobs and CI retains fixture parity", () => {
@@ -577,15 +501,13 @@ test("repository workflows omit hosted Windows jobs and CI retains fixture parit
     /^  windows:[ \t]*\r?$/m,
     "the hosted Windows CI job is temporarily disabled",
   );
-  for (const directory of [".ci/workflows", ".github/workflows"]) {
-    for (const workflowPath of filesRecursively(
-      path.join(repositoryRoot, directory),
-    )) {
-      if (!workflowPath.endsWith(".yml")) continue;
-      const workflow = readFileSync(workflowPath, "utf8");
-      assert.doesNotMatch(workflow, /^  windows:[ \t]*\r?$/m, workflowPath);
-      assert.doesNotMatch(workflow, /^[ \t]+runs-on: windows-/m, workflowPath);
-    }
+  for (const workflowPath of filesRecursively(
+    path.join(repositoryRoot, ".ci/workflows"),
+  )) {
+    if (!workflowPath.endsWith(".yml")) continue;
+    const workflow = readFileSync(workflowPath, "utf8");
+    assert.doesNotMatch(workflow, /^  windows:[ \t]*\r?$/m, workflowPath);
+    assert.doesNotMatch(workflow, /^[ \t]+runs-on: windows-/m, workflowPath);
   }
 });
 
@@ -746,8 +668,8 @@ test("distribution build overlaps validation while the final gate retains every 
 });
 
 test("Pages and profile publication isolate concurrency and environments", () => {
-  const pages = source(".github/workflows/pages.yml");
-  const profile = source(".github/workflows/profile-image.yml");
+  const pages = source(".ci/workflows/pages.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const promote = profile.slice(profile.indexOf("\n  promote:"));
 
   assert.match(pages, /npm ci --no-audit/);
@@ -761,11 +683,11 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/,
   );
   assert.equal(
-    (pages.match(/- "\.github\/workflows\/pages\.yml"/g) ?? []).length,
+    (pages.match(/- "\.ci\/workflows\/pages\.yml"/g) ?? []).length,
     2,
     "Pages must run when its current workflow source changes",
   );
-  assert.doesNotMatch(pages, /\.ci\/workflows\/pages\.yml/);
+  assert.doesNotMatch(pages, /- "\.github\/workflows\/pages\.yml"/);
   assert.equal(
     (pages.match(/- "crates\/automata-ci-ui-renderer\/contract\.json"/g) ?? [])
       .length,
@@ -783,11 +705,11 @@ test("Pages and profile publication isolate concurrency and environments", () =>
   assert.match(promote, /environment: profile-promotion/);
 });
 
-test("hosted publication verification retains GitHub signer identities", () => {
-  const profile = source(".github/workflows/profile-image.yml");
-  const serviceProxy = source(".github/workflows/service-proxy-image.yml");
+test("Automata publication retains GitHub-compatible signer identities", () => {
+  const profile = source(".ci/workflows/profile-image.yml");
+  const serviceProxy = source(".ci/workflows/service-proxy-image.yml");
 
-  // These values identify the native GitHub publisher recorded in attestations.
+  // These are provider-facing compatibility identities, not repository paths.
   assert.match(
     profile,
     /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/profile-image\.yml/,
@@ -799,7 +721,7 @@ test("hosted publication verification retains GitHub signer identities", () => {
 });
 
 test("registry attestations use the isolated Docker credential home", () => {
-  const profile = source(".github/workflows/profile-image.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const profileCandidate = section(profile, "\n  candidate:", "\n  promote:");
   const { candidate: serviceProxyCandidate } = serviceProxyJobs();
   const { stage } = releaseJobs();
@@ -818,7 +740,7 @@ test("registry attestations use the isolated Docker credential home", () => {
   });
 });
 
-test("service-proxy publication is GitHub-hosted, two-phase, and least-privileged", () => {
+test("service-proxy publication is Automata-hosted, two-phase, and least-privileged", () => {
   const {
     candidate,
     candidateBuild,
@@ -1301,7 +1223,7 @@ test("final publication reconciles the exact immutable GitHub state", () => {
 });
 
 test("profile promotion rechecks the reviewed default-branch head", () => {
-  const profile = source(".github/workflows/profile-image.yml");
+  const profile = source(".ci/workflows/profile-image.yml");
   const freshness = section(
     profile,
     "      - name: Scrub checkout credentials and require current default-branch head",
@@ -1315,7 +1237,7 @@ test("profile promotion rechecks the reviewed default-branch head", () => {
 
 test("release documentation requires all publication controls", () => {
   const guide = source("docs/releasing.md");
-  const release = source(".github/workflows/release.yml");
+  const release = source(".ci/workflows/release.yml");
   const productPolicy = source("scripts/ci/verify-product-targets.sh");
   assert.match(guide, /`release`,\n`crates-io`, and `profile-promotion`/);
   assert.match(guide, /`release` as the\nunattended staging boundary/);
@@ -1329,11 +1251,8 @@ test("release documentation requires all publication controls", () => {
   );
   assert.match(guide, /CRATES_IO_EXPECTED_OWNER_LOGINS/);
   assert.match(guide, /CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED=true/);
-  assert.match(guide, /`AUTOMATA_CHECK_APP_ID`/);
-  assert.match(guide, /exact App ID/);
-  assert.match(guide, /latest exact-SHA native bridge run/);
-  assert.match(guide, /\.github\/workflows\/profile-image\.yml/);
-  assert.match(guide, /\.github\/workflows\/release\.yml/);
+  assert.match(guide, /\.ci\/workflows\/profile-image\.yml/);
+  assert.match(guide, /\.ci\/workflows\/release\.yml/);
   assert.match(guide, /crates\.io\/docs\/rate-limits/);
   assert.match(guide, /rechecks?[^.]+default\s+branch/i);
   assert.match(guide, /ordinary CI permits a truthful pre-tag changelog/);

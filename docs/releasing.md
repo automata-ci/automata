@@ -101,20 +101,9 @@ before its first PUT and before claiming each name.
 
 ### 3. Confirm workflow permissions
 
-Set the repository variable `AUTOMATA_CHECK_APP_ID` to the positive numeric ID
-of the GitHub App configured for this repository in Automata's provider
-manifest. The native CI bridge requires that exact App ID, the exact commit SHA,
-and the configured `Automata CI` Check name. It fails closed instead of
-accepting a same-named Check from GitHub Actions or another App. Update the
-variable atomically with any reviewed provider App rotation. The release gate
-then requires the latest exact-SHA native bridge run from a `main` push, so a
-weaker pull-request run cannot authorize publication.
-
 Repository and organization Actions policy must allow the job's declared
 permissions:
 
-- the native CI bridge receives `checks: read`, while the read-only release
-  gate receives `actions: read` to verify the native main-push bridge run;
 - the staging job receives `contents`, `packages`, `id-token`, `attestations`,
   and `artifact-metadata` write access for the draft, GHCR, and provenance;
 - the credential-free crate preparation job receives only `contents: read`;
@@ -149,16 +138,14 @@ control alerts and security updates.
 ### 5. Enable GitHub Pages from Actions
 
 Under **Settings → Pages → Build and deployment**, select **GitHub Actions**
-as the source. The least-privilege `.github/workflows/pages.yml` workflow builds
-the static UI demo and screenshots from `main`; its deploy job alone receives
-`pages: write` and `id-token: write`, and manual dispatches from other branches
-are skipped. Changes to the renderer contract also trigger the review build.
-Restrict the `github-pages` environment to the default branch as defense in
-depth. Pull request review runs use per-PR concurrency groups, separate from the
-serialized main deployment group. Run the workflow once manually from `main`
-or merge a reviewed `ui/` change, then confirm
-<https://automata-ci.github.io/automata/> is public before publishing crates
-whose homepage metadata points there.
+as the source. The least-privilege `pages.yml` workflow builds the static UI demo
+and screenshots from `main`; its deploy job alone receives `pages: write` and
+`id-token: write`, and manual dispatches from other branches are skipped. Restrict
+the `github-pages` environment to the default branch as defense in depth. Pull
+request review runs use per-PR concurrency groups, separate from the serialized
+main deployment group. Run the workflow once manually from `main` or merge a
+reviewed `ui/` change, then confirm <https://automata-ci.github.io/automata/> is
+public before publishing crates whose homepage metadata points there.
 
 ### 6. Plan the first GHCR visibility change
 
@@ -186,7 +173,7 @@ the workflow.
 ## Publish the runner profile
 
 The Ubuntu runner profile is released independently through
-`.github/workflows/profile-image.yml`. Its two manual operations form a review
+`.ci/workflows/profile-image.yml`. Its two manual operations form a review
 boundary:
 
 1. Dispatch `build-candidate` from the default branch and supply the full source
@@ -290,14 +277,13 @@ Only tag a reviewed release commit. The workflow rejects a tag that does not
 equal `v` plus the workspace version, a mismatched checkout, or a dirty release
 build.
 
-The tag push starts `.github/workflows/release.yml`. Every version shares one
+The tag push starts `.ci/workflows/release.yml`. Every version shares one
 repository-wide publication lock, so crates.io publication and the two global
 `latest` aliases cannot race another release. A different unfinished draft
 blocks the next tag, and a stable version must be newer than every stable GitHub
 Release already published. It performs these gates in order:
 
-1. prove that the tag commit is on `main` and that the latest native CI bridge
-   run for an exact-SHA `main` push passed;
+1. prove that the tag commit is on `main` and that CI passed for that exact SHA;
 2. stage every crate and exercise both static musl executables inside the
    protected `release` environment;
 3. generate SBOMs, license material, the deterministic archive, checksums, and

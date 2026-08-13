@@ -15,10 +15,6 @@ fn discovers_exact_direct_workflows_in_deterministic_path_order() {
     let archive = archive(&[
         directory(ROOT),
         directory(b"repository-deadbeef/.github/"),
-        regular(
-            b"repository-deadbeef/.github/workflows/automata-check-bridge.yml",
-            b"native bridge",
-        ),
         directory(b"repository-deadbeef/.ci/workflows/"),
         regular(b"repository-deadbeef/.ci/workflows/z.yaml", b"z\0exact"),
         regular(b"repository-deadbeef/.ci/workflows/a.yml", b"name: a\n"),
@@ -36,28 +32,6 @@ fn discovers_exact_direct_workflows_in_deterministic_path_order() {
     assert_eq!(discovered[0].result(), Ok(b"name: a\n".as_slice()));
     assert_eq!(discovered[1].path(), ".ci/workflows/z.yaml");
     assert_eq!(discovered[1].result(), Ok(b"z\0exact".as_slice()));
-}
-
-#[test]
-fn rejects_portable_and_native_workflow_filename_collisions_in_either_order() {
-    let portable = regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"portable");
-    let native = regular(b"repository-deadbeef/.github/workflows/ci.yml", b"native");
-    let native_case_variant = regular(
-        b"repository-deadbeef/.github/workflows/CI.YML",
-        b"native case variant",
-    );
-
-    for native_entry in [native, native_case_variant] {
-        for entries in [
-            [directory(ROOT), portable.clone(), native_entry.clone()],
-            [directory(ROOT), native_entry.clone(), portable.clone()],
-        ] {
-            assert_eq!(
-                discover(&archive(&entries)),
-                Err(DiscoveryError::WorkflowPathCollision)
-            );
-        }
-    }
 }
 
 #[test]
