@@ -46,6 +46,7 @@ pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollmen
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
+const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
 const TOKEN_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
@@ -527,7 +528,7 @@ fn token_digest(token: &[u8]) -> Result<[u8; 32], ApiError> {
     if encoded.len() != TOKEN_ENCODED_BYTES {
         return Err(ApiError::EnrollmentRejected);
     }
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
     let decoded_length = URL_SAFE_NO_PAD
         .decode_slice(encoded, &mut *decoded)
         .map_err(|_| ApiError::EnrollmentRejected)?;

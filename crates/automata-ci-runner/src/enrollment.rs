@@ -28,6 +28,7 @@ const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
+const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
 const MAX_TOKEN_BYTES: usize = TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -216,7 +217,7 @@ fn validate_token(value: &str) -> Result<()> {
     else {
         bail!("runner enrollment token is invalid");
     };
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
     if !matches!(
         URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
         Ok(TOKEN_BYTES)

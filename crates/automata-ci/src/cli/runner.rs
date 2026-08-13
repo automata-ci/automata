@@ -22,6 +22,7 @@ const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
+const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
 const CREATE_ATTEMPTS: usize = 3;
 
 pub(crate) async fn execute_runner_command(
@@ -203,7 +204,7 @@ fn valid_generated_token(token: &str) -> bool {
     else {
         return false;
     };
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
     matches!(
         URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
         Ok(TOKEN_BYTES)
