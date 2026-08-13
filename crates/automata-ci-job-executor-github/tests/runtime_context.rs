@@ -11,10 +11,11 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_core::{
-    ContextValue, JobConclusion, JobContentReference, JobRuntimeContext, NeedContext, NeedOutput,
-    OutputSensitivity, RunValueTemplates, RuntimeBoolean, RuntimePositiveInteger,
-    RuntimeTimeoutTemplate, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepId,
-    StepIr, StrategyContext, ValueTemplate, ValueTemplateSegment,
+    ContextValue, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobConclusion, JobContentReference,
+    JobRuntimeContext, NeedContext, NeedOutput, OutputSensitivity, RunValueTemplates,
+    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
+    Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext, ValueTemplate,
+    ValueTemplateSegment,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue, MapContext};
 use automata_ci_job_executor_github::{
@@ -340,8 +341,18 @@ async fn malformed_and_unsupported_context_versions_fail_before_sandbox_creation
         Some(&0x08),
         "schema field must be first"
     );
-    assert_eq!(unsupported.get(1), Some(&0x02), "fixture schema is v2");
-    unsupported[1] = 0x03;
+    let current_schema = u8::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)
+        .expect("current schema uses a one-byte protobuf varint");
+    let unsupported_schema = current_schema
+        .checked_add(1)
+        .filter(|version| *version < 0x80)
+        .expect("next schema uses a one-byte protobuf varint");
+    assert_eq!(
+        unsupported.get(1),
+        Some(&current_schema),
+        "fixture schema matches the canonical runtime-context schema"
+    );
+    unsupported[1] = unsupported_schema;
     let unsupported = Bytes::from(unsupported);
     assert_pre_sandbox_failure(
         runtime_context_reference(&unsupported),
