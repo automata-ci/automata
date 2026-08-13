@@ -159,7 +159,6 @@ impl RootlessPodmanProvider {
                 SandboxCapability::CopyTo,
                 SandboxCapability::CopyFrom,
                 SandboxCapability::EnvironmentInjection,
-                SandboxCapability::NetworkDisabled,
                 SandboxCapability::PrivateEgress,
                 SandboxCapability::ReadOnlyRootFilesystem,
                 SandboxCapability::WritableRootFilesystem,
@@ -168,6 +167,9 @@ impl RootlessPodmanProvider {
                 SandboxCapability::ResourceLimits,
                 SandboxCapability::ProcessLimits,
             ];
+            if options.host_gateway_alias().is_none() {
+                declared_capabilities.push(SandboxCapability::NetworkDisabled);
+            }
             if options.service_proxy_image().is_some() {
                 declared_capabilities.push(SandboxCapability::ServiceContainers);
             }
@@ -252,6 +254,14 @@ impl SandboxProvider for RootlessPodmanProvider {
         if spec.resource_allocation().is_some_and(|allocation| {
             allocation.limits().ephemeral_disk_bytes() > 0 || allocation.limits().gpu_count() > 0
         }) {
+            return Err(provider_error::known(
+                ProviderErrorKind::UnsupportedCapability,
+                ProviderStage::Validate,
+            ));
+        }
+        if spec.network() == NetworkPolicy::Disabled
+            && self.inner.options.host_gateway_alias().is_some()
+        {
             return Err(provider_error::known(
                 ProviderErrorKind::UnsupportedCapability,
                 ProviderStage::Validate,

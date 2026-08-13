@@ -547,6 +547,46 @@ fn explicit_host_gateway_alias_is_one_create_argument_and_changes_spec_fingerpri
 }
 
 #[test]
+fn explicit_host_gateway_alias_rejects_disabled_network_before_podman_or_filesystem_work() {
+    let alias = PodmanHostGatewayAlias::new("automata-git.invalid", 8088).expect("valid alias");
+    let fixture = Fixture::new_with_options("host-gateway-disabled-network", |options| {
+        options
+            .with_host_gateway_alias(alias)
+            .expect("host gateway configuration")
+    });
+    assert!(
+        !fixture
+            .provider
+            .capabilities()
+            .supports(SandboxCapability::NetworkDisabled),
+        "mapped providers must not advertise disabled-network support"
+    );
+    let spec = sample_spec_with(
+        OperationId::new(),
+        "automata.dev/archlinux-x86-64-v1",
+        NetworkPolicy::Disabled,
+    );
+
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("disabled networking must reject the provider-wide host mapping");
+    assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+    assert_eq!(
+        error.stage(),
+        automata_ci_execution::ProviderStage::Validate
+    );
+    assert!(fixture.fake.commands().is_empty());
+    assert!(
+        std::fs::read_dir(fixture.scratch.path().join("workspaces"))
+            .expect("workspace root")
+            .next()
+            .is_none(),
+        "validation must run before dynamic workspace creation"
+    );
+}
+
+#[test]
 fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
     let fixture = Fixture::new("writable-rootfs");
     assert!(
