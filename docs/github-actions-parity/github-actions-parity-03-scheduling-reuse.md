@@ -114,7 +114,7 @@ Tasks:
 - [ ] Reject reruns of deleted or expired source and changed authority rather
   than compiling new evidence under the old run.
 - [x] Preserve the current 50-rerun limit.
-- [x] Preserve runner-requirements schema v3 when cloning rerun jobs and fail
+- [x] Preserve runner-requirements schema v1 when cloning rerun jobs and fail
   closed when source requirements use a different schema.
 
 Acceptance:

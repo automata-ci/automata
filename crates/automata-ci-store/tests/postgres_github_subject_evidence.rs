@@ -1821,7 +1821,7 @@ fn logical_command_at_path(
     .expect("source object");
     let plan = AdmissionObject::new(
         Sha256Digest::from_bytes([0x32; 32]),
-        ObjectKey::new(format!("logical/{namespace}/plan-v2")).expect("plan object key"),
+        ObjectKey::new(format!("logical/{namespace}/plan-v1")).expect("plan object key"),
         768,
         "application/json",
     )

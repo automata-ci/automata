@@ -7,7 +7,7 @@ const RUN_ID: &str = "10000000-0000-0000-0000-000000000004";
 
 // The reusable-ledger test starts from an already admitted and sealed root.
 // Provider-admission triggers are disabled only while constructing that base
-// fixture; all 0051 triggers are enabled before any ledger row is written.
+// fixture; all expansion triggers are enabled before any ledger row is written.
 const SEALED_ROOT_SQL: &str = r"
 ALTER TABLE repositories DISABLE TRIGGER USER;
 ALTER TABLE workflow_definitions DISABLE TRIGGER USER;
@@ -102,7 +102,7 @@ ALTER TABLE logical_workflow_jobs ENABLE TRIGGER USER;
 
 // The ordinary expansion fixture has one root call job. The identity-chain
 // matrix exercises seven independent callsites, so seed the other six exact
-// durable root jobs before sealing its 0051 expansion ledger.
+// durable root jobs before sealing its expansion ledger.
 const IDENTITY_ROOT_JOBS_SQL: &str = r"
 ALTER TABLE logical_workflow_jobs DISABLE TRIGGER USER;
 INSERT INTO logical_workflow_jobs (

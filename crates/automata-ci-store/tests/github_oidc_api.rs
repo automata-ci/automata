@@ -60,7 +60,7 @@ fn runtime_execution() -> GithubOidcExecutionIdentity {
             JobIrVersion::current(),
             1_024,
             digest(1),
-            ObjectKey::new("job-ir/v5/example").expect("object key"),
+            ObjectKey::new("job-ir/v1/example").expect("object key"),
         )
         .expect("JobIR metadata"),
     )

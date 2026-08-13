@@ -191,7 +191,7 @@ impl GithubChecksCredentialRequest<'_> {
         self.required_through
     }
 
-    /// Derives the exact 0032 consumer claim from this durable outbox claim.
+    /// Derives the exact consumer claim from this durable outbox claim.
     ///
     /// # Errors
     ///
@@ -331,7 +331,7 @@ impl GithubChecksServerServiceCredential {
         self.required_through
     }
 
-    /// Returns the trusted observation at which 0032 revalidated this handoff.
+    /// Returns the trusted observation at which Store revalidated this handoff.
     #[must_use]
     pub const fn acquired_at(&self) -> UnixMillis {
         self.acquired_at
@@ -428,7 +428,7 @@ pub enum GithubChecksCredentialValueError {
     /// The authority selector belongs to a different authenticated tenant.
     #[error("the GitHub Checks credential authority selector tenant is inconsistent")]
     AuthorityTenantMismatch,
-    /// The exact outbox claim cannot be represented at the 0032 boundary.
+    /// The exact outbox claim cannot be represented at the authority boundary.
     #[error("the GitHub Checks credential claim binding is invalid")]
     InvalidClaimBinding,
 }

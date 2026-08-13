@@ -141,8 +141,8 @@ Tasks:
   transition, observed invariant, and recovery time.
 - [ ] Keep fault controls outside product trust and credential paths; a test
   fault cannot forge successful evidence.
-- [ ] Support the drain-required protocol-v4/v5 transition separately from
-  live one-version-skew upgrade scenarios.
+- [ ] Exercise only the exact current runner protocol; mixed-version operation
+  is unsupported.
 - [ ] Tear down every replica, network rule, volume, namespace, credential, and
   retained process even when the test driver crashes.
 

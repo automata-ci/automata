@@ -54,7 +54,7 @@ fn offer_receipt_migration_requires_a_complete_supported_fallback_projection() {
     ] {
         assert!(
             OFFER_HORIZON_MIGRATION.contains(required),
-            "0045 is missing fallback shape contract: {required}"
+            "initial schema is missing fallback shape contract: {required}"
         );
     }
 }

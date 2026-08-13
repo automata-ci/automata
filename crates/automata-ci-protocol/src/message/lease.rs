@@ -4,7 +4,7 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobIrEnvelope, JobLifecycle, Lease, LeaseGuard, LeaseId, OperationId,
     UnixMillis,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::MessageValidationError;
 use super::{MessageHeader, RunnerSlotOrdinal, ServerCommandHeader};
@@ -87,8 +87,16 @@ pub struct LeaseOffer {
     lease: Lease,
     job: JobIrEnvelope,
     runtime_authorities: Option<super::JobRuntimeAuthorities>,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     managed_secret_bindings: Option<super::ManagedSecretBindingOverlay>,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 impl LeaseOffer {

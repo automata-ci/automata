@@ -197,6 +197,20 @@ fn deserialized_offer_with_invalid_lease_interval_cannot_enter_journal() {
 }
 
 #[test]
+fn current_lease_offer_record_requires_explicit_managed_secret_bindings() {
+    let fixture = Fixture::new();
+    let mut incomplete = serde_json::to_value(fixture.offer(1)).expect("serialize offer");
+    incomplete
+        .as_object_mut()
+        .expect("lease-offer record")
+        .remove("managed_secret_bindings");
+
+    assert!(
+        serde_json::from_value::<automata_ci_runner_journal::LeaseOfferRecord>(incomplete).is_err()
+    );
+}
+
+#[test]
 fn exact_replays_are_noops_and_lease_expiration_only_moves_forward() {
     let scratch = Scratch::new("idempotent-replays");
     let fixture = Fixture::new();

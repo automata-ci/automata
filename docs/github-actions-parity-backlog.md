@@ -19,18 +19,21 @@ only in focused component tests, work only on Linux, lack production ingress or
 credentials, or deliberately diverge from GitHub.
 
 The 2026-08-12 refresh includes the runtime restoration merged in PR #29:
-runner protocol v5, runner-requirements schema v3, migrations through `0070`,
-three isolated single-slot Linux runner processes, the Kubernetes product
-configuration path, durable rerun and protected-environment authority,
+runner protocol v1, runner-requirements schema v1, one canonical greenfield
+store schema, three isolated single-slot Linux runner processes, the Kubernetes
+product configuration path, durable rerun and protected-environment authority,
 value-safe managed-secret delivery, and immutable multi-workflow fanout. These
 are component or experimental foundations unless a later item records product
 acceptance. Hosted Windows CI was removed from `main`; the native Windows path
 therefore remains source-tested but is not a release gate.
 
-The final baseline also retains exact cleanup custody when sandbox creation has
-an uncertain outcome and the provider returns a recovery handle. Legacy Podman
-intents reconstruct the deterministic handle from operation ID and lease
-generation, while unreconstructible legacy intents remain fenced.
+The final baseline retains exact cleanup custody when sandbox creation has an
+uncertain outcome and the provider returns a recovery handle. Missing custody
+is an executor-contract failure and remains fenced; the runtime never guesses
+or reconstructs a provider identity. Operators must drain that runner, use
+provider-owned evidence to prove absence or destroy any external resource, and
+then recreate its empty local state; deleting the journal alone must never
+release capacity.
 
 The companion
 [`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
@@ -573,11 +576,11 @@ case-insensitive groups, and FIFO-by-wait-start behavior. See
 - [ ] Test cancellation while a post action is running.
 - [ ] Test job and workflow timeouts during cleanup.
 - [x] When uncertain sandbox creation returns an exact recovery handle, journal
-  it as cleanup custody; reconstruct only deterministic legacy Podman identity,
-  and leave an unreconstructible legacy intent fenced.
-- [ ] For every shipped provider, prove returned or reconstructed sandbox
-  custody is destroyed before slot release and define exact reconstruction or
-  a drain/upgrade policy for pre-custody legacy intents.
+  it as cleanup custody and fence any missing-custody state without identity
+  reconstruction.
+- [ ] For every shipped provider, prove returned sandbox custody is destroyed
+  before slot release; document the bounded drain and provider-side
+  reconciliation required when custody is missing.
 - [x] Enforce the current 50-rerun limit (51 physical attempts including the
   original run).
 - [x] Implement authenticated, durable, idempotent rerun-all,
@@ -1094,7 +1097,7 @@ runner. There is no enrollment API.
 - [x] Load and atomically validate the current privileged static fleet at
   startup.
 - [x] Negotiate the runner protocol and JobIR ranges before a session or lease;
-  the current baseline admits protocol v5 only.
+  the current baseline admits protocol v1 only.
 - [ ] Preserve static loading as a migration and break-glass path when dynamic
   enrollment lands.
 
@@ -1205,7 +1208,7 @@ Windows CI is disabled on the current baseline.
 - [ ] Add ARM32 if supported.
 - [ ] Add Linux ARM64.
 - [ ] Add Windows ARM64.
-- [ ] Prove runner-requirements-schema-v3 CPU, memory, ephemeral-storage, GPU,
+- [ ] Prove runner-requirements-schema-v1 CPU, memory, ephemeral-storage, GPU,
   and per-runner PID-cap enforcement through production providers. These are
   structured `JobResourceAllocation` fields, not labels.
 - [ ] Add custom images.

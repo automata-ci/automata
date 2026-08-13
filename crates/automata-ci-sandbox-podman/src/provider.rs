@@ -232,14 +232,6 @@ impl SandboxProvider for RootlessPodmanProvider {
         &self.inner.capabilities
     }
 
-    fn create_recovery_handle(
-        &self,
-        operation_id: automata_ci_execution::OperationId,
-        generation: automata_ci_execution::SandboxGeneration,
-    ) -> Option<SandboxHandle> {
-        Some(ResourceNames::for_create(operation_id, generation).handle())
-    }
-
     fn create(
         &self,
         spec: &SandboxSpec,

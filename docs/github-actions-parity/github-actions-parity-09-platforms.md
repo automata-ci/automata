@@ -107,7 +107,7 @@ Acceptance:
 
 Current component foundation:
 
-- [x] Requirements schema v3 carries run-pinned CPU, memory, ephemeral-disk,
+- [x] Requirements schema v1 carries run-pinned CPU, memory, ephemeral-disk,
   and optional GPU requests and limits through scheduler matching, executor
   admission, and `SandboxSpec`; the Kubernetes adapter renders exact resource
   quantities and mapped devices.

@@ -44,12 +44,12 @@ const RESOURCE_MAPPING: &str = "github_role_mapping";
 /// row locks through the mapping write and immutable audit append.
 ///
 /// Lists use the mapping primary-key keyset. Option result sets are capped by
-/// `LIMIT 501`, but migration 0010 has no supporting label-order indexes or
+/// `LIMIT 501`, but the current schema has no supporting label-order indexes or
 /// tenant cardinality ceilings, so those scans are only output-bounded.
-/// Successful mutations retain migration 0010's tenant-wide authorization-
-/// revision invalidation and likewise have tenant-cardinality-wide work. Product
-/// composition remains gated on the missing indexes/ceilings or equivalently
-/// fail-closed bounded designs.
+/// Successful mutations retain tenant-wide authorization-revision invalidation
+/// and likewise have tenant-cardinality-wide work. Product composition remains
+/// gated on the missing indexes/ceilings or equivalently fail-closed bounded
+/// designs.
 #[derive(Clone)]
 pub struct PostgresGithubMappingManagementRepository {
     pool: PgPool,

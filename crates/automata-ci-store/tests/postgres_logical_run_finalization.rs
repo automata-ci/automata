@@ -85,10 +85,10 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         finalize_skipped_job(&database, &fixture, 1).await?;
         finalize_skipped_job(&database, &fixture, 2).await?;
 
-        // This test fixture changes already trusted 0025 rows only to exercise
+        // This test fixture changes already trusted result rows only to exercise
         // the run-level SQL precedence and transition mapping. The immutable
         // rejection trigger is disabled for the narrow update and restored
-        // before 0031 observes or claims any evidence.
+        // before finalization observes or claims any evidence.
         sqlx::query(
             "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER logical_workflow_job_results_reject_update",
         )

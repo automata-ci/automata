@@ -72,7 +72,7 @@ const fn server_service_action(
 
 /// Move-only capability that releases one exact durable server-service handoff.
 ///
-/// Implementations own the complete non-secret 0032 release binding. They must
+/// Implementations own the complete non-secret credential release binding. They must
 /// make one bounded exact release attempt and retain any replayable ambiguous
 /// release evidence internally until it is resolved or the immutable handoff
 /// horizon expires. The delivery credential drops its bearer before invoking
@@ -227,7 +227,7 @@ impl GithubDeliverySourceCredentialRequest<'_> {
         self.repository_owner_id
     }
 
-    /// Returns the immutable 0032 private-source authority pinned at acceptance.
+    /// Returns the immutable private-source authority pinned at acceptance.
     #[must_use]
     pub const fn authority_selector(&self) -> &GithubServerServiceAuthoritySelector {
         self.authority_selector
@@ -258,7 +258,7 @@ impl GithubDeliverySourceCredentialRequest<'_> {
         self.required_through
     }
 
-    /// Derives the exact 0032 consumer claim from this delivery lease.
+    /// Derives the exact consumer claim from this delivery lease.
     ///
     /// # Errors
     ///
@@ -482,7 +482,7 @@ impl GithubDeliverySourceCredential {
         &self.binding.repository
     }
 
-    /// Returns the immutable 0032 authority selector that granted this handoff.
+    /// Returns the immutable authority selector that granted this handoff.
     #[must_use]
     pub const fn authority_selector(&self) -> &GithubServerServiceAuthoritySelector {
         &self.binding.authority_selector

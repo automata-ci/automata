@@ -846,7 +846,7 @@ pub enum MessageValidationError {
     #[error("command acknowledgement must advance through at least one command")]
     EmptyCommandAcknowledgement,
     /// A lease offer omits its protected runtime-authority bundle.
-    #[error("protocol v5 lease offers require protected runtime authority")]
+    #[error("current protocol lease offers require protected runtime authority")]
     MissingRuntimeAuthorities,
     /// A named scalar whose protocol contract requires a positive value is zero.
     #[error("{0} must be nonzero")]

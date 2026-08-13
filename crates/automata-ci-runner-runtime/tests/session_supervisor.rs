@@ -1233,8 +1233,8 @@ async fn executor_failure_is_terminalized_per_slot_while_sibling_and_supervisor_
 }
 
 #[tokio::test]
-async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_release() {
-    let scratch = support::Scratch::new("legacy-uncertain-create-recovery");
+async fn recovered_uncertain_create_without_exact_cleanup_custody_remains_fenced() {
+    let scratch = support::Scratch::new("missing-create-cleanup-custody");
     let runner_id = RunnerId::new();
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
     let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
@@ -1246,7 +1246,7 @@ async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_rele
             guard,
             JobLifecycle::Preparing,
         )
-        .expect("begin legacy preparation");
+        .expect("begin preparation");
     let create = OperationId::new();
     journal
         .record_provider_intent(
@@ -1255,7 +1255,7 @@ async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_rele
             guard,
             ProviderOperation::intent(create, ProviderOperationKind::CreateSandbox),
         )
-        .expect("record legacy create intent");
+        .expect("record create intent");
     journal
         .fail_provider_operation(
             fixture.session_id,
@@ -1264,7 +1264,7 @@ async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_rele
             create,
             ProviderFailureOutcome::Uncertain(ProviderFailureKind::Internal),
         )
-        .expect("retain uncertain legacy create");
+        .expect("retain uncertain create");
     support::seed_failed_terminal_without_logs(journal.as_ref(), spool.as_ref(), &fixture);
     let terminal_operation = journal
         .snapshot()
@@ -1275,45 +1275,81 @@ async fn legacy_uncertain_create_recovers_exact_cleanup_custody_before_slot_rele
         .operation_id();
     journal
         .acknowledge_terminal_result(fixture.session_id, fixture.slot, guard, terminal_operation)
-        .expect("acknowledge legacy terminal result");
+        .expect("acknowledge terminal result");
 
-    let shutdown = CancellationToken::new();
+    let runtime = RunnerSessionSupervisor::new(
+        support::config(runner_id),
+        RunnerRuntimePorts::new(
+            Arc::new(support::FailureIsolationClient::new(fixture.session_id)),
+            journal.clone(),
+            spool,
+            Arc::new(support::FailureIsolationExecutor::default()),
+            Arc::new(support::FixedClock::new(10_000, 50)),
+            Arc::new(support::ImmediateSleeper),
+            Arc::new(SystemRuntimeIds),
+        ),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.run(CancellationToken::new()),
+    )
+    .await
+    .expect("missing custody fails without retrying");
+    assert!(matches!(result, Err(RunnerRuntimeError::ExecutorContract)));
+    let snapshot = journal.snapshot().expect("fenced snapshot");
+    let slot = snapshot.slot(fixture.slot).expect("slot remains fenced");
+    assert!(slot.sandbox().is_none());
+    assert!(slot.provider_operations().last().is_some_and(|operation| {
+        operation.operation_id() == create
+            && operation.kind() == ProviderOperationKind::CreateSandbox
+            && operation.is_pending()
+    }));
+}
+
+#[tokio::test]
+async fn live_uncertain_create_without_exact_cleanup_custody_fails_before_terminal_delivery() {
+    let scratch = support::Scratch::new("live-missing-create-cleanup-custody");
+    let runner_id = RunnerId::new();
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
     let client = Arc::new(support::FailureIsolationClient::new(fixture.session_id));
-    let executor = Arc::new(support::LegacyUncertainCreateExecutor::default());
     let runtime = RunnerSessionSupervisor::new(
         support::config(runner_id),
         RunnerRuntimePorts::new(
             client.clone(),
             journal.clone(),
             spool,
-            executor.clone(),
+            Arc::new(support::MissingCreateCustodyExecutor),
             Arc::new(support::FixedClock::new(10_000, 50)),
             Arc::new(support::ImmediateSleeper),
             Arc::new(SystemRuntimeIds),
         ),
     );
-    let task_shutdown = shutdown.clone();
-    let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
 
-    tokio::time::timeout(Duration::from_secs(5), client.wait_for_released_slot_poll())
-        .await
-        .expect("legacy create custody is destroyed and slot released");
-    assert_eq!(executor.recovery_calls(), vec![(create, guard)]);
-    assert_eq!(executor.cleanup_calls(), 1);
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.run(CancellationToken::new()),
+    )
+    .await
+    .expect("missing live custody fails without retrying");
+    assert!(matches!(result, Err(RunnerRuntimeError::ExecutorContract)));
     assert!(
-        journal
-            .snapshot()
-            .expect("released snapshot")
-            .slots()
-            .is_empty()
+        client.terminal_results().is_empty(),
+        "terminal delivery must not acknowledge a slot without cleanup custody"
     );
-
-    shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("runner shutdown")
-        .expect("runtime task")
-        .expect("clean shutdown after legacy recovery");
+    let snapshot = journal.snapshot().expect("fenced live snapshot");
+    let slot = snapshot
+        .slot(fixture.slot)
+        .expect("live slot remains fenced");
+    assert!(slot.sandbox().is_none());
+    assert!(
+        slot.terminal_result()
+            .is_some_and(|result| !result.is_acknowledged())
+    );
+    assert!(slot.provider_operations().last().is_some_and(|operation| {
+        operation.kind() == ProviderOperationKind::CreateSandbox && operation.is_pending()
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

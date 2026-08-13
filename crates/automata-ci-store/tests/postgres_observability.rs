@@ -772,7 +772,7 @@ async fn build_logical_metrics_fixture(
             "application/yaml",
         ),
         logical_metrics_object(
-            format!("metrics/{suffix}/plan-v2.json"),
+            format!("metrics/{suffix}/plan-v1.json"),
             19,
             "application/vnd.automata.workflow-plan+json",
         ),

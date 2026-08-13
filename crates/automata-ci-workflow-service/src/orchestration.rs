@@ -104,7 +104,7 @@ impl LogicalJobOrchestrationTarget {
 /// Store-authenticated descriptors and metadata prepared before a claim.
 ///
 /// The two context objects are canonical protobuf-encoded
-/// [`JobRuntimeContext`] v2 snapshots. `base_context` carries admission-bound
+/// [`JobRuntimeContext`] v1 snapshots. `base_context` carries admission-bound
 /// inputs, repository variables, and opaque secret locators;
 /// `prerequisite_context` carries direct `needs` results and
 /// sensitivity-classified outputs. Every unused field has a canonical empty

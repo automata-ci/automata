@@ -264,9 +264,11 @@ Acceptance:
 Current component foundation:
 
 - [x] When provider create reports an uncertain outcome with an exact recovery
-  handle, journal that handle as sandbox cleanup custody; reconstruct only the
-  deterministic legacy Podman identity from operation ID plus lease generation,
-  and leave an unreconstructible legacy intent fenced.
+  handle, journal that handle as sandbox cleanup custody and fence any
+  missing-custody state without reconstructing a provider identity.
+- [ ] Document and exercise the bounded operator path for missing custody:
+  drain the runner, prove absence or cleanup from provider-owned evidence, then
+  recreate empty local state without treating journal deletion as cleanup.
 
 Tasks:
 

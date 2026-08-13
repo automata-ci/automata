@@ -286,7 +286,7 @@ fn fixture(
         1,
         AdmissionObject::new(
             Sha256Digest::from_bytes(Sha256::digest(&plan_bytes).into()),
-            ObjectKey::new("plans/workflow-v2.json").expect("plan key"),
+            ObjectKey::new("plans/workflow-v1.json").expect("plan key"),
             u64::try_from(plan_bytes.len()).expect("plan size"),
             "application/vnd.automata.workflow-plan+json",
         )

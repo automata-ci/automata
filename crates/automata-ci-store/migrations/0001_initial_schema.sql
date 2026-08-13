@@ -14441,7 +14441,7 @@ BEGIN
         WHERE run.id = NEW.run_id
           AND run.runner_requirements_schema = 1
     ) THEN
-        RAISE EXCEPTION 'new executable rows require runner-requirements schema v3'
+        RAISE EXCEPTION 'new executable rows require runner-requirements schema v1'
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'runner_requirements_current_new_rows_only';
     END IF;
@@ -14460,7 +14460,7 @@ BEGIN
           AND job.requirements @> '{"schema_version": 1}'::jsonb
           AND job.requirements ? 'resource_allocation'
     ) THEN
-        RAISE EXCEPTION 'new attempts require runner-requirements schema v3'
+        RAISE EXCEPTION 'new attempts require runner-requirements schema v1'
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'job_attempts_runner_requirements_current_new_only';
     END IF;
@@ -14714,7 +14714,7 @@ BEGIN
              AND run.runner_requirements_schema = 1
        )
     THEN
-        RAISE EXCEPTION 'new logical workflow runs require runner-requirements schema v3'
+        RAISE EXCEPTION 'new logical workflow runs require runner-requirements schema v1'
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'logical_workflow_runs_runner_requirements_current_new_only';
     END IF;

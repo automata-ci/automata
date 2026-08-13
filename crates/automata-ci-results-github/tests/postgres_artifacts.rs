@@ -18,6 +18,7 @@ use automata_ci_store::{
     AcquireLease, InternalAttemptRepository as _, QueuedAttempt, StableRunnerSlot,
 };
 use bytes::Bytes;
+use sqlx::PgPool;
 use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};
 use uuid::Uuid;
 

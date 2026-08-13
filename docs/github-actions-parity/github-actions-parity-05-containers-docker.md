@@ -110,8 +110,9 @@ Remaining tasks:
   capabilities are advertised.
 - [ ] Exercise cancellation, runner loss, guest loss, ambiguous Kubernetes API
   responses, stale generations, provider restart, and idempotent recovery;
-  prove cleanup before slot release and define deterministic reconstruction or
-  a drain policy for legacy pre-custody intents.
+  prove exact returned custody is cleaned before slot release and missing
+  custody remains fenced until a bounded provider-side reconciliation and
+  runner drain prove cleanup before empty state is recreated.
 - [ ] Publish bounded provider/guest diagnostics and RED/USE metrics without
   exposing Kubernetes credentials, tokens, object bodies, or user output.
 - [ ] Record the operator assertions and rollback procedure; keep cluster

@@ -1486,79 +1486,6 @@ impl JobExecutor for CancellationContentRaceExecutor {
 }
 
 #[derive(Debug, Default)]
-pub struct LegacyUncertainCreateExecutor {
-    recovery_calls: Mutex<Vec<(OperationId, automata_ci_core::LeaseGuard)>>,
-    cleanup_calls: AtomicUsize,
-}
-
-impl LegacyUncertainCreateExecutor {
-    pub fn recovery_calls(&self) -> Vec<(OperationId, automata_ci_core::LeaseGuard)> {
-        self.recovery_calls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    pub fn cleanup_calls(&self) -> usize {
-        self.cleanup_calls.load(Ordering::SeqCst)
-    }
-
-    fn recovery_identity() -> SandboxIdentity {
-        SandboxIdentity::new(
-            ProviderName::new("legacy-recovery-provider").expect("provider name"),
-            JournalSandboxHandle::new("legacy-uncertain-create").expect("sandbox handle"),
-        )
-    }
-}
-
-impl JobExecutor for LegacyUncertainCreateExecutor {
-    fn admit(&self, _job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
-        Ok(ExecutionAdmission::new(sandbox_environment()))
-    }
-
-    fn create_recovery_sandbox(
-        &self,
-        operation_id: OperationId,
-        guard: automata_ci_core::LeaseGuard,
-    ) -> Result<Option<SandboxIdentity>, ExecutorError> {
-        self.recovery_calls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((operation_id, guard));
-        Ok(Some(Self::recovery_identity()))
-    }
-
-    fn execute(
-        &self,
-        _request: ExecutionRequest,
-        _events: Arc<dyn ExecutionEvents>,
-        _cancellation: ExecutionCancellation,
-    ) -> ExecutorFuture<'_> {
-        Box::pin(async { Err(ExecutorError::new(ExecutorErrorKind::Internal)) })
-    }
-
-    fn cleanup(
-        &self,
-        request: CleanupRequest,
-        events: Arc<dyn ExecutionEvents>,
-        _cancellation: ExecutionCancellation,
-    ) -> CleanupFuture<'_> {
-        Box::pin(async move {
-            if request.sandbox() != &Self::recovery_identity() {
-                return Err(ExecutorError::new(ExecutorErrorKind::Internal));
-            }
-            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
-            let destroy = events
-                .begin_provider_operation(ProviderOperationKind::DestroySandbox)
-                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
-            events
-                .provider_operation_completed(destroy)
-                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))
-        })
-    }
-}
-
-#[derive(Debug, Default)]
 pub struct FailureIsolationExecutor {
     survivor_started: AtomicBool,
 }
@@ -1603,6 +1530,44 @@ impl JobExecutor for FailureIsolationExecutor {
             self.survivor_started.store(true, Ordering::SeqCst);
             cancellation.token().cancelled().await;
             Err(ExecutorError::new(ExecutorErrorKind::Cancelled))
+        })
+    }
+
+    fn cleanup(
+        &self,
+        _request: CleanupRequest,
+        _events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> CleanupFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MissingCreateCustodyExecutor;
+
+impl JobExecutor for MissingCreateCustodyExecutor {
+    fn admit(&self, _job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
+        Ok(ExecutionAdmission::new(sandbox_environment()))
+    }
+
+    fn execute(
+        &self,
+        _request: ExecutionRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> ExecutorFuture<'_> {
+        Box::pin(async move {
+            let create = events
+                .begin_provider_operation(ProviderOperationKind::CreateSandbox)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            events
+                .provider_operation_failed(
+                    create,
+                    ProviderFailureOutcome::Uncertain(ProviderFailureKind::Internal),
+                )
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            Err(ExecutorError::new(ExecutorErrorKind::Internal))
         })
     }
 

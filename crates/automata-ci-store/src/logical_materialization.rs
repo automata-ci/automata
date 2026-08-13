@@ -2,7 +2,7 @@
 //!
 //! The repository returns an immutable instance descriptor and releases its
 //! transaction before any blob I/O. Callers load and decode the exact `JobIR`
-//! blob, then construct a commit that proves the current v5 envelope matches
+//! blob, then construct a commit that proves the current v1 envelope matches
 //! every store-authenticated identity and content reference.
 
 use std::num::NonZeroU64;

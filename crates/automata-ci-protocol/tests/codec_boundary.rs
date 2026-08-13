@@ -452,6 +452,24 @@ fn nested_job_and_result_domain_errors_are_rejected() {
 }
 
 #[test]
+fn current_lease_offer_requires_explicit_managed_secret_bindings() {
+    let attempt_id = AttemptId::new();
+    let offer = ServerToRunner::LeaseOffer(Box::new(lease_offer(
+        command_header(),
+        slot(),
+        lease(attempt_id, RunnerId::new()),
+        job_envelope(RunnerRequirements::default()),
+    )));
+    let mut incomplete = serde_json::to_value(offer).expect("serialize lease offer");
+    incomplete["payload"]
+        .as_object_mut()
+        .expect("lease-offer payload")
+        .remove("managed_secret_bindings");
+
+    assert!(serde_json::from_value::<ServerToRunner>(incomplete).is_err());
+}
+
+#[test]
 fn nested_requirement_collections_obey_the_configured_budget() {
     use automata_ci_core::RunnerLabel;
 

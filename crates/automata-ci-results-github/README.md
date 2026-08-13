@@ -88,7 +88,7 @@ URLs use separate protocol domains and derived keys. Every metadata mutation
 rechecks the attempt lifecycle and fence.
 
 `GithubResultsRuntimeAuthorityIssuer` creates the JWT while building the
-durable lease offer. Runner protocol v5 requires the authority bundle. The
+durable lease offer. Runner protocol v1 requires the authority bundle. The
 runner stores it as separately authenticated content and injects it into that
 job only; there is no runner- or fleet-wide Results credential.
 

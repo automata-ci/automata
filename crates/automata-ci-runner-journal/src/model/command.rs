@@ -2,7 +2,7 @@ use automata_ci_core::{Lease, OperationId, Sha256Digest, UnixMillis};
 use automata_ci_protocol::{
     CommandSequence, LeaseRejectionReason, ManagedSecretBindingOverlay, RunnerSlotOrdinal,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{JobIrContentRef, JournalInvariantError, RuntimeAuthorityContentRef};
 
@@ -112,9 +112,17 @@ pub struct LeaseOfferRecord {
     lease: Lease,
     job_ir: JobIrContentRef,
     runtime_authorities: RuntimeAuthorityContentRef,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_required_option")]
     managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
     command: DurableCommand,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 impl LeaseOfferRecord {
