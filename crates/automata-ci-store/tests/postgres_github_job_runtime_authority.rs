@@ -61,7 +61,7 @@ use uuid::Uuid;
 
 use common::{TestClock, TestDatabase, TestResult, run_with_database};
 
-const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 
 fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])

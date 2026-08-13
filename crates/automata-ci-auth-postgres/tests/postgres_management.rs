@@ -3664,14 +3664,10 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 .count(),
             1
         );
-        let loser = if matches!(
+        let loser = usize::from(!matches!(
             capacity_outcomes[0],
             RunnerEnrollmentConsumeOutcome::CapacityExhausted
-        ) {
-            0
-        } else {
-            1
-        };
+        ));
         let capacity_counts: (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT count(*) FROM runners),(SELECT count(*) FROM runner_machine_certificates),(SELECT count(*) FROM security_audit_events WHERE action='runner.enroll')",
         )

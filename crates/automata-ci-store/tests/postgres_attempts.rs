@@ -50,7 +50,7 @@ async fn queued_creation_persists_current_safety_and_retries_reuse_the_job_ceili
                 requested_visibility: "private".to_owned(),
                 effective_visibility: "private".to_owned(),
                 reason: "repository_policy".to_owned(),
-                schema: 2,
+                schema: 1,
                 classified_at: 70,
             }
         );

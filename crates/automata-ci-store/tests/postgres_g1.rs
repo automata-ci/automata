@@ -2610,11 +2610,22 @@ async fn requeue_at_exact_database_expiry(
     maximum_failures: u32,
     limit: u32,
 ) -> TestResult<Vec<AttemptId>> {
-    let exact_expiry = checked_add_millis(database_now(database).await?, 1)?;
     let durable_attempt_ids = attempt_ids
         .iter()
         .map(|attempt_id| attempt_id.as_uuid())
         .collect::<Vec<_>>();
+    let exact_expiry = UnixMillis::new(
+        sqlx::query_scalar(
+            r"
+            SELECT max(greatest(lease_issued_at_ms, changed_at_ms)) + 1
+            FROM job_attempts
+            WHERE id = ANY($1) AND lease_id IS NOT NULL
+            ",
+        )
+        .bind(&durable_attempt_ids)
+        .fetch_one(database.pool())
+        .await?,
+    );
     let updated = sqlx::query(
         r"
         UPDATE job_attempts

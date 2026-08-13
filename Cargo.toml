@@ -98,7 +98,7 @@ automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
 automata-ci-oidc-github-control = { path = "crates/automata-ci-oidc-github-control", version = "0.1.0" }
 automata-ci-output-policy = { path = "crates/automata-ci-output-policy", version = "0.1.0" }
-automata-ci-postgres-test-support = { path = "crates/automata-ci-postgres-test-support" }
+automata-ci-postgres-test-support = { path = "crates/automata-ci-postgres-test-support", version = "0.1.0" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }

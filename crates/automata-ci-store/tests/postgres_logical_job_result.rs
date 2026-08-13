@@ -240,6 +240,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         let instance_projection_observed_at = database_now_ms(&database).await?;
         for (claim_order, index) in [1_usize, 0_usize].into_iter().enumerate() {
             let claimed_at = instance_projection_observed_at + i64::try_from(claim_order)?;
+            clock.set(claimed_at).await?;
             let claimed = expect_instance_result_claimed(
                 database
                     .store()
@@ -1506,6 +1507,7 @@ fn fixture_manifest(tenant: TenantScope, namespace: u128) -> GithubProviderManif
     )
 }
 
+#[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture) -> TestResult {
     let manifest = &fixture.manifest;
     let configured_at = database_now_ms(database).await?;
@@ -1588,6 +1590,14 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     let command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),

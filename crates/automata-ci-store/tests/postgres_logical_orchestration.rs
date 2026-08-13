@@ -9,7 +9,8 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_core::{
-    JobAuthorityProfile, OperationId, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, OperationId, RunId, Sha256Digest,
+    UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -32,7 +33,7 @@ use automata_ci_store::{
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, ResolveAuthenticatedWorkflowDispatchSource, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -248,6 +249,14 @@ async fn stage_authenticated_admission(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &manifest,
+        command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     Ok((
         logical_command_at(command, claimed.claimed_at())?,
         AuthenticatedGithubDeliveryClaim::new(
@@ -437,7 +446,7 @@ async fn assert_logical_admission_shape(
             base_context.object_key().as_str().to_owned(),
             i64::try_from(base_context.encoded_size())?,
             base_context.media_type().to_owned(),
-            2,
+            i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)?,
         )
     );
 
@@ -451,7 +460,14 @@ async fn assert_logical_admission_shape(
     .bind(run_id.as_uuid())
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(invocation, (2, "pending".to_owned(), vec![2; 32]));
+    assert_eq!(
+        invocation,
+        (
+            i16::try_from(WORKFLOW_PLAN_SCHEMA)?,
+            "pending".to_owned(),
+            vec![2; 32],
+        )
+    );
 
     let logical_jobs: Vec<(String, i32, String, String)> = sqlx::query_as(
         r"

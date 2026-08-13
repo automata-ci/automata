@@ -417,13 +417,7 @@ async fn redeem_enrollment(
         Ok(document) => document,
         Err(error) => return error.into_response(),
     };
-    if document.operation_id.is_nil()
-        || document.runner_name.is_empty()
-        || document.runner_name.len() > 255
-        || document.runner_name.trim() != document.runner_name
-        || document.runner_name.chars().any(char::is_control)
-        || document.capabilities.validate().is_err()
-    {
+    if !valid_redeem_document(&document) {
         return ApiError::InvalidRequest.into_response();
     }
     let token_sha256 = match token_digest(document.token.as_bytes()) {
@@ -511,6 +505,15 @@ async fn redeem_enrollment(
         ) => ApiError::Conflict.into_response(),
         Err(error) => repository_error(error).into_response(),
     }
+}
+
+fn valid_redeem_document(document: &RedeemEnrollmentDocument) -> bool {
+    !document.operation_id.is_nil()
+        && !document.runner_name.is_empty()
+        && document.runner_name.len() <= 255
+        && document.runner_name.trim() == document.runner_name
+        && !document.runner_name.chars().any(char::is_control)
+        && document.capabilities.validate().is_ok()
 }
 
 enum EnrollmentPreparation {

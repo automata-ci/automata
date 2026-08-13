@@ -1155,6 +1155,7 @@ async fn wait_until_database_after(database: &TestDatabase, target_ms: i64) -> T
     }
 }
 
+#[allow(clippy::too_many_lines)] // The fixture keeps the complete relational workflow seed auditable.
 async fn insert_metrics_workflow(
     database: &TestDatabase,
     seed: &MetricsWorkflowSeed,

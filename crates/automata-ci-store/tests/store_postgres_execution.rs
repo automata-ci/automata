@@ -1,4 +1,4 @@
-//! Current-schema PostgreSQL execution, runner, and runtime-authority tests.
+//! Current-schema `PostgreSQL` execution, runner, and runtime-authority tests.
 
 mod common;
 

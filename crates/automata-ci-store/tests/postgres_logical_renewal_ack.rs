@@ -512,7 +512,7 @@ async fn legacy_null_preparation_origin_rejects_live_consume_and_allows_takeover
         let first_preparation_authority = preparation_authority(&first_preparation.consumed)?;
         let first_renewal_request = RenewLogicalActivationPreparation::new(
             first_preparation_authority.claim().clone(),
-            INITIAL_SELECTION_MILLIS,
+            FIRST_RENEWAL_MILLIS,
         )?;
         let first_renewal_ack = database
             .store()
@@ -574,7 +574,7 @@ async fn legacy_null_activation_origin_rejects_live_consume_and_allows_takeover(
         let first_activation_authority = activation_authority(&first_activation.consumed)?;
         let first_renewal_request = RenewLogicalJobActivation::new(
             first_activation_authority.claim().clone(),
-            INITIAL_SELECTION_MILLIS,
+            FIRST_RENEWAL_MILLIS,
         )?;
         let first_renewal_ack = database
             .store()
@@ -674,7 +674,7 @@ async fn legacy_null_materialization_origin_rejects_live_consume_and_allows_take
         let first_materialization_authority = first_materialization.consumed.authority().clone();
         let first_renewal_request = RenewLogicalInstanceMaterialization::new(
             first_materialization_authority.claim().clone(),
-            INITIAL_SELECTION_MILLIS,
+            FIRST_RENEWAL_MILLIS,
         )?;
         let first_renewal_ack = database
             .store()
@@ -2174,6 +2174,7 @@ async fn fixture(
     })
 }
 
+#[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixture) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
     database
@@ -2251,6 +2252,14 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),

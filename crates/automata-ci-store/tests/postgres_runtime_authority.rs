@@ -67,7 +67,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 
 use common::{TestClock, TestDatabase, TestResult, run_with_database};
 

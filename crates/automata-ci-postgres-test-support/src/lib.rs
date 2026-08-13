@@ -1,4 +1,4 @@
-//! Process-safe PostgreSQL fixtures for Automata's integration tests.
+//! Process-safe `PostgreSQL` fixtures for Automata's integration tests.
 //!
 //! A [`PostgresTestHarness`] prepares one immutable, disconnected database
 //! template per CI job. Tests clone that template into independent databases,
@@ -24,7 +24,7 @@ pub use database::{
 
 use std::error::Error;
 
-/// Environment variable containing the isolated PostgreSQL server URL.
+/// Environment variable containing the isolated `PostgreSQL` server URL.
 pub const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";
 
 /// Optional job-scoped namespace shared by cooperating test processes.

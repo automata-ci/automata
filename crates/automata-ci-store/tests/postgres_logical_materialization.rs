@@ -2457,7 +2457,7 @@ async fn admit_authenticated_fixture(
                             ),
                         )?,
                         ProviderDeliveryWorkflowInventoryEntry::new(
-                            ".github/workflows/child.yml",
+                            ".ci/workflows/child.yml",
                             ProviderDeliveryWorkflowSourceState::Ready(
                                 fixture.command.source().digest(),
                             ),
@@ -2562,7 +2562,7 @@ fn standard_public_attempt_safety(classified_at: i64) -> DurableAttemptSafety {
         requested_visibility: "public".to_owned(),
         effective_visibility: "private".to_owned(),
         reason: "secret_exposure".to_owned(),
-        schema: 2,
+        schema: 1,
         classified_at,
     }
 }
