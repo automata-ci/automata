@@ -581,15 +581,13 @@ omits `sslmode` or requests a fallback mode. Remote deployments must use a host
 name matching the database certificate and configure its trusted CA (for
 example with `sslrootcert` in the referenced URL).
 
-### Unsupported pre-release plaintext state
+### Greenfield database boundary
 
-Migration `0013_encrypted_runner_payloads.sql` deliberately fails with SQLSTATE
-`23514` if an obsolete pre-release database contains plaintext
-`runner_command_outbox` or `runner_rpc_receipts` rows. It never deletes a row or
-labels plaintext as encrypted. Such a database is not an upgrade source for
-v0.1: stop the obsolete installation and create a fresh current schema, or
-restore an explicitly reviewed backup that already uses the current encrypted
-schema. Do not bypass the guard or delete individual retry rows in place.
+Only a fresh database initialized by the canonical
+`0001_initial_schema.sql` is supported. Never copy, relabel, or reinterpret
+plaintext `runner_command_outbox` or `runner_rpc_receipts` retry rows as
+current encrypted state. Recreate the database or restore an explicitly
+reviewed backup produced by the current encrypted schema.
 
 ### Rotating the control-plane wrapping key
 

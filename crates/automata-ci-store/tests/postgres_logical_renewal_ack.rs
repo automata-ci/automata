@@ -2146,7 +2146,7 @@ async fn fixture(
         snapshot_id,
         admission_object(format!("renewal/{namespace}/source"), 1, "application/json"),
         admission_object(
-            format!("renewal/{namespace}/plan-v2"),
+            format!("renewal/{namespace}/plan-v1"),
             2,
             "application/vnd.automata.workflow-plan+json",
         ),

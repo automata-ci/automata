@@ -12,9 +12,9 @@ current support. The [implementation plan](implementation-plan.md) owns release
 gates. This page is an execution aid: unchecked tasks are planned work, not
 availability claims.
 
-The refreshed baseline uses runner protocol v5, JobIR schema v5,
-runner-requirements schema v3, and immutable migrations through `0070`. It also
-contains a real Kubernetes product-composition path, three independent
+The refreshed baseline uses runner protocol v1, JobIR schema v1,
+runner-requirements schema v1, and one canonical greenfield store migration. It
+also contains a real Kubernetes product-composition path, three independent
 single-slot Linux runner processes, durable workflow reruns and protected
 environment lease authority, and immutable multi-workflow fanout. These are
 component or experimental foundations unless their package records product
@@ -22,10 +22,11 @@ acceptance. Hosted Windows CI is currently disabled, so the Windows gate is an
 independent restoration task rather than a prerequisite for the repository's
 current Ubuntu-only CI workflow.
 
-The runtime also preserves exact sandbox cleanup custody when an uncertain
-create failure returns a recovery handle. Deterministic legacy Podman identities
-can be reconstructed; unreconstructible legacy provider intents remain fenced
-rather than being guessed or enumerated.
+The runtime preserves exact sandbox cleanup custody when an uncertain create
+failure returns a recovery handle. Missing-custody state remains fenced rather
+than being guessed, reconstructed, or enumerated. Recovery drains the runner
+until provider-owned evidence proves absence or cleanup and only then recreates
+empty local state; journal deletion alone is not reconciliation.
 
 The companion
 [`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
@@ -134,10 +135,11 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 
 Additional coordination rules:
 
-- [ ] Reserve migration numbers before opening a branch.
-- [ ] Start new migration reservations at `0071`; migrations through `0070`
-  are immutable on this baseline.
-- [ ] Never edit a migration that has reached `main`.
+- [ ] Keep the unreleased greenfield store as one canonical
+  `0001_initial_schema.sql`; fold schema changes into that baseline and its
+  inventory test.
+- [ ] Introduce ordered upgrade migrations only after a released schema creates
+  durable state that the project commits to preserve.
 - [ ] Merge provider-neutral core, JobIR, protocol, or protobuf changes before
   provider implementations begin.
 - [ ] Give serialized-format changes one owner for the version bump,

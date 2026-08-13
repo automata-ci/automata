@@ -269,21 +269,6 @@ async fn provider_failures_map_to_exact_executor_and_durable_domains() {
     }
 }
 
-#[test]
-fn deterministic_provider_identity_reconstructs_legacy_create_custody() {
-    let fixture = Fixture::new(Vec::new(), Vec::new());
-    let request = fixture.request(run_job("true\n"));
-    let operation_id = automata_ci_core::OperationId::new();
-
-    let recovered = fixture
-        .executor
-        .create_recovery_sandbox(operation_id, request.lease().guard())
-        .expect("recovery identity construction")
-        .expect("fake provider has deterministic identity");
-
-    assert_eq!(recovered, journal_identity());
-}
-
 #[tokio::test]
 async fn destroy_completion_commit_failure_retains_and_replays_exact_custody() {
     let fixture = Fixture::new(Vec::new(), vec![PhaseResponse::success()]);

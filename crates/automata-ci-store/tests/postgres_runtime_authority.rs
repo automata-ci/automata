@@ -1594,7 +1594,7 @@ async fn race_retry_and_confirm_revocation(
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn migration_installs_and_retains_the_exact_v5_gate() -> TestResult {
+async fn initial_schema_installs_and_retains_the_exact_current_gate() -> TestResult {
     run_with_database(|database| async move {
         require_postgres_18(&database).await?;
 

@@ -29,7 +29,7 @@ pub enum GithubConditionPhase {
     Step,
 }
 
-/// Field-specific availability used by the workflow-plan v2 lowering path.
+/// Field-specific availability used by the workflow-plan v1 lowering path.
 ///
 /// GitHub publishes context availability per workflow key. Keeping the policy
 /// explicit prevents a template accepted for a late runner field from being

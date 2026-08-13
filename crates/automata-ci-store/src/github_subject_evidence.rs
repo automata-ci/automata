@@ -293,7 +293,7 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
 impl ManifestPinnedGithubDeliveryEvidence {
     /// Rehydrates one complete immutable GitHub delivery-evidence record.
     ///
-    /// The manifest is the complete historical 0035 policy, not merely a
+    /// The manifest is the complete accepted policy, not merely a
     /// revision number. The mandatory `checks_write` selector and visibility-
     /// dependent private-source selector are retained exactly as accepted.
     /// Public evidence must prove that no private-source selector was pinned.

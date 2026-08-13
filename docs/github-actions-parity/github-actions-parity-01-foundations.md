@@ -174,13 +174,15 @@ Acceptance:
 
 **Owner:** rotating integration owner. **Size:** S. **Dependencies:** none.
 
-Current baseline: runner protocol v5, message schema v3, JobIR schema v5,
-runner-requirements schema v3, and immutable migrations through `0070`.
+Current baseline: runner protocol v1, message schema v1, JobIR schema v1,
+runner-requirements schema v1, and one canonical greenfield
+`0001_initial_schema.sql` migration.
 
 Tasks:
 
-- [ ] Maintain an issue-level registry for reserved migration numbers,
-  beginning at `0071` for new work on this baseline.
+- [ ] Keep schema changes in the canonical greenfield migration and its
+  inventory test until the first released schema creates supported durable
+  upgrade state.
 - [ ] Record owners for JobIR, protobuf, result, event, and store schema
   versions.
 - [ ] Require compatibility readers for every durable or wire-format change.
@@ -192,7 +194,7 @@ Tasks:
 
 Acceptance:
 
-- [ ] Parallel branches never claim the same migration number.
+- [ ] Parallel schema branches coordinate changes to the canonical baseline.
 - [ ] No durable format changes without a version and compatibility test.
 - [ ] Limits have one owner and one enforcing phase.
 

@@ -37,7 +37,7 @@ commit `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` with
 Ignored offline tests import explicitly supplied local client modules and never
 download packages. They are focused client-library and protocol evidence, not
 ordinary-CI acceptance of every exact action wrapper or the production stores.
-Runner protocol v5 carries a required, per-attempt Results authority bundle;
+Runner protocol v1 carries a required, per-attempt Results authority bundle;
 there is no runner- or fleet-wide Results credential.
 
 Tasks:

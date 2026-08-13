@@ -2576,7 +2576,8 @@ async fn ready_authority_is_rechecked_at_inspection_lease_and_grant_boundaries()
         )
         .await?;
         // Variable value custody is independently fail-closed. Disable only
-        // that earlier guard so this case reaches the 0070 currentness proof.
+        // that earlier guard so this case reaches the selection-currentness
+        // proof.
         sqlx::query(
             "ALTER TABLE job_attempts DISABLE TRIGGER job_attempts_00_require_variable_custody_before_lease",
         )

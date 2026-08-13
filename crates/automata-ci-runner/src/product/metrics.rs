@@ -2211,14 +2211,6 @@ impl SandboxProvider for ObservedSandboxProvider {
         self.inner.capabilities()
     }
 
-    fn create_recovery_handle(
-        &self,
-        operation_id: automata_ci_execution::OperationId,
-        generation: automata_ci_execution::SandboxGeneration,
-    ) -> Option<SandboxHandle> {
-        self.inner.create_recovery_handle(operation_id, generation)
-    }
-
     fn create(
         &self,
         spec: &SandboxSpec,

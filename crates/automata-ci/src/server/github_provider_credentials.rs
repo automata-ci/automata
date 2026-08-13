@@ -735,7 +735,7 @@ impl fmt::Debug for StoreGithubProviderAuthorityLookup {
 impl GithubProviderCredentialAdapters {
     /// Constructs product adapters from a bootstrap-projected exact authority set.
     ///
-    /// Both repository ports must be views of the same durable 0032
+    /// Both repository ports must be views of the same durable credential
     /// implementation used by the issuer. The authority view revalidates exact
     /// current and historical descriptors before any handoff attempt; the
     /// credential view is retained inside redacted pending-release replay

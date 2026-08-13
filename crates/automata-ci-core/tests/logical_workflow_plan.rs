@@ -787,7 +787,7 @@ fn timeout_units_survive_deferred_values_and_literal_scaling_is_checked() {
 }
 
 #[test]
-fn unknown_fields_fail_closed_inside_v2_boundaries() {
+fn unknown_fields_fail_closed_inside_v1_boundaries() {
     let encoded = serde_json::to_value(valid_plan()).expect("serialize");
     for pointer in [
         "",

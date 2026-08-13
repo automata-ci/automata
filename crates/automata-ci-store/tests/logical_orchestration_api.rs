@@ -56,7 +56,7 @@ fn command(
         "refs/heads/main",
         WorkflowSnapshotId::from_uuid(Uuid::from_u128(3)),
         object("source", 1),
-        object("plan-v2", 2),
+        object("plan-v1", 2),
         RunId::from_uuid(Uuid::from_u128(4)),
         1,
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(5)).expect("root invocation"),

@@ -773,7 +773,7 @@ fn prepare_instance(
     }
 }
 
-#[allow(clippy::too_many_lines)] // The fixture mirrors the complete immutable 0043 execution graph.
+#[allow(clippy::too_many_lines)] // The fixture mirrors the complete immutable execution graph.
 async fn seed_execution(
     database: &TestDatabase,
     namespace: u128,

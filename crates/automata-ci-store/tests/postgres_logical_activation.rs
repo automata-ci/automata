@@ -159,7 +159,7 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         snapshot_id,
         admission_object(format!("activation/{namespace}/source"), 1),
         admission_object_with_media(
-            format!("activation/{namespace}/plan-v2"),
+            format!("activation/{namespace}/plan-v1"),
             2,
             "application/vnd.automata.workflow-plan+json",
         ),

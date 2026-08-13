@@ -430,7 +430,8 @@ pub enum GithubServerServiceMintCutoffOutcome {
 
 /// Narrow durable port consumed by the credential lifecycle core.
 ///
-/// Every implementation must preserve the exact Store 0032 semantics. The
+/// Every implementation must preserve the exact Store server-service
+/// credential semantics. The
 /// blanket implementation delegates directly to
 /// [`GithubServerServiceAuthorityRepository`]; the narrower port also permits
 /// deterministic provider-boundary tests without constructing Store-private
@@ -676,7 +677,7 @@ pub enum GithubServerServiceCoordinationOutcome {
     RevocationCommitPending(Box<PendingGithubServerServiceRevocationCommit>),
 }
 
-/// Generic 0032 coordinator for Checks and private-source credentials.
+/// Generic coordinator for Checks and private-source credentials.
 pub struct GithubServerServiceCredentialCoordinator {
     repository: Arc<dyn GithubServerServiceCredentialRepository>,
     resolver: Arc<dyn GithubServerServiceCredentialRequestResolver>,
@@ -1145,7 +1146,7 @@ pub enum GithubServerServiceHandoffReleaseOutcome {
     Pending(PendingGithubServerServiceHandoffRelease),
 }
 
-/// Opens and releases exact action-bound 0032 credential handoffs.
+/// Opens and releases exact action-bound credential handoffs.
 pub struct GithubServerServiceCredentialIssuer {
     repository: Arc<dyn GithubServerServiceCredentialRepository>,
     envelopes: Arc<EnvelopeCodec>,

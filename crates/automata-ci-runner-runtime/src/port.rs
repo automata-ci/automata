@@ -543,25 +543,6 @@ pub trait JobExecutor: fmt::Debug + Send + Sync {
     /// selected environment cannot be supported exactly.
     fn admit(&self, job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection>;
 
-    /// Reconstructs exact cleanup custody for a legacy uncertain create.
-    ///
-    /// New executions must durably retain the recovery handle returned by the
-    /// provider. This compatibility seam lets a provider with deterministic
-    /// create identities recover an older intent without broad enumeration or
-    /// weakening the journal's unresolved-operation fence.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ExecutorError`] if the durable operation identity cannot be
-    /// mapped to an exact provider-owned sandbox handle.
-    fn create_recovery_sandbox(
-        &self,
-        _operation_id: OperationId,
-        _guard: LeaseGuard,
-    ) -> Result<Option<SandboxIdentity>, ExecutorError> {
-        Ok(None)
-    }
-
     /// Starts or reattaches to one admitted attempt.
     fn execute(
         &self,

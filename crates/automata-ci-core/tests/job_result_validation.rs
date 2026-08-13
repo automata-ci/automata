@@ -31,7 +31,7 @@ fn valid_result_has_monotonic_unique_step_history() {
 }
 
 #[test]
-fn step_summaries_and_annotations_are_bounded_redacted_and_backward_compatible() {
+fn step_summaries_and_annotations_are_bounded_redacted_and_schema_complete() {
     let sensitive = "masked-attachment-value";
     let attached = step("build", 10, 20)
         .with_summary_markdown(format!("## Result\n{sensitive}\n"))
@@ -63,16 +63,21 @@ fn step_summaries_and_annotations_are_bounded_redacted_and_backward_compatible()
     let decoded: JobResult = serde_json::from_value(encoded).expect("decode attachments");
     assert_eq!(decoded, result);
 
-    let legacy = serde_json::json!({
-        "step_id": "build",
-        "outcome": "success",
-        "conclusion": "success",
-        "started_at": 10,
-        "completed_at": 20
-    });
-    let decoded: StepResult = serde_json::from_value(legacy).expect("decode legacy step");
+    let empty = serde_json::to_value(step("empty", 20, 30)).expect("serialize empty attachment");
+    assert_eq!(empty["summary_markdown"], serde_json::Value::Null);
+    assert_eq!(empty["annotations"], serde_json::json!([]));
+    let decoded: StepResult = serde_json::from_value(empty.clone()).expect("decode current step");
     assert_eq!(decoded.summary_markdown(), None);
     assert!(decoded.annotations().is_empty());
+
+    for required in ["summary_markdown", "annotations"] {
+        let mut incomplete = empty.clone();
+        incomplete
+            .as_object_mut()
+            .expect("step object")
+            .remove(required);
+        assert!(serde_json::from_value::<StepResult>(incomplete).is_err());
+    }
 }
 
 #[test]

@@ -361,7 +361,7 @@ fn fixture_at(
         snapshot_id,
         object(format!("logical/{namespace}/source"), 1),
         object_with_media(
-            format!("logical/{namespace}/plan-v2"),
+            format!("logical/{namespace}/plan-v1"),
             2,
             "application/vnd.automata.workflow-plan+json",
         ),

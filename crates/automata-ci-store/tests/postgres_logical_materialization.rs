@@ -362,7 +362,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .await?;
         assert!(materialized_child);
 
-        let session = open_v5_runner(&database, &fixture.tenant, 70_300).await?;
+        let session = open_current_runner(&database, &fixture.tenant, 70_300).await?;
         let terminal_at = database_now_ms(&database).await?;
         let result = successful_job_result(materialized.attempt_id(), terminal_at);
         let result_bytes = serde_json::to_vec(&result)?;
@@ -920,7 +920,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         .fetch_all(database.pool())
         .await?;
         assert_eq!(routing_shape, vec![(1, 1, 1), (1, 1, 1)]);
-        let runner = open_v5_runner(&database, &fixture.tenant, 10_300).await?;
+        let runner = open_current_runner(&database, &fixture.tenant, 10_300).await?;
         let runnable = database
             .store()
             .scan_runnable(RunnableScanRequest::new(
@@ -1129,7 +1129,7 @@ async fn exact_receipt_replays_after_job_and_run_finalization() -> TestResult {
             .commit_logical_instance_materialization(exact_commit.clone())
             .await?;
 
-        let session = open_v5_runner(&database, &fixture.tenant, 50_300).await?;
+        let session = open_current_runner(&database, &fixture.tenant, 50_300).await?;
         let terminal_at = database_now_ms(&database).await?;
         let result = successful_job_result(materialized.attempt_id(), terminal_at);
         let result_bytes = serde_json::to_vec(&result)?;
@@ -2567,7 +2567,7 @@ fn standard_public_attempt_safety(classified_at: i64) -> DurableAttemptSafety {
     }
 }
 
-async fn open_v5_runner(
+async fn open_current_runner(
     database: &TestDatabase,
     tenant: &str,
     runner_identity: u128,

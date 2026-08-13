@@ -233,7 +233,7 @@ impl WorkflowRunCounts {
     }
 }
 
-/// Closed durable state of a current `WorkflowPlan`-v2 orchestration marker.
+/// Closed durable state of a current `WorkflowPlan`-v1 orchestration marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalWorkflowRunState {
     Pending,
@@ -263,7 +263,7 @@ impl LogicalWorkflowRunState {
     }
 }
 
-/// Counts for every closed `WorkflowPlan`-v2 orchestration-marker state.
+/// Counts for every closed `WorkflowPlan`-v1 orchestration-marker state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogicalWorkflowRunCounts([u64; 5]);
 

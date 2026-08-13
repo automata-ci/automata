@@ -141,12 +141,11 @@ stored outside PostgreSQL; protect their mounted host volume, and encrypt
 PostgreSQL data, WAL, replicas, snapshots, and backups at rest as separate
 controls.
 
-Migration `0013_encrypted_runner_payloads.sql` refuses to run while either
-obsolete pre-release plaintext retry table contains rows. Those databases are
-not supported upgrade sources for v0.1; recreate the current schema or restore
-a reviewed backup that already uses it. The migration never deletes those
-ledgers and must not be bypassed. See the deployment guide for the schema and
-rotation boundary.
+Only a fresh database initialized by the canonical
+`0001_initial_schema.sql` is supported. Never copy, relabel, or reinterpret
+plaintext `runner_command_outbox` or `runner_rpc_receipts` retry rows as
+current encrypted state. Recreate the database or restore a reviewed backup
+produced by the current encrypted schema.
 
 ## Object storage
 

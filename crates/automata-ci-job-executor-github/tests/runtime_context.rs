@@ -113,7 +113,7 @@ async fn exact_runtime_context_is_fetched_once_and_borrowed_by_phase_snapshots()
     fixture
         .executor
         .admit(&job)
-        .expect("valid v5 job is admitted");
+        .expect("valid v1 job is admitted");
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -146,7 +146,7 @@ async fn exact_runtime_context_is_fetched_once_and_borrowed_by_phase_snapshots()
 }
 
 #[tokio::test]
-async fn v5_step_templates_and_runtime_boolean_resolve_from_hydrated_context() {
+async fn v1_step_templates_and_runtime_boolean_resolve_from_hydrated_context() {
     let runtime_context = rich_runtime_context();
     let encoded = encode_runtime_context(&runtime_context);
     let reference = runtime_context_reference(&encoded);

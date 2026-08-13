@@ -23,7 +23,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 #[test]
-fn decoded_v5_commit_binds_exact_blob_identity_and_execution_references() {
+fn decoded_v1_commit_binds_exact_blob_identity_and_execution_references() {
     let fixture = fixture(0, 2, [0x44; 32]);
     let claim = claim(&fixture.descriptor, 10, 100);
     let claimed =

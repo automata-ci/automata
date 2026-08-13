@@ -1463,7 +1463,7 @@ pub enum LogicalJobResultValueError {
     #[error("loaded workflow plan bytes disagree with the durable descriptor")]
     PlanBlobMismatch,
     /// The decoded plan was invalid, non-current, or noncanonical.
-    #[error("decoded workflow plan is invalid or not canonical v2 JSON")]
+    #[error("decoded workflow plan is invalid or not canonical v1 JSON")]
     InvalidPlan,
     /// The decoded plan did not contain the exact claimed step job.
     #[error("decoded workflow plan job disagrees with the durable descriptor")]

@@ -51,7 +51,7 @@ fn migration_closes_reciprocal_quarantine_custody() {
     ] {
         assert!(
             MIGRATION_SQL.contains(required),
-            "0043 lost work-selection quarantine closure: {required}"
+            "initial schema lost work-selection quarantine closure: {required}"
         );
     }
 }
@@ -414,7 +414,7 @@ async fn admit_authenticated_fixture(
             "application/json",
         ),
         admission_object(
-            format!("admission/{namespace}/plan-v2"),
+            format!("admission/{namespace}/plan-v1"),
             2,
             "application/vnd.automata.workflow-plan+json",
         ),

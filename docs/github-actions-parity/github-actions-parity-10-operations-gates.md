@@ -89,9 +89,9 @@ per-job ceiling the trio advertises 12,000 CPU millicores, 48 GiB memory, and
 and 13,824 tasks. Inventory schema 3 admits a host only with slots 1, 2, and 3.
 
 Authenticated Handshake/Sync already negotiates the exact current runner
-protocol v5 and JobIR v5 contract before lease traffic; the supported protocol
-range is currently min=max v5. Dynamic enrollment, update channels, and a live
-version-skew policy remain separate work.
+protocol v1 and JobIR v1 contract before lease traffic; the supported protocol
+range is currently min=max v1. Dynamic enrollment and update channels remain
+separate work; version skew is unsupported.
 
 Tasks:
 
@@ -107,10 +107,10 @@ Tasks:
 - [ ] Preserve static fleet loading as a migration and break-glass path when
   dynamic enrollment becomes available.
 - [ ] Add disable, drain, replace, delete, and audit operations.
-- [x] Negotiate the exact protocol v5 and JobIR v5 range during authenticated
+- [x] Negotiate the exact protocol v1 and JobIR v1 range during authenticated
   Handshake/Sync before accepting lease traffic.
-- [ ] Define enrollment and update minimum/maximum compatibility, then block
-  automatic updates that cross the supported live-skew window.
+- [ ] Keep enrollment and updates pinned to the exact current protocol and
+  block mixed-version automatic replacement.
 - [ ] Reject capability or identity changes that were not authorized by the
   registration operation.
 - [ ] Add CLI/API/UI flows without returning private keys after creation.
@@ -196,11 +196,8 @@ Tasks:
 - [ ] Define network policies, pod security, volumes, disruption budgets,
   anti-affinity, probes, and upgrade ordering.
 - [ ] Produce signed Linux and Windows artifacts with checksums and provenance.
-- [ ] Add update channels, rollback, version-skew policy, and migration gates.
-- [ ] Encode migration `0054` as an explicit drain-required boundary: drain
-  live runner-requirements-v2 attempts and workflow runs, disconnect every
-  runner session, and only then move the cluster from protocol v4 to v5 and
-  runner-requirements schema v3.
+- [ ] Add update channels and define the supported current-version replacement
+  and rollback policy before the first release.
 - [ ] Verify supply-chain inputs and pin build images/actions by digest or SHA.
 - [ ] Add air-gapped installation and trust-root rotation procedures if kept in
   scope.
@@ -210,17 +207,16 @@ Acceptance:
 
 - [ ] A documented install reaches readiness without mutable or unsigned
   runtime downloads.
-- [ ] Live-compatible one-version-skew upgrades preserve jobs and durable state;
-  drain-required boundaries such as protocol v4 to v5 instead prove that no
-  old-schema live work or session crosses the migration.
+- [ ] The documented deployment path installs only the current protocol and
+  schema without hidden version-skew behavior.
 - [ ] Rollback behavior is explicit when database migrations are irreversible.
 
 ### LIM-01 — Limits, quotas, rate limiting, and overload behavior
 
 **Owner:** S with X and C review. **Size:** XL. **Dependencies:** FND-04.
 
-Current new work is pinned to JobIR v5 and runner-requirements schema v3.
-Schema v3 requires a resolved `resource_allocation` derived from an immutable,
+Current new work is pinned to JobIR v1 and runner-requirements schema v1.
+Schema v1 requires a resolved `resource_allocation` derived from an immutable,
 run-pinned default/minimum/maximum policy. The Automata-only workflow extension
 covers CPU, memory, ephemeral storage, and GPU request/limit values; the
 runner/provider contract separately carries a PIDs ceiling. Current cache
@@ -238,7 +234,7 @@ Tasks:
   annotations, summaries, artifacts, cache, API bodies, webhook rate, queue
   depth, runner slots, concurrent jobs, per-job CPU/memory/ephemeral-storage/GPU
   allocation, runner PIDs, and immutable resource-policy bounds.
-- [x] Require runner-requirements schema v3 and a run-pinned resolved resource
+- [x] Require runner-requirements schema v1 and a run-pinned resolved resource
   allocation for every new runnable/materialized job.
 - [ ] Enforce or explicitly diverge from the 35-day workflow-run lifetime, the
   24-hour self-hosted queue timeout, and the five-day self-hosted job maximum.
@@ -454,16 +450,13 @@ Tasks:
   independently.
 - [ ] Inject duplicate, delayed, reordered, truncated, corrupt, and
   uncertain-outcome operations, including sandbox-create failure before and
-  after durable handle custody; prove a returned or exactly reconstructed
-  handle is destroyed before slot release and an unreconstructible legacy
-  intent remains fenced.
+  after durable handle custody; prove exact returned custody is destroyed
+  before slot release and missing custody remains fenced until a bounded runner
+  drain and provider-side reconciliation prove absence or cleanup.
 - [ ] Saturate each configured quota and queue while measuring tenant fairness,
   bounded memory, recovery lag, and retry traffic.
-- [ ] Exercise deployment upgrades, one-version skew, certificate/key rotation,
-  backup/restore, and rollback where the declared migration supports live skew.
-- [ ] Exercise migration `0054` separately as a drain-required protocol-v4 to
-  v5 and runner-requirements-v2 to v3 transition; prove every old-schema live
-  attempt/run is drained and every runner session disconnected before upgrade.
+- [ ] Exercise current-version replacement, certificate/key rotation,
+  backup/restore, and rollback within the declared current schema boundary.
 - [ ] Verify repair tools converge state without bypassing authority or
   idempotency.
 

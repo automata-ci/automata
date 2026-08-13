@@ -5,7 +5,7 @@ use std::{
     fmt,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use super::{MAX_JOB_OUTPUT_DEFINITIONS, StepId, instance::validate_logical_name};
@@ -183,10 +183,17 @@ pub struct StepResult {
     conclusion: JobConclusion,
     started_at: UnixMillis,
     completed_at: UnixMillis,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_option")]
     summary_markdown: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     annotations: Vec<StepAnnotation>,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 impl StepResult {

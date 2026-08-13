@@ -3459,7 +3459,7 @@ async fn lock_exact_authority_graph(
     Ok(true)
 }
 
-#[allow(clippy::too_many_lines)] // One phase-ordered lock boundary for three 0043 tails.
+#[allow(clippy::too_many_lines)] // One phase-ordered lock boundary for three selection tails.
 async fn lock_exact_selection_tails(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &GithubRuntimeAuthorityIdentity,
