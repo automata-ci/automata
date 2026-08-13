@@ -53,6 +53,111 @@ fn shell_seam_has_no_executor_side_effect_or_secret_dependencies() {
 }
 
 #[test]
+fn extracted_executor_seams_only_construct_bounded_requests() {
+    let seams = vec![
+        (
+            "action content",
+            include_str!("../src/action_content.rs"),
+            vec![
+                "ExecutionCommand::new",
+                "CopyToRequest::new",
+                "archive.to_vec()",
+            ],
+        ),
+        (
+            "container runtime",
+            include_str!("../src/container_runtime.rs"),
+            vec![
+                "ServicePort::new",
+                "ServiceContainerSpec::new",
+                "ServiceContainerSpecs::new",
+                "ResourceLimits::new",
+                "SandboxSpec::new",
+                "SandboxLaunch::VirtualMachine",
+            ],
+        ),
+    ];
+
+    for (name, source, required) in seams {
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(production, _)| production);
+        for forbidden in [
+            "ExecutionCancellation",
+            "CancellationBridge",
+            "ExecutionEndpoint",
+            "SandboxProvider",
+            "SecretPort",
+            "SecretMasker",
+            "EnvironmentBuilder",
+            ".exec(",
+            ".copy_to(",
+            ".create(",
+            ".attach(",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "{name} seam must not depend on {forbidden}"
+            );
+        }
+        for required in required {
+            assert!(
+                production.contains(required),
+                "{name} seam must retain bounded constructor {required}"
+            );
+        }
+    }
+}
+
+#[test]
+fn extracted_executor_seams_retain_operation_identity_coordinates() {
+    let executor = include_str!("../src/executor.rs")
+        .split_whitespace()
+        .collect::<String>();
+    for expected in [
+        "letprepare_ordinal=index.checked_add(1).ok_or_else(invalid_job)?;",
+        "OperationPurpose::PrepareDirectory,prepare_ordinal",
+        "OperationPurpose::CopyActionArchive,index",
+        "OperationPurpose::ExtractActionArchive,index",
+        "container_runtime::sandbox_spec(&self.config,request,operation_id,generation",
+    ] {
+        assert!(
+            executor.contains(expected),
+            "executor must retain operation identity input {expected}"
+        );
+    }
+
+    let action_content = include_str!("../src/action_content.rs")
+        .split_whitespace()
+        .collect::<String>();
+    for expected in [
+        "ExecutionCommand::new(operation_id,",
+        "CopyToRequest::new(operation_id,archive_path.clone(),archive.to_vec())",
+    ] {
+        assert!(
+            action_content.contains(expected),
+            "action content plan must consume explicit operation identity {expected}"
+        );
+    }
+    assert_eq!(
+        action_content
+            .matches("ExecutionCommand::new(operation_id,")
+            .count(),
+        2
+    );
+
+    let container_runtime = include_str!("../src/container_runtime.rs")
+        .split_whitespace()
+        .collect::<String>();
+    assert_eq!(
+        container_runtime
+            .matches("SandboxSpec::new(operation_id,")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn artifact_hash_operation_ids_preserve_full_composite_phase_coordinates() {
     const COMPOSITE_PHASE_BASE: u32 = 1 << 24;
 

@@ -21,11 +21,9 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
-    ImmutableImage, NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
-    SandboxLaunch, SandboxProvider, SandboxSpec, SandboxState, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
-    ServicePort, ServiceTransportProtocol, TargetPath, TargetPlatform,
+    NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind, RootFilesystemPolicy,
+    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxLaunch, SandboxProvider,
+    SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
@@ -61,7 +59,7 @@ use crate::{
     OperationPurpose, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
     PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedKeyValue,
     PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretCustodyAcknowledger,
-    SecretPort,
+    SecretPort, action_content, container_runtime,
     environment::{EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue},
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
@@ -508,7 +506,7 @@ impl GithubJobExecutor {
         if workspace.platform() == TargetPlatform::Windows && !job.job().services().is_empty() {
             return Err(AdmissionRejection::InvalidJob);
         }
-        validate_service_admission(job, capabilities)?;
+        container_runtime::validate_service_admission(job, capabilities)?;
         Ok(())
     }
 
@@ -3428,72 +3426,49 @@ impl GithubJobExecutor {
         cancellation: &ExecutionCancellation,
     ) -> Result<ActionPaths, ExecutorAdapterError> {
         let action_paths = paths.action(index, action.subpath())?;
-        let argv = ExecutionArgv::new(
-            required_tool(self.ports.toolchain.install())?,
-            vec![
-                "-d".to_owned(),
-                "-m".to_owned(),
-                DIRECTORY_MODE.to_owned(),
-                "--".to_owned(),
-                action_paths.base.as_str().to_owned(),
-                action_paths.extracted.as_str().to_owned(),
-            ],
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let command = ExecutionCommand::new(
+        let prepare_ordinal = index.checked_add(1).ok_or_else(invalid_job)?;
+        let command = action_content::prepare_directory_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
                 OperationPurpose::PrepareDirectory,
-                index.checked_add(1).ok_or_else(|| {
-                    ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                })?,
+                prepare_ordinal,
             ),
-            argv,
-            paths.workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            required_tool(self.ports.toolchain.install())?,
+            &paths.workspace,
+            &action_paths.base,
+            &action_paths.extracted,
             self.config.default_step_timeout(),
             self.config.maximum_output_bytes(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        )?;
         let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
-        self.copy_bytes(
-            endpoint,
-            attempt_id,
-            OperationPurpose::CopyActionArchive,
-            index,
+        let request = action_content::copy_archive_request(
+            self.ports.operation_ids.operation_id(
+                attempt_id,
+                OperationPurpose::CopyActionArchive,
+                index,
+            ),
             &action_paths.archive,
             action.archive(),
-            cancellation,
         )?;
-        let argv = ExecutionArgv::new(
-            required_tool(self.ports.toolchain.tar())?,
-            vec![
-                "-xzf".to_owned(),
-                action_paths.archive.as_str().to_owned(),
-                "--directory".to_owned(),
-                action_paths.extracted.as_str().to_owned(),
-                "--strip-components=1".to_owned(),
-                "--no-same-owner".to_owned(),
-                "--no-same-permissions".to_owned(),
-            ],
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let command = ExecutionCommand::new(
+        endpoint
+            .copy_to(&request, &CancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        let command = action_content::extract_archive_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
                 OperationPurpose::ExtractActionArchive,
                 index,
             ),
-            argv,
-            paths.workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            required_tool(self.ports.toolchain.tar())?,
+            &paths.workspace,
+            &action_paths.extracted,
+            &action_paths.archive,
             self.config.default_step_timeout(),
             self.config.maximum_output_bytes(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        )?;
         let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error)?;
@@ -4159,28 +4134,22 @@ impl GithubJobExecutor {
                         ExecutorAdapterErrorKind::Unsupported,
                     ));
                 }
-                let image = cancellation_dominant(
-                    ImmutableImage::new(service.image()).map_err(|_| {
-                        ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                    }),
-                    cancellation,
-                )?;
+                let image =
+                    cancellation_dominant(container_runtime::service_image(service), cancellation)?;
                 let environment = cancellation_dominant(
                     builder.container_environment(service.environment(), context, masker),
                     cancellation,
                 )?;
-                let ports = cancellation_dominant(service_ports(service), cancellation)?;
-                let health =
-                    cancellation_dominant(service_health_policy(service.options()), cancellation)?;
-                let spec = cancellation_dominant(
-                    ServiceContainerSpec::new(image, environment)
-                        .with_ports(ports)
-                        .map_err(|_| {
-                            ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                        }),
+                let ports =
+                    cancellation_dominant(container_runtime::service_ports(service), cancellation)?;
+                let health = cancellation_dominant(
+                    container_runtime::service_health_policy(service.options()),
                     cancellation,
-                )?
-                .with_health(health);
+                )?;
+                let spec = cancellation_dominant(
+                    container_runtime::service_spec(image, environment, ports, health),
+                    cancellation,
+                )?;
                 Ok((name.clone(), spec))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
@@ -4274,7 +4243,8 @@ impl GithubJobExecutor {
             let operation_id = events
                 .begin_provider_operation(ProviderOperationKind::CreateSandbox)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let spec = self.sandbox_spec(
+            let spec = container_runtime::sandbox_spec(
+                &self.config,
                 request,
                 operation_id,
                 generation,
@@ -4312,70 +4282,13 @@ impl GithubJobExecutor {
                 .service_bindings(&handle, &cancellation)
                 .map_err(|error| map_provider_error(&error))?
         };
-        validate_service_bindings(service_specs, &services)?;
+        container_runtime::validate_service_bindings(service_specs, &services)?;
         let endpoint = self
             .ports
             .provider
             .attach(&handle, &cancellation)
             .map_err(|error| map_provider_error(&error))?;
         Ok(ObtainedSandbox { endpoint, services })
-    }
-
-    fn sandbox_spec(
-        &self,
-        request: &ExecutionRequest,
-        operation_id: OperationId,
-        generation: SandboxGeneration,
-        workspace: &TargetPath,
-        scratch: &TargetPath,
-        service_specs: &ServiceContainerSpecs,
-    ) -> Result<SandboxSpec, ExecutorAdapterError> {
-        let resources = self.sandbox_resources(request)?;
-        let mut spec = SandboxSpec::new(
-            operation_id,
-            generation,
-            request.environment().clone(),
-            workspace.clone(),
-            self.config.network(),
-            self.config.root_filesystem(),
-            resources,
-        )
-        .with_privilege(self.config.privilege())
-        .with_services(service_specs.clone())
-        .with_resource_allocation(
-            request
-                .job()
-                .job()
-                .requirements()
-                .resource_allocation()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
-        );
-        if matches!(
-            request.environment().launch(),
-            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. }
-        ) {
-            spec = spec.with_scratch(scratch.clone());
-        }
-        Ok(spec)
-    }
-
-    fn sandbox_resources(
-        &self,
-        request: &ExecutionRequest,
-    ) -> Result<ResourceLimits, ExecutorAdapterError> {
-        let allocation = request
-            .job()
-            .job()
-            .requirements()
-            .resource_allocation()
-            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let limits = allocation.limits();
-        ResourceLimits::new(
-            limits.memory_bytes(),
-            limits.cpu_millis(),
-            self.config.resources().pids(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
 
     fn prepare_attempt_directories(
@@ -6571,220 +6484,6 @@ fn validate_resource_admission(
         return Err(AdmissionRejection::CapabilityChanged);
     }
     Ok(())
-}
-
-fn validate_service_admission(
-    job: &JobIrEnvelope,
-    capabilities: &automata_ci_execution::ProviderCapabilities,
-) -> Result<(), AdmissionRejection> {
-    if job.job().services().is_empty() {
-        return Ok(());
-    }
-    if !capabilities.supports(SandboxCapability::ServiceContainers) {
-        return Err(AdmissionRejection::CapabilityChanged);
-    }
-    let declarations = job
-        .job()
-        .services()
-        .iter()
-        .map(|(name, service)| {
-            if service.credentials().is_some() || !service.volumes().is_empty() {
-                return Err(());
-            }
-            let image = ImmutableImage::new(service.image()).map_err(|_| ())?;
-            let ports = service_ports(service).map_err(|_| ())?;
-            let health = service_health_policy(service.options()).map_err(|_| ())?;
-            let spec = ServiceContainerSpec::new(
-                image,
-                automata_ci_execution::ExecutionEnvironment::empty(),
-            )
-            .with_ports(ports)
-            .map_err(|_| ())?
-            .with_health(health);
-            Ok((name.clone(), spec))
-        })
-        .collect::<Result<std::collections::BTreeMap<_, _>, ()>>();
-    if declarations
-        .ok()
-        .and_then(|values| ServiceContainerSpecs::new(values).ok())
-        .is_none()
-    {
-        return Err(AdmissionRejection::InvalidJob);
-    }
-    Ok(())
-}
-
-fn service_ports(
-    service: &automata_ci_core::ContainerSpec,
-) -> Result<Vec<ServicePort>, ExecutorAdapterError> {
-    service
-        .ports()
-        .iter()
-        .map(|port| {
-            let protocol = match port.protocol() {
-                automata_ci_core::TransportProtocol::Tcp => ServiceTransportProtocol::Tcp,
-                automata_ci_core::TransportProtocol::Udp => ServiceTransportProtocol::Udp,
-            };
-            ServicePort::new(port.container_port(), port.requested_host_port(), protocol)
-                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
-        })
-        .collect()
-}
-
-fn service_health_policy(options: &[String]) -> Result<ServiceHealthPolicy, ExecutorAdapterError> {
-    if options.is_empty() {
-        return Ok(ServiceHealthPolicy::Image);
-    }
-    let mut command = None;
-    let mut interval = None;
-    let mut timeout = None;
-    let mut start_period = None;
-    let mut retries = None;
-    let mut disabled = false;
-    let mut seen = std::collections::BTreeSet::new();
-    let mut index = 0;
-    while index < options.len() {
-        let token = &options[index];
-        if token == "--no-healthcheck" {
-            if !seen.insert("disabled") {
-                return Err(invalid_service());
-            }
-            disabled = true;
-            index += 1;
-            continue;
-        }
-        let (name, inline) = token
-            .split_once('=')
-            .map_or((token.as_str(), None), |(name, value)| (name, Some(value)));
-        let field = match name {
-            "--health-cmd" => "command",
-            "--health-interval" => "interval",
-            "--health-timeout" => "timeout",
-            "--health-start-period" => "start_period",
-            "--health-retries" => "retries",
-            _ => return Err(invalid_service()),
-        };
-        if !seen.insert(field) {
-            return Err(invalid_service());
-        }
-        let value = if let Some(value) = inline {
-            value
-        } else {
-            index += 1;
-            options
-                .get(index)
-                .map(String::as_str)
-                .ok_or_else(invalid_service)?
-        };
-        if value.is_empty() {
-            return Err(invalid_service());
-        }
-        match field {
-            "command" => command = Some(value.to_owned()),
-            "interval" => interval = Some(parse_container_duration(value)?),
-            "timeout" => timeout = Some(parse_container_duration(value)?),
-            "start_period" => start_period = Some(parse_container_duration(value)?),
-            "retries" => {
-                retries = Some(value.parse::<u32>().map_err(|_| invalid_service())?);
-            }
-            _ => return Err(invalid_service()),
-        }
-        index += 1;
-    }
-    if disabled || command.as_deref() == Some("none") {
-        if seen.len() != 1 {
-            return Err(invalid_service());
-        }
-        return Ok(ServiceHealthPolicy::Disabled);
-    }
-    ServiceHealthOverrides::new(command, interval, timeout, start_period, retries)
-        .map(ServiceHealthPolicy::Override)
-        .map_err(|_| invalid_service())
-}
-
-fn parse_container_duration(value: &str) -> Result<Duration, ExecutorAdapterError> {
-    if value.is_empty() || !value.is_ascii() {
-        return Err(invalid_service());
-    }
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    let mut total = Duration::ZERO;
-    while index < bytes.len() {
-        let number_start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        if number_start == index {
-            return Err(invalid_service());
-        }
-        let number = value[number_start..index]
-            .parse::<u64>()
-            .map_err(|_| invalid_service())?;
-        let remaining = &value[index..];
-        let (unit, duration) = if remaining.starts_with("ms") {
-            (2, Duration::from_millis(number))
-        } else if remaining.starts_with("us") {
-            (2, Duration::from_micros(number))
-        } else if remaining.starts_with("ns") {
-            (2, Duration::from_nanos(number))
-        } else if remaining.starts_with('h') {
-            (
-                1,
-                Duration::from_secs(number.checked_mul(3_600).ok_or_else(invalid_service)?),
-            )
-        } else if remaining.starts_with('m') {
-            (
-                1,
-                Duration::from_secs(number.checked_mul(60).ok_or_else(invalid_service)?),
-            )
-        } else if remaining.starts_with('s') {
-            (1, Duration::from_secs(number))
-        } else {
-            return Err(invalid_service());
-        };
-        index += unit;
-        total = total.checked_add(duration).ok_or_else(invalid_service)?;
-    }
-    if total.is_zero() {
-        return Err(invalid_service());
-    }
-    Ok(total)
-}
-
-fn validate_service_bindings(
-    specs: &ServiceContainerSpecs,
-    bindings: &ServiceContainerBindings,
-) -> Result<(), ExecutorAdapterError> {
-    if specs.len() != bindings.len() {
-        return Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Internal,
-        ));
-    }
-    for (name, spec) in specs.iter() {
-        let binding = bindings
-            .get(name)
-            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let expected = spec
-            .ports()
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        let actual = binding
-            .ports()
-            .iter()
-            .map(|port| port.service_port())
-            .collect::<std::collections::BTreeSet<_>>();
-        if expected != actual {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        }
-    }
-    Ok(())
-}
-
-const fn invalid_service() -> ExecutorAdapterError {
-    ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
 }
 
 fn tool_path(path: &TargetPath, platform: TargetPlatform) -> bool {
