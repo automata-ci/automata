@@ -18,7 +18,7 @@ use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
-use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_response, validate_token};
+use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_token};
 use crate::product::{RunnerProductConfig, SecretSource};
 
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
@@ -163,41 +163,8 @@ impl CredentialDestinations {
     }
 
     pub(super) fn complete(&self) -> Result<()> {
-        remove_durable(&self.request_stage)?;
-        remove_durable(&self.response_stage)
-    }
-
-    pub(super) fn finish_interrupted_cleanup(
-        &self,
-        config: &RunnerProductConfig,
-        validation_time_seconds: i64,
-    ) -> Result<bool> {
-        if read_bounded_file(&self.request_stage, MAX_STAGE_BYTES, true)?.is_some() {
-            return Ok(false);
-        }
-        let Some(response) = self.load_response()? else {
-            return Ok(false);
-        };
-        let enrolled: RedeemResponse = serde_json::from_slice(&response)
-            .context("runner enrollment completion receipt is invalid")?;
-        validate_response(config, &enrolled, validation_time_seconds)?;
-        existing_file_matches(&self.server_roots, enrolled.server_ca_pem.as_bytes(), false)?;
-        existing_file_matches(
-            &self.certificate_chain,
-            enrolled.certificate_chain_pem.as_bytes(),
-            false,
-        )?;
-        let private_key = read_bounded_file(&self.private_key, MAX_STAGE_BYTES, true)?
-            .context("runner enrollment completion is missing its private key")?;
-        validate_certificate_response(
-            config.runner_id().as_uuid(),
-            &enrolled,
-            std::str::from_utf8(&private_key)
-                .context("runner enrollment completion has an invalid private key")?,
-            validation_time_seconds,
-        )?;
         remove_durable(&self.response_stage)?;
-        Ok(true)
+        remove_durable(&self.request_stage)
     }
 }
 
@@ -864,8 +831,8 @@ mod tests {
 
     use super::{
         CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, acquire_enrollment_lock,
-        persist_exact_file, persist_new, prepare_destination, same_destination, temporary_path,
-        validate_certificate_response, validate_destination_set,
+        persist_exact_file, persist_new, prepare_destination, remove_durable, same_destination,
+        temporary_path, validate_certificate_response, validate_destination_set,
     };
     use crate::enrollment::RedeemResponse;
     #[cfg(target_os = "linux")]
@@ -933,73 +900,26 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn persisted_completion_response_is_rejected_at_expiry_and_recovers_before_it() {
+    fn completion_keeps_replay_authority_until_the_response_receipt_is_gone() {
         let root = std::env::current_dir()
             .expect("current directory")
-            .join(format!(".automata-enroll-expiry-test-{}", Uuid::new_v4()));
+            .join(format!(".automata-enroll-completion-test-{}", Uuid::new_v4()));
         fs::create_dir(&root).expect("test root");
-        let runner_id = Uuid::new_v4();
-        let config = product_config(&root, runner_id);
+        let config = product_config(&root, Uuid::new_v4());
         let destinations =
             CredentialDestinations::from_config(&config).expect("credential destinations");
+        fs::write(&destinations.request_stage, b"request authority").expect("request stage");
+        fs::write(&destinations.response_stage, b"response receipt").expect("response stage");
 
-        let not_before = 1_800_000_000;
-        let expires_at = 1_900_000_000;
-        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
-        let mut ca_params = CertificateParams::default();
-        ca_params.not_before =
-            time::OffsetDateTime::from_unix_timestamp(not_before).expect("CA not-before");
-        ca_params.not_after =
-            time::OffsetDateTime::from_unix_timestamp(expires_at + 60).expect("CA not-after");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("CA");
-
-        let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
-        let mut leaf_params = CertificateParams::default();
-        leaf_params
-            .distinguished_name
-            .push(DnType::CommonName, runner_id.hyphenated().to_string());
-        leaf_params.not_before =
-            time::OffsetDateTime::from_unix_timestamp(not_before).expect("leaf not-before");
-        leaf_params.not_after =
-            time::OffsetDateTime::from_unix_timestamp(expires_at).expect("leaf not-after");
-        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        let leaf = leaf_params
-            .signed_by(&runner_key, &issuer)
-            .expect("runner leaf");
-        let runner_private_key_pem = zeroize::Zeroizing::new(runner_key.serialize_pem());
-        let response = RedeemResponse {
-            runner_id,
-            runner_group: "default".to_owned(),
-            control_endpoint: config.control_endpoint().to_string(),
-            certificate_chain_pem: format!("{}{}", leaf.pem(), issuer.pem()),
-            server_ca_pem: issuer.pem(),
-            certificate_expires_at_seconds: expires_at,
-        };
-        destinations
-            .persist_response(&serde_json::to_vec(&response).expect("response JSON"))
-            .expect("persist response");
-        destinations
-            .persist_exact(
-                response.server_ca_pem.as_bytes(),
-                response.certificate_chain_pem.as_bytes(),
-                runner_private_key_pem.as_bytes(),
-            )
-            .expect("persist credentials");
-
-        destinations
-            .finish_interrupted_cleanup(&config, expires_at)
-            .expect_err("expired completion response must remain fail-closed");
-        assert!(destinations.response_stage.exists());
+        remove_durable(&destinations.response_stage).expect("remove response first");
         assert!(
-            destinations
-                .finish_interrupted_cleanup(&config, expires_at - 1)
-                .expect("fresh completion recovery")
+            destinations.request_stage.exists(),
+            "a crash after response cleanup must retain database replay authority"
         );
+        destinations.complete().expect("finish completion cleanup");
         assert!(!destinations.response_stage.exists());
-        fs::remove_dir_all(&root).expect("remove expiry test root");
+        assert!(!destinations.request_stage.exists());
+        fs::remove_dir_all(&root).expect("remove completion test root");
     }
 
     #[test]

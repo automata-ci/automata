@@ -39,11 +39,6 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         .context("runner enrollment could not load the product configuration")?;
     let destinations = CredentialDestinations::from_config(&config)?;
     let origin = enrollment_origin(&args.server)?;
-    let cleanup_validation_time_seconds = current_unix_time_seconds()?;
-    if destinations.finish_interrupted_cleanup(&config, cleanup_validation_time_seconds)? {
-        println!("runner enrollment was already completed");
-        return Ok(());
-    }
     let stage = match destinations.load_stage(&config, &origin, &args.name)? {
         Some(stage) => stage,
         None => destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?,

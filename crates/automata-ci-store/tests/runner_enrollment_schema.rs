@@ -17,5 +17,7 @@ fn enrollment_authority_and_consumption_are_tenant_scoped() {
 #[test]
 fn exact_replay_receipt_carries_its_certificate_expiry() {
     assert!(MIGRATION.contains("redeem_certificate_expires_at_seconds bigint"));
-    assert!(MIGRATION.contains("redeem_certificate_expires_at_seconds > (consumed_at_ms / 1000)"));
+    assert!(MIGRATION.contains(
+        "(redeem_certificate_expires_at_seconds - (consumed_at_ms / 1000)) >= 300"
+    ));
 }

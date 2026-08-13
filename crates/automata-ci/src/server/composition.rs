@@ -1469,6 +1469,7 @@ async fn build_human_api(
         let client_ca = config.load_client_ca_pem()?;
         let client_ca_key = config.load_client_ca_private_key_pem()?;
         let server_ca = config.load_runner_server_ca_pem()?;
+        let server_certificate = config.load_server_certificate_pem()?;
         let authority = config
             .runner_public_authority
             .as_ref()
@@ -1478,6 +1479,7 @@ async fn build_human_api(
                 &client_ca,
                 &client_ca_key,
                 &server_ca,
+                &server_certificate,
                 format!("https://{authority}/"),
             )
             .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,

@@ -26,6 +26,11 @@ const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
 /// shorter when its issuing CA expires first.
 pub const MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+/// Minimum certificate lifetime remaining when enrollment commits. This
+/// covers the bounded HTTP exchange and durable credential publication so a
+/// one-use token cannot be consumed for a certificate that expires in transit.
+pub const MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS: i64 = 5 * 60;
+
 /// Authorized request to create a short-lived runner enrollment token record.
 pub struct CreateRunnerEnrollmentToken {
     /// Current human actor evidence, reauthorized transactionally.
@@ -225,7 +230,11 @@ impl EnrollmentRow {
                 && request.len() == 32
                 && !response.is_empty()
                 && response.len() <= MAX_REDEEM_RESPONSE_BYTES
-                && certificate_expires_at_seconds > consumed_at_ms.div_euclid(1_000) =>
+                && certificate_expires_at_seconds
+                    .checked_sub(consumed_at_ms.div_euclid(1_000))
+                    .is_some_and(|remaining| {
+                        remaining >= MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
+                    }) =>
             {
                 Ok(())
             }
@@ -416,7 +425,12 @@ impl PostgresHumanRbacManagementRepository {
         let now_seconds = now_ms.div_euclid(1_000);
         if request.certificate_issued_at_seconds < row.issued_at_ms.div_euclid(1_000)
             || request.certificate_issued_at_seconds > now_seconds
-            || request.certificate_expires_at_seconds <= now_seconds
+            || request
+                .certificate_expires_at_seconds
+                .checked_sub(now_seconds)
+                .is_none_or(|remaining| {
+                    remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
+                })
             || request
                 .certificate_expires_at_seconds
                 .checked_sub(request.certificate_issued_at_seconds)
