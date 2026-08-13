@@ -27,6 +27,16 @@ create failure returns a recovery handle. Deterministic legacy Podman identities
 can be reconstructed; unreconstructible legacy provider intents remain fenced
 rather than being guessed or enumerated.
 
+The companion
+[`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
+repository now has a dedicated
+[cross-repository integration-test workstream](github-actions-parity/github-actions-parity-11-integration-tests.md).
+At its audited `af7e2ca` revision it provides a manual real-product isolated
+harness, but all seven scenarios remain candidates, live GitHub differential
+execution is absent, and ordinary suite CI does not launch Automata. The IT
+packages turn that harness into retained acceptance evidence without moving
+product behavior out of the existing feature packages or gates.
+
 ## How to use this plan
 
 Each work package is intended to become an issue or epic owned by one
@@ -68,7 +78,7 @@ creates conflicts in the compiler, scheduler, executor, and store contracts.
 | R — Runner/executor | Developer 3 | GitHub executor state machine, actions, shells, commands, cancellation, runtime contexts |
 | P — Providers/platforms | Developer 4 | Podman, Windows, containers, services, images, later macOS and architectures |
 | C — Control/security | Developer 5 | events, permissions, credentials, variables, environments, OIDC, security policy |
-| X — Results/conformance | Developer 6 | Results, artifacts, cache, Checks, UI integration, conformance and product gates |
+| X — Results/conformance | Developer 6 | Results, artifacts, cache, Checks, UI integration, the external integration harness, conformance, and product gates |
 
 ### Five developers
 
@@ -117,6 +127,10 @@ These files and contracts are merge hotspots. Assign one owner at a time.
   unchanged workflow gate.
 - root `Cargo.toml`, `Cargo.lock`, compatibility docs, and shared CI workflow:
   the wave's integration owner.
+- cross-repository fixture schemas, adapters, comparator policy, graduation
+  ledger, and protected live-test workflows in `automata-integration-tests`:
+  lane X; feature lanes contribute expected behavior through companion pull
+  requests instead of editing the harness concurrently.
 
 Additional coordination rules:
 
@@ -273,6 +287,20 @@ Exit criteria:
 - [ ] `GATE-04` broader-event gate.
 - [ ] `GATE-05` chaos and multi-replica gate.
 
+### Integration-test companion waves
+
+These run beside the product waves. They do not replace package-local tests or
+permit a product feature to advertise support early.
+
+| Product wave | External integration-test work |
+| --- | --- |
+| 0 | `IT-01` release-bundle intake and `IT-02` admission/graduation contracts |
+| 1 | Exercise admission over the locked corpus; build the `IT-03` mirror, authority, target, and report skeleton |
+| 2 | Complete canonical Automata observation, finish the `IT-07` Linux adapter, and prepare isolated `IT-04` Chalk evidence |
+| 3 | Finish live `IT-03`; graduate `IT-04`; begin `IT-05`; start other adapter contracts |
+| 4 | Complete `IT-05`/`IT-06`, feed `GATE-01`/`GATE-06`, and run ready `IT-09` Windows/`IT-10` Kubernetes adapters |
+| 5 | Run `IT-08` continuously; add `IT-11` macOS and `IT-12` fault topology when product prerequisites land; supply evidence to `GATE-02` through `GATE-05` |
+
 ### Reduced-team serialization
 
 The dependency graph does not change with fewer developers. Combined owners
@@ -309,6 +337,11 @@ Every package must satisfy the applicable items:
 - [ ] no secrets or raw provider payloads in durable errors or debug output;
 - [ ] exact pinned upstream action, client, image, or runner version;
 - [ ] no ordinary test that downloads mutable network content;
+- [ ] a companion `automata-integration-tests` scenario and immutable evidence
+  handoff when the package requires product, provider, differential, platform,
+  or fault acceptance;
+- [ ] explicit evidence classification so emulator, isolated, live-provider,
+  differential, and fault results cannot substitute for one another;
 - [ ] package tests and strict Clippy for affected targets;
 - [ ] documentation links and structure verification;
 - [ ] capability advertisement only after product acceptance.
@@ -331,10 +364,12 @@ stable across files so issues and pull requests can link to them.
 | 8 | [Results, Checks, artifacts, cache, and product UI](github-actions-parity/github-actions-parity-08-results.md) | RES-01, RES-02, CHECK-01, ART-01, ART-02, ART-03, CACHE-01, CACHE-02, UI-01 |
 | 9 | [Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity/github-actions-parity-09-platforms.md) | WIN-01, WIN-02, WIN-03, PLAT-01, PLAT-02, PLAT-03, PLAT-04, CACHE-03 |
 | 10 | [Operations, limits, runner fleet, and acceptance gates](github-actions-parity/github-actions-parity-10-operations-gates.md) | OPS-01, FLT-01, FLT-02, FLT-03, FLT-04, LIM-01, GATE-01, GATE-02, GATE-03, GATE-04, GATE-05, GATE-06 |
+| 11 | [Cross-repository integration tests](github-actions-parity/github-actions-parity-11-integration-tests.md) | IT-01, IT-02, IT-03, IT-04, IT-05, IT-06, IT-07, IT-08, IT-09, IT-10, IT-11, IT-12 |
 
 Recommended reading order is this hub, foundations, the assigned lane
-document, and then the operations and gates document. Implementation order is
-still determined by the package dependency graph.
+document, the integration-test workstream for companion evidence, and then the
+operations and gates document. Implementation order is still determined by the
+package dependency graph.
 
 ## Package lookup
 
@@ -347,3 +382,4 @@ The explicit product decisions, pull-request protocol, handoff checklist, and
 initial issue-creation checklist live with the acceptance gates:
 
 - [Operations, limits, runner fleet, and acceptance gates](github-actions-parity/github-actions-parity-10-operations-gates.md)
+- [Cross-repository integration tests](github-actions-parity/github-actions-parity-11-integration-tests.md)

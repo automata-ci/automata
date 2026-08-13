@@ -32,6 +32,17 @@ an uncertain outcome and the provider returns a recovery handle. Legacy Podman
 intents reconstruct the deterministic handle from operation ID and lease
 generation, while unreconstructible legacy intents remain fenced.
 
+The companion
+[`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
+repository was audited at `af7e2ca`. It contains a manual real-Automata E2E
+harness with immutable source/action locks, a strict loopback GitHub emulator,
+real control-plane and runner processes, canonical evidence types, and a
+fail-closed comparator. Its current CI runs contract tests and fixture audit,
+not the real E2E; all seven scenarios remain `candidate`; and no live
+GitHub-versus-Automata differential path exists. The detailed parallel work is
+tracked in the
+[cross-repository integration-test plan](github-actions-parity/github-actions-parity-11-integration-tests.md).
+
 One immediate documentation correction is required: `concurrency.queue: max`
 is now documented by GitHub, including a 100-entry queue and FIFO behavior. It
 must no longer be described as an Automata-only extension. See
@@ -116,6 +127,19 @@ must no longer be described as an Automata-only extension. See
   - [ ] reruns;
   - [ ] cleanup.
 - [ ] Run that differential gate before claiming workflow parity.
+- [ ] Verify one coherent cross-repository release bundle before starting an
+  E2E deployment; bind the Automata commit, binary hashes, profile manifest and
+  image, helpers, schema versions, and topology.
+- [ ] Enforce scenario capability requirements, side effects, runner count,
+  graduation state, and quarantine expiry instead of treating them as catalog
+  annotations.
+- [ ] Add concrete live GitHub and complete Automata evidence adapters, a
+  protected event driver, and an atomic retained differential report.
+- [ ] Graduate Chalk push/PR first, then p-limit push/PR, Testify push/PR, and
+  the controlled Testify tag/release lane; keep each scenario independent.
+- [ ] Add required secret-free isolated smoke, scheduled protected live corpus,
+  flake evidence, quarantine enforcement, fixture refresh review, and phase
+  budgets.
 
 ## 2. P0: current parse-or-compile false positives
 

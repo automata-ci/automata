@@ -80,11 +80,30 @@ inputs, artifact bytes, and per-step outputs. The loopback provider emulator is
 protocol evidence only; it cannot prove GitHub.com networking, App
 installation, or live credential behavior.
 
+The companion
+[`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
+repository was audited at `af7e2ca`. It already supplies immutable fixture
+schema v3 locks, complete top-level workflow byte auditing, digest-addressed
+source/action packs, a strict loopback provider emulator, real local Automata
+process composition, a schema-v1 canonical evidence model, and a fail-closed
+comparator. That harness is manual, its default lane is provider-emulated, its
+CI does not launch Automata, and all seven scenarios remain candidates. The
+[integration-test workstream](github-actions-parity-11-integration-tests.md)
+owns the cross-repository harness and graduation work; this package continues
+to own the product export and composition contracts it consumes.
+
 Tasks:
 
-- [ ] Build one reusable fixture composing signed webhook ingress, immutable
-  source storage, workflow admission, PostgreSQL scheduling, Results, Checks,
-  and an optional real runner process.
+- [x] Establish an external immutable fixture catalog with exact source,
+  workflow, and action locks and reject unreviewed workflow inventory drift.
+- [x] Establish a fail-closed loopback GitHub protocol emulator and keep its
+  evidence distinct from live GitHub proof.
+- [x] Establish canonical evidence types and a strict structural comparator;
+  the evidence schema and comparator reject incomplete records, while concrete
+  target adapters remain incomplete.
+- [x] Establish a manual reusable fixture composing signed webhook ingress,
+  immutable source storage, workflow admission, PostgreSQL scheduling,
+  Results, Checks, and real control-plane and runner processes.
 - [ ] Add deterministic fake-clock control.
 - [ ] Inject exact raw webhook bodies and signatures.
 - [ ] Stub paginated GitHub APIs, rate limits, indeterminate mutations, and
@@ -107,6 +126,9 @@ Tasks:
 - [ ] Keep emulator, hermetic GitHub stub, and live-provider evidence as
   distinct catalog classes so one cannot satisfy another's acceptance gate.
 - [ ] Shard without shared rows, ports, credentials, or object prefixes.
+- [ ] Publish the evidence and scenario-admission contracts consumed by
+  `IT-02`/`IT-03`, and provide exact source/build/profile metadata to the
+  `IT-01` release-bundle contract.
 
 Acceptance:
 
