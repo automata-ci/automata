@@ -1332,3 +1332,16 @@ fn configuration_and_proof_parsers_reject_wrong_provider_unsafe_keys_and_cross_k
         Err(GithubLoginConfigurationError::WrongAuthenticationProvider)
     ));
 }
+
+#[test]
+fn browser_and_device_proofs_reject_forward_versions_with_valid_remaining_fields() {
+    let suffix = format!(
+        "login-v1~aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa~{}",
+        "A".repeat(43)
+    );
+    assert!(GithubBrowserBindingCookie::from_raw(&format!("bw1~{suffix}")).is_ok());
+    assert!(GithubDevicePollCredential::from_raw(&format!("dp1~{suffix}")).is_ok());
+
+    assert!(GithubBrowserBindingCookie::from_raw(&format!("bw2~{suffix}")).is_err());
+    assert!(GithubDevicePollCredential::from_raw(&format!("dp2~{suffix}")).is_err());
+}

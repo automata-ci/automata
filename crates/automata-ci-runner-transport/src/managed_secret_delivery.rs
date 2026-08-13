@@ -849,4 +849,27 @@ mod tests {
             Ok(ManagedSecretDeliveryResponse::Acknowledged)
         ));
     }
+
+    #[test]
+    fn request_and_response_reject_forward_wire_version() {
+        let bindings = bindings();
+        let request = ManagedSecretDeliveryRequest::new(
+            ManagedSecretDeliveryOperation::Fetch,
+            "managed-secret-delivery-v1",
+            vec![12; 32],
+            coordinates(&bindings),
+            bindings,
+        )
+        .expect("valid request");
+        let mut request_bytes = request.encode().expect("request encoding");
+        let forward_version = WIRE_VERSION.checked_add(1).expect("test version");
+        request_bytes[REQUEST_MAGIC.len()] = forward_version;
+        assert!(ManagedSecretDeliveryRequest::decode(&request_bytes).is_err());
+
+        let mut response_bytes = ManagedSecretDeliveryResponse::Acknowledged
+            .encode()
+            .expect("response encoding");
+        response_bytes[RESPONSE_MAGIC.len()] = forward_version;
+        assert!(ManagedSecretDeliveryResponse::decode(&response_bytes).is_err());
+    }
 }
