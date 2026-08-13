@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package automata.management.v1;
+
+import "google/api/annotations.proto";
+import "google/api/field_behavior.proto";
+import "google/protobuf/timestamp.proto";
+
+// Administers one Automata Core shard on behalf of an authorized external
+// control plane. This service is not exposed to browsers, runners, or human
+// sessions.
+service ShardManagementService {
+  // Atomically creates one workspace and its initial external owner mapping.
+  // Replaying the same operation and semantic request returns the original
+  // stable response without repeating effects.
+  rpc ProvisionWorkspace(ProvisionWorkspaceRequest) returns (ProvisionWorkspaceResponse) {
+    option idempotency_level = IDEMPOTENT;
+    option (google.api.http) = {
+      post: "/internal/v1/workspaces"
+      body: "*"
+    };
+  }
+}
+
+// Identifies the workspace that Core must create.
+message WorkspaceProvisioningTarget {
+  // Cloud-generated, non-nil canonical lower-case UUID. Core persists this
+  // exact value as the tenant identity.
+  string workspace_id = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Non-authoritative, trimmed display label.
+  string display_name = 2 [(google.api.field_behavior) = REQUIRED];
+}
+
+// Identifies the external human who receives the initial owner membership.
+message InitialWorkspaceOwner {
+  // Exact configured HTTPS issuer origin for delegated actor assertions.
+  string issuer = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Stable external account subject as a non-nil canonical lower-case UUID.
+  string subject = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Non-authoritative, trimmed display label.
+  string display_name = 3 [(google.api.field_behavior) = REQUIRED];
+}
+
+// Durable, idempotent request to provision one workspace.
+message ProvisionWorkspaceRequest {
+  // Stable non-nil canonical lower-case UUID generated before the first
+  // network attempt and reused across every retry.
+  string operation_id = 1 [(google.api.field_behavior) = REQUIRED];
+
+  // Expected immutable shard identity, already verified through capability
+  // discovery.
+  string shard_id = 2 [(google.api.field_behavior) = REQUIRED];
+
+  // Workspace identity and initial label.
+  WorkspaceProvisioningTarget workspace = 3 [(google.api.field_behavior) = REQUIRED];
+
+  // External identity that receives Core's fixed initial-owner role.
+  InitialWorkspaceOwner initial_owner = 4 [(google.api.field_behavior) = REQUIRED];
+}
+
+// Stable result stored by Core in the provisioning transaction.
+message ProvisionWorkspaceResponse {
+  // Operation identity from the request.
+  string operation_id = 1;
+
+  // Immutable identity of the shard that committed the operation.
+  string shard_id = 2;
+
+  // Workspace identity from the request and resulting Core tenant.
+  string workspace_id = 3;
+
+  // Core-owned, shard-local principal created or reused for the initial owner.
+  string initial_owner_principal_id = 4;
+
+  // Database commit time. This value remains stable on replay.
+  google.protobuf.Timestamp provisioned_at = 5;
+}
+
+// Stable machine-readable reason attached to a failed provisioning RPC.
+enum ProvisionWorkspaceFailureReason {
+  PROVISION_WORKSPACE_FAILURE_REASON_UNSPECIFIED = 0;
+  PROVISION_WORKSPACE_FAILURE_REASON_INVALID_REQUEST = 1;
+  PROVISION_WORKSPACE_FAILURE_REASON_UNAUTHENTICATED = 2;
+  PROVISION_WORKSPACE_FAILURE_REASON_FORBIDDEN = 3;
+  PROVISION_WORKSPACE_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  PROVISION_WORKSPACE_FAILURE_REASON_WORKSPACE_CONFLICT = 5;
+  PROVISION_WORKSPACE_FAILURE_REASON_PRINCIPAL_UNAVAILABLE = 6;
+  PROVISION_WORKSPACE_FAILURE_REASON_RATE_LIMITED = 7;
+  PROVISION_WORKSPACE_FAILURE_REASON_INTERNAL_ERROR = 8;
+  PROVISION_WORKSPACE_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
+}
+
+// Typed detail carried in google.rpc.Status.details when the failure occurs
+// after Core can safely construct contract-specific details. Authentication
+// and transport failures may contain only the ordinary gRPC status.
+message ProvisionWorkspaceFailure {
+  ProvisionWorkspaceFailureReason reason = 1;
+
+  // Opaque request correlation identifier safe to expose to the caller.
+  string request_id = 2;
+}
