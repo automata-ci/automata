@@ -74,7 +74,6 @@ const MAX_REPOSITORY_NAME_BYTES: usize = 100;
 const MAX_REPOSITORY_CURSOR_BYTES: usize =
     REPOSITORY_CURSOR_FIXED_BYTES + MAX_REPOSITORY_OWNER_BYTES + MAX_REPOSITORY_NAME_BYTES;
 const BINDING_BYTES: usize = 16;
-// foundation-governance: derived-contract owner=integration kind=digest-domain
 const BLOCK_LIST_DIGEST_DOMAIN: &[u8] = b"automata-results-block-list-v1\0";
 const REPOSITORY_SETTINGS_READ_PERMISSION: &str = "repositories:read";
 const REPOSITORY_SETTINGS_UPDATE_PERMISSION: &str = "repositories:visibility:update";
@@ -1313,7 +1312,7 @@ fn publication_target(
     )
 }
 
-pub(crate) fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
+fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
     automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
         stream.publication.safety_schema,
     )) && stream.raw_log_disposition == HumanRawLogDisposition::Persist

@@ -23,13 +23,9 @@ use crate::{
     WorkflowRuntimePolicyPin,
 };
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const CALL_INSTANCE_ID_DOMAIN: &[u8] = b"automata.store.reusable-call-instance.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const OUTPUT_MAPPING_DIGEST_DOMAIN: &[u8] = b"automata.store.reusable-output-mappings.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const PUBLICATION_DIGEST_DOMAIN: &[u8] = b"automata.store.reusable-publication.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const EVALUATED_OUTPUTS_DIGEST_DOMAIN: &[u8] = b"automata.store.reusable-evaluated-outputs.v1\0";
 
 /// Maximum caller-visible or callee-declared outputs at one call boundary.

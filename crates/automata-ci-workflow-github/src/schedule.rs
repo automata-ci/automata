@@ -10,13 +10,10 @@ use thiserror::Error;
 use crate::{GithubWorkflowSourcePlan, TriggerConfiguration, YamlMappingEntry, YamlNode};
 
 /// Maximum schedule entries accepted from one workflow.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_SCHEDULE_ENTRIES: usize = 64;
 /// Maximum decoded bytes in one exact five-field cron expression.
-// foundation-governance: limit-alias
 pub const MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES: usize = MAX_CRON_EXPRESSION_BYTES;
 /// Maximum bytes in one IANA timezone identifier.
-// foundation-governance: limit-alias
 pub const MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES: usize = MAX_IANA_TIMEZONE_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

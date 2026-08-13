@@ -6,7 +6,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::JobValidationError;
 
-// foundation-governance: parity-limit
 const MAX_SEMANTIC_ID_LENGTH: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

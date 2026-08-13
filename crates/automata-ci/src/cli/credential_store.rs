@@ -45,7 +45,6 @@ const MAX_SEARCH_OUTPUT_BYTES: usize = 16 * 1_024;
 const MAX_STORED_CREDENTIAL_BYTES: usize = 512;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 const LOCK_DIRECTORY: &str = "automata-ci";
-// foundation-governance: operational-limit
 const MAX_RUNNER_ENROLLMENT_RECEIPT_BYTES: usize = 2 * 1_024;
 
 #[async_trait]

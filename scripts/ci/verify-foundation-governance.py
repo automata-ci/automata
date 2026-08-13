@@ -21,8 +21,6 @@ STORE_MIGRATION_FORMAT_MAP_PATH = PurePosixPath(
     "docs/governance/store-migration-format-map-v1.json"
 )
 TOP_LEVEL_KEYS = {
-    "derived_contract_exclusions",
-    "derived_contract_registry",
     "format_exclusions",
     "format_scope",
     "formats",
@@ -62,14 +60,6 @@ FORMAT_COMPATIBILITY_POLICIES = {
     "exact-current-only",
     "generated-v1-package",
 }
-DERIVED_CONTRACT_KINDS = {
-    "credential-namespace",
-    "cryptographic-context",
-    "digest-domain",
-    "storage-namespace",
-    "wire-discriminator",
-}
-DERIVED_CONTRACT_POLICY = "append-only-token-or-coordinated-migration"
 GITHUB_LIMIT_IDS = {
     "github.cache.deletes-per-minute",
     "github.cache.downloads-per-minute",
@@ -134,24 +124,11 @@ RUST_CONSTANT_DECLARATION = re.compile(
     r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?const\s+"
     r"(?P<name>[A-Z][A-Z0-9_]*)\s*:[^=\r\n]+="
 )
-RUST_DERIVED_CONTRACT_ANNOTATION = re.compile(
-    r"(?m)^[ \t]*//[ \t]*foundation-governance:[ \t]*"
-    r"(?P<annotation>derived-contract-exclusion|derived-contract)"
-    r"(?P<metadata>[^\r\n]*)\r?\n"
-    r"[ \t]*(?:pub(?:\([^)]*\))?\s+)?const\s+"
-    r"(?P<name>[A-Z][A-Z0-9_]*)\s*:[^=\r\n]+="
-)
 RUST_LIMIT_DECLARATION = re.compile(
     r"(?mx)^[ \t]*(?:\#\[[^\r\n]+\]\s*)*"
     r"(?:pub(?:\([^)]*\))?\s+)?const\s+"
     r"(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*"
     r"(?P<type>[^=\r\n]+?)\s*="
-)
-RUST_LIMIT_ANNOTATION = re.compile(
-    r"(?m)^[ \t]*//[ \t]*foundation-governance:[ \t]*"
-    r"(?P<kind>limit-alias|parity-limit|operational-limit)[ \t]*\r?\n"
-    r"[ \t]*(?:pub(?:\([^)]*\))?\s+)?const\s+"
-    r"(?P<name>[A-Z][A-Z0-9_]*)\s*:[^=\r\n]+="
 )
 LIMIT_NAME_TOKEN = re.compile(
     r"(?:^|_)(?:MAX|MAXIMUM|MIN|MINIMUM|LIMIT|CEILING|CAP|BOUND|BUDGET|QUOTA|"
@@ -1159,222 +1136,6 @@ def _is_test_only_rust_source(path: Path) -> bool:
     )
 
 
-def _derived_contract_version(name: str, declaration: str) -> int | None:
-    value = declaration.partition("=")[2]
-    matches = list(
-        re.finditer(
-            r"(?i)(?<![A-Za-z0-9])v([1-9][0-9]*)(?![0-9])",
-            value,
-        )
-    )
-    if not matches:
-        return None
-    versions = {int(match.group(1)) for match in matches}
-    if len(versions) != 1:
-        terminal = matches[-1]
-        if re.fullmatch(r"[^A-Za-z0-9]*", value[terminal.end() :]) is None:
-            _fail(
-                f"derived contract declaration {name} contains ambiguous version tokens "
-                f"{sorted(versions)} without a terminal contract version"
-            )
-        return int(terminal.group(1))
-    return next(iter(versions))
-
-
-def _derived_contract_declarations(
-    repository_root: Path,
-) -> dict[tuple[str, str], tuple[str, int]]:
-    declarations: dict[tuple[str, str], tuple[str, int]] = {}
-    crates = repository_root / "crates"
-    for path in sorted(crates.glob("*/src/**/*.rs")):
-        if path.is_symlink() or not path.is_file():
-            _fail(f"derived-contract discovery encountered a non-regular source: {path}")
-        if _is_test_only_rust_source(path):
-            continue
-        source = _production_source(path)
-        relative = path.relative_to(repository_root).as_posix()
-        for match in RUST_CONSTANT_DECLARATION.finditer(source):
-            name = match.group("name")
-            declaration = _constant_declaration_fragment(source, match)
-            if _is_format_declaration(name, declaration):
-                continue
-            version = _derived_contract_version(name, declaration)
-            if version is not None:
-                declarations[(relative, name)] = (declaration, version)
-    return declarations
-
-
-def _annotated_derived_contract_declarations(
-    repository_root: Path,
-) -> dict[tuple[str, str], tuple[str, str | None, str | None]]:
-    declarations: dict[tuple[str, str], tuple[str, str | None, str | None]] = {}
-    crates = repository_root / "crates"
-    for path in sorted(crates.glob("*/src/**/*.rs")):
-        if _is_test_only_rust_source(path):
-            continue
-        source = _production_source(path)
-        relative = path.relative_to(repository_root).as_posix()
-        for match in RUST_DERIVED_CONTRACT_ANNOTATION.finditer(source):
-            identity = (relative, match.group("name"))
-            if identity in declarations:
-                _fail(f"duplicate derived-contract annotation for {identity}")
-            annotation = match.group("annotation")
-            metadata = match.group("metadata")
-            if annotation == "derived-contract":
-                fields = re.fullmatch(
-                    r"[ \t]+owner=(?P<owner>[a-z][a-z0-9.-]*)"
-                    r"[ \t]+kind=(?P<kind>[a-z][a-z0-9.-]*)[ \t]*",
-                    metadata,
-                )
-                if fields is None:
-                    _fail(
-                        f"derived-contract annotation for {identity} must declare "
-                        "canonical owner=<id> kind=<kind> metadata"
-                    )
-                declarations[identity] = (
-                    annotation,
-                    fields.group("owner"),
-                    fields.group("kind"),
-                )
-            else:
-                if metadata.strip():
-                    _fail(
-                        f"derived-contract-exclusion annotation for {identity} "
-                        "must not contain metadata"
-                    )
-                declarations[identity] = (annotation, None, None)
-    return declarations
-
-
-def _validate_derived_contract_registry(value: Any) -> None:
-    registry = _object(
-        value,
-        {
-            "annotation",
-            "declaration_roots",
-            "evolution_policy",
-            "includes",
-            "reader_policy",
-            "registration_mode",
-        },
-        "derived_contract_registry",
-    )
-    if registry["annotation"] != (
-        "foundation-governance: derived-contract owner=<owner> kind=<kind>"
-    ):
-        _fail("derived_contract_registry.annotation is not canonical")
-    if registry["declaration_roots"] != ["crates/*/src/**/*.rs"]:
-        _fail("derived_contract_registry.declaration_roots must cover every crate source")
-    if registry["evolution_policy"] != DERIVED_CONTRACT_POLICY:
-        _fail("derived_contract_registry.evolution_policy is not canonical")
-    if registry["includes"] != ["named-versioned-derived-contract-tokens"]:
-        _fail("derived_contract_registry.includes must state the governed contract class")
-    if registry["reader_policy"] != "separate-from-serialization-compatibility":
-        _fail("derived_contract_registry.reader_policy is not canonical")
-    if registry["registration_mode"] != "source-annotation":
-        _fail("derived_contract_registry.registration_mode must be 'source-annotation'")
-
-
-def _derived_source_identity(
-    repository_root: Path,
-    raw_source: Any,
-    context: str,
-) -> tuple[tuple[str, str], str, int]:
-    source = _object(raw_source, {"contains", "path"}, context)
-    relative = _string(source["path"], f"{context}.path")
-    fragment = _validate_sources(repository_root, [source], context)[0]
-    match = RUST_CONSTANT_DECLARATION.search(fragment)
-    if match is None:
-        _fail(f"{context}.contains must bind a Rust constant declaration")
-    constant = match.group("name")
-    version = _derived_contract_version(constant, fragment)
-    if version is None:
-        _fail(f"{context}.contains does not bind a versioned derived contract")
-    path = _existing_path(repository_root, relative, f"{context}.path", kind="file")
-    source = _production_source(path)
-    exact_declarations = [
-        _constant_declaration_fragment(source, candidate)
-        for candidate in RUST_CONSTANT_DECLARATION.finditer(source)
-        if candidate.group("name") == constant
-    ]
-    if exact_declarations != [fragment]:
-        _fail(f"{context}.contains must bind the exact complete constant declaration")
-    return (relative, constant), fragment, version
-
-
-def _validate_derived_contracts(
-    repository_root: Path,
-    exclusions_value: Any,
-    owner_ids: set[str],
-) -> None:
-    exclusions = _array(exclusions_value, "derived_contract_exclusions")
-    excluded: list[tuple[str, str]] = []
-    for index, raw_exclusion in enumerate(exclusions):
-        context = f"derived_contract_exclusions[{index}]"
-        exclusion = _object(raw_exclusion, {"constant", "path", "reason", "source"}, context)
-        relative = _string(exclusion["path"], f"{context}.path")
-        constant = _string(exclusion["constant"], f"{context}.constant")
-        if re.fullmatch(r"[A-Z][A-Z0-9_]*", constant) is None:
-            _fail(f"{context}.constant must be an uppercase Rust constant name")
-        _string(exclusion["reason"], f"{context}.reason")
-        identity, fragment, _ = _derived_source_identity(
-            repository_root,
-            {"contains": exclusion["source"], "path": relative},
-            f"{context}.source",
-        )
-        if identity != (relative, constant):
-            _fail(f"{context}.source must bind its exact path and constant")
-        excluded.append(identity)
-    if excluded != sorted(excluded):
-        _fail("derived contract exclusions must be sorted by path and constant")
-    if len(excluded) != len(set(excluded)):
-        _fail("derived contract exclusions must be unique")
-
-    discovered = _derived_contract_declarations(repository_root)
-    annotations = _annotated_derived_contract_declarations(repository_root)
-    annotated_identities = set(annotations)
-    unannotated = sorted(set(discovered) - annotated_identities)
-    stale_annotations = sorted(annotated_identities - set(discovered))
-    if unannotated:
-        _fail(f"versioned derived contract declarations require annotations: {unannotated}")
-    if stale_annotations:
-        _fail(f"stale derived-contract annotations: {stale_annotations}")
-
-    registered_set = {
-        identity
-        for identity, (annotation, _, _) in annotations.items()
-        if annotation == "derived-contract"
-    }
-    for identity in sorted(registered_set):
-        _, owner, kind = annotations[identity]
-        if owner not in owner_ids:
-            _fail(f"derived-contract annotation for {identity} names unknown owner {owner!r}")
-        if kind not in DERIVED_CONTRACT_KINDS:
-            _fail(
-                f"derived-contract annotation for {identity} has unsupported kind "
-                f"{kind!r}; expected one of {sorted(DERIVED_CONTRACT_KINDS)}"
-            )
-    excluded_set = set(excluded)
-    wrong_excluded = sorted(
-        identity
-        for identity in excluded_set
-        if annotations.get(identity, (None, None, None))[0]
-        != "derived-contract-exclusion"
-    )
-    if wrong_excluded:
-        _fail(f"excluded derived contracts need exclusion annotations: {wrong_excluded}")
-    overlap = registered_set.intersection(excluded_set)
-    if overlap:
-        _fail(f"derived contracts cannot be registered and excluded: {sorted(overlap)}")
-    accounted = registered_set.union(excluded_set)
-    missing = sorted(set(discovered) - accounted)
-    stale = sorted(accounted - set(discovered))
-    if missing:
-        _fail(f"unregistered derived contract declarations: {missing}")
-    if stale:
-        _fail(f"stale registered or excluded derived contracts: {stale}")
-
-
 def _validate_migrations(repository_root: Path, value: Any, owner_ids: set[str]) -> None:
     migrations = _object(
         value,
@@ -2237,7 +1998,7 @@ def _limit_declarations(
     repository_root: Path,
     surfaces: Any,
 ) -> dict[tuple[str, str], str]:
-    """Discover candidate limits before consulting governance annotations."""
+    """Discover candidate limits before consulting governance dispositions."""
 
     declarations: dict[tuple[str, str], str] = {}
     surface_paths = _array(surfaces, "limit_surfaces", nonempty=True)
@@ -2268,40 +2029,6 @@ def _limit_declarations(
                 declarations[identity] = _constant_declaration_fragment(source, match)
     _sorted_unique(normalized_surfaces, "limit discovery surfaces")
     return declarations
-
-
-def _annotated_limit_declarations(
-    repository_root: Path,
-    surfaces: Any,
-    kind: str,
-) -> set[tuple[str, str]]:
-    declarations: list[tuple[str, str]] = []
-    surface_paths = _array(surfaces, "limit_surfaces", nonempty=True)
-    normalized_surfaces: list[str] = []
-    for index, raw_surface in enumerate(surface_paths):
-        context = f"limit_surfaces[{index}]"
-        relative = _string(raw_surface, context)
-        surface = _existing_path(repository_root, relative, context)
-        normalized_surfaces.append(relative)
-        paths = [surface] if surface.is_file() else sorted(surface.rglob("*.rs"))
-        for path in paths:
-            if path.is_symlink() or not path.is_file():
-                _fail(f"{context} contains a non-regular Rust source: {path}")
-            source = _production_source(path)
-            namespace_ranges = _rust_namespace_ranges(source)
-            path_relative = path.relative_to(repository_root).as_posix()
-            for match in RUST_LIMIT_ANNOTATION.finditer(source):
-                if match.group("kind") == kind:
-                    declarations.append(
-                        (
-                            path_relative,
-                            _rust_qualified_constant(match, namespace_ranges),
-                        )
-                    )
-    _sorted_unique(normalized_surfaces, "limit discovery surfaces")
-    if len(declarations) != len(set(declarations)):
-        _fail(f"duplicate foundation-governance {kind} annotations")
-    return set(declarations)
 
 
 def _registered_limit_declarations(
@@ -2641,47 +2368,6 @@ def _validate_limit_exclusions(
     if stale:
         _fail(f"stale registered or excluded limit declarations: {stale}")
 
-    parity_annotations = _annotated_limit_declarations(
-        repository_root, surfaces, "parity-limit"
-    )
-    operational_annotations = _annotated_limit_declarations(
-        repository_root, surfaces, "operational-limit"
-    )
-    alias_annotations = _annotated_limit_declarations(
-        repository_root, surfaces, "limit-alias"
-    )
-    wrong_parity_annotations = sorted(parity_annotations - registered)
-    missing_parity_annotations = sorted(registered - parity_annotations)
-    wrong_operational_annotations = sorted(operational_annotations - operational)
-    wrong_alias_annotations = sorted(alias_annotations - alias_identities)
-    if wrong_parity_annotations:
-        _fail(
-            "parity-limit annotations must have registered product rows: "
-            f"{wrong_parity_annotations}"
-        )
-    if missing_parity_annotations:
-        _fail(
-            "registered product limits need parity-limit annotations: "
-            f"{missing_parity_annotations}"
-        )
-    if wrong_operational_annotations:
-        _fail(
-            "operational-limit annotations must have operational exclusions: "
-            f"{wrong_operational_annotations}"
-        )
-    if wrong_alias_annotations:
-        _fail(
-            "limit-alias annotations must have structured alias rows: "
-            f"{wrong_alias_annotations}"
-        )
-    missing_alias_annotations = sorted(alias_identities - alias_annotations)
-    if missing_alias_annotations:
-        _fail(
-            "structured aliases need limit-alias annotations: "
-            f"{missing_alias_annotations}"
-        )
-
-
 def _github_limit_references(repository_root: Path) -> set[str]:
     path = _existing_path(
         repository_root,
@@ -2916,12 +2602,6 @@ def validate_repository(
         _fail("schema version 1 status must be 'active'")
 
     owner_ids = _validate_owners(document["owners"])
-    _validate_derived_contract_registry(document["derived_contract_registry"])
-    _validate_derived_contracts(
-        root,
-        document["derived_contract_exclusions"],
-        owner_ids,
-    )
     _validate_format_scope(root, document["format_scope"])
     _validate_formats(root, document["formats"], owner_ids)
     _validate_format_exclusions(

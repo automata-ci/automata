@@ -44,7 +44,6 @@ use crate::{
     logical_job_result::rederive_commit_digest as rederive_job_commit_digest,
 };
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const MATERIALIZATION_COMMIT_DIGEST_DOMAIN: &[u8] =
     b"automata.store.logical-materialization-commit.v3\0";
 

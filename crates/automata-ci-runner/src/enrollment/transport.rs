@@ -3,9 +3,7 @@
 use anyhow::{Context as _, Result, bail};
 use zeroize::Zeroizing;
 
-// foundation-governance: operational-limit
 pub(super) const MAX_RESPONSE_BYTES: usize = 512 * 1_024;
-// foundation-governance: operational-limit
 const MAX_RESPONSE_BYTES_U64: u64 = 512 * 1_024;
 
 pub(super) async fn read_bounded_response(

@@ -29,16 +29,12 @@ use crate::{
     observer::{NoopResultsObserver, ResultsHttpObservation},
 };
 
-// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const CREATE_ARTIFACT_PATH: &str =
     "/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact";
-// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const FINALIZE_ARTIFACT_PATH: &str =
     "/twirp/github.actions.results.api.v1.ArtifactService/FinalizeArtifact";
-// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const LIST_ARTIFACTS_PATH: &str =
     "/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts";
-// foundation-governance: derived-contract owner=github-runtime kind=wire-discriminator
 const GET_SIGNED_ARTIFACT_URL_PATH: &str =
     "/twirp/github.actions.results.api.v1.ArtifactService/GetSignedArtifactURL";
 const UPLOAD_PATH: &str = "/_apis/results/artifacts/{upload_id}/blob";

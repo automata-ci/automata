@@ -1,48 +1,4 @@
 {
-  "derived_contract_exclusions": [
-    {
-      "constant": "GITHUB_ACTION_METADATA_BASELINE",
-      "path": "crates/automata-ci-action-github/src/lib.rs",
-      "reason": "Pinned upstream actions/runner metadata baseline governed by the GitHub compatibility registry, not an Automata-derived durable or wire token.",
-      "source": "pub const GITHUB_ACTION_METADATA_BASELINE: &str = \"actions/runner@v2.336.0\";"
-    },
-    {
-      "constant": "GITHUB_EXPRESSION_RUNTIME_BASELINE",
-      "path": "crates/automata-ci-expression-github/src/lib.rs",
-      "reason": "Pinned upstream actions/runner expression baseline governed by the GitHub compatibility registry, not an Automata-derived durable or wire token.",
-      "source": "pub const GITHUB_EXPRESSION_RUNTIME_BASELINE: &str = \"actions/runner@v2.336.0\";"
-    },
-    {
-      "constant": "GITHUB_RUNTIME_PROTOCOL_BASELINE",
-      "path": "crates/automata-ci-github-runtime/src/lib.rs",
-      "reason": "Pinned upstream actions/runner protocol baseline governed by the GitHub compatibility registry, not an Automata-derived durable or wire token.",
-      "source": "pub const GITHUB_RUNTIME_PROTOCOL_BASELINE: &str = \"actions/runner@v2.336.0\";"
-    },
-    {
-      "constant": "READINESS_BYTES",
-      "path": "crates/automata-ci/src/server/composition.rs",
-      "reason": "Internal readiness probe payload used to verify object-store access, not a durable business or interoperable wire contract.",
-      "source": "const READINESS_BYTES: &[u8] = b\"automata-immutable-readiness-v1\\n\";"
-    },
-    {
-      "constant": "READINESS_OBJECT_KEY",
-      "path": "crates/automata-ci/src/server/composition.rs",
-      "reason": "Internal readiness probe object location, not a durable business or interoperable wire contract.",
-      "source": "const READINESS_OBJECT_KEY: &str = \"system/readiness/v1\";"
-    }
-  ],
-  "derived_contract_registry": {
-    "annotation": "foundation-governance: derived-contract owner=<owner> kind=<kind>",
-    "declaration_roots": [
-      "crates/*/src/**/*.rs"
-    ],
-    "evolution_policy": "append-only-token-or-coordinated-migration",
-    "includes": [
-      "named-versioned-derived-contract-tokens"
-    ],
-    "reader_policy": "separate-from-serialization-compatibility",
-    "registration_mode": "source-annotation"
-  },
   "format_exclusions": [
     {
       "constant": "X_GITHUB_API_VERSION",
@@ -310,90 +266,6 @@
     },
     {
       "compatibility_policy": "exact-current-only",
-      "id": "conformance-evidence",
-      "owner": "conformance",
-      "sources": [
-        {
-          "contains": "pub const EVIDENCE_SCHEMA_VERSION: u16 = 1;",
-          "path": "crates/automata-ci-conformance/src/evidence.rs",
-          "role": "version"
-        }
-      ],
-      "tests": [
-        {
-          "contains": "json[\"schemaVersion\"] = serde_json::json!(2);",
-          "function": "envelope_is_canonical_and_bound_to_catalog_provenance_and_expected_evidence",
-          "path": "crates/automata-ci-conformance/tests/evidence_contract.rs"
-        }
-      ],
-      "version": 1
-    },
-    {
-      "compatibility_policy": "exact-current-only",
-      "id": "conformance-export-v1",
-      "owner": "conformance",
-      "sources": [
-        {
-          "contains": "const CONFORMANCE_EXPORT_V1_SCHEMA_VERSION: u16 = 1;",
-          "path": "crates/automata-ci/src/app/conformance_api.rs",
-          "role": "version"
-        }
-      ],
-      "tests": [
-        {
-          "contains": "include_str!(\"fixtures/conformance-export-v1.json\")",
-          "function": "v1_and_v2_exports_match_complete_wire_goldens",
-          "path": "crates/automata-ci/src/app/conformance_api.rs"
-        }
-      ],
-      "version": 1
-    },
-    {
-      "compatibility_policy": "backward-compatible",
-      "id": "conformance-export-v2",
-      "owner": "conformance",
-      "prior_version_readers": [
-        {
-          "reader": {
-            "contains": "\"application/json\" | \"*/*\" => Ok(ExportVersion::V1),",
-            "path": "crates/automata-ci/src/app/conformance_api.rs",
-            "symbol": "requested_export_version"
-          },
-          "tests": [
-            {
-              "function": "v1_export_remains_a_supported_prior_contract",
-              "outcome": "assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V1));",
-              "path": "crates/automata-ci/src/app/conformance_api.rs",
-              "reader_call": "requested_export_version(&headers)",
-              "version": "assert_eq!(CONFORMANCE_EXPORT_V1_SCHEMA_VERSION, 1);"
-            }
-          ],
-          "version": 1
-        }
-      ],
-      "sources": [
-        {
-          "contains": "const CONFORMANCE_EXPORT_V2_SCHEMA_VERSION: u16 = 2;",
-          "path": "crates/automata-ci/src/app/conformance_api.rs",
-          "role": "version"
-        },
-        {
-          "contains": "pub(crate) const CONFORMANCE_EXPORT_V2_MEDIA_TYPE: &str =",
-          "path": "crates/automata-ci/src/app/conformance_api.rs",
-          "role": "evidence"
-        }
-      ],
-      "tests": [
-        {
-          "contains": "include_str!(\"fixtures/conformance-export-v2.json\")",
-          "function": "v1_and_v2_exports_match_complete_wire_goldens",
-          "path": "crates/automata-ci/src/app/conformance_api.rs"
-        }
-      ],
-      "version": 2
-    },
-    {
-      "compatibility_policy": "exact-current-only",
       "id": "core-envelopes",
       "owner": "core-domain",
       "sources": [
@@ -518,26 +390,6 @@
           "contains": "encoded[\"schema_version\"] = serde_json::json!(2);",
           "function": "deserialization_revalidates_schema_and_rejects_unknown_fields",
           "path": "crates/automata-ci-core/tests/expression_program.rs"
-        }
-      ],
-      "version": 1
-    },
-    {
-      "compatibility_policy": "exact-current-only",
-      "id": "fixture-catalog",
-      "owner": "conformance",
-      "sources": [
-        {
-          "contains": "pub const FIXTURE_CATALOG_SCHEMA_VERSION: u16 = 1;",
-          "path": "crates/automata-ci-conformance/src/catalog.rs",
-          "role": "version"
-        }
-      ],
-      "tests": [
-        {
-          "contains": "Err(CatalogError::UnsupportedSchema(2))",
-          "function": "unknown_and_foreign_schema_fields_fail_closed",
-          "path": "crates/automata-ci-conformance/tests/catalog_contract.rs"
         }
       ],
       "version": 1
@@ -3443,98 +3295,6 @@
           "constant": "MAX_OBJECT_KEY_BYTES",
           "contains": "if value.is_empty() || value.len() > MAX_OBJECT_KEY_BYTES {",
           "path": "crates/automata-ci-blob/src/model.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_CATALOG_ENTRIES",
-        "MAX_EXTERNAL_PREREQUISITES",
-        "MAX_LOCKS_PER_FIXTURE"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci-conformance/src/catalog.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_CATALOG_ENTRIES",
-          "contains": "if self.entries.is_empty() || self.entries.len() > MAX_CATALOG_ENTRIES {",
-          "path": "crates/automata-ci-conformance/src/catalog.rs"
-        },
-        {
-          "constant": "MAX_EXTERNAL_PREREQUISITES",
-          "contains": "if values.len() > MAX_EXTERNAL_PREREQUISITES {",
-          "path": "crates/automata-ci-conformance/src/catalog.rs"
-        },
-        {
-          "constant": "MAX_LOCKS_PER_FIXTURE",
-          "contains": "if (required && locks.is_empty()) || locks.len() > MAX_LOCKS_PER_FIXTURE {",
-          "path": "crates/automata-ci-conformance/src/catalog.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_CONFORMANCE_SHARDS",
-        "MAX_FAULTS"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci-conformance/src/control.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_CONFORMANCE_SHARDS",
-          "contains": "if count == 0 || count > MAX_CONFORMANCE_SHARDS {",
-          "path": "crates/automata-ci-conformance/src/control.rs"
-        },
-        {
-          "constant": "MAX_FAULTS",
-          "contains": "if count > MAX_FAULTS {",
-          "path": "crates/automata-ci-conformance/src/control.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_STUB_AGGREGATE_RESPONSE_BYTES",
-        "MAX_STUB_RESPONSE_BYTES"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci-conformance/src/provider_stub.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_STUB_AGGREGATE_RESPONSE_BYTES",
-          "contains": "if aggregate_response_bytes > MAX_STUB_AGGREGATE_RESPONSE_BYTES {",
-          "path": "crates/automata-ci-conformance/src/provider_stub.rs"
-        },
-        {
-          "constant": "MAX_STUB_RESPONSE_BYTES",
-          "contains": "|| body.len() > MAX_STUB_RESPONSE_BYTES",
-          "path": "crates/automata-ci-conformance/src/provider_stub.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_RAW_WEBHOOK_BODY_BYTES"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci-conformance/src/webhook.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_RAW_WEBHOOK_BODY_BYTES",
-          "contains": "if body.is_empty() || body.len() > MAX_RAW_WEBHOOK_BODY_BYTES {",
-          "path": "crates/automata-ci-conformance/src/webhook.rs"
         }
       ]
     },
@@ -6533,7 +6293,7 @@
         "MAX_CONFORMANCE_DELIVERY_ID_BYTES",
         "MAX_PROVIDER_NAME_BYTES"
       ],
-      "owner": "conformance",
+      "owner": "store",
       "path": "crates/automata-ci-store/src/conformance.rs",
       "phase": "external",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
@@ -7088,7 +6848,7 @@
       "constants": [
         "validate_header_shape::MAX_ATTEMPTS"
       ],
-      "owner": "conformance",
+      "owner": "store",
       "path": "crates/automata-ci-store/src/postgres/conformance.rs",
       "phase": "external",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
@@ -7959,11 +7719,9 @@
     {
       "classification": "operational",
       "constants": [
-        "MAX_CONFORMANCE_EXPORT_BLOB_BYTES",
-        "MAX_CONFORMANCE_LOG_PAGES",
-        "MAX_CONFORMANCE_LOG_SEGMENTS"
+        "MAX_CONFORMANCE_EXPORT_BLOB_BYTES"
       ],
-      "owner": "conformance",
+      "owner": "control-plane",
       "path": "crates/automata-ci/src/app/conformance_api.rs",
       "phase": "external",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
@@ -7972,108 +7730,6 @@
           "constant": "MAX_CONFORMANCE_EXPORT_BLOB_BYTES",
           "contains": ".filter(|total| *total <= MAX_CONFORMANCE_EXPORT_BLOB_BYTES)",
           "path": "crates/automata-ci/src/app/conformance_api.rs"
-        },
-        {
-          "constant": "MAX_CONFORMANCE_LOG_PAGES",
-          "contains": "if page_count > MAX_CONFORMANCE_LOG_PAGES {",
-          "path": "crates/automata-ci/src/app/conformance_api.rs"
-        },
-        {
-          "constant": "MAX_CONFORMANCE_LOG_SEGMENTS",
-          "contains": "const MAX_CONFORMANCE_LOG_PAGES: usize = MAX_CONFORMANCE_LOG_SEGMENTS + 1;",
-          "path": "crates/automata-ci/src/app/conformance_api.rs"
-        }
-      ]
-    },
-    {
-      "classification": "non-limit",
-      "constants": [
-        "X_RATE_LIMIT_REMAINING"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci/src/app/conformance_github_stub.rs",
-      "phase": "external",
-      "reason": "Lexical header, diagnostic, or protocol-version tokens whose names contain a limit word; these constants do not impose behavioral resource ceilings.",
-      "uses": []
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_GITHUB_STUB_CREDENTIALS",
-        "MAX_GITHUB_STUB_REQUEST_BODY_BYTES"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci/src/app/conformance_github_stub.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_GITHUB_STUB_CREDENTIALS",
-          "contains": "if credentials.len() > MAX_GITHUB_STUB_CREDENTIALS {",
-          "path": "crates/automata-ci/src/app/conformance_github_stub.rs"
-        },
-        {
-          "constant": "MAX_GITHUB_STUB_REQUEST_BODY_BYTES",
-          "contains": "let Ok(body) = to_bytes(request.into_body(), MAX_GITHUB_STUB_REQUEST_BODY_BYTES).await else {",
-          "path": "crates/automata-ci/src/app/conformance_github_stub.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_CONFORMANCE_PROCESS_ARGUMENTS",
-        "MAX_CONFORMANCE_PROCESS_ENVIRONMENT",
-        "MAX_CONFORMANCE_PROCESS_FIELD_BYTES",
-        "MAX_CONFORMANCE_PROCESS_TIMEOUT"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci/src/app/conformance_process.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_CONFORMANCE_PROCESS_ARGUMENTS",
-          "contains": "|| arguments.len() > MAX_CONFORMANCE_PROCESS_ARGUMENTS",
-          "path": "crates/automata-ci/src/app/conformance_process.rs"
-        },
-        {
-          "constant": "MAX_CONFORMANCE_PROCESS_ENVIRONMENT",
-          "contains": "|| environment.len() > MAX_CONFORMANCE_PROCESS_ENVIRONMENT",
-          "path": "crates/automata-ci/src/app/conformance_process.rs"
-        },
-        {
-          "constant": "MAX_CONFORMANCE_PROCESS_FIELD_BYTES",
-          "contains": "!value.is_empty() && value.as_encoded_bytes().len() <= MAX_CONFORMANCE_PROCESS_FIELD_BYTES",
-          "path": "crates/automata-ci/src/app/conformance_process.rs"
-        },
-        {
-          "constant": "MAX_CONFORMANCE_PROCESS_TIMEOUT",
-          "contains": "|| operation_timeout > MAX_CONFORMANCE_PROCESS_TIMEOUT",
-          "path": "crates/automata-ci/src/app/conformance_process.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_LOCAL_IDENTITY_BYTES",
-        "MAX_SPENT_PORT_RESERVATIONS"
-      ],
-      "owner": "conformance",
-      "path": "crates/automata-ci/src/app/conformance_shard.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_LOCAL_IDENTITY_BYTES",
-          "contains": "if value.len() > MAX_LOCAL_IDENTITY_BYTES",
-          "path": "crates/automata-ci/src/app/conformance_shard.rs"
-        },
-        {
-          "constant": "MAX_SPENT_PORT_RESERVATIONS",
-          "contains": "if reservations.len() > MAX_SPENT_PORT_RESERVATIONS {",
-          "path": "crates/automata-ci/src/app/conformance_shard.rs"
         }
       ]
     },
@@ -15634,10 +15290,6 @@
     {
       "description": "Authentication, credential, and encrypted key formats",
       "id": "auth-security"
-    },
-    {
-      "description": "Product conformance catalogs, evidence, deterministic controls, and fixture contracts",
-      "id": "conformance"
     },
     {
       "description": "Control-plane configuration, cursors, identity manifests, and runner registration",

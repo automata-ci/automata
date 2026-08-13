@@ -96,7 +96,7 @@
   "replacement_policy": {
     "approval_registry": "docs/governance/github-actions-reviewed-deltas-v1.json",
     "minimum_human_reviewers": 2,
-    "procedure": "Open a compatibility issue from the bounded drift report, classify every changed category, update affected capability entries and fixtures, record the reviewed delta, then replace this lock in a separately reviewed pull request."
+    "procedure": "Compare proposed immutable sources with this snapshot, classify every changed category, update affected capability entries and fixtures, record the reviewed delta, then replace this lock in a separately reviewed pull request."
   },
   "retrieved_at": "2026-08-13",
   "runner": {

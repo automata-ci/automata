@@ -14,12 +14,9 @@ use thiserror::Error;
 use crate::{LogicalWorkflowJobId, RepositoryId, StoreError};
 
 /// Maximum physical attempts after the original run and its 50 allowed reruns.
-// foundation-governance: parity-limit
 pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;
 /// Database-time retention horizon for starting a rerun of a terminal run.
-// foundation-governance: parity-limit
 pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 2_592_000_000;
-// foundation-governance: parity-limit
 const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

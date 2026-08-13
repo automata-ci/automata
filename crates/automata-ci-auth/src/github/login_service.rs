@@ -62,11 +62,8 @@ const DEVICE_PROOF_VERSION: &str = "dp1";
 const MAX_PROOF_KEY_ID_LENGTH: usize = 128;
 const MAX_PROOF_CREDENTIAL_LENGTH: usize =
     3 + 3 + MAX_PROOF_KEY_ID_LENGTH + 36 + GENERATED_PROOF_LENGTH;
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const OAUTH_STATE_HMAC_DOMAIN: &[u8] = b"automata-ci/github-login/oauth-state/v1\0";
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const BROWSER_BINDING_HMAC_DOMAIN: &[u8] = b"automata-ci/github-login/browser-binding/v1\0";
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const DEVICE_POLL_HMAC_DOMAIN: &[u8] = b"automata-ci/github-login/device-poll/v1\0";
 
 /// Consumed configuration for one login-proof HMAC key.

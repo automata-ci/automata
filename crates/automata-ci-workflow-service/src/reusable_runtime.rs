@@ -36,11 +36,8 @@ use crate::{
 };
 
 const IDLE_POLL: Duration = Duration::from_millis(250);
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const OPERATION_ID_DOMAIN: &[u8] = b"automata.workflow-service.reusable-operation.v1\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const ACTIVATION_DIGEST_DOMAIN: &[u8] = b"automata.workflow-service.reusable-activation.v1\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const OUTPUT_EVALUATION_DOMAIN: &[u8] =
     b"automata.workflow-service.reusable-output-evaluation.v1\0";
 

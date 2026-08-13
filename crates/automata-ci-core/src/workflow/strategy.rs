@@ -15,29 +15,21 @@ use super::{
 /// Strategy representation emitted by this build.
 pub const WORKFLOW_STRATEGY_SCHEMA_VERSION: u16 = WorkflowStrategyVersion::current().get();
 /// Maximum logical job instances one matrix may activate.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_EXPANSION: usize = 256;
 /// Maximum named axes in one matrix.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_AXES: usize = 32;
 /// Maximum statically listed values in one axis.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_AXIS_VALUES: usize = 256;
 /// Maximum include or exclude patches in one matrix.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_PATCHES: usize = 256;
 /// Maximum entries in one matrix object or patch.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_OBJECT_ENTRIES: usize = 128;
 /// Maximum nesting depth of a literal matrix value.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_VALUE_DEPTH: usize = 8;
 /// Maximum bytes in a matrix key or string literal.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_TEXT_BYTES: usize = 16_384;
 /// Maximum fully static Cartesian candidates activation may inspect before
 /// include/exclude transformations reduce the emitted instance set.
-// foundation-governance: parity-limit
 const MAX_STATIC_MATRIX_CANDIDATE_COMBINATIONS: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

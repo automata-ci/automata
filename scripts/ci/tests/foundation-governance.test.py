@@ -42,7 +42,6 @@ class FoundationGovernanceTests(unittest.TestCase):
                 "}\n"
             ),
             "crates/automata-ci-runtime/src/limits.rs": (
-                "// foundation-governance: parity-limit\n"
                 "pub const MAX_TEST_ITEMS: usize = 5;\n"
                 "return Err(TestLimitError::Exceeded);\n"
             ),
@@ -61,18 +60,6 @@ class FoundationGovernanceTests(unittest.TestCase):
             path.write_text(contents, encoding="utf-8")
 
         self.registry = {
-            "derived_contract_exclusions": [],
-            "derived_contract_registry": {
-                "annotation": (
-                    "foundation-governance: derived-contract "
-                    "owner=<owner> kind=<kind>"
-                ),
-                "declaration_roots": ["crates/*/src/**/*.rs"],
-                "evolution_policy": "append-only-token-or-coordinated-migration",
-                "includes": ["named-versioned-derived-contract-tokens"],
-                "reader_policy": "separate-from-serialization-compatibility",
-                "registration_mode": "source-annotation",
-            },
             "format_exclusions": [],
             "format_scope": {
                 "declaration_roots": ["crates/*/src/**/*.rs", "ui/src/**/*.{ts,tsx}"],
@@ -278,11 +265,10 @@ class FoundationGovernanceTests(unittest.TestCase):
             "version": version,
         }
 
-    def add_limit_alias(self, *, value: int = 6, annotated: bool = True) -> None:
+    def add_limit_alias(self, *, value: int = 6) -> None:
         source = self.root / "crates" / "automata-ci-runtime" / "src" / "limits.rs"
         source.write_text(
             source.read_text(encoding="utf-8")
-            + ("// foundation-governance: limit-alias\n" if annotated else "")
             + f"const TEST_ITEM_CENSUS_LIMIT: usize = {value};\n",
             encoding="utf-8",
         )
@@ -374,145 +360,22 @@ class FoundationGovernanceTests(unittest.TestCase):
 
         governance.validate_repository(self.root)
 
-    def test_versioned_derived_contract_in_new_crate_cannot_escape_discovery(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "digest.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            'const PAYLOAD_DIGEST_DOMAIN: &[u8] = b"example.payload.v1\\0";\n',
-            encoding="utf-8",
-        )
-
-        self.assert_invalid(
-            r"versioned derived contract declarations require annotations.*"
-            r"PAYLOAD_DIGEST_DOMAIN"
-        )
-
-    def test_arbitrarily_named_versioned_contract_in_new_crate_cannot_escape(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "capability.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            'const PROCESS_EXECUTION: &str = "core.process-exec/v1";\n',
-            encoding="utf-8",
-        )
-
-        self.assert_invalid(
-            r"versioned derived contract declarations require annotations.*"
-            r"PROCESS_EXECUTION"
-        )
-
-    def test_terminal_contract_version_disambiguates_versioned_value(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "capability.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "// foundation-governance: derived-contract "
-            "owner=integration kind=wire-discriminator\n"
-            'const CGROUP_V2: &str = "linux.cgroup-v2/v1";\n',
-            encoding="utf-8",
-        )
-
-        governance.validate_repository(self.root)
-
-    def test_indented_derived_contract_in_new_crate_cannot_escape_discovery(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "digest.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "pub mod nested {\n"
-            '    const PAYLOAD_DIGEST_DOMAIN: &[u8] = b"example.payload.v1\\0";\n'
-            "}\n",
-            encoding="utf-8",
-        )
-
-        self.assert_invalid(
-            r"versioned derived contract declarations require annotations.*"
-            r"PAYLOAD_DIGEST_DOMAIN"
-        )
-
-    def test_test_only_format_and_derived_constants_are_not_production_contracts(self) -> None:
+    def test_test_only_format_constants_are_not_production_contracts(self) -> None:
         source = self.root / "crates" / "new-derived-adapter" / "src" / "fixture.rs"
         source.parent.mkdir(parents=True)
         source.write_text(
             "#[cfg(test)]\n"
             "mod tests {\n"
             "    const TEST_WIRE_SCHEMA: u16 = 1;\n"
-            '    const TEST_DIGEST_DOMAIN: &[u8] = b"fixture.v1";\n'
             "}\n"
             "#[test]\n"
             "fn inline_fixture() {\n"
             "    const LOCAL_WIRE_SCHEMA: u16 = 1;\n"
-            '    const LOCAL_DIGEST_DOMAIN: &[u8] = b"fixture.v1";\n'
             "}\n",
             encoding="utf-8",
         )
 
         governance.validate_repository(self.root)
-
-    def test_versioned_cryptographic_label_in_new_crate_cannot_escape_discovery(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "crypto.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            'const PAYLOAD_DERIVATION_LABEL: &[u8] = b"example/payload/v1";\n',
-            encoding="utf-8",
-        )
-
-        self.assert_invalid(
-            r"versioned derived contract declarations require annotations.*"
-            r"PAYLOAD_DERIVATION_LABEL"
-        )
-
-    def test_annotated_derived_contract_in_new_crate_is_registered(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "digest.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "// foundation-governance: derived-contract "
-            "owner=integration kind=digest-domain\n"
-            'const PAYLOAD_DIGEST_DOMAIN: &[u8] = b"example.payload.v1\\0";\n',
-            encoding="utf-8",
-        )
-
-        governance.validate_repository(self.root)
-
-    def test_derived_contract_annotation_requires_known_owner_and_kind(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "digest.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text(
-            "// foundation-governance: derived-contract "
-            "owner=missing kind=banana\n"
-            'const PAYLOAD_DIGEST_DOMAIN: &[u8] = b"example.payload.v1\\0";\n',
-            encoding="utf-8",
-        )
-
-        self.assert_invalid(r"names unknown owner 'missing'")
-
-    def test_derived_contract_exclusion_is_exact_source_bound(self) -> None:
-        source = self.root / "crates" / "new-derived-adapter" / "src" / "probe.rs"
-        source.parent.mkdir(parents=True)
-        declaration = 'const PROBE_BYTES: &[u8] = b"internal-probe-v1";'
-        source.write_text(
-            "// foundation-governance: derived-contract-exclusion\n"
-            f"{declaration}\n",
-            encoding="utf-8",
-        )
-        self.registry["derived_contract_exclusions"] = [
-            {
-                "constant": "PROBE_BYTES",
-                "path": "crates/new-derived-adapter/src/probe.rs",
-                "reason": "Synthetic internal probe outside durable and wire contracts.",
-                "source": declaration,
-            }
-        ]
-        self.write_registry()
-
-        governance.validate_repository(self.root)
-
-        self.registry["derived_contract_exclusions"][0]["source"] = declaration[:-1]
-        self.write_registry()
-        self.assert_invalid(r"must bind the exact complete constant declaration")
-
-        self.registry["derived_contract_exclusions"][0]["source"] = (
-            'const PROBE_BYTES: &[u8] = b"internal-probe-v2";'
-        )
-        self.write_registry()
-        self.assert_invalid(r"fragment must occur exactly once.*found 0")
 
     def test_new_media_type_and_named_format_require_governance(self) -> None:
         source = self.root / "crates" / "automata-ci-core" / "src" / "wire.rs"
@@ -794,7 +657,6 @@ class FoundationGovernanceTests(unittest.TestCase):
         source = self.root / "crates" / "new-parity-adapter" / "src" / "new.rs"
         source.parent.mkdir(parents=True)
         source.write_text(
-            "// foundation-governance: parity-limit\n"
             "const MAX_NEW_ITEMS: usize = 9;\n",
             encoding="utf-8",
         )
@@ -853,7 +715,6 @@ class FoundationGovernanceTests(unittest.TestCase):
     def test_operational_limit_can_be_explicitly_excluded(self) -> None:
         source = self.root / "crates" / "automata-ci-runtime" / "src" / "retry.rs"
         source.write_text(
-            "// foundation-governance: operational-limit\n"
             "const MAX_RETRY_ATTEMPTS: usize = 3;\n"
             "fn retry() { let _attempts = MAX_RETRY_ATTEMPTS; }\n",
             encoding="utf-8",
@@ -933,10 +794,9 @@ class FoundationGovernanceTests(unittest.TestCase):
 
         self.assert_invalid(r"unregistered limit declarations.*Beta::MAX")
 
-    def test_annotated_operational_limit_requires_an_exclusion(self) -> None:
+    def test_operational_limit_requires_an_exclusion(self) -> None:
         source = self.root / "crates" / "automata-ci-runtime" / "src" / "retry.rs"
         source.write_text(
-            "// foundation-governance: operational-limit\n"
             "const MAX_RETRY_ATTEMPTS: usize = 3;\n",
             encoding="utf-8",
         )
@@ -946,7 +806,6 @@ class FoundationGovernanceTests(unittest.TestCase):
     def test_stale_limit_exclusion_is_rejected(self) -> None:
         source = self.root / "crates" / "automata-ci-runtime" / "src" / "retry.rs"
         source.write_text(
-            "// foundation-governance: operational-limit\n"
             "const MAX_OTHER_ATTEMPTS: usize = 3;\n"
             "fn retry() { let _attempts = MAX_RETRY_ATTEMPTS; }\n",
             encoding="utf-8",
@@ -983,12 +842,6 @@ class FoundationGovernanceTests(unittest.TestCase):
         self.write_registry()
 
         self.assert_invalid(r"relation drift.*TEST_ITEM_CENSUS_LIMIT.*expected 5 \+ 1")
-
-    def test_limit_alias_requires_a_source_annotation(self) -> None:
-        self.add_limit_alias(annotated=False)
-        self.write_registry()
-
-        self.assert_invalid(r"structured aliases need limit-alias annotations")
 
     def test_stale_limit_alias_source_is_rejected(self) -> None:
         self.add_limit_alias()

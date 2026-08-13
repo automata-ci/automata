@@ -10,11 +10,8 @@ use thiserror::Error;
 
 use crate::WORKFLOW_EVENT_MEDIA_TYPE;
 
-// foundation-governance: parity-limit
 const MAX_IDENTITY_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_SOURCE_BYTES: usize = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_EVENT_BYTES: usize = 26_214_400;
 const _: () = assert!(MAX_SOURCE_BYTES as u64 == MAX_ADMISSION_OBJECT_BYTES);
 const _: () = assert!(MAX_EVENT_BYTES as u64 == MAX_ADMISSION_EVENT_BYTES);

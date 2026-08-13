@@ -9,22 +9,16 @@ use uuid::Uuid;
 use crate::cache_model::CacheAuthority;
 
 const INVALID_ARTIFACT_NAME_BYTES: &[u8] = b"\"\\/:<>|*?";
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_NAME_BYTES: usize = 255;
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_BLOCK_BYTES: u64 = 4_294_967_296;
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_BLOCKS: usize = 100_000;
 /// Maximum encoded size of one canonical immutable artifact manifest.
-// foundation-governance: parity-limit
 pub const MAXIMUM_ARTIFACT_MANIFEST_BYTES: u64 = 1_048_576;
 /// Maximum duration of one renewable artifact-finalization claim.
-// foundation-governance: operational-limit
 pub const MAXIMUM_ARTIFACT_FINALIZATION_LEASE_SECONDS: u64 = 60 * 60;
 // The default 100 GiB run ceiling holds 12,800 full 8 MiB blocks. This leaves
 // bounded slack for small tail blocks without allowing zero-byte row growth to
 // approach the 500-artifact by 2,048-block per-artifact product.
-// foundation-governance: operational-limit
 const DEFAULT_MAXIMUM_RUN_ARTIFACT_BLOCKS: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

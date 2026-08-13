@@ -17,7 +17,6 @@ pub const ENVELOPE_SCHEMA_V1: u16 = 1;
 /// Exact nonce length required by AES-256-GCM.
 pub const ENVELOPE_NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const ENVELOPE_AAD_DOMAIN: &[u8] = b"automata-ci/envelope/payload/aes-256-gcm/v1";
 
 /// Inclusive maximum ciphertext length accepted by the generic envelope boundary.

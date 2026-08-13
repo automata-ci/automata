@@ -13,15 +13,8 @@ surfaces, the pinned GitHub limit catalog, and every reviewed parity-visible
 stricter Automata limit.
 
 The registry is active. Its validator discovers format/version constants and
-requires each one to be registered or explicitly excluded. A separate
-repository-wide derived-contract pass discovers every production Rust constant
-whose value contains a version token after serialized-format declarations are
-accounted for. This includes digest domains, cryptographic contexts, capability
-and route discriminators, credential keys, and storage namespaces under every
-crate source, regardless of the constant's name or indentation. Each such token
-must carry a source-local owner/kind annotation or an exact-source exclusion.
-The validator also requires the full
-pinned GitHub limit ID set, and binds implemented limits to exact source,
+requires each one to be registered or explicitly excluded. It also requires the
+full pinned GitHub limit ID set, and binds implemented limits to exact source,
 reason, and boundary-test evidence. An entry documents an existing contract;
 it does not make an unsupported product surface available. A future registry
 schema or status transition must define and enforce its own completeness
@@ -64,14 +57,6 @@ distinct fragments inside the attributed, non-ignored test body: the prior
 version, the reader call, and the asserted outcome. Comments and helper
 functions cannot satisfy those bindings.
 
-Versioned derived tokens such as digest domains, AAD/purpose labels, operation
-kinds, and storage namespaces are not serialization readers. Annotate them
-immediately above the declaration as
-`foundation-governance: derived-contract owner=<owner> kind=<kind>`. Their
-append-only-token-or-coordinated-migration policy is enforced separately from
-serialized-format prior-reader policy; new tokens should normally be added
-instead of mutating a token already used by durable data or another process.
-
 ## Changing the store schema
 
 The repository currently has a canonical greenfield database with no supported
@@ -98,8 +83,7 @@ version rules. Parallel feature branches must not invent that transition.
 Limit discovery is declaration-first across every production
 `crates/*/src/**/*.rs` source. It scans module, local, and associated constants
 whose token-bounded names or semantic types identify a maximum, minimum, limit,
-ceiling, cap, bound, budget, quota, page size, or batch size. Source annotations
-are consistency evidence; they do not opt a declaration into discovery.
+ceiling, cap, bound, budget, quota, page size, or batch size.
 
 Every discovered declaration must have exactly one of four dispositions:
 
@@ -113,21 +97,14 @@ Every discovered declaration must have exactly one of four dispositions:
 - a narrow lexical non-limit exclusion for names such as protocol/header tokens
   that contain a limit word but impose no behavioral ceiling.
 
-Registered product limits carry an immediately preceding
-`// foundation-governance: parity-limit` annotation. Structured aliases use
-`// foundation-governance: limit-alias`. Existing
-`// foundation-governance: operational-limit` annotations must resolve to
-operational exclusions, but unannotated operational candidates still require
-an explicit disposition. Add or update the inventory in the same change that
-introduces, renames, aliases, or changes an enforced limit.
+Add or update the central inventory in the same change that introduces,
+renames, aliases, or changes an enforced limit. Source files do not carry
+governance annotations; declaration-first discovery and the four dispositions
+above are the authority.
 
 The repository's canonical Automata workflow invokes these checks through
-`verify-product-targets.sh`. The scheduled/manual upstream-reference drift
-detector is declared alongside that workflow at
-`.ci/workflows/github-actions-reference-drift.yml`; the checked-in contract is
-not evidence that scheduled production execution has been proven. It is also
-not a GitHub pull-request validation lane, so an empty GitHub PR check rollup is
-not evidence that the governance checks ran.
+`verify-product-targets.sh`. An empty GitHub pull-request check rollup is not
+evidence that the governance checks ran.
 
 ## Shared surfaces
 

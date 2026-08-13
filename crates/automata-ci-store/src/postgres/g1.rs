@@ -46,16 +46,11 @@ use crate::{
     TryClaimReceipt, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
 };
 
-// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
-// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-// foundation-governance: derived-contract owner=store kind=wire-discriminator
 const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-rpc-response-metadata:v1";
 

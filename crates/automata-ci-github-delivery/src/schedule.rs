@@ -72,7 +72,6 @@ const DEFAULT_MAX_FIRES: u16 = 32;
 const MAX_FIRES_PER_PASS: u16 = 256;
 const MAX_STALENESS_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 const MAX_PROVIDER_REQUEST_MILLIS: i64 = 5 * 60 * 1_000;
-// foundation-governance: derived-contract owner=workflow kind=storage-namespace
 const ARCHIVE_KEY_PREFIX: &str = "github/schedule-archives/v1";
 
 /// Time source used to bound scheduler-owned work outside database calls.

@@ -17,7 +17,6 @@ use crate::{
 // Parsing already bounds source bytes and AST nodes. This separate budget keeps
 // repeated fully qualified paths and diagnostics linear in a small multiple of
 // the accepted source size, even when one very long key has many descendants.
-// foundation-governance: parity-limit
 const MAX_DERIVED_TEXT_BYTES: usize = 16_777_216;
 const DERIVED_TEXT_LIMIT_CODE: &str = "github.decode.derived_text_limit";
 const DERIVED_TEXT_LIMIT_MESSAGE: &str =

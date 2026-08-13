@@ -6,7 +6,6 @@ use thiserror::Error;
 use crate::{AttemptId, CORE_SCHEMA_VERSION, LogStreamId, UnixMillis};
 
 /// Defensive maximum for one wire frame; larger writes must be chunked.
-// foundation-governance: parity-limit
 pub const MAX_LOG_FRAME_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -7,11 +7,9 @@ use thiserror::Error;
 use crate::{PortError, PortErrorKind, SecretPort};
 
 /// Maximum number of exact-version bindings retained for one running job.
-// foundation-governance: parity-limit
 pub const MAX_EPHEMERAL_JOB_SECRETS: usize = 256;
 
 /// Maximum aggregate plaintext bytes retained for one running job.
-// foundation-governance: parity-limit
 pub const MAX_EPHEMERAL_JOB_SECRET_BYTES: usize = 1_048_576;
 
 /// Validates the projected aggregate plaintext held by one job.

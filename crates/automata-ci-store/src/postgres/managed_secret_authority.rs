@@ -21,7 +21,6 @@ use crate::{
 
 use super::{PostgresStore, durable_schema::current_durable_schemas};
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const EVIDENCE_DOMAIN: &[u8] = b"automata/store/managed-secret-authority:v1\0";
 
 #[derive(Debug)]

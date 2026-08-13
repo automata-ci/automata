@@ -19,11 +19,8 @@ use crate::{
 };
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
-// foundation-governance: parity-limit
 const MAX_CHECK_NAME_BYTES: usize = 255;
-// foundation-governance: parity-limit
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_DETAILS_URL_BYTES: usize = 2_048;
 const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
 const MAX_CHECK_OUTPUT_SUMMARY_BYTES: usize = 65_535;
@@ -39,7 +36,6 @@ const MAX_CHECK_ANNOTATIONS_PER_REQUEST: usize = 50;
 const CHECK_ANNOTATIONS_PER_PAGE: usize = 100;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
-// foundation-governance: parity-limit
 const MAX_GITHUB_ID: u64 = 9_223_372_036_854_775_807;
 const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
 const MAX_RATE_LIMIT_RESET_SECONDS: u64 = 253_402_300_799;

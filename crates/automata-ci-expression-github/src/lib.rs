@@ -23,7 +23,6 @@ pub use evaluator::{GithubExpressionEvaluator, GithubExpressionLimits};
 pub use value::{GithubObject, GithubValue, GithubValueError};
 
 /// Upstream compatibility baseline used for evaluator behavior.
-// foundation-governance: derived-contract-exclusion
 pub const GITHUB_EXPRESSION_RUNTIME_BASELINE: &str = "actions/runner@v2.336.0";
 /// Immutable upstream source revision for the compatibility baseline.
 pub const GITHUB_EXPRESSION_RUNTIME_BASELINE_COMMIT: &str =

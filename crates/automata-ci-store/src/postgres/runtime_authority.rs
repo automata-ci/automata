@@ -43,16 +43,12 @@ const MINT_COMMIT_OPERATION: &str = "mint_commit";
 const QUARANTINE_OPERATION: &str = "quarantine";
 const REVOCATION_OUTCOME_OPERATION: &str = "revocation_outcome";
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const MINT_COMMIT_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.mint-commit.v4\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const QUARANTINE_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.quarantine.v4\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const REVOCATION_OUTCOME_DIGEST_DOMAIN: &[u8] =
     b"automata.store.github-runtime-authority-operation.revocation-outcome.v4\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const ENVELOPE_DIGEST_DOMAIN: &[u8] = b"automata.store.github-runtime-authority-envelope.v1\0";
 
 pub(super) fn github_manifest_origin_is_closed(origin_kind: &str) -> bool {

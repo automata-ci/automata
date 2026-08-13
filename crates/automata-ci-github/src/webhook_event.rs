@@ -15,11 +15,8 @@ use crate::webhook::{
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
-// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_EVENT_TYPE_CHARS: usize = 100;
-// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_PROPERTIES: usize = 10;
-// foundation-governance: parity-limit
 const MAX_REPOSITORY_DISPATCH_CLIENT_PAYLOAD_CHARS: usize = 65_535;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

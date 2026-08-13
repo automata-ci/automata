@@ -34,7 +34,6 @@ use crate::{
 /// Canonical content type for a protobuf-encoded current job runtime context.
 pub use automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
-// foundation-governance: parity-limit
 const MAX_JOB_CONTENT_BYTES: usize = 16_777_216;
 const DEFAULT_GITHUB_JOB_TIMEOUT_SECONDS: u32 = 360 * 60;
 

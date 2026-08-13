@@ -49,7 +49,6 @@ enum SubjectEvidenceAdmission {
 const WORKFLOW_DISPATCH_PERMISSION: &str = "runs:dispatch";
 const WORKFLOW_DISPATCH_AUDIT_ACTION: &str = "workflow.dispatch";
 const WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND: &str = "workflow_run";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-dispatch.audit.v1\0";
 
 #[async_trait]

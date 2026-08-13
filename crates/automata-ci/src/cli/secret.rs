@@ -38,9 +38,7 @@ use crate::app::secret_api::{
     BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH, BUILTIN_SECRET_PROVIDER_PATH, MAX_SECRET_INGRESS_BYTES,
 };
 
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 const REPOSITORY_RESOLUTION_BASE: &str = "/api/v1/repository-targets/github";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 const REPOSITORY_SECRETS_BASE: &str = "/api/v1/repositories";
 const LIST_PAGE_SIZE: usize = 20;
 const MAX_LIST_PAGES: usize = 500;

@@ -3,7 +3,6 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use automata_ci_core::WorkflowInputKey;
 
 /// Maximum number of inputs accepted by a GitHub manual-dispatch contract or payload.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS: usize = 25;
 
 /// Maximum aggregate characters accepted in one verified manual-dispatch payload.
@@ -11,7 +10,6 @@ pub const MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS: usize = 25;
 /// The budget includes input identifiers and the textual representation of each
 /// value. It matches GitHub's documented 65,535-character payload ceiling while
 /// remaining independent of a webhook's JSON serialization details.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS: usize = 65_535;
 
 /// Supported source type for one manually dispatched workflow input.

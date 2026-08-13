@@ -43,5 +43,4 @@ pub use provider::RootlessPodmanProvider;
 pub use state::PodmanStateRoot;
 
 /// Stable provider identifier for this adapter generation.
-// foundation-governance: derived-contract owner=sandbox kind=storage-namespace
 pub const PODMAN_PROVIDER_ID: &str = "podman-rootless-v1";

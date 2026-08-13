@@ -52,7 +52,7 @@ Tasks:
 - [x] Validate the compatibility table from the registry.
 - [x] Add a reviewed-delta mechanism for new GitHub syntax, permissions,
   variables, limits, and action runtimes.
-- [x] Run a scheduled, source-pinned detector against the reviewed GitHub
+- [ ] Run a scheduled, source-pinned detector against the reviewed GitHub
   Actions reference catalog and open a bounded diff issue when syntax,
   contexts, permissions, events, limits, or default variables change.
 - [x] Track the pinned `actions/runner` baseline and automatically require
@@ -88,20 +88,6 @@ inputs, artifact bytes, and per-step outputs. The loopback provider emulator is
 protocol evidence only; it cannot prove GitHub.com networking, App
 installation, or live credential behavior.
 
-This package adds an opt-in, media-type-negotiated `schemaVersion: 2` export.
-It returns verified masked log frames and gives fields modeled as optional by
-the export an explicit `present` or `unavailable` state; missing per-step
-outputs are never synthesized as an empty map. Legitimate semantic `null`
-values inside typed GitHub data remain representable. The product-owned
-`automata-ci-conformance` crate now defines exact
-  catalog, provenance, evidence-class, fake-clock, failure-script, restart,
-  webhook, GitHub-stub, live-prerequisite, and shard contracts. The product now
-  also publishes an explicit composition behind the
-`automata-ci/conformance-test-support` Cargo feature and one
-`ProductConformanceShard` provisioning adapter that consumes all four identities
-from a selected plan entry; default production builds do not expose or select
-that composition, and companion process wiring remains pending.
-
 The companion
 [`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
 repository was audited at `af7e2ca`. It already supplies immutable fixture
@@ -112,7 +98,7 @@ comparator. That harness is manual, its default lane is provider-emulated, its
 CI does not launch Automata, and all seven scenarios remain candidates. The
 [integration-test workstream](github-actions-parity-11-integration-tests.md)
 owns the cross-repository harness and graduation work; this package continues
-to own the product export and composition contracts intended for that harness.
+to own the product export and composition contracts it consumes.
 
 Tasks:
 
@@ -123,27 +109,14 @@ Tasks:
 - [x] Establish canonical evidence types and a strict structural comparator;
   the evidence schema and comparator reject incomplete records, while concrete
   target adapters remain incomplete.
-- [x] Preserve the companion repository's manual reusable fixture composing signed webhook ingress,
+- [x] Establish a manual reusable fixture composing signed webhook ingress,
   immutable source storage, workflow admission, PostgreSQL scheduling,
   Results, Checks, and real control-plane and runner processes.
-- [x] Publish a deterministic monotonic fixture-control clock and an explicit
-  product composition that injects it into workflow admission, Results, and
-  the real GitHub provider runtime builder without changing production defaults.
-- [ ] Make the companion process launcher select that opt-in composition for
-  every launched control-plane and runner process rather than using wall time.
-- [x] Send validated byte-exact raw webhook fixtures through the production
-  Axum ingress. The fixture type locks the body and signature at construction
-  or decoding, and the route test proves invalid signatures write nothing,
-  exact replays are idempotent, and changed bytes under one delivery identity
-  conflict.
-- [x] Serve paginated GitHub APIs, rate limits, indeterminate mutations, and
-  credential failures through a bounded exact-order loopback server; compose
-  the real hardened GitHub HTTP client against its held shard listener.
-- [x] Provide a shell-free bounded child-process restart probe and require the
-  exact scheduled service restart before each durable fixture transition.
-- [ ] Apply that restart probe to the real control-plane, runner, PostgreSQL,
-  and object-store processes and retain their restart evidence in the companion
-  run.
+- [ ] Add deterministic fake-clock control.
+- [ ] Inject exact raw webhook bodies and signatures.
+- [ ] Stub paginated GitHub APIs, rate limits, indeterminate mutations, and
+  credential failures.
+- [ ] Restart individual services between every durable transition.
 - [ ] Snapshot selected workflows, expanded jobs, dependencies, step results,
   outputs, annotations, summaries, logs, services, artifacts, caches, effective
   authority, and cleanup.
@@ -151,53 +124,30 @@ Tasks:
   operating system, provider, external prerequisites, and expected digest.
 - [ ] Convert current checkout, upload/download-artifact, cache, service, and
   Windows fixtures into catalog entries.
-- [x] Define mutually exclusive contract, hermetic-product, provider-emulator,
-  and live-provider evidence classes so one class cannot satisfy another.
-- [ ] Make CI and deployment adapters select and enforce those evidence
-  classes rather than relying on convention.
-- [x] Make catalog-bound `ScenarioAdmission` return an explicit non-passing
-  `Skipped` outcome for missing live prerequisites.
-- [ ] Enforce that outcome in the companion CI/live adapter rather than merely
-  publishing the contract.
+- [ ] Separate hermetic CI fixtures from deployment-owned live tests.
+- [ ] Make missing live prerequisites skip explicitly rather than report a
+  false pass.
 - [ ] Allow the same source/event fixture to consume GitHub-derived expected
   snapshots.
-- [x] Evolve the existing schema-v1 export with a versioned per-step-output
+- [ ] Evolve the existing schema-v1 export with a versioned per-step-output
   boundary; never synthesize missing output maps as empty evidence.
-- [x] Keep emulator, hermetic GitHub stub, and live-provider evidence as
+- [ ] Keep emulator, hermetic GitHub stub, and live-provider evidence as
   distinct catalog classes so one cannot satisfy another's acceptance gate.
-- [x] Derive isolated shard identities without shared PostgreSQL schemas,
-  port-reservation keys, credential scopes, or object prefixes.
-- [x] Make the product-owned conformance provisioning adapter consume the
-  selected shard's PostgreSQL schema, object prefix, credential scope, and
-  port-reservation key together. It marker-owns a real PostgreSQL schema,
-  gates real immutable-blob operations, scopes the hermetic GitHub credential
-  adapter, and holds real loopback listeners through handoff.
-- [ ] Make the companion real-process adapter consume that product provisioning
-  boundary for every control-plane/runner process and external S3 resource;
-  existing standalone tests that bind port `0` or invent local fixture names
-  are not evidence for this task.
-- [x] Publish strict evidence, scenario-admission, and source/build/profile
-  metadata contracts for `IT-01`/`IT-02`/`IT-03` consumption.
-- [ ] Add the companion-repository JSON/CLI adapter that consumes those
-  contracts; the companion's existing schema-v3 fixture model remains a
-  distinct external contract.
+- [ ] Shard without shared rows, ports, credentials, or object prefixes.
+- [ ] Publish the evidence and scenario-admission contracts consumed by
+  `IT-02`/`IT-03`, and provide exact source/build/profile metadata to the
+  `IT-01` release-bundle contract.
 
 Acceptance:
 
 - [ ] A signed push reaches a terminal run, Results, and Check through real
   product composition without network access.
-- [x] Production ingress and its durable repository contract replay an exact
-  delivery while changed bytes under the same identity conflict.
-- [x] Typed product-port adapters can fail source, token, Results, the Checks
-  credential boundary, runner, or object storage independently; mutating ports
-  can apply an operation and then return an indeterminate outcome.
-- [ ] Process-composed tests exercise those failures through the full workflow
-  lifecycle, including Checks publication after credential acquisition.
-- [x] Canonical catalog and evidence-envelope provenance is auditable offline.
-- [ ] Real process adapters emit and retain that bound envelope for every run.
-- [ ] Restart snapshots from real service processes remain deterministic; the
-  ordering and restart-record contract is complete, while retained process
-  evidence belongs to the pending adapter run.
+- [ ] Duplicate delivery replays, while changed bytes under the same identity
+  conflict.
+- [ ] A test can fail source, token, Results, Checks, runner, or object storage
+  independently.
+- [ ] Fixture provenance is auditable offline.
+- [ ] Restart snapshots remain deterministic.
 
 ### FND-03 — Extract executor integration seams
 
@@ -255,10 +205,6 @@ Tasks:
 - [x] Require a source-bound, non-ignored compatibility-reader test for every
   prior version whenever a named/versioned durable or wire format advances
   beyond v1; `exact-current-only` cannot advance to v2.
-- [x] Discover every named/versioned derived contract token (digest and identity
-  domains, cryptographic contexts, wire discriminators, credential keys, and
-  storage namespaces) across crate sources; require a source-local owner/kind
-  registration or an exact-source exclusion under a separate evolution policy.
 - [x] Expand the machine-readable inventory to every GitHub and stricter
   Automata limit, enforcement phase, and reason code.
 - [x] Require every registered limit to bind distinct boundary-minus-one,

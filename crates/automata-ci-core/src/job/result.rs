@@ -18,25 +18,19 @@ use crate::{AttemptId, CORE_SCHEMA_VERSION, OutputSensitivity, UnixMillis};
 ///
 /// This follows the provider-compatible one-megabyte per-job accounting rule.
 /// Secret-derived output markers carry no value and consume no value budget.
-// foundation-governance: parity-limit
 pub const MAX_JOB_RESULT_OUTPUT_UTF16_BYTES: usize = 1_048_576;
 
 /// Maximum UTF-8 bytes retained across step summaries and annotations in one job result.
-// foundation-governance: parity-limit
 pub const MAX_JOB_RESULT_ATTACHMENT_BYTES: usize = 8_388_608;
 
 /// Maximum structured annotations retained across one job result.
-// foundation-governance: parity-limit
 pub const MAX_JOB_RESULT_ANNOTATIONS: usize = 4_096;
 
 /// Maximum properties retained on one structured step annotation.
-// foundation-governance: parity-limit
 pub const MAX_STEP_ANNOTATION_PROPERTIES: usize = 64;
 
 /// Maximum UTF-8 bytes retained in one summary, annotation message, or property value.
-// foundation-governance: parity-limit
 pub const MAX_STEP_ATTACHMENT_TEXT_BYTES: usize = 1_048_576;
-// foundation-governance: parity-limit
 const MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

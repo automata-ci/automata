@@ -16,9 +16,7 @@ use crate::{
 
 const ACTIVE_CACHE_LIFECYCLES: &[&str] =
     &["leased", "preparing", "running", "cancelling", "finalizing"];
-// foundation-governance: parity-limit
 const MAX_REPOSITORY_CACHE_ENTRIES: usize = 4_096;
-// foundation-governance: limit-alias
 const CACHE_ENTRY_CENSUS_LIMIT: i64 = 4_097;
 const MAXIMUM_CACHE_CALLER_CLOCK_SKEW_SECONDS: u64 = 60;
 

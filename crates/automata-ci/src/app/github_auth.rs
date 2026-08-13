@@ -63,16 +63,11 @@ use crate::server::installation_setup::{
 pub(crate) const GITHUB_WEB_BEGIN_PATH: &str = "/auth/github/login";
 pub(crate) const GITHUB_WEB_CALLBACK_PATH: &str = "/auth/github/callback";
 pub(crate) const GITHUB_WEB_LOGOUT_PATH: &str = "/auth/logout";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const GITHUB_DEVICE_BEGIN_PATH: &str = "/api/v1/auth/device";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const GITHUB_DEVICE_POLL_PATH: &str = "/api/v1/auth/device/poll";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const CLI_SESSION_PATH: &str = "/api/v1/session";
 pub(crate) const GITHUB_SETUP_WEB_BEGIN_PATH: &str = "/setup/auth/github";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const GITHUB_SETUP_DEVICE_BEGIN_PATH: &str = "/api/v1/setup/device";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const GITHUB_SETUP_DEVICE_POLL_PATH: &str = "/api/v1/setup/device/poll";
 
 const MAX_JSON_REQUEST_BYTES: usize = 4 * 1_024;

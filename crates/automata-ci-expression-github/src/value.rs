@@ -2,9 +2,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const MAX_CONSTRUCTION_ITEMS: usize = 65_536;
-// foundation-governance: parity-limit
 const MAX_KEY_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -6,10 +6,8 @@ use thiserror::Error;
 use super::{ExpressionProgram, ExpressionProgramError};
 
 /// Maximum number of literal/evaluation segments in one value template.
-// foundation-governance: parity-limit
 pub const MAX_VALUE_TEMPLATE_SEGMENTS: usize = 1_024;
 /// Maximum aggregate UTF-8 source bytes retained by one value template.
-// foundation-governance: parity-limit
 pub const MAX_VALUE_TEMPLATE_TEXT_BYTES: usize = 16_777_216;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -31,33 +31,21 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Maximum repository workflow files accepted by one reusable catalog.
-// foundation-governance: parity-limit
 pub const MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES: usize = 50;
 /// Maximum caller-to-callee edges below the root invocation.
-// foundation-governance: parity-limit
 pub const MAX_REUSABLE_WORKFLOW_DEPTH: usize = 9;
 /// Maximum invocation occurrences, including the root, in one expansion.
-// foundation-governance: parity-limit
 pub const MAX_REUSABLE_WORKFLOW_INVOCATIONS: usize = 256;
 /// Maximum logical jobs across all invocation occurrences in one expansion.
-// foundation-governance: parity-limit
 pub const MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS: usize = 4_096;
 
-// foundation-governance: parity-limit
 const MAX_REUSABLE_WORKFLOW_PATH_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_REUSABLE_WORKFLOW_SOURCE_BYTES: usize = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_PERMISSION_NAME_BYTES: usize = 256;
-// foundation-governance: parity-limit
 const MAX_PERMISSION_GRANTS: usize = 256;
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const REUSABLE_INVOCATION_ID_DOMAIN: &[u8] = b"automata.reusable-workflow.invocation.v1\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const REUSABLE_JOB_ID_DOMAIN: &[u8] = b"automata.reusable-workflow.job.v1\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const ROOT_JOB_ID_DOMAIN: &[u8] = b"automata.admission.logical-job.v1\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const EXPANSION_DIGEST_DOMAIN: &[u8] = b"automata.reusable-workflow.expansion.v1\0";
 
 /// Independent hard-bounded limits applied while constructing an expansion.

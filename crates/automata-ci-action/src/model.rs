@@ -10,19 +10,12 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const MAX_SUBPATH_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_COMPRESSED_BYTES: u64 = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_ENTRY_COUNT: usize = 10_000;
-// foundation-governance: parity-limit
 const MAX_EXPANDED_BYTES: u64 = 268_435_456;
-// foundation-governance: parity-limit
 const MAX_DEFINITION_BYTES: u64 = 1_048_576;
-// foundation-governance: parity-limit
 const MAX_ENTRY_PATH_BYTES: usize = 4_096;
-// foundation-governance: parity-limit
 const MAX_PATH_INDEX_BYTES: usize = 16_777_216;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -29,14 +29,10 @@ pub const LOGICAL_INSTANCE_RESULT_MEDIA_TYPE: &str = "application/vnd.automata.j
 /// Maximum duration of one logical-instance result claim.
 pub const MAX_LOGICAL_INSTANCE_RESULT_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-descriptor.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const SERVER_CANCELLATION_DESCRIPTOR_DOMAIN: &[u8] =
     b"automata.store.logical-instance-result.server-cancellation.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const OUTPUTS_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-outputs.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-commit.v1\0";
 
 /// Positive server-assigned completion order within one logical job.

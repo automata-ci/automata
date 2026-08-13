@@ -24,7 +24,6 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Maximum aggregate serialized runtime-context bytes emitted by one activation.
-// foundation-governance: parity-limit
 pub const MAX_ACTIVATION_OUTPUT_BYTES: usize = 67_108_864;
 
 /// Maximum raw Cartesian candidates inspected before matrix exclusions.
@@ -32,11 +31,9 @@ pub const MAX_ACTIVATION_OUTPUT_BYTES: usize = 67_108_864;
 /// GitHub's generated-job limit is applied after exclusions and includes. This
 /// separate bound prevents an exclusion-heavy matrix from becoming an
 /// unbounded control-plane CPU or allocation request.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_CANDIDATE_COMBINATIONS: usize = 4_096;
 
 /// Maximum combination/patch operations performed by one matrix expansion.
-// foundation-governance: parity-limit
 pub const MAX_MATRIX_EXPANSION_WORK: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,7 +68,6 @@ const fn matrix_expansion_work_rejection(
     None
 }
 
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const MATRIX_DIGEST_DOMAIN: &[u8] = b"automata-ci/matrix-instance/v1\0";
 
 /// Insertion-stable value returned by a provider expression adapter.

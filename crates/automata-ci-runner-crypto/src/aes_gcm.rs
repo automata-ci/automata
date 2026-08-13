@@ -19,7 +19,6 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HEADER: &[u8; 4] = b"ASP1";
 const ENCODED_OVERHEAD: usize = HEADER.len() + NONCE_BYTES + TAG_BYTES;
-// foundation-governance: derived-contract owner=protocol kind=cryptographic-context
 const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v1\0";
 
 /// AES-256-GCM implementation of the runner spool protection boundary.

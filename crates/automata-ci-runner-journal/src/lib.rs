@@ -72,7 +72,6 @@ pub const MAX_JOB_IR_CONTENT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_RUNTIME_AUTHORITY_CONTENT_BYTES: u64 = 512 * 1024;
 
 /// Maximum durable canonical terminal-result payload size.
-// foundation-governance: parity-limit
 pub const MAX_TERMINAL_RESULT_CONTENT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Maximum aggregate durable log-segment content size per slot.

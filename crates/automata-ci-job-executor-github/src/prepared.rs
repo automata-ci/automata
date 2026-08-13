@@ -6,17 +6,11 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const MAX_PREPARED_ARCHIVE_BYTES: usize = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_PREPARED_INPUTS: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_PREPARED_OUTPUTS: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_COMPOSITE_STEPS: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_COMPOSITE_VALUES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_ACTION_PATH_BYTES: usize = 4_096;
 
 /// One already-compiled action input default.

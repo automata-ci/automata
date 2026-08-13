@@ -17,7 +17,6 @@ pub const GITHUB_EXPRESSION_DIALECT: &str = "github-actions";
 /// Semantics version implemented by this parser/compiler.
 pub const GITHUB_EXPRESSION_DIALECT_VERSION: u16 = 1;
 /// Upstream runner limit, measured as .NET UTF-16 code units.
-// foundation-governance: parity-limit
 pub const GITHUB_EXPRESSION_MAX_UTF16_UNITS: usize = 21_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

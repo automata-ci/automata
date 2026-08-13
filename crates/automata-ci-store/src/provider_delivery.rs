@@ -28,9 +28,7 @@ const MAX_DELIVERY_ID_BYTES: usize = 255;
 const MAX_REPOSITORY_IDENTITY_BYTES: usize = 1_024;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const MAX_WORKFLOW_PATH_BYTES: usize = 1_024;
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMPLETION_DIGEST_DOMAIN: &[u8] = b"automata.store.provider-delivery-completion.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const WORKFLOW_INVENTORY_DIGEST_DOMAIN: &[u8] =
     b"automata.store.provider-delivery-workflow-inventory.v1\0";
 

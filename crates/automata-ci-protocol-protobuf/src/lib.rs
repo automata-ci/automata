@@ -37,5 +37,4 @@ pub use encode::{
 pub use error::{DecodeError, EncodeError};
 
 /// Stable protobuf package implemented by this adapter.
-// foundation-governance: derived-contract owner=protocol kind=wire-discriminator
 pub const PROTOBUF_PACKAGE: &str = "automata.runner.v1";

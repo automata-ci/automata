@@ -93,9 +93,7 @@ pub enum PostgresTransportSecurity {
     LoopbackPlaintext,
 }
 
-// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const RUNNER_COMMAND_ENCRYPTION_PURPOSE: &str = "control-plane/runner-command:v1";
-// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const RUNNER_RPC_RESPONSE_ENCRYPTION_PURPOSE: &str = "control-plane/runner-rpc-response:v1";
 
 /// Immutable safety fields written by current admission or copied by retry.

@@ -42,19 +42,12 @@ const DEFAULT_PAGE_SIZE: u16 = 50;
 const DEFAULT_DETAIL_ASSIGNMENT_PAGE_SIZE: u16 = 50;
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const USERS_PATH: &str = "/api/v1/users";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const USER_PATH: &str = "/api/v1/users/{principal_id}";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const ROLES_PATH: &str = "/api/v1/roles";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const ROLE_PATH: &str = "/api/v1/roles/{role_id}";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const ROLE_PERMISSION_PATH: &str = "/api/v1/roles/{role_id}/permissions/{permission}";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const DIRECT_BINDINGS_PATH: &str = "/api/v1/direct-bindings";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const DIRECT_BINDING_PATH: &str = "/api/v1/direct-bindings/{binding_id}";
 
 /// Dependencies for the isolated RBAC management HTTP surface.

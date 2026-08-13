@@ -24,9 +24,7 @@ use crate::{
 
 const CONCURRENCY_CANCELLATION_ACTOR: &str = "automata.concurrency";
 const CONCURRENCY_CANCELLATION_REASON: &str = "superseded by a newer workflow run";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const CANCELLATION_INTENT_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-intent.v1";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const CANCELLATION_COMMAND_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-command.v1";
 const PUBLICATION_SAFETY_REASON: &str = "repository_policy";
 pub(super) const MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP: i64 = 4_096;

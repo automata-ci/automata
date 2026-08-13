@@ -42,7 +42,6 @@ pub use phase::{CompletedStepApplicator, GithubCompletedStepApplicator};
 pub use workflow_command::{GithubWorkflowCommandSession, WorkflowCommandProcessor};
 
 /// Reviewed upstream runner release.
-// foundation-governance: derived-contract-exclusion
 pub const GITHUB_RUNTIME_PROTOCOL_BASELINE: &str = "actions/runner@v2.336.0";
 
 /// Immutable commit behind [`GITHUB_RUNTIME_PROTOCOL_BASELINE`].

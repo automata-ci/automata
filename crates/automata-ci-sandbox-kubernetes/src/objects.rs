@@ -33,7 +33,6 @@ pub(crate) const PROFILE_DIGEST_ANNOTATION: &str = "ci.automata.dev/profile-dige
 pub(crate) const FINGERPRINT_ANNOTATION: &str = "ci.automata.dev/spec-sha256";
 pub(crate) const MAIN_CONTAINER: &str = "job";
 pub(crate) const GUEST_BINARY: &str = "/automata/bin/automata-ci-sandbox-guest";
-// foundation-governance: derived-contract owner=sandbox kind=storage-namespace
 pub(crate) const GUEST_SOCKET: &str = "@automata-ci-control-v1";
 
 #[derive(Debug)]

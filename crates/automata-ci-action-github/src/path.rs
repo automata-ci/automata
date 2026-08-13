@@ -3,9 +3,7 @@ use crate::{
     MetadataScalarKind,
 };
 
-// foundation-governance: parity-limit
 const MAX_ENTRY_PATH_BYTES: usize = 4_096;
-// foundation-governance: parity-limit
 const MAX_IMAGE_REFERENCE_BYTES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

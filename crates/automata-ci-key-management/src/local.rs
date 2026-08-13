@@ -19,7 +19,6 @@ const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const WRAP_HEADER: &[u8; 4] = b"AKW1";
 const WRAP_SCHEMA: u16 = 1;
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const WRAP_AAD_DOMAIN: &[u8] = b"automata-ci/local-keyring/dek-wrap/aes-256-gcm/v1";
 const WRAPPED_KEY_BYTES: usize =
     WRAP_HEADER.len() + NONCE_BYTES + AES_256_GCM_KEY_BYTES + TAG_BYTES;

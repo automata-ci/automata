@@ -9,10 +9,8 @@ use super::{
 };
 
 /// Maximum cumulative number of semantic nodes in one logical-workflow plan.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_PLAN_NODES: usize = 65_536;
 /// Maximum cumulative UTF-8 text retained by one logical-workflow plan.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_PLAN_TEXT_BYTES: usize = 4_194_304;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

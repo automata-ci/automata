@@ -45,7 +45,6 @@ use crate::{
     GithubInstallationTokenRevocationCandidate, config::whole_milliseconds,
 };
 
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const INSTALLATION_TOKEN_FRAME_DOMAIN: &[u8] = b"automata-ci/github-installation-token/v1\0";
 const DEFAULT_MINT_RETRY_BACKOFF_MILLIS: i64 = 1_000;
 const MAX_SUPERVISED_PENDING_COMMITS: usize = 1_024;

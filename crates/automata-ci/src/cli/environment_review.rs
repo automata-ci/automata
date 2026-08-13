@@ -14,7 +14,6 @@ use super::{
     credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
 };
 
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 const ENVIRONMENT_REVIEW_BASE: &str = "/api/v1/repositories";
 
 pub(crate) async fn execute_environment_review_command(

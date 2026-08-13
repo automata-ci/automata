@@ -6,7 +6,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::WorkflowPlanError;
 
-// foundation-governance: parity-limit
 const MAX_PLAN_KEY_LENGTH: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

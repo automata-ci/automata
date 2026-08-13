@@ -8,19 +8,14 @@ use thiserror::Error;
 /// Current durable expression-program representation.
 pub const EXPRESSION_PROGRAM_SCHEMA_VERSION: u16 = 1;
 /// Maximum preserved expression source size in UTF-8 bytes.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_SOURCE_BYTES: usize = 84_000;
 /// Maximum number of instructions in one expression program.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_INSTRUCTIONS: usize = 4_096;
 /// Maximum validated expression stack-tree depth.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_DEPTH: usize = 50;
 /// Maximum aggregate UTF-8 bytes stored by instruction text operands.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_TEXT_BYTES: usize = 84_000;
 /// Maximum durable expression dialect identifier length.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_DIALECT_LENGTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

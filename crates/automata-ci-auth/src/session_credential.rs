@@ -40,9 +40,7 @@ const MIN_CREDENTIAL_LENGTH: usize =
     SESSION_CREDENTIAL_VERSION.len() + 2 + 1 + GENERATED_SECRET_LENGTH;
 const MAX_CREDENTIAL_LENGTH: usize =
     SESSION_CREDENTIAL_VERSION.len() + 2 + MAX_KEY_ID_LENGTH + GENERATED_SECRET_LENGTH;
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const LOOKUP_HMAC_DOMAIN: &[u8] = b"automata-ci/session-credential/lookup/v1\0";
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const CSRF_HMAC_DOMAIN: &[u8] = b"automata-ci/session-credential/csrf/v1\0";
 
 /// One parsed opaque browser or CLI bearer credential.

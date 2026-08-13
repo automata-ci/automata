@@ -6,7 +6,6 @@ use xmlparser::{ElementEnd, Token, Tokenizer};
 
 const MAXIMUM_DECODED_BLOCK_ID_BYTES: usize = 64;
 const MAXIMUM_ENCODED_BLOCK_ID_BYTES: usize = 128;
-// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const BLOCK_LIST_DIGEST_DOMAIN: &[u8] = b"automata-results-block-list-v1\0";
 
 /// Azure Block Blob request rejected at the compatibility boundary.

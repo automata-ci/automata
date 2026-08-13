@@ -79,8 +79,6 @@ pub use github_provider_credentials::{
     GithubProviderCredentialReleaseSupervisor, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
 };
 use github_provider_runtime::GithubProviderFatalNotification;
-#[cfg(any(test, feature = "conformance-test-support"))]
-pub(crate) use github_provider_runtime::GithubProviderRuntimeClocks;
 pub use github_provider_runtime::{
     GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
     GithubProviderRuntimeError, GithubProviderRuntimePolicy, GithubProviderRuntimePolicyError,

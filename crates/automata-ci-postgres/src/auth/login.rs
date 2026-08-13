@@ -29,7 +29,6 @@ use super::{
     },
 };
 
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const LOGIN_ENCRYPTION_PURPOSE: &str = "auth/login-state:v1";
 const INSTALLATION_ENCRYPTION_SCOPE: &str = "system:installation";
 const LOGIN_PAYLOAD_HEADER: &[u8; 4] = b"ALP1";

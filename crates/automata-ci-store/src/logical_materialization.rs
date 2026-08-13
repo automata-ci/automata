@@ -28,15 +28,11 @@ use crate::{
 /// Maximum duration of one concrete-job materialization claim.
 pub const MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-materialization-descriptor.v4\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-materialization-commit.v3\0";
 // This is the current projector contract. Materialization independently
 // derives the identity and verifies the value embedded in the decoded JobIR.
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const JOB_ID_DOMAIN: &[u8] = b"automata.workflow-service.logical-job-id.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const ATTEMPT_ID_DOMAIN: &[u8] = b"automata.store.logical-initial-attempt-id.v1\0";
 
 /// Non-nil durable identity of one materialization worker.

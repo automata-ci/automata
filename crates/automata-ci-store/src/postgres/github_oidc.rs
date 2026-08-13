@@ -25,7 +25,6 @@ use crate::{
     ReserveGithubOidcAuthority, ReservedGithubOidcAuthority, RetainGithubOidcKey,
 };
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const AUDIENCE_SLOT_DOMAIN: &[u8] = b"automata/github-oidc/audience-slot:v1\0";
 const KEY_RETENTION_LOCK_NAMESPACE: i64 = 5_554_449_119_617_405_696;
 

@@ -23,7 +23,6 @@ use zeroize::Zeroizing;
 use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_token};
 use crate::product::{RunnerProductConfig, SecretSource};
 
-// foundation-governance: operational-limit
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
 const STAGE_SCHEMA: u8 = 1;
 

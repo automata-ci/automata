@@ -13,9 +13,7 @@ use zeroize::Zeroize as _;
 
 use crate::{ExecutorAdapterError, error::ExecutorAdapterErrorKind};
 
-// foundation-governance: parity-limit
 const MAX_MASKS: usize = 4_096;
-// foundation-governance: parity-limit
 const MAX_MASK_BYTES: usize = 1_048_576;
 const MASK_REPLACEMENT: &[u8] = b"***";
 

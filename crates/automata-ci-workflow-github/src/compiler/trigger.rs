@@ -16,13 +16,9 @@ use crate::{
 use super::{CompileContext, CompiledEvent, CompiledWorkflowDispatch, WorkflowNotSelectedReason};
 
 const DEFAULT_PULL_REQUEST_ACTIONS: &[&str] = &["opened", "synchronize", "reopened"];
-// foundation-governance: parity-limit
 const MAX_PATTERN_BYTES: usize = 4_096;
-// foundation-governance: parity-limit
 const MAX_CANDIDATE_BYTES: usize = 4_096;
-// foundation-governance: parity-limit
 const MAX_CHANGED_FILES: usize = 3_000;
-// foundation-governance: parity-limit
 const MAX_CHANGED_FILE_BYTES: usize = 12_288_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

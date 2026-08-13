@@ -12,7 +12,6 @@ const MAX_CANCELLATION_ACTOR_BYTES: usize = 255;
 const MAX_CANCELLATION_REASON_BYTES: usize = 1024;
 
 /// Durable outbox kind for a typed runner cancellation command.
-// foundation-governance: derived-contract owner=store kind=wire-discriminator
 pub const CANCEL_JOB_COMMAND_KIND: &str = "automata.runner.cancel-job.v1";
 /// Independently versioned JSON payload schema for [`CancelJobCommandPayload`].
 pub const CANCEL_JOB_COMMAND_SCHEMA: u16 = 1;

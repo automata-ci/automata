@@ -12,7 +12,6 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-// foundation-governance: derived-contract owner=integration kind=digest-domain
 const APPROVAL_REQUEST_ID_DOMAIN: &[u8] =
     b"automata/server/protected-environment-approval-request:v1\0";
 const APPROVAL_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;

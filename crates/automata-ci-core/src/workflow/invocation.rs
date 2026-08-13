@@ -12,10 +12,8 @@ use super::{
 };
 
 /// Maximum definitions in each invocation contract namespace.
-// foundation-governance: parity-limit
 pub const MAX_INVOCATION_DEFINITIONS: usize = 256;
 /// Maximum bytes in an invocation description or string default.
-// foundation-governance: parity-limit
 pub const MAX_INVOCATION_TEXT_BYTES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

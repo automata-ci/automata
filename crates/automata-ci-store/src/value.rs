@@ -7,7 +7,6 @@ use thiserror::Error;
 /// Maximum encoded size accepted for one immutable `JobIR` object.
 pub const MAX_JOB_IR_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum encoded size accepted for one terminal-result object.
-// foundation-governance: parity-limit
 pub const MAX_TERMINAL_RESULT_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum compressed size described by one immutable log segment.
 pub const MAX_LOG_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;

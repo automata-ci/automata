@@ -20,15 +20,10 @@ use crate::{
 };
 
 const CACHE_BLOCK_MEDIA_TYPE: &str = "application/octet-stream";
-// foundation-governance: derived-contract owner=github-runtime kind=digest-domain
 const CACHE_BLOCK_LIST_DOMAIN: &[u8] = b"automata-results-cache-block-list-v1\0";
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_CACHE_BLOCK_BYTES: u64 = 134_217_728;
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_CACHE_BLOCKS: usize = 50_000;
-// foundation-governance: parity-limit
 const MAXIMUM_DURABLE_CACHE_BYTES: u64 = 10_737_418_240;
-// foundation-governance: parity-limit
 const MAXIMUM_CACHE_KEYS: usize = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

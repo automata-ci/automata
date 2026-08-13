@@ -8,13 +8,10 @@ use super::{PlanExpression, WorkflowPlanError, validation::LogicalPlanBudget};
 use crate::{ExpressionInstruction, ExpressionLiteral, ExpressionProgram};
 
 /// Maximum bytes in one literal or compiled expression source.
-// foundation-governance: parity-limit
 pub const MAX_TEMPLATE_BYTES: usize = 65_536;
 /// Maximum compiled segments in one expression template.
-// foundation-governance: parity-limit
 pub const MAX_TEMPLATE_SEGMENTS: usize = 512;
 /// Maximum declared context dependencies for one expression template.
-// foundation-governance: parity-limit
 pub const MAX_EXPRESSION_CONTEXTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

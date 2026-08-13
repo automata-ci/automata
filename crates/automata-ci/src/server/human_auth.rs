@@ -44,12 +44,10 @@ const GITHUB_WEB_TRANSACTION_TTL_SECONDS: u64 = 10 * 60;
 const GITHUB_HTTP_USER_AGENT: &str = concat!("automata-ci/", env!("CARGO_PKG_VERSION"));
 const BROWSER_IDLE_LIFETIME_CAP: Duration = Duration::from_mins(30);
 const CLI_IDLE_LIFETIME_CAP: Duration = Duration::from_hours(12);
-// foundation-governance: derived-contract owner=integration kind=cryptographic-context
 const HMAC_KDF_DOMAIN: &[u8] = b"automata-ci/human-auth/hmac-kdf/hmac-sha256/v1\0";
 const SESSION_HMAC_DOMAIN: &[u8] = b"session-credential";
 const LOGIN_PROOF_HMAC_DOMAIN: &[u8] = b"github-login-proof";
 const INSTALLATION_PROOF_HMAC_DOMAIN: &[u8] = b"installation-bootstrap-proof";
-// foundation-governance: derived-contract owner=integration kind=digest-domain
 const INSTALLATION_TOKEN_DIGEST_DOMAIN: &[u8] =
     b"automata-ci/installation-bootstrap/token-digest/hmac-sha256/v1\0";
 const SHA256_BLOCK_BYTES: usize = 64;

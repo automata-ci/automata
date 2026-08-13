@@ -17,10 +17,8 @@ use jiff::{
 use thiserror::Error;
 
 /// Maximum decoded bytes in one exact five-field cron expression.
-// foundation-governance: parity-limit
 pub const MAX_CRON_EXPRESSION_BYTES: usize = 256;
 /// Maximum bytes in one IANA timezone identifier.
-// foundation-governance: parity-limit
 pub const MAX_IANA_TIMEZONE_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +42,6 @@ const fn timezone_byte_rejection(observed: usize) -> Option<ScheduleLimitRejecti
     None
 }
 /// Minimum supported interval between selected wall-clock minutes.
-// foundation-governance: parity-limit
 pub const MINIMUM_CRON_INTERVAL_MINUTES: u16 = 5;
 
 const fn cron_interval_rejection(observed: u16) -> Option<ScheduleLimitRejection> {
@@ -54,7 +51,6 @@ const fn cron_interval_rejection(observed: u16) -> Option<ScheduleLimitRejection
     None
 }
 
-// foundation-governance: operational-limit
 const MAXIMUM_CALENDAR_SEARCH_DAYS: usize = 3_660;
 
 /// One validated, exact five-field cron expression.

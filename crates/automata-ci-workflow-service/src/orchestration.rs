@@ -39,12 +39,9 @@ use crate::{
     ValidatedLogicalPlan, WORKFLOW_PLAN_MEDIA_TYPE,
 };
 
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const ACTIVATION_INPUT_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow-service.logical-activation-input.v5\0";
-// foundation-governance: derived-contract owner=workflow kind=digest-domain
 const JOB_ID_DOMAIN: &[u8] = b"automata.workflow-service.logical-job-id.v1\0";
-// foundation-governance: parity-limit
 const MAX_EXACT_GITHUB_INTEGER: u64 = 9_007_199_254_740_992;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

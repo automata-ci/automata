@@ -16,40 +16,28 @@ use super::{
 };
 
 /// Maximum logical jobs in one logical-workflow workflow plan.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOBS: usize = 1_024;
 /// Maximum direct prerequisite jobs for one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOB_NEEDS: usize = 128;
 /// Maximum declared result references consumed by one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_RESULT_REFERENCES: usize = 512;
 /// Maximum outputs declared by one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_JOB_OUTPUTS: usize = 256;
 /// Maximum step templates in one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_STEPS: usize = 2_048;
 /// Maximum service containers attached to one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICES: usize = 64;
 /// Maximum exposed ports on one logical service container.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICE_PORTS: usize = 256;
 /// Maximum parsed engine-option tokens retained for one logical service.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_SERVICE_OPTIONS: usize = 64;
 /// Maximum entries in one environment/input layer.
-// foundation-governance: parity-limit
 pub const MAX_TEMPLATE_MAP_ENTRIES: usize = 512;
 /// Maximum runner labels in one logical job.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_RUNNER_LABELS: usize = 64;
 /// Maximum input/secret bindings on one reusable invocation.
-// foundation-governance: parity-limit
 pub const MAX_REUSABLE_BINDINGS: usize = 256;
 /// Maximum bytes in a logical-plan name, key, reference, or description.
-// foundation-governance: parity-limit
 pub const MAX_LOGICAL_FIELD_BYTES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -39,7 +39,6 @@ pub use model::{
 pub const GITHUB_ACTION_METADATA_DIALECT: &str = "github-actions.action-metadata";
 
 /// Upstream runner release used to review schema and conversion behavior.
-// foundation-governance: derived-contract-exclusion
 pub const GITHUB_ACTION_METADATA_BASELINE: &str = "actions/runner@v2.336.0";
 
 /// Immutable upstream source revision for the compatibility baseline.

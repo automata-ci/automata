@@ -29,7 +29,6 @@ pub const AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE: &str =
 
 const EVIDENCE_SCHEMA: u16 = 1;
 const EVIDENCE_KIND: &str = "automata_workflow_dispatch";
-// foundation-governance: parity-limit
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

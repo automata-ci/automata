@@ -8,15 +8,10 @@ use uuid::Uuid;
 
 use crate::ExecutionAuthority;
 
-// foundation-governance: parity-limit
 const MAX_CACHE_SCOPE_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_CACHE_AUTHORITY_SCOPES: usize = 8;
-// foundation-governance: parity-limit
 const MAX_CACHE_KEY_BYTES: usize = 512;
-// foundation-governance: parity-limit
 const MAX_CACHE_KEY_COMPONENT_BYTES: usize = 512;
-// foundation-governance: parity-limit
 const MAX_CACHE_REPOSITORY_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

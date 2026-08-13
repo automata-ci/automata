@@ -68,15 +68,10 @@ use crate::{
 use automata_ci_workflow_github::GithubConditionCompiler;
 
 const DIRECTORY_MODE: &str = "0700";
-// foundation-governance: parity-limit
 const MAX_ACTION_NESTING_DEPTH: usize = 10;
-// foundation-governance: parity-limit
 const MAX_COMPOSITE_CHILD_STEPS: usize = 10_000;
-// foundation-governance: parity-limit
 const MAX_ACTION_INVOCATIONS: u32 = 10_000;
-// foundation-governance: parity-limit
 const MAX_COMPOSITE_DERIVED_BYTES: usize = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =

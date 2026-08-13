@@ -33,9 +33,7 @@ pub const LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE: &str = "application/vnd.automata
 pub const LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const INSTANCE_ID_DOMAIN: &[u8] = b"automata.store.logical-instance-id.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const PUBLICATION_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-activation-output.v1\0";
 
 /// Non-nil durable identity of an activation worker.

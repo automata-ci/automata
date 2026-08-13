@@ -29,14 +29,11 @@ pub const MAX_GITHUB_OIDC_ISSUANCE_SLOTS: usize = 64;
 /// The key loader computes SHA-256 over this prefix, then the raw key byte
 /// length as an unsigned 64-bit big-endian integer, then the raw key bytes.
 /// Only the resulting digest crosses the store boundary.
-// foundation-governance: derived-contract owner=store kind=digest-domain
 pub const GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN: &[u8] =
     b"automata/github-oidc/request-bearer-key-fingerprint:v1\0";
 /// Domain prefix for the canonical public RS256 JWK fingerprint.
-// foundation-governance: derived-contract owner=store kind=digest-domain
 pub const GITHUB_OIDC_RS256_PUBLIC_KEY_FINGERPRINT_DOMAIN: &[u8] =
     b"automata/github-oidc/rs256-public-key-fingerprint:v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const GITHUB_OIDC_CLAIM_EVIDENCE_DOMAIN: &[u8] = b"automata/github-oidc/claim-evidence:v1\0";
 
 /// Fingerprints canonical public RS256 key material without accepting a private key.

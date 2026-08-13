@@ -18,15 +18,10 @@ use crate::{
 /// Canonical media type for the exact provider event attached to a job.
 pub const WORKFLOW_EVENT_MEDIA_TYPE: &str = "application/json";
 
-// foundation-governance: parity-limit
 const MAX_EXECUTION_CONTEXT_TEXT_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_CONTENT_KEY_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_CONTENT_MEDIA_TYPE_BYTES: usize = 128;
-// foundation-governance: parity-limit
 const MAX_JOB_CONTENT_BYTES: u64 = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_SECRET_REFERENCE_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

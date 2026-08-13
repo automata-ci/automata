@@ -1,17 +1,6 @@
 mod api_security;
 pub(crate) mod conformance_api;
 pub(crate) mod delegated_actor_api;
-/// Explicit product composition for deterministic conformance adapters.
-#[cfg(any(test, feature = "conformance-test-support"))]
-pub mod conformance_composition;
-pub mod conformance_control;
-pub mod conformance_fault_ports;
-pub mod conformance_fixture;
-pub mod conformance_github_stub;
-/// Shell-free child-process restart support for conformance adapters.
-#[cfg(any(test, feature = "conformance-test-support"))]
-pub mod conformance_process;
-pub mod conformance_shard;
 mod form;
 pub(crate) mod github_auth;
 pub mod http;

@@ -29,7 +29,6 @@ use uuid::Uuid;
 const MAX_REQUEST_BYTES: usize = 8 * 1_024;
 const MAX_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
-// foundation-governance: derived-contract owner=workflow kind=wire-discriminator
 pub(crate) const WORKFLOW_RERUN_PATH: &str =
     "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns";
 pub(crate) const WORKFLOW_BROWSER_RERUN_PATH: &str =

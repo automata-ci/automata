@@ -11,7 +11,6 @@ use crate::{TIMING_INVOCATION_ENVIRONMENT, TIMING_RUN_ENVIRONMENT, TIMINGS_DIREC
 
 static TIMING_WRITE_LOCK: Mutex<()> = Mutex::new(());
 const TIMING_RECORD_SCHEMA: &str = "automata-postgres-test-timing/v1";
-// foundation-governance: operational-limit
 const MAX_TIMING_INVOCATION_LENGTH: usize = 64;
 
 #[derive(Clone, Copy)]

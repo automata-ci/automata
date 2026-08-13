@@ -4,22 +4,18 @@ use serde::Serialize;
 
 use crate::{ArtifactListEncodingError, ArtifactSubjectError, CommandScopeIdError};
 
-// foundation-governance: parity-limit
 const MAX_SCOPE_ID_BYTES: usize = 512;
 
 /// Exact schema of the read-only `GITHUB_ARTIFACTS_LIST` JSON payload.
 pub const ARTIFACT_LIST_SCHEMA_VERSION: u8 = 1;
 
 /// Fixed upstream ceiling for one `GITHUB_ARTIFACTS` declaration file.
-// foundation-governance: parity-limit
 pub const MAX_ARTIFACT_DECLARATION_FILE_BYTES: usize = 1_048_576;
 
 /// Fixed upstream ceiling for distinct artifact subjects accumulated by one job.
-// foundation-governance: parity-limit
 pub const MAX_ARTIFACT_SUBJECTS: usize = 500;
 
 /// Automata transport ceiling for the generated read-only artifact list.
-// foundation-governance: parity-limit
 pub const MAX_ARTIFACT_LIST_BYTES: usize = 16_777_216;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

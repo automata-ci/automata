@@ -9,7 +9,6 @@ members = [
     "crates/automata-ci-blob-s3",
     "crates/automata-ci-build-support",
     "crates/automata-ci-control",
-    "crates/automata-ci-conformance",
     "crates/automata-ci-core",
     "crates/automata-ci-credential",
     "crates/automata-ci-credential-github",
@@ -82,7 +81,6 @@ automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
 automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
 automata-ci-build-support = { path = "crates/automata-ci-build-support", version = "0.1.0" }
 automata-ci-control = { path = "crates/automata-ci-control", version = "0.1.0" }
-automata-ci-conformance = { path = "crates/automata-ci-conformance", version = "0.1.0" }
 automata-ci-core = { path = "crates/automata-ci-core", version = "0.1.0" }
 automata-ci-credential = { path = "crates/automata-ci-credential", version = "0.1.0" }
 automata-ci-credential-github = { path = "crates/automata-ci-credential-github", version = "0.1.0" }

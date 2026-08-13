@@ -89,20 +89,12 @@ link cannot satisfy the replacement gate.
 
 To replace a pin:
 
-1. Run the scheduled detector or run
-   `scripts/ci/check-github-actions-reference-drift.py` with explicit output
-   and Markdown paths.
+1. Fetch the exact proposed GitHub documentation and `actions/runner`
+   revisions, calculate their byte counts and digests, and compare them with
+   the currently pinned immutable sources.
 2. Review the bounded source delta and its compatibility impact. Update code,
    fixtures, stage claims, and diagnostics before changing the snapshot.
 3. Record the immutable source revision, affected categories, decision, and at
    least two distinct human reviewers in the reviewed-delta registry.
 4. Replace the snapshot metadata and run both registry checks. Never replace a
-   digest solely because the detector reported drift.
-
-The scheduled detector contract at
-`.ci/workflows/github-actions-reference-drift.yml` verifies the old immutable
-bytes first, compares the same files at the current documentation commit and
-latest stable runner release, and opens or updates one bounded review issue.
-Its presence does not claim that scheduled production execution has been
-proven. Any issue it produces is a review prompt, not approval to move the
-baseline.
+   digest without reviewing the bounded source delta.

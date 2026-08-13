@@ -10,13 +10,10 @@ use thiserror::Error;
 use crate::repository_path::{has_ascii_case_insensitive_suffix, is_valid_component};
 
 /// Maximum exact webhook body accepted by workflow admission.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 26_214_400;
 /// Maximum configured GitHub webhook secret size.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_WEBHOOK_SECRET_BYTES: usize = 16_384;
 /// Maximum commit summaries GitHub documents in one push webhook.
-// foundation-governance: parity-limit
 pub const MAX_GITHUB_PUSH_COMMITS: usize = 2_048;
 /// Exact durable media type required for a stored authenticated GitHub push.
 pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
@@ -31,15 +28,11 @@ pub const X_GITHUB_EVENT: &str = "x-github-event";
 /// GitHub's provider delivery identifier header.
 pub const X_GITHUB_DELIVERY: &str = "x-github-delivery";
 
-// foundation-governance: parity-limit
 const MAX_DELIVERY_ID_BYTES: usize = 128;
-// foundation-governance: parity-limit
 const MAX_GIT_REF_BYTES: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_GITHUB_PATH_FILTER_COMMITS: usize = 1_000;
 const SHA256_SIGNATURE_PREFIX: &[u8] = b"sha256=";
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
-// foundation-governance: derived-contract owner=control-plane kind=digest-domain
 const WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN: &[u8] =
     b"automata.store.github-webhook-verifier-fingerprint.v1\0";
 

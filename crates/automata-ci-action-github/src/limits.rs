@@ -1,12 +1,8 @@
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const MAX_SOURCE_BYTES: usize = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_DEPTH: usize = 256;
-// foundation-governance: parity-limit
 const MAX_NODES: usize = 1_000_000;
-// foundation-governance: parity-limit
 const MAX_DECODED_TEXT_BYTES: usize = 33_554_432;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

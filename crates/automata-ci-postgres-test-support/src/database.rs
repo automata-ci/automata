@@ -22,14 +22,11 @@ use crate::{
 
 const DATABASE_PREFIX: &str = "at_";
 const TEMPLATE_SUFFIX: &str = "_template";
-// foundation-governance: operational-limit
 const MAX_NAMESPACE_LENGTH: usize = 27;
 const DEFAULT_POOL_CONNECTIONS: u32 = 16;
-// foundation-governance: operational-limit
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 const TEMPLATE_MARKER_VERSION: &str = "automata-ci-postgres-test-support:v1";
 const TEMPLATE_LOCK_SALT: i64 = 6_482_851_405_936_141_723;
-// foundation-governance: operational-limit
 const INITIALIZER_FINGERPRINT_LENGTH_LIMIT: usize = 64;
 
 const CLEANUP_LIVE: u8 = 0;

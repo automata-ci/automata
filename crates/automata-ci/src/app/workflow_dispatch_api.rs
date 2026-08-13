@@ -29,9 +29,7 @@ use serde::{
 };
 use uuid::Uuid;
 
-// foundation-governance: parity-limit
 const MAX_REQUEST_BYTES: usize = 131_072;
-// foundation-governance: parity-limit
 const MAX_TARGET_TEXT_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,7 +76,6 @@ const fn workflow_dispatch_input_character_rejection(
     None
 }
 
-// foundation-governance: derived-contract owner=workflow kind=wire-discriminator
 pub(crate) const WORKFLOW_DISPATCH_PATH: &str =
     "/api/v1/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
 

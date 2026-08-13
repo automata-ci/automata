@@ -30,7 +30,6 @@ use crate::{
 pub const GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE: &str =
     "application/vnd.automata.github-runner-policy+json";
 /// Maximum encoded size of one historical runner policy.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_RUNNER_POLICY_MAX_BYTES: u64 = 64 * 1_024;
 
 /// Exact current GitHub.com browser origin pinned by the provider manifest.
@@ -63,39 +62,28 @@ pub const GITHUB_PROVIDER_EVENT: &str = "push";
 /// Default branch ref used by manifest constructors.
 pub const GITHUB_PROVIDER_GIT_REF: &str = "refs/heads/main";
 /// GitHub's documented maximum webhook payload size.
-// foundation-governance: limit-alias
 pub const GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES: u64 = 25 * 1_024 * 1_024;
 /// Application deadline below the dedicated edge's response-header deadline.
 pub const GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS: u64 = 7_000;
 /// Maximum commit summaries retained from one authenticated push payload.
-// foundation-governance: limit-alias
 pub const GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS: u64 = 2_048;
 /// Maximum push commits for which webhook metadata is complete for path filters.
-// foundation-governance: limit-alias
 pub const GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS: u64 = 1_000;
 /// Maximum provider-verified changed paths accepted by trigger evaluation.
-// foundation-governance: limit-alias
 pub const GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES: u64 = 3_000;
 /// Exact compressed repository-archive ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES: u64 = 256 * 1_024 * 1_024;
 /// Exact gzip-decoded repository-archive ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES: u64 = 2 * 1_024 * 1_024 * 1_024;
 /// Exact repository-archive entry-count ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES: u64 = 100_000;
 /// Exact sum-of-entry-sizes ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES: u64 = 1_024 * 1_024 * 1_024;
 /// Exact encoded archive-entry path ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES: u64 = 4 * 1_024;
 /// Exact direct workflow-file count ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS: u64 = 256;
 /// Exact per-workflow source ceiling supported by discovery.
-// foundation-governance: parity-limit
 pub const GITHUB_PROVIDER_WORKFLOW_MAX_BYTES: u64 = 1_024 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,7 +167,6 @@ const fn workflow_bytes_rejection(observed: u64) -> Option<GithubProviderManifes
 }
 
 const MANIFEST_DIGEST_DOMAIN: &[u8] = b"automata.store.github-provider-manifest\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const REPOSITORY_ID_DOMAIN: &[u8] = b"automata.admission.repository.v1\0";
 
 /// Domain required when secret custody derives the public webhook verifier fingerprint.
@@ -187,7 +174,6 @@ const REPOSITORY_ID_DOMAIN: &[u8] = b"automata.admission.repository.v1\0";
 /// The trusted secret loader computes SHA-256 over this domain followed by at
 /// least 32 uniformly random verifier-key bytes. Only that 32-byte fingerprint,
 /// never the verifier key, enters the provider-manifest boundary.
-// foundation-governance: derived-contract owner=store kind=digest-domain
 pub const GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN: &[u8] =
     b"automata.store.github-webhook-verifier-fingerprint.v1\0";
 

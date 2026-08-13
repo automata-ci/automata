@@ -172,21 +172,6 @@ impl GithubProviderConfig {
         Self::from_raw(raw)
     }
 
-    /// Parses a bounded strict document for crate-internal unit composition.
-    ///
-    /// This is not a production input path. It exists only so unit tests can
-    /// construct the real provider builder while production continues to load
-    /// configuration exclusively through the hardened [`SecretSource`] path.
-    #[cfg(test)]
-    pub(crate) fn parse_for_test(bytes: &[u8]) -> Result<Self, GithubProviderConfigError> {
-        if bytes.len() > MAX_GITHUB_PROVIDER_CONFIG_BYTES {
-            return Err(GithubProviderConfigError);
-        }
-        let raw: RawConfig =
-            serde_json::from_slice(bytes).map_err(|_| GithubProviderConfigError)?;
-        Self::from_raw(raw)
-    }
-
     fn from_raw(raw: RawConfig) -> Result<Self, GithubProviderConfigError> {
         if raw.schema != CONFIG_SCHEMA
             || raw.repositories.is_empty()

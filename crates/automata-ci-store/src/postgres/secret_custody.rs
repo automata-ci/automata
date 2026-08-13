@@ -17,9 +17,7 @@ use crate::{
 use super::durable_schema::{current_durable_schemas, is_current_secret_custody_canary_schema};
 
 const CANARY_CONTEXT_TENANT: &str = "automata-ci";
-// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const CANARY_PURPOSE: &str = "actions/secrets/custody-canary:v1";
-// foundation-governance: derived-contract owner=store kind=cryptographic-context
 const CANARY_PLAINTEXT: &[u8] = b"automata-ci-secret-custody-canary-v1";
 const REQUIRED_KEY_QUERY_BOUND: i64 = 33;
 const _: () = assert!(MAX_SECRET_CUSTODY_CONFIGURED_KEYS == 32);

@@ -14,16 +14,12 @@ pub const JOB_RUNTIME_CONTEXT_SCHEMA_VERSION: u16 = 1;
 pub const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     "application/vnd.automata.job-runtime-context.protobuf";
 /// Maximum nesting depth of a canonical runtime-context value.
-// foundation-governance: parity-limit
 pub const MAX_CONTEXT_VALUE_DEPTH: usize = 32;
 /// Maximum aggregate value nodes in one canonical value or runtime context.
-// foundation-governance: parity-limit
 pub const MAX_CONTEXT_VALUE_NODES: usize = 65_536;
 /// Maximum aggregate UTF-8 bytes in one canonical value or runtime context.
-// foundation-governance: parity-limit
 pub const MAX_CONTEXT_VALUE_TEXT_BYTES: usize = 1_048_576;
 /// Maximum UTF-8 bytes in one runtime-context key or opaque binding identifier.
-// foundation-governance: parity-limit
 pub const MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

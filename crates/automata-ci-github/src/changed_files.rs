@@ -15,9 +15,7 @@ use crate::{
 
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const COMPARE_COMMITS_PER_PAGE: usize = 100;
-// foundation-governance: parity-limit
 const MAX_ACTIONS_PUSH_COMMITS: usize = 1_000;
-// foundation-governance: parity-limit
 const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 
 /// Largest GitHub Compare JSON file collection that is demonstrably complete.
@@ -25,7 +23,6 @@ const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 /// GitHub documents a 300-file response cap without a total-file count. An
 /// exactly 300-entry response is therefore ambiguous and is never accepted as
 /// complete.
-// foundation-governance: parity-limit
 pub const MAX_COMPLETE_GITHUB_COMPARE_FILES: usize = 299;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

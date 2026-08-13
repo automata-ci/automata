@@ -32,12 +32,9 @@ pub const LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE: &str =
 /// Maximum duration of one preparation claim.
 pub const MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const DESCRIPTOR_DOMAIN: &[u8] = b"automata.store.logical-activation-preparation.v5\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const PREREQUISITES_DOMAIN: &[u8] =
     b"automata.store.logical-activation-preparation-prerequisites.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const ACTIVATION_INPUT_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow-service.logical-activation-input.v5\0";
 

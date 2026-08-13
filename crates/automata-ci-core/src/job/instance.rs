@@ -6,10 +6,8 @@ use super::{ExpressionInstruction, JobValidationError, ValueTemplate, ValueTempl
 use crate::{OutputSensitivity, Sha256Digest};
 
 /// Maximum UTF-8 bytes in a source-level logical job or output name.
-// foundation-governance: parity-limit
 pub const MAX_JOB_LOGICAL_NAME_BYTES: usize = 256;
 /// Maximum number of terminal output definitions on one concrete job.
-// foundation-governance: parity-limit
 pub const MAX_JOB_OUTPUT_DEFINITIONS: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

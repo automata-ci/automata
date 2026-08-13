@@ -47,20 +47,14 @@ const MUTATION_ID_HEADER: &str = "x-automata-secret-mutation-id";
 const SECRET_NAME_HEADER: &str = "x-automata-secret-name";
 const SECRET_PROVIDER_HEADER: &str = "x-automata-secret-provider";
 
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const REPOSITORY_SECRETS_PATH: &str = "/api/v1/repositories/{repository_id}/secrets";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const REPOSITORY_SECRET_PATH: &str =
     "/api/v1/repositories/{repository_id}/secrets/{secret_id}";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH: &str =
     "/api/v1/repository-targets/github/{owner}/{repository}";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const REPOSITORY_SECRET_BY_NAME_PATH: &str =
     "/api/v1/repositories/{repository_id}/secrets/lookup";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const BUILTIN_SECRET_PROVIDER_PATH: &str = "/api/v1/secret-providers/builtin";
-// foundation-governance: derived-contract owner=auth-security kind=wire-discriminator
 pub(crate) const BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH: &str =
     "/api/v1/secret-providers/builtin/activation";
 

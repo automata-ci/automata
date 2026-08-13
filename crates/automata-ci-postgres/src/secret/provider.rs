@@ -29,7 +29,6 @@ use super::{
 pub const BUILTIN_POSTGRES_PROVIDER_ID: &str = "builtin";
 
 /// Domain-separation purpose for encrypted built-in secret values.
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 pub const BUILTIN_SECRET_VALUE_KEY_PURPOSE: &str = "secrets/builtin-value:v1";
 
 const VERSION_MUTATION_REQUEST_PREFIX: &str = "secret-version:";

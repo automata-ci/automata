@@ -14,9 +14,6 @@ repository.workspace = true
 homepage.workspace = true
 build = "build.rs"
 
-[features]
-conformance-test-support = []
-
 [[bin]]
 name = "automata"
 path = "src/main.rs"
@@ -28,9 +25,7 @@ automata-ci-auth.workspace = true
 automata-ci-blob.workspace = true
 automata-ci-blob-s3.workspace = true
 automata-ci-control.workspace = true
-automata-ci-conformance.workspace = true
 automata-ci-core.workspace = true
-automata-ci-credential.workspace = true
 automata-ci-credential-github.workspace = true
 automata-ci-github.workspace = true
 automata-ci-github-delivery.workspace = true
@@ -48,8 +43,6 @@ automata-ci-results-github.workspace = true
 automata-ci-runner-auth.workspace = true
 automata-ci-runner-transport.workspace = true
 automata-ci-secret.workspace = true
-automata-ci-runner-runtime.workspace = true
-automata-ci-scm.workspace = true
 automata-ci-store.workspace = true
 automata-ci-ui-renderer.workspace = true
 automata-ci-workflow-github.workspace = true
@@ -70,7 +63,6 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
@@ -92,9 +84,11 @@ automata-ci-build-support.workspace = true
 
 [dev-dependencies]
 automata-ci-postgres-test-support.workspace = true
+automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true
 ring.workspace = true
+sqlx.workspace = true
 tar.workspace = true
 
 [lints]

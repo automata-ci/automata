@@ -6,10 +6,8 @@ use super::JobValidationError;
 use crate::PermissionLevel;
 
 /// Maximum number of explicitly named permission grants in one job request.
-// foundation-governance: parity-limit
 pub const MAX_JOB_PERMISSION_GRANTS: usize = 64;
 /// Maximum UTF-8 bytes in one canonical provider permission name.
-// foundation-governance: parity-limit
 pub const MAX_JOB_PERMISSION_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

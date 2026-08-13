@@ -5,7 +5,6 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const MAX_SELECTOR_LENGTH: usize = 256;
 
 macro_rules! canonical_selector {

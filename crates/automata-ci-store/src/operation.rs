@@ -10,7 +10,6 @@ use crate::{
     RunnerOperationResponse, RunnerSessionFence, Sha256Digest, StableRunnerSlot, StoreError,
 };
 
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const LEASE_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.store.lease-request.v2\0";
 
 /// Canonical identity of one runner lease poll before scheduling selects work.

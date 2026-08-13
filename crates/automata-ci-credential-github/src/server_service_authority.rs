@@ -41,7 +41,6 @@ use crate::{
     config::whole_milliseconds,
 };
 
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const SERVER_SERVICE_TOKEN_FRAME_DOMAIN: &[u8] =
     b"automata-ci/github-server-service-installation-token/v1\0";
 const DEFAULT_MINT_RETRY_MILLIS: i64 = 1_000;

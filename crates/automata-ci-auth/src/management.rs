@@ -27,7 +27,6 @@ const MAX_PERMISSION_CATALOG_ENTRIES: usize = 256;
 const MAX_PERMISSION_DESCRIPTION_BYTES: usize = 1_024;
 /// Maximum complete choice count for each direct-binding grant-option kind.
 pub const DIRECT_BINDING_GRANT_OPTION_LIMIT: usize = 500;
-// foundation-governance: derived-contract owner=auth-security kind=digest-domain
 const PROVIDER_OBSERVED_BINDING_ID_DOMAIN: &[u8] =
     b"automata-ci/rbac/provider-observed-binding-id/v1\0";
 

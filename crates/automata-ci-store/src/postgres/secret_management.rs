@@ -53,9 +53,7 @@ const SECRET_DELETE_ACTION: &str = "secret.delete";
 const PROVIDER_RESOURCE_KIND: &str = "secret_provider";
 const SECRET_RESOURCE_KIND: &str = "secret";
 const SECRET_MUTATION_RESOURCE_KIND: &str = "secret_mutation";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const CLEANUP_OPERATION_DOMAIN: &[u8] = b"automata.store.secret-cleanup-operation.v1\0";
-// foundation-governance: derived-contract owner=store kind=digest-domain
 const RECOVERY_OPERATION_DOMAIN: &[u8] = b"automata.store.secret-mutation-recovery.v1\0";
 const MAX_DELETE_VERSIONS: i64 = 65_535;
 

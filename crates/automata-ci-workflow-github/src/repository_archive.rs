@@ -11,21 +11,13 @@ use flate2::read::MultiGzDecoder;
 
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_BLOCK_BYTES_U64: u64 = 512;
-// foundation-governance: parity-limit
 const MAX_COMPRESSED_BYTES: u64 = 4_294_967_296;
-// foundation-governance: parity-limit
 const MAX_DECOMPRESSED_BYTES: u64 = 17_179_869_184;
-// foundation-governance: parity-limit
 const MAX_ENTRY_COUNT: usize = 1_000_000;
-// foundation-governance: parity-limit
 const MAX_EXPANDED_BYTES: u64 = 17_179_869_184;
-// foundation-governance: parity-limit
 const MAX_ENTRY_PATH_BYTES: usize = 16_384;
-// foundation-governance: parity-limit
 const MAX_WORKFLOW_COUNT: usize = 1_024;
-// foundation-governance: parity-limit
 const MAX_WORKFLOW_BYTES: u64 = 16_777_216;
-// foundation-governance: parity-limit
 const MAX_GLOBAL_PAX_BYTES: u64 = 65_536;
 const OBSERVED_STREAM_TAIL_BYTES: usize = 2 * 1_024;
 
@@ -34,7 +26,6 @@ const OBSERVED_STREAM_TAIL_BYTES: usize = 2 * 1_024;
 /// This must remain exactly aligned with the durable provider-delivery
 /// workflow-outcome path bound. It is defined here as well because this
 /// source-level frontend must not depend on the persistence crate.
-// foundation-governance: parity-limit
 pub const MAX_REPOSITORY_WORKFLOW_PATH_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

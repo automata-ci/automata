@@ -44,33 +44,22 @@ use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const RUNNER_ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
-// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
 const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const TOKEN_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
-// foundation-governance: derived-contract owner=auth-security kind=cryptographic-context
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
-// foundation-governance: operational-limit
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
 const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
-// foundation-governance: operational-limit
 const MAX_CSR_BYTES: usize = 32 * 1_024;
-// foundation-governance: operational-limit
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
-// foundation-governance: operational-limit
 const MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES: usize = 64 * 1_024;
-// foundation-governance: operational-limit
 const MIN_TOKEN_LIFETIME_SECONDS: u64 = 60;
-// foundation-governance: operational-limit
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60 * 60;
-// foundation-governance: operational-limit
 const MAX_CONCURRENT_REDEMPTIONS: usize = 32;
 
 /// In-memory CA signer for runner client certificates.

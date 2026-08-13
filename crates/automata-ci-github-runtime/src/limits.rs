@@ -1,28 +1,16 @@
 use thiserror::Error;
 
-// foundation-governance: parity-limit
 const HARD_MAX_FILE_BYTES: usize = 64 * 1_024 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_SUMMARY_BYTES: usize = 1_024 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_LINE_BYTES: usize = 16 * 1_024 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_RECORDS: usize = 1_000_000;
-// foundation-governance: parity-limit
 const HARD_MAX_NAME_BYTES: usize = 64 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_VALUE_BYTES: usize = 64 * 1_024 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_STREAM_BYTES: usize = 512 * 1_024 * 1_024;
-// foundation-governance: parity-limit
 const HARD_MAX_STREAM_LINES: usize = 10_000_000;
-// foundation-governance: parity-limit
 const HARD_MAX_PROPERTIES: usize = 16_384;
-// foundation-governance: parity-limit
 const HARD_MAX_MASKS: usize = 1_000_000;
-// foundation-governance: parity-limit
 const HARD_MAX_STATE_ENTRIES: usize = 1_000_000;
-// foundation-governance: parity-limit
 const HARD_MAX_STATE_BYTES: usize = 512 * 1_024 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

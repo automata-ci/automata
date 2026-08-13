@@ -1,4 +1,3 @@
-// foundation-governance: parity-limit
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
