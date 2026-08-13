@@ -63,7 +63,7 @@ installation without the tuple fails closed.
 
 The full option reference is in the
 [`automata` README](../crates/automata-ci/README.md#human-authentication). The
-[deployment guide](deployment.md#optional-github-human-authentication) shows
+[deployment guide](deployment.md#enable-github-human-authentication-for-enrollment) shows
 where to add it to the server command.
 
 ## Browser and CLI sign-in
