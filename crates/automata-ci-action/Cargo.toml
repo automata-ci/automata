@@ -26,7 +26,6 @@ thiserror.workspace = true
 [dev-dependencies]
 automata-ci-blob-s3.workspace = true
 automata-ci-github.workspace = true
-static_assertions.workspace = true
 tokio.workspace = true
 url.workspace = true
 

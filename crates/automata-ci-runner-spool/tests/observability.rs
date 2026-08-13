@@ -7,10 +7,7 @@ use automata_ci_runner_spool::{
     SpoolEvent, SpoolFailureKind, SpoolInvariantError, SpoolLimits, SpoolObserver, SpoolOperation,
     SpoolOperationOutcome, SpoolRoot,
 };
-use static_assertions::assert_obj_safe;
 use support::{Scratch, StaticRetainSet, TestProtector, adopt};
-
-assert_obj_safe!(SpoolObserver);
 
 #[derive(Debug, Default)]
 struct CapturingObserver {

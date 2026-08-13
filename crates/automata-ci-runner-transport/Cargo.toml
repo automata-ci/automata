@@ -37,5 +37,4 @@ zeroize.workspace = true
 [dev-dependencies]
 http-body-util = { workspace = true, features = ["channel"] }
 rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
-static_assertions.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

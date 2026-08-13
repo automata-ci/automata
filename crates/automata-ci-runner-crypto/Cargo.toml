@@ -20,7 +20,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 automata-ci-core.workspace = true
-static_assertions.workspace = true
 
 [lints]
 workspace = true

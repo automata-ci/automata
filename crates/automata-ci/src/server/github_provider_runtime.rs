@@ -45,10 +45,8 @@ use automata_ci_github_delivery::{
     GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceError,
     GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
-    GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
-    GithubRestPushChangedFilesProvider, GithubScheduleClock,
-    GithubSchedulePrivateSourceAuthorities, GithubScheduleService,
-    GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
+    GithubDeliveryWorkflowProcessor, GithubScheduleClock, GithubSchedulePrivateSourceAuthorities,
+    GithubScheduleService, GithubScheduleServiceConfigurationError, GithubScheduleServiceError,
     GithubScheduleSourceCredentialProvider,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
@@ -326,13 +324,6 @@ impl GithubProviderRuntimeBuilder {
     #[must_use]
     pub fn with_admission_observer(mut self, observer: Arc<dyn WorkflowAdmissionObserver>) -> Self {
         self.admission_observer = Some(observer);
-        self
-    }
-
-    /// Replaces the bounded idle and release policy.
-    #[must_use]
-    pub fn with_policy(mut self, policy: GithubProviderRuntimePolicy) -> Self {
-        self.policy = policy;
         self
     }
 
@@ -668,12 +659,8 @@ impl GithubProviderRuntimeBuilder {
             }
         }
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
-        let changed_files: Arc<dyn GithubPushChangedFilesProvider> =
-            Arc::new(GithubRestPushChangedFilesProvider::new(endpoint.clone()));
-        let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> = Arc::new(
-            GithubDeliveryWorkflowAdmissionProcessor::new(admission)
-                .with_changed_files_provider(changed_files),
-        );
+        let workflow_processor: Arc<dyn GithubDeliveryWorkflowProcessor> =
+            Arc::new(GithubDeliveryWorkflowAdmissionProcessor::new(admission));
         let repository_source = Arc::new(endpoint.clone());
         let repository_dispatch_resolver = Arc::new(endpoint.clone());
         let repository_dispatch_evidence: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =

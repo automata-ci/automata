@@ -220,11 +220,6 @@ impl YamlDocument {
         &self.root
     }
 
-    /// Returns whether the source included an explicit `---` document start.
-    pub const fn has_explicit_start(&self) -> bool {
-        self.explicit_start
-    }
-
     /// Returns the exact source span covering the document.
     pub fn span(&self) -> &SourceSpan {
         &self.span

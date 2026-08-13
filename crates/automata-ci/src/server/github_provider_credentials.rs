@@ -23,12 +23,11 @@ use automata_ci_credential_github::{
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
     GithubChecksCredentialRequest, GithubChecksServerServiceCredential,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceCredential,
-    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
-    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
-    GithubScheduleSourceCredential, GithubScheduleSourceCredentialProvider,
-    GithubScheduleSourceCredentialProviderError, GithubScheduleSourceCredentialRequest,
-    GithubServerServiceCredentialRelease,
+    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
+    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
+    GithubDeliverySourceCredentialRequest, GithubScheduleSourceCredential,
+    GithubScheduleSourceCredentialProvider, GithubScheduleSourceCredentialProviderError,
+    GithubScheduleSourceCredentialRequest, GithubServerServiceCredentialRelease,
 };
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, GithubCheckSubjectIdentity, GithubProviderManifest,
@@ -929,7 +928,8 @@ impl GithubProviderCredentialAdapters {
             .await
             .map_err(source_handoff_error)?;
         if !private_identity_matches(&authority, &context.identity)
-            || context.consumer.action() != private_action(context.action)
+            || context.consumer.action()
+                != GithubServerServiceAction::FetchPrivateRepositoryRevision
         {
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
         }
@@ -1118,7 +1118,6 @@ impl GithubDeliverySourceCredentialProvider for GithubProviderCredentialAdapters
             identity: request.identity().clone(),
             repository_owner_id: request.repository_owner_id(),
             selector: request.authority_selector().clone(),
-            action: request.action(),
             consumer,
             observed_at: request.observed_at(),
             required_through: request.required_through(),
@@ -1149,7 +1148,6 @@ struct PrivateSourceCredentialContext {
     identity: ProviderDeliveryIdentity,
     repository_owner_id: ProviderRepositoryOwnerId,
     selector: GithubServerServiceAuthoritySelector,
-    action: GithubDeliveryPrivateRepositoryAction,
     consumer: GithubServerServiceConsumerClaim,
     observed_at: UnixMillis,
     required_through: UnixMillis,
@@ -1264,19 +1262,6 @@ async fn release_invalid_handoff(handoff: GithubProviderCredentialHandoff) {
 fn arm_drop_release(arm: Option<Arc<AtomicBool>>) {
     if let Some(arm) = arm {
         arm.store(true, Ordering::Release);
-    }
-}
-
-const fn private_action(
-    action: GithubDeliveryPrivateRepositoryAction,
-) -> GithubServerServiceAction {
-    match action {
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
-            GithubServerServiceAction::FetchPrivateRepositoryRevision
-        }
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
-            GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-        }
     }
 }
 

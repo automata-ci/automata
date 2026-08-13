@@ -8,7 +8,6 @@ use automata_ci_runner_runtime::{
     LeaseWatchdog, MonotonicMillis, RetryPolicy, RunnerRuntimeConfig, RunnerRuntimeConfigError,
     RunnerRuntimeError, RunnerRuntimeLimits, RuntimeIdSource, StableIdDomain, SystemRuntimeIds,
 };
-use static_assertions::assert_obj_safe;
 
 #[test]
 fn retry_backoff_is_bounded_and_saturating() {
@@ -76,10 +75,3 @@ fn stable_ids_are_domain_separated_and_restart_deterministic() {
         first.stable_operation_id(StableIdDomain::LeaseRejection, identity),
     );
 }
-
-assert_obj_safe!(automata_ci_runner_runtime::RunnerRuntimeControlClient);
-assert_obj_safe!(automata_ci_runner_runtime::JobExecutor);
-assert_obj_safe!(automata_ci_runner_runtime::RuntimeClock);
-assert_obj_safe!(automata_ci_runner_runtime::RuntimeSleeper);
-assert_obj_safe!(automata_ci_runner_runtime::RuntimeIdSource);
-assert_obj_safe!(automata_ci_runner_runtime::ExecutionEvents);

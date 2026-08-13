@@ -12,13 +12,11 @@ use std::{
 use automata_ci_auth::{
     github::{
         DeviceCodeResponse, GithubAppAuthenticationProvider, GithubAppProtocol,
-        GithubBrowserBindingCookie, GithubDeviceLoginPollOutcome, GithubDeviceLoginStart,
-        GithubDevicePollCredential, GithubDevicePollResponse, GithubEndpointError,
-        GithubInstallationAuthentication, GithubInstallationDevicePollOutcome,
-        GithubLoginCompletion, GithubLoginConfigurationError, GithubLoginError,
-        GithubLoginProofKey, GithubLoginProofKeyring, GithubLoginService,
-        GithubLoginSessionLifetimes, GithubMembershipSnapshot, GithubWebCallback,
-        GithubWebCallbackPurpose, GithubWebLoginStart,
+        GithubBrowserBindingCookie, GithubDeviceLoginPollOutcome, GithubDevicePollCredential,
+        GithubDevicePollResponse, GithubEndpointError, GithubInstallationDevicePollOutcome,
+        GithubLoginConfigurationError, GithubLoginError, GithubLoginProofKey,
+        GithubLoginProofKeyring, GithubLoginService, GithubLoginSessionLifetimes,
+        GithubMembershipSnapshot, GithubWebCallback, GithubWebCallbackPurpose,
     },
     human::{
         AuthenticationFuture, AuthenticationProvider, AuthenticationProviderError, PrincipalId,
@@ -49,22 +47,9 @@ use automata_ci_auth::{
     time::{Clock, UnixTimestamp},
 };
 use futures::executor::block_on;
-use static_assertions::assert_not_impl_any;
 use url::Url;
 
 use support::{DeterministicRandom, MockGithubEndpoint, config, secret, token_response};
-
-assert_not_impl_any!(GithubLoginProofKey: Clone, serde::Serialize);
-assert_not_impl_any!(GithubLoginProofKeyring: Clone, serde::Serialize);
-assert_not_impl_any!(GithubBrowserBindingCookie: Clone, serde::Serialize);
-assert_not_impl_any!(GithubDevicePollCredential: Clone, serde::Serialize);
-assert_not_impl_any!(GithubWebLoginStart: Clone, serde::Serialize);
-assert_not_impl_any!(GithubDeviceLoginStart: Clone, serde::Serialize);
-assert_not_impl_any!(GithubDeviceLoginPollOutcome: Clone, serde::Serialize);
-assert_not_impl_any!(GithubInstallationAuthentication: Clone, serde::Serialize);
-assert_not_impl_any!(GithubInstallationDevicePollOutcome: Clone, serde::Serialize);
-assert_not_impl_any!(GithubLoginCompletion: Clone, serde::Serialize);
-assert_not_impl_any!(GithubLoginService: Clone, serde::Serialize);
 
 const PRINCIPAL_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 

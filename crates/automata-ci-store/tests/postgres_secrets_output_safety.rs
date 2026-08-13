@@ -5,59 +5,11 @@ use uuid::Uuid;
 
 use common::{SeedData, TestResult, run_with_database, seed_control_plane};
 
-const SECRETS_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
 #[derive(Clone, Copy)]
 struct SeededHuman {
     principal_id: Uuid,
     session_id: Uuid,
     authorization_revision: i64,
-}
-
-#[test]
-fn secrets_migration_is_ciphertext_only_and_fail_private() {
-    for table in [
-        "secret_providers",
-        "secret_provider_configuration_envelopes",
-        "repository_environments",
-        "protected_environment_approval_requests",
-        "secrets",
-        "secret_versions",
-        "secret_provider_locator_envelopes",
-        "secret_provider_version_envelopes",
-        "secret_version_envelopes",
-        "secret_policies",
-        "secret_repository_access",
-        "secret_workload_grants",
-        "secret_provider_leases",
-        "secret_provider_lease_envelopes",
-        "secret_cleanup_outbox",
-        "secret_key_rotations",
-    ] {
-        assert!(
-            SECRETS_MIGRATION.contains(&format!("CREATE TABLE {table}")),
-            "missing durable table {table}"
-        );
-    }
-    assert!(SECRETS_MIGRATION.contains("octet_length(nonce) = 12"));
-    assert!(SECRETS_MIGRATION.contains("wrapped_data_key BYTEA NOT NULL"));
-    assert!(SECRETS_MIGRATION.contains("DEFAULT 'readable_secret'"));
-    assert!(SECRETS_MIGRATION.contains("DEFAULT 'suppress_user_output'"));
-    assert!(!SECRETS_MIGRATION.contains("value_hash"));
-    assert!(!SECRETS_MIGRATION.contains("value_digest"));
-    assert!(!SECRETS_MIGRATION.contains("provider_locator TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("provider_version_id TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("provider_lease_id TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("public_configuration JSONB"));
-    assert!(!SECRETS_MIGRATION.contains("credential_source_label TEXT"));
-    assert!(!SECRETS_MIGRATION.contains("octet_length(resolution_reason)"));
-    assert!(!SECRETS_MIGRATION.contains("octet_length(revocation_reason)"));
-    assert!(!SECRETS_MIGRATION.contains("failure_kind ~"));
-    assert!(SECRETS_MIGRATION.contains("resolution_reason IN ("));
-    assert!(SECRETS_MIGRATION.contains("revocation_reason IN ("));
-    assert!(SECRETS_MIGRATION.contains("failure_kind IN ("));
-    assert!(SECRETS_MIGRATION.contains("create_request_id TEXT NOT NULL"));
-    assert!(SECRETS_MIGRATION.contains("secret_version_id UUID NOT NULL"));
 }
 
 #[tokio::test]

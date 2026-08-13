@@ -18,7 +18,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
-static_assertions.workspace = true
 
 [lints]
 workspace = true

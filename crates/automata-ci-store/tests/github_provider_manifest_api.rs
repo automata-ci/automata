@@ -12,8 +12,8 @@ use automata_ci_store::{
     GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS, GITHUB_PROVIDER_REST_API_VERSION,
     GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS, GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES,
     GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubCheckName, GithubProviderGitRef,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository,
-    GithubProviderManifestRevision, GithubProviderManifestValueError, GithubProviderOrigins,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
@@ -351,10 +351,8 @@ fn canonical_repository_bounds_include_one_character_owner() {
     assert!(GithubRepositoryName::new("owner/repository/extra").is_err());
 }
 
-fn accepts_manifest_repository(_: &dyn GithubProviderManifestRepository) {}
-
 #[test]
-fn bootstrap_request_is_nonnegative_and_port_is_object_safe() {
+fn bootstrap_request_rejects_negative_timestamps() {
     let desired = manifest(1, 1, 1, [7; 32], "Automata CI");
     let request = BootstrapGithubProviderManifest::new(desired.clone(), UnixMillis::new(100))
         .expect("bootstrap request");
@@ -364,8 +362,6 @@ fn bootstrap_request_is_nonnegative_and_port_is_object_safe() {
         BootstrapGithubProviderManifest::new(desired, UnixMillis::new(-1)),
         Err(GithubProviderManifestValueError::NegativeTimestamp)
     ));
-
-    let _ = accepts_manifest_repository;
 }
 
 fn manifest(

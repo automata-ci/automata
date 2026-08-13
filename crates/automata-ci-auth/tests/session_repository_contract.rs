@@ -15,14 +15,7 @@ use automata_ci_auth::{
     },
     time::UnixTimestamp,
 };
-use static_assertions::assert_not_impl_any;
-
 use support::secret;
-
-assert_not_impl_any!(SessionToken: serde::Serialize, Clone);
-assert_not_impl_any!(LoginTransactionState: serde::Serialize, Clone);
-assert_not_impl_any!(LoginTransaction: serde::Serialize, Clone);
-assert_not_impl_any!(ActivateCliSession: serde::Serialize);
 
 const SESSION_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

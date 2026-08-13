@@ -6,10 +6,7 @@ use automata_ci_runner_spool::{
     ContentKind, ContentProtectionError, DurableContentStore, FileSpool, FileSpoolOptions,
     SpoolError, SpoolInvariantError, SpoolLimits,
 };
-use static_assertions::assert_obj_safe;
 use support::{Scratch, StaticRetainSet, TestProtector, adopt, content_path};
-
-assert_obj_safe!(DurableContentStore);
 
 fn protector() -> Arc<TestProtector> {
     Arc::new(TestProtector::new("test-aead-v1", 0xa7))

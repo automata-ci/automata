@@ -33,17 +33,6 @@ use elf::load_executable_snapshot;
 use elf::load_running_executable_snapshot;
 use lifecycle::run_lifecycle;
 
-/// Runs the opt-in active Podman/Netavark probe with system adapters.
-pub async fn probe_current_executable() -> CapabilityProbe {
-    probe_current_executable_with_control(
-        Arc::new(SystemCommandExecutor),
-        None,
-        NetworkPolicy::PrivateEgress,
-        &ProbeCancellation::default(),
-    )
-    .await
-}
-
 pub(crate) async fn probe_current_executable_with_cancellation(
     cancellation: &ProbeCancellation,
 ) -> CapabilityProbe {

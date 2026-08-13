@@ -22,7 +22,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-static_assertions.workspace = true
 
 [lints]
 workspace = true

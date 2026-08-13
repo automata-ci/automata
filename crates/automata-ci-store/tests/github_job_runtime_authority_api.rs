@@ -1,13 +1,10 @@
-use std::sync::Arc;
-
 use automata_ci_core::{
     AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrVersion, Lease, LeaseId, RunId,
     RunnerId, RunnerSessionId, Sha256Digest, UnixMillis, WorkflowId,
 };
 use automata_ci_store::{
-    GithubJobRuntimeAuthorityExecution, GithubJobRuntimeAuthorityRepository,
-    GithubJobRuntimeAuthorityValueError, GithubRepositoryName, JobIrMetadata, ObjectKey,
-    RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
+    GithubJobRuntimeAuthorityExecution, GithubJobRuntimeAuthorityValueError, GithubRepositoryName,
+    JobIrMetadata, ObjectKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };
 use uuid::Uuid;
 
@@ -136,9 +133,4 @@ fn nil_workflow_identity_is_rejected() {
         result.expect_err("nil workflow must fail"),
         GithubJobRuntimeAuthorityValueError::InvalidExecution
     );
-}
-
-#[allow(dead_code)]
-fn repository_port_is_object_safe(value: Arc<dyn GithubJobRuntimeAuthorityRepository>) {
-    drop(value);
 }

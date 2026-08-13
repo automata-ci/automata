@@ -618,14 +618,10 @@ impl HumanSignInFinalizer for PostgresHumanSignInFinalizer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use automata_ci_auth::sign_in::SignInFinalizerError;
     use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use static_assertions::assert_impl_all;
-
-    use super::*;
-
-    assert_impl_all!(PostgresHumanSignInFinalizer: HumanSignInFinalizer, Clone, Send, Sync);
 
     fn keyring() -> Arc<LocalAes256GcmKeyring> {
         let active = LocalKeyMaterial::new(

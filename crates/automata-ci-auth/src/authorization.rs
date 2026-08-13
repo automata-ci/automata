@@ -141,19 +141,6 @@ impl RbacPolicy {
         Self { grants }
     }
 
-    /// Returns the union of permissions explicitly granted to the supplied roles.
-    pub fn permissions_for<'a>(
-        &'a self,
-        roles: impl IntoIterator<Item = &'a RoleName>,
-    ) -> BTreeSet<Permission> {
-        roles
-            .into_iter()
-            .filter_map(|role| self.grants.get(role))
-            .flatten()
-            .cloned()
-            .collect()
-    }
-
     /// Reports whether any supplied role explicitly grants a permission.
     pub fn allows<'a>(
         &'a self,

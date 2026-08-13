@@ -818,14 +818,12 @@ fn checks_context(authority: &GithubServerServiceAuthorityIdentity) -> ChecksCre
 fn private_context(
     authority: &GithubServerServiceAuthorityIdentity,
     drift: PrivateIdentityDrift,
-    action: GithubDeliveryPrivateRepositoryAction,
 ) -> PrivateSourceCredentialContext {
     PrivateSourceCredentialContext {
         identity: private_identity(drift),
         repository_owner_id: ProviderRepositoryOwnerId::new(19).expect("repository owner ID"),
         selector: GithubServerServiceAuthoritySelector::from_identity(authority),
-        action,
-        consumer: consumer(private_action(action)),
+        consumer: consumer(GithubServerServiceAction::FetchPrivateRepositoryRevision),
         observed_at: UnixMillis::new(OBSERVED_AT),
         required_through: UnixMillis::new(REQUIRED_THROUGH),
     }
@@ -1021,22 +1019,14 @@ async fn public_source_and_wrong_scope_never_enter_handoff_io() {
     ] {
         assert_eq!(
             adapters
-                .acquire_private_source(private_context(
-                    &private,
-                    drift,
-                    GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-                ))
+                .acquire_private_source(private_context(&private, drift,))
                 .await
                 .expect_err("source coordinate drift"),
             GithubDeliverySourceCredentialProviderError::Rejected
         );
     }
 
-    let mut wrong_action = private_context(
-        &private,
-        PrivateIdentityDrift::Exact,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-    );
+    let mut wrong_action = private_context(&private, PrivateIdentityDrift::Exact);
     wrong_action.consumer = consumer(GithubServerServiceAction::CreateCheckRun);
     assert_eq!(
         adapters
@@ -1045,11 +1035,7 @@ async fn public_source_and_wrong_scope_never_enter_handoff_io() {
             .expect_err("Checks action cannot authorize source"),
         GithubDeliverySourceCredentialProviderError::Rejected
     );
-    let mut changed_selector = private_context(
-        &private,
-        PrivateIdentityDrift::Exact,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-    );
+    let mut changed_selector = private_context(&private, PrivateIdentityDrift::Exact);
     changed_selector.selector = GithubServerServiceAuthoritySelector::from_durable_parts(
         tenant(),
         private.authority_id(),
@@ -1065,43 +1051,6 @@ async fn public_source_and_wrong_scope_never_enter_handoff_io() {
         GithubDeliverySourceCredentialProviderError::Rejected
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn private_revision_and_changed_files_use_distinct_exact_consumers() {
-    let private = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x61);
-    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
-    let adapters = adapters(Arc::clone(&fake), std::slice::from_ref(&private));
-    for action in [
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
-    ] {
-        let error = adapters
-            .acquire_private_source(private_context(
-                &private,
-                PrivateIdentityDrift::Exact,
-                action,
-            ))
-            .await
-            .expect_err("fake rejects after recording exact request");
-        assert_eq!(error, GithubDeliverySourceCredentialProviderError::Rejected);
-    }
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].consumer().action(),
-        GithubServerServiceAction::FetchPrivateRepositoryRevision
-    );
-    assert_eq!(
-        requests[1].consumer().action(),
-        GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-    );
-    assert_ne!(requests[0].consumer(), requests[1].consumer());
-    assert_eq!(requests[0].observed_at(), UnixMillis::new(OBSERVED_AT));
-    assert_eq!(
-        requests[0].required_through(),
-        UnixMillis::new(REQUIRED_THROUGH)
-    );
 }
 
 #[tokio::test]

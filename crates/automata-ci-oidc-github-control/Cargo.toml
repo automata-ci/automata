@@ -25,7 +25,6 @@ uuid.workspace = true
 [dev-dependencies]
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-store.workspace = true
-static_assertions.workspace = true
 tokio.workspace = true
 
 [lints]

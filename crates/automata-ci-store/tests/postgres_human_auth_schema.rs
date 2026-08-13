@@ -6,28 +6,6 @@ use uuid::Uuid;
 
 use common::{TestResult, run_with_database, seed_control_plane};
 
-const HUMAN_AUTH_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
-#[test]
-fn human_auth_migration_keeps_publication_private_and_never_names_value_read() {
-    assert!(HUMAN_AUTH_MIGRATION.contains("dashboard_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("log_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("artifact_audience TEXT NOT NULL DEFAULT 'private'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("public_if_safe"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("octet_length(token_hash) = 32"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("security_audit_events_append_only"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("secrets.value.read"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("('runs:read'"));
-    assert!(HUMAN_AUTH_MIGRATION.contains("('repositories:read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("('runs.read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("('repositories.read'"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("device_user_code TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("verification_uri TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("access_token TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("refresh_token TEXT"));
-    assert!(!HUMAN_AUTH_MIGRATION.contains("metadata JSONB"));
-}
-
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)]

@@ -19,4 +19,3 @@ automata-ci-core.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-static_assertions.workspace = true

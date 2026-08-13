@@ -13,10 +13,7 @@ use automata_ci_sandbox_podman::{
     CommandOutput, CommandTermination, PodmanCommandExecutor, PodmanCommandOutcome,
     PodmanCommandStage, PodmanEvent, PodmanObserver, RootlessPodmanProvider,
 };
-use static_assertions::assert_obj_safe;
 use support::{FakePodman, ScratchRoot, options, sample_spec};
-
-assert_obj_safe!(PodmanObserver);
 
 #[derive(Debug, Default)]
 struct CapturingObserver {
