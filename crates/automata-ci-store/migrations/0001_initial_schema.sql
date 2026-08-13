@@ -15149,6 +15149,31 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION automata_runner_enrollment_token_consume_once() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.runner_group_id IS DISTINCT FROM OLD.runner_group_id
+       OR NEW.token_sha256 IS DISTINCT FROM OLD.token_sha256
+       OR NEW.issued_by_principal_id IS DISTINCT FROM OLD.issued_by_principal_id
+       OR NEW.issued_by_session_id IS DISTINCT FROM OLD.issued_by_session_id
+       OR NEW.issued_authorization_revision IS DISTINCT FROM OLD.issued_authorization_revision
+       OR NEW.issued_at_ms IS DISTINCT FROM OLD.issued_at_ms
+       OR NEW.expires_at_ms IS DISTINCT FROM OLD.expires_at_ms
+       OR (OLD.consumed_at_ms IS NOT NULL AND (
+           NEW.consumed_at_ms IS DISTINCT FROM OLD.consumed_at_ms
+           OR NEW.consumed_runner_id IS DISTINCT FROM OLD.consumed_runner_id
+       )) THEN
+        RAISE EXCEPTION 'runner enrollment token authority is immutable and consumption is write-once'
+            USING ERRCODE = 'integrity_constraint_violation',
+                  CONSTRAINT = 'runner_enrollment_tokens_consume_once';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION automata_seal_github_schedule_registry() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -25582,6 +25607,25 @@ CREATE TABLE runner_machine_certificates (
     CONSTRAINT runner_machine_certificates_revocation_monotonic CHECK (((revoked_at_seconds IS NULL) OR ((revoked_at_seconds > 0) AND (revoked_at_seconds <= expires_at_seconds))))
 );
 
+CREATE TABLE runner_enrollment_tokens (
+    id uuid NOT NULL,
+    tenant_id text NOT NULL,
+    runner_group_id uuid NOT NULL,
+    token_sha256 bytea NOT NULL,
+    issued_by_principal_id uuid NOT NULL,
+    issued_by_session_id uuid NOT NULL,
+    issued_authorization_revision bigint NOT NULL,
+    issued_at_ms bigint NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    consumed_at_ms bigint,
+    consumed_runner_id uuid,
+    CONSTRAINT runner_enrollment_tokens_digest CHECK ((octet_length(token_sha256) = 32)),
+    CONSTRAINT runner_enrollment_tokens_ids_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_group_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_session_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((consumed_runner_id IS NULL) OR (consumed_runner_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
+    CONSTRAINT runner_enrollment_tokens_lifetime CHECK (((issued_at_ms >= 0) AND ((expires_at_ms - issued_at_ms) >= 60000) AND ((expires_at_ms - issued_at_ms) <= 3600000))),
+    CONSTRAINT runner_enrollment_tokens_revision_positive CHECK ((issued_authorization_revision > 0)),
+    CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL))) IS TRUE))
+);
+
 CREATE TABLE runner_operation_receipts (
     runner_session_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -28440,6 +28484,12 @@ ALTER TABLE ONLY runner_lease_request_heads
 ALTER TABLE ONLY runner_machine_certificates
     ADD CONSTRAINT runner_machine_certificates_pkey PRIMARY KEY (leaf_sha256);
 
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_digest_unique UNIQUE (token_sha256);
+
 ALTER TABLE ONLY runner_operation_receipts
     ADD CONSTRAINT runner_operation_receipts_primary_key PRIMARY KEY (runner_session_id, operation_id);
 
@@ -29204,6 +29254,8 @@ CREATE INDEX runner_machine_certificates_active_by_runner ON runner_machine_cert
 
 CREATE INDEX runner_machine_certificates_revoked_at ON runner_machine_certificates USING btree (revoked_at_seconds) WHERE (revoked_at_seconds IS NOT NULL);
 
+CREATE INDEX runner_enrollment_tokens_active ON runner_enrollment_tokens USING btree (expires_at_ms, id) WHERE (consumed_at_ms IS NULL);
+
 CREATE INDEX runner_operation_receipts_attempt ON runner_operation_receipts USING btree (requested_attempt_id, completed_at_ms);
 
 CREATE UNIQUE INDEX runner_sessions_one_live_per_runner ON runner_sessions USING btree (runner_id) WHERE (disconnected_at_ms IS NULL);
@@ -29763,6 +29815,8 @@ CREATE TRIGGER runner_lease_offer_delivery_revocation_guard BEFORE INSERT OR UPD
 CREATE TRIGGER runner_machine_certificates_authority_immutable BEFORE UPDATE OF leaf_sha256, runner_id, expires_at_seconds ON runner_machine_certificates FOR EACH ROW EXECUTE FUNCTION automata_runner_certificate_authority_immutable();
 
 CREATE TRIGGER runner_machine_certificates_revocation_write_once BEFORE UPDATE OF revoked_at_seconds ON runner_machine_certificates FOR EACH ROW EXECUTE FUNCTION automata_runner_certificate_revocation_write_once();
+
+CREATE TRIGGER runner_enrollment_tokens_consume_once BEFORE UPDATE ON runner_enrollment_tokens FOR EACH ROW EXECUTE FUNCTION automata_runner_enrollment_token_consume_once();
 
 CREATE TRIGGER runner_rpc_receipt_lease_offer_binding_guard BEFORE UPDATE OF lease_offer_request_operation_id, lease_offer_command_sequence, lease_offer_response_disposition, lease_offer_primary_response_schema, lease_offer_primary_response_digest, lease_offer_fallback_version, lease_offer_fallback_operation_id, lease_offer_fallback_retry_after_millis, lease_offer_fallback_response_schema, lease_offer_fallback_response_digest ON runner_rpc_receipts FOR EACH ROW EXECUTE FUNCTION automata_enforce_runner_rpc_receipt_lease_offer_binding();
 
@@ -31191,6 +31245,21 @@ ALTER TABLE ONLY runner_lease_request_heads
 
 ALTER TABLE ONLY runner_machine_certificates
     ADD CONSTRAINT runner_machine_certificates_runner_id_fkey FOREIGN KEY (runner_id) REFERENCES runners(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_group_fkey FOREIGN KEY (tenant_id, runner_group_id) REFERENCES runner_groups(tenant_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_issuer_principal_fkey FOREIGN KEY (issued_by_principal_id) REFERENCES human_principals(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_issuer_session_fkey FOREIGN KEY (issued_by_session_id) REFERENCES human_sessions(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_consumed_runner_fkey FOREIGN KEY (consumed_runner_id) REFERENCES runners(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_operation_receipts
     ADD CONSTRAINT runner_operation_receipts_session_fence FOREIGN KEY (runner_id, runner_session_id, runner_session_epoch, runner_generation) REFERENCES runner_sessions(runner_id, id, session_epoch, runner_generation) ON DELETE RESTRICT;

@@ -165,6 +165,7 @@ fn only_operational_top_level_commands_are_advertised() {
             "secret",
             "environment-review",
             "rerun",
+            "runner",
             "admin"
         ]
     );
@@ -172,7 +173,6 @@ fn only_operational_top_level_commands_are_advertised() {
         "workflow",
         "run",
         "job",
-        "runner",
         "runner-group",
         "artifact",
         "cache",
@@ -397,6 +397,29 @@ fn rerun_parses_exact_selection_and_retry_identity() {
     assert_eq!(
         args.operation_id.expect("operation ID").to_string(),
         "40000000-0000-4000-8000-000000000004"
+    );
+}
+
+#[test]
+fn runner_token_has_safe_scoped_defaults() {
+    let cli = Cli::try_parse_from(["automata", "runner", "token"])
+        .expect("runner token command must parse");
+    let Command::Runner(args) = cli.command else {
+        panic!("runner command expected");
+    };
+    let automata_ci::cli::RunnerCommand::Token(token) = args.command;
+    assert_eq!(token.group, "default");
+    assert_eq!(token.expires_in_seconds, 900);
+
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "runner",
+            "token",
+            "--expires-in-seconds",
+            "3601"
+        ])
+        .is_err()
     );
 }
 

@@ -22,6 +22,7 @@ pub mod capability_probe;
 mod cli;
 /// Runner host and control-plane health diagnostics.
 pub mod doctor;
+mod enrollment;
 /// Rootless-Podman network isolation verification.
 pub mod podman_probe;
 mod probe_http;
@@ -65,6 +66,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 .await
                 .map_err(Into::into)
         }
+        Command::Enroll(args) => enrollment::enroll(&args).await,
         Command::Capabilities(args) => print_capabilities(&args.config),
         Command::Doctor(args) => {
             let cancellation = podman_probe::ProbeCancellation::default();

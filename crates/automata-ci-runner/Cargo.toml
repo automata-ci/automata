@@ -46,11 +46,13 @@ automata-ci-sandbox-windows.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-workflow-github.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
 http.workspace = true
 kube.workspace = true
 reqwest.workspace = true
 prometheus-client.workspace = true
+rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -61,6 +63,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+x509-parser.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -78,6 +81,7 @@ automata-ci-protocol-protobuf.workspace = true
 base64.workspace = true
 rcgen.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

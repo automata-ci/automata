@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 automata-ci-auth.workspace = true
+automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
 serde.workspace = true
 serde_json.workspace = true

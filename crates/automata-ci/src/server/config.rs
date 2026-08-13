@@ -320,7 +320,9 @@ pub struct ServerConfig {
     pub(crate) s3_access_key: SecretSource,
     pub(crate) s3_secret_key: SecretSource,
     pub(crate) s3_session_token: Option<SecretSource>,
-    pub(crate) runner_client_ca: SecretSource,
+    pub(crate) runner_client_ca_certificate: SecretSource,
+    pub(crate) runner_client_ca_private_key: SecretSource,
+    pub(crate) runner_server_ca: SecretSource,
     pub(crate) runner_server_certificate: SecretSource,
     pub(crate) runner_server_private_key: SecretSource,
     pub(crate) readiness_probe_interval: Duration,
@@ -329,7 +331,6 @@ pub struct ServerConfig {
     pub(crate) maximum_lease_failures: LeaseFailureLimit,
     pub(crate) stale_runner_session_timeout: StaleSessionTimeoutMillis,
     pub(crate) fallback_tenant_id: String,
-    pub(crate) static_runner_registration_file: Option<PathBuf>,
 }
 
 /// Mandatory rotation-aware wrapping keys for durable control-plane payloads.
@@ -572,7 +573,6 @@ impl ServerConfig {
     ///
     /// Returns a typed error for invalid endpoint or duration configuration.
     pub fn from_args(args: &ServerArgs) -> Result<Self, ServerConfigError> {
-        validate_static_runner_registration_path(args.static_runner_registration_file.as_deref())?;
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
         if args.fallback_tenant_id.is_empty()
@@ -622,7 +622,9 @@ impl ServerConfig {
         let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
-        if secret_encryption.is_some() && runner_public_authority.is_none() {
+        if (secret_encryption.is_some() || human_auth.is_some())
+            && runner_public_authority.is_none()
+        {
             return Err(ServerConfigError::MissingRunnerPublicEndpoint);
         }
         let control_plane_encryption = control_plane_encryption_configuration(args)?;
@@ -659,7 +661,9 @@ impl ServerConfig {
             s3_access_key: args.s3_access_key_source.clone(),
             s3_secret_key: args.s3_secret_key_source.clone(),
             s3_session_token: args.s3_session_token_source.clone(),
-            runner_client_ca: args.runner_client_ca_source.clone(),
+            runner_client_ca_certificate: args.runner_client_ca_certificate_source.clone(),
+            runner_client_ca_private_key: args.runner_client_ca_key_source.clone(),
+            runner_server_ca: args.runner_server_ca_source.clone(),
             runner_server_certificate: args.runner_server_certificate_source.clone(),
             runner_server_private_key: args.runner_server_key_source.clone(),
             readiness_probe_interval,
@@ -668,7 +672,6 @@ impl ServerConfig {
             maximum_lease_failures,
             stale_runner_session_timeout,
             fallback_tenant_id: args.fallback_tenant_id.clone(),
-            static_runner_registration_file: args.static_runner_registration_file.clone(),
         })
     }
 
@@ -742,7 +745,19 @@ impl ServerConfig {
     }
 
     pub(crate) fn load_client_ca_pem(&self) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
-        self.runner_client_ca.load_bytes(MAX_CA_PEM_BYTES)
+        self.runner_client_ca_certificate
+            .load_bytes(MAX_CA_PEM_BYTES)
+    }
+
+    pub(crate) fn load_client_ca_private_key_pem(
+        &self,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+        self.runner_client_ca_private_key
+            .load_bytes(MAX_PRIVATE_KEY_PEM_BYTES)
+    }
+
+    pub(crate) fn load_runner_server_ca_pem(&self) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+        self.runner_server_ca.load_bytes(MAX_CA_PEM_BYTES)
     }
 
     pub(crate) fn load_server_certificate_pem(
@@ -1001,13 +1016,6 @@ fn conformance_export_configuration(
     Ok(Some(source.clone()))
 }
 
-fn validate_static_runner_registration_path(path: Option<&Path>) -> Result<(), ServerConfigError> {
-    if path.is_some_and(|path| !path.is_absolute()) {
-        return Err(ServerConfigError::InvalidStaticRunnerRegistrationPath);
-    }
-    Ok(())
-}
-
 fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigError> {
     let required = [
         &args.database_url_source,
@@ -1015,7 +1023,9 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         &args.control_plane_encryption_key_source,
         &args.s3_access_key_source,
         &args.s3_secret_key_source,
-        &args.runner_client_ca_source,
+        &args.runner_client_ca_certificate_source,
+        &args.runner_client_ca_key_source,
+        &args.runner_server_ca_source,
         &args.runner_server_certificate_source,
         &args.runner_server_key_source,
     ];
@@ -1202,9 +1212,6 @@ pub enum ServerConfigError {
     /// The unauthenticated fallback tenant identity is malformed.
     #[error("fallback tenant identity is invalid")]
     InvalidFallbackTenant,
-    /// Static runner registration must be read from an absolute privileged path.
-    #[error("static runner registration path must be absolute")]
-    InvalidStaticRunnerRegistrationPath,
 }
 
 /// Sanitized failure while loading the built-in provider's local keyring.

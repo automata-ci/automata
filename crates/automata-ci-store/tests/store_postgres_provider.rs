@@ -5,8 +5,6 @@ mod common;
 #[path = "github_manifest_fixture.rs"]
 mod github_manifest_fixture;
 
-#[path = "postgres_bootstrap.rs"]
-mod postgres_bootstrap;
 #[path = "postgres_github_job_runtime_authority.rs"]
 mod postgres_github_job_runtime_authority;
 #[path = "postgres_github_oidc.rs"]

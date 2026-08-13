@@ -22,7 +22,6 @@ mod secret_custody;
 mod secret_management;
 mod secret_mutation_recovery;
 mod state_metrics;
-mod static_registration;
 mod workflow_dispatch;
 mod workflow_rerun;
 

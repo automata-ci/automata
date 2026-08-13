@@ -18,6 +18,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Connect to the control plane and execute assigned jobs.
     Run(RunArgs),
+    /// Enroll this host with a short-lived one-time control-plane token.
+    Enroll(EnrollArgs),
     /// Render the canonical durable-registration ceiling without loading credentials.
     Capabilities(CapabilitiesArgs),
     /// Inspect local capabilities; read-only unless --active is supplied.
@@ -28,6 +30,23 @@ pub(crate) enum Command {
     /// Internal same-binary supervisor for one trusted native macOS command.
     #[command(name = "__macos-job-supervisor", hide = true)]
     InternalMacosJobSupervisor,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnrollArgs {
+    /// Strict JSON product configuration whose file-backed TLS destinations will be populated.
+    #[arg(long, env = "AUTOMATA_RUNNER_CONFIG", value_name = "PATH")]
+    pub(crate) config: PathBuf,
+    /// Human API HTTPS origin, such as <https://ci.example.com>.
+    #[arg(long, env = "AUTOMATA_SERVER_URL", value_name = "URL")]
+    pub(crate) server: String,
+    /// Human-readable runner name, unique within its tenant.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+    /// Owner-only file containing the one-time token. If omitted, the token is read from
+    /// `AUTOMATA_RUNNER_ENROLLMENT_TOKEN` or redirected stdin, in that order.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) token_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +149,48 @@ mod tests {
             args.config,
             std::path::PathBuf::from("/var/lib/automata/runner.json")
         );
+    }
+
+    #[test]
+    fn enroll_accepts_safe_token_sources_but_no_inline_token() {
+        let cli = Cli::try_parse_from([
+            "automata-runner",
+            "enroll",
+            "--config",
+            "/var/lib/automata/runner.json",
+            "--server",
+            "https://ci.example.test",
+            "--name",
+            "linux-amd64-1",
+            "--token-file",
+            "/run/secrets/automata-enrollment-token",
+        ])
+        .expect("enroll CLI must parse");
+        let Command::Enroll(args) = cli.command else {
+            panic!("enroll command expected");
+        };
+        assert_eq!(args.name, "linux-amd64-1");
+        assert_eq!(
+            args.token_file.as_deref(),
+            Some(std::path::Path::new(
+                "/run/secrets/automata-enrollment-token"
+            ))
+        );
+
+        let error = Cli::try_parse_from([
+            "automata-runner",
+            "enroll",
+            "--config",
+            "/var/lib/automata/runner.json",
+            "--server",
+            "https://ci.example.test",
+            "--name",
+            "linux-amd64-1",
+            "--token",
+            "must-not-enter-argv",
+        ])
+        .expect_err("inline enrollment tokens must not be accepted");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

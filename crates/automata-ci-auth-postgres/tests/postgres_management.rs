@@ -24,7 +24,17 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
-use automata_ci_auth_postgres::PostgresHumanRbacManagementRepository;
+use automata_ci_auth_postgres::{
+    PostgresHumanRbacManagementRepository,
+    management::{
+        ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, RunnerEnrollmentConsumeOutcome,
+        RunnerEnrollmentPrepareOutcome,
+    },
+};
+use automata_ci_core::{
+    Architecture, OperatingSystem, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel,
+    RunnerPlatform,
+};
 use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -3157,6 +3167,182 @@ async fn grant_role_rechecks_active_target_after_the_option_snapshot() -> TestRe
         .fetch_one(pool)
         .await?;
         assert_eq!(inserted, 0);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the integration test keeps issuance, concurrent consumption, and durable assertions contiguous"
+)]
+async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResult {
+    run_with_database(|database| async move {
+        let pool = database.pool();
+        seed_tenant(pool, "runner-enrollment").await?;
+        let manager = Uuid::new_v4();
+        seed_member(pool, "runner-enrollment", manager, "runner-manager", "runner-manager")
+            .await?;
+        let role_id = Uuid::new_v4();
+        seed_role(
+            pool,
+            "runner-enrollment",
+            role_id,
+            "runner-enroller",
+            false,
+            &["runners:enroll"],
+        )
+        .await?;
+        seed_binding(
+            pool,
+            "runner-enrollment",
+            Uuid::new_v4(),
+            manager,
+            role_id,
+        )
+        .await?;
+        let session_id = Uuid::new_v4();
+        let authority_revision =
+            seed_session(pool, "runner-enrollment", manager, session_id).await?;
+        let repository = PostgresHumanRbacManagementRepository::new(pool.clone());
+        let token_sha256 = [7_u8; 32];
+        let enrollment_id = Uuid::new_v4();
+        let issued = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-runner-token",
+                ),
+                enrollment_id,
+                token_sha256,
+                runner_group: "trusted-linux".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        assert!(matches!(issued, ManagementMutationOutcome::Applied(_)));
+        let duplicate = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "duplicate-runner-token",
+                ),
+                enrollment_id: Uuid::new_v4(),
+                token_sha256,
+                runner_group: "must-not-persist".to_owned(),
+                lifetime_ms: 60_000,
+            })
+            .await?;
+        assert!(matches!(duplicate, ManagementMutationOutcome::AlreadyExists));
+        let leaked_group: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_groups WHERE tenant_id='runner-enrollment' AND name='must-not-persist'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(leaked_group, 0);
+        assert!(matches!(
+            repository.prepare_runner_enrollment(token_sha256).await?,
+            RunnerEnrollmentPrepareOutcome::Prepared(scope)
+                if scope.enrollment_id == enrollment_id
+                    && scope.runner_group == "trusted-linux"
+                    && scope.observed_at_ms > 0
+        ));
+
+        let group = RunnerGroup::new("trusted-linux")?;
+        let label = RunnerLabel::new("linux")?;
+        let certificate_expires_at_seconds: i64 = sqlx::query_scalar(
+            "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint + 3600",
+        )
+        .fetch_one(pool)
+        .await?;
+        let consume = |runner_id: RunnerId, name: &str, certificate_byte: u8| {
+            let capabilities = RunnerCapabilities::new(
+                runner_id,
+                RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+            )
+            .with_groups([group.clone()])
+            .with_labels([label.clone()])
+            .with_max_parallel_jobs(2)
+            .expect("valid slots");
+            ConsumeRunnerEnrollment {
+                token_sha256,
+                runner_id: runner_id.as_uuid(),
+                runner_name: name.to_owned(),
+                capabilities,
+                certificate_leaf_sha256: [certificate_byte; 32],
+                certificate_expires_at_seconds,
+            }
+        };
+        let broadened_id = RunnerId::new();
+        let broadened = RunnerCapabilities::new(
+            broadened_id,
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_groups([
+            group.clone(),
+            RunnerGroup::new("privileged-extra")?,
+        ])
+        .with_labels([label.clone()]);
+        assert!(matches!(
+            repository
+                .consume_runner_enrollment(ConsumeRunnerEnrollment {
+                    token_sha256,
+                    runner_id: broadened_id.as_uuid(),
+                    runner_name: "broadened-runner".to_owned(),
+                    capabilities: broadened,
+                    certificate_leaf_sha256: [6; 32],
+                    certificate_expires_at_seconds,
+                })
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Rejected
+        ));
+        let first_id = RunnerId::new();
+        let second_id = RunnerId::new();
+        let (first, second) = tokio::join!(
+            repository.consume_runner_enrollment(consume(first_id, "runner-one", 8)),
+            repository.consume_runner_enrollment(consume(second_id, "runner-two", 9))
+        );
+        let outcomes = [first?, second?];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerEnrollmentConsumeOutcome::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerEnrollmentConsumeOutcome::Rejected))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            repository.prepare_runner_enrollment(token_sha256).await?,
+            RunnerEnrollmentPrepareOutcome::Rejected
+        ));
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runners),(SELECT count(*) FROM runner_machine_certificates),(SELECT count(*) FROM security_audit_events WHERE action='runner.enroll')",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(counts, (1, 1, 1));
+        let (runner_id, external_identity): (Uuid, String) =
+            sqlx::query_as("SELECT id,external_identity FROM runners")
+                .fetch_one(pool)
+                .await?;
+        assert!(matches!(runner_id, id if id == first_id.as_uuid() || id == second_id.as_uuid()));
+        assert_eq!(
+            external_identity,
+            format!("automata:runner:{}", runner_id.hyphenated())
+        );
         Ok(())
     })
     .await

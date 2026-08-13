@@ -37,6 +37,13 @@ use crate::{
     },
 };
 
+mod runner_enrollment;
+
+pub use runner_enrollment::{
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, PreparedRunnerEnrollment,
+    RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
+};
+
 const ACTION_ROLE_CREATE: &str = "rbac.role.create";
 const ACTION_ROLE_UPDATE: &str = "rbac.role.update";
 const ACTION_ROLE_DELETE: &str = "rbac.role.delete";

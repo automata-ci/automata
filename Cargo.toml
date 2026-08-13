@@ -141,7 +141,7 @@ kube = { version = "4.2.0", default-features = false, features = ["client", "rin
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
 processkit = { version = "=3.3.1", default-features = false, features = ["limits"] }
 prometheus-client = "=0.25.0"
-rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["pem", "ring", "x509-parser"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["http2", "json", "rustls-tls-webpki-roots"] }
 ring = { version = "=0.17.14", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
@@ -157,6 +157,7 @@ subtle = "2.6.1"
 thiserror = "2.0.16"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 tar = { version = "0.4.46", default-features = false }
+tempfile = "3.27.0"
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
@@ -168,7 +169,7 @@ url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
 wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
-x509-parser = { version = "=0.18.1", default-features = false }
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 xmlparser = "=0.13.6"
 zeroize = { version = "1.8.1", features = ["derive"] }
 

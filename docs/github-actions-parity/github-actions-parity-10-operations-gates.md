@@ -79,33 +79,33 @@ Acceptance:
 **Owner:** P with C reviewing identity. **Size:** XL. **Dependencies:** SEC-02,
 GATE-06.
 
-The current bootstrap has no enrollment API. It loads one privileged static
-fleet document at server startup. The checked-in Linux host is exactly three
-independent, single-slot runner processes, each with a separate OS account,
-runner ID, client leaf/key, spool key, journal, spool, Podman state, delegated
-cgroup, and metrics listener on ports 9464, 9465, and 9466. At the checked-in
-per-job ceiling the trio advertises 12,000 CPU millicores, 48 GiB memory, and
-12,288 PIDs; the aggregate systemd slice is capped at 13.5 CPU cores, 54 GiB,
-and 13,824 tasks. Inventory schema 3 admits a host only with slots 1, 2, and 3.
+The current control plane issues one-use enrollment tokens and signs a
+runner-generated CSR while atomically binding exact identity, group,
+capabilities, labels, slots, and leaf digest. The checked-in Linux host remains
+exactly three independent, single-slot runner processes, each with a separate
+OS account, runner ID, client leaf/key, spool key, journal, spool, Podman state,
+delegated cgroup, and metrics listener on ports 9464, 9465, and 9466. At the
+checked-in per-job ceiling the trio advertises 12,000 CPU millicores, 48 GiB
+memory, and 12,288 PIDs; the aggregate systemd slice is capped at 13.5 CPU
+cores, 54 GiB, and 13,824 tasks. Inventory schema 3 admits a host only with
+slots 1, 2, and 3.
 
 Authenticated Handshake/Sync already negotiates the exact current runner
 protocol v1 and JobIR v1 contract before lease traffic; the supported protocol
-range is currently min=max v1. Dynamic enrollment and update channels remain
+range is currently min=max v1. Rotation and lifecycle update channels remain
 separate work; version skew is unsupported.
 
 Tasks:
 
-- [ ] Design an authenticated enrollment protocol separate from normal runner
+- [x] Design an authenticated enrollment protocol separate from normal runner
   Handshake/Sync.
-- [ ] Issue one-time, narrowly scoped registration credentials with expiry and
+- [x] Issue one-time, narrowly scoped registration credentials with expiry and
   replay protection.
-- [ ] Bind registered runner ID, tenant, group, labels, capabilities, slot
+- [x] Bind registered runner ID, tenant, group, labels, capabilities, slot
   count, certificate, platform, and environment profile.
 - [ ] Add certificate issuance/rotation/revocation and server-root rotation.
-- [x] Keep the privileged static fleet startup path and exact three-process
-  reference deployment documented and validated.
-- [ ] Preserve static fleet loading as a migration and break-glass path when
-  dynamic enrollment becomes available.
+- [x] Remove the privileged static fleet path without a compatibility mode and
+  document enrollment for the exact three-process reference deployment.
 - [ ] Add disable, drain, replace, delete, and audit operations.
 - [x] Negotiate the exact protocol v1 and JobIR v1 range during authenticated
   Handshake/Sync before accepting lease traffic.

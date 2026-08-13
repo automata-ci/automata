@@ -13,8 +13,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Loss-aware GitHub Actions workflow parsing and planning, durable PostgreSQL
   coordination, S3-compatible immutable blobs, mTLS runner control, Results and
   artifact protocol foundations, and a server-rendered preview UI.
-- Fail-closed configured rootless-Podman admission plus privileged static runner
-  registration for bootstrap deployments without an enrollment API.
+- Fail-closed configured rootless-Podman admission plus one-use, group-scoped
+  runner enrollment with runner-local key generation and audited certificate
+  issuance.
 - Static x86-64 Linux archive, checksum-verifying installer, crates.io workspace,
   GHCR image publication, SBOM generation, third-party license collection, and
   release-attestation automation.
@@ -32,8 +33,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 - This bootstrap release is not production-ready and has not passed the full
   end-to-end compatibility gate.
-- Automated runner enrollment, managed-secret runner delivery, workload OIDC,
-  and several workflow semantics remain unsupported end to end.
+- Automated runner certificate rotation and lifecycle administration,
+  managed-secret runner delivery, workload OIDC, and several workflow semantics
+  remain unsupported end to end.
 - No public archive, crate, or product image has been published. Planned static
   archives and images target Linux x86-64; runner execution also requires the
   documented rootless Podman host path.

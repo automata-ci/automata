@@ -888,38 +888,8 @@ fn fallback_tenant_is_explicit_and_validated_before_adapter_composition() {
 }
 
 #[test]
-fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--results-public-url",
-        "https://results.example.test/",
-    ])
-    .expect("server syntax");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert!(args.static_runner_registration_file.is_none());
-    assert!(ServerConfig::from_args(&args).is_ok());
-
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--results-public-url",
-        "https://results.example.test/",
-        "--static-runner-registration-file",
-        "relative/static-runners.json",
-    ])
-    .expect("path syntax");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert!(matches!(
-        ServerConfig::from_args(&args),
-        Err(ServerConfigError::InvalidStaticRunnerRegistrationPath)
-    ));
-
-    let cli = Cli::try_parse_from([
+fn static_runner_registration_interface_is_removed() {
+    let error = Cli::try_parse_from([
         "automata",
         "server",
         "--results-public-url",
@@ -927,15 +897,8 @@ fn static_runner_registration_is_optional_and_requires_an_absolute_path() {
         "--static-runner-registration-file",
         "/etc/automata/static-runners.json",
     ])
-    .expect("absolute path syntax");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert_eq!(
-        args.static_runner_registration_file.as_deref(),
-        Some(std::path::Path::new("/etc/automata/static-runners.json"))
-    );
-    assert!(ServerConfig::from_args(&args).is_ok());
+    .expect_err("static registration must not remain a server interface");
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 #[test]

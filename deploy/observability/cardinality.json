@@ -567,6 +567,8 @@
                 "/api/v1/secret-providers/builtin/activation",
                 "/api/v1/repository-targets/github/{owner}/{repository}",
                 "/api/v1/session",
+                "/api/v1/runner-enrollments",
+                "/api/v1/runner-enrollments/redeem",
                 "/api/v1/roles",
                 "/api/v1/roles/{role_id}",
                 "/api/v1/roles/{role_id}/permissions/{permission}",
@@ -598,7 +600,7 @@
               ]
             }
           ],
-          "maximum_series": 615,
+          "maximum_series": 645,
           "name": "automata_ci_control_plane_http_request_duration_seconds",
           "type": "histogram",
           "unit": "seconds"
@@ -625,6 +627,8 @@
                 "/api/v1/secret-providers/builtin/activation",
                 "/api/v1/repository-targets/github/{owner}/{repository}",
                 "/api/v1/session",
+                "/api/v1/runner-enrollments",
+                "/api/v1/runner-enrollments/redeem",
                 "/api/v1/roles",
                 "/api/v1/roles/{role_id}",
                 "/api/v1/roles/{role_id}/permissions/{permission}",
@@ -656,7 +660,7 @@
               ]
             }
           ],
-          "maximum_series": 41,
+          "maximum_series": 43,
           "name": "automata_ci_control_plane_http_requests_in_flight",
           "type": "gauge"
         },
@@ -695,6 +699,8 @@
                 "/api/v1/secret-providers/builtin/activation",
                 "/api/v1/repository-targets/github/{owner}/{repository}",
                 "/api/v1/session",
+                "/api/v1/runner-enrollments",
+                "/api/v1/runner-enrollments/redeem",
                 "/api/v1/roles",
                 "/api/v1/roles/{role_id}",
                 "/api/v1/roles/{role_id}/permissions/{permission}",
@@ -737,7 +743,7 @@
               ]
             }
           ],
-          "maximum_series": 1968,
+          "maximum_series": 2064,
           "name": "automata_ci_control_plane_http_requests_total",
           "type": "counter"
         },
