@@ -5,9 +5,19 @@ use thiserror::Error;
 use crate::catalog::hex_digest;
 
 /// Exact webhook bytes and headers injected into product ingress.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RawWebhookFixture {
+    event: String,
+    delivery_id: String,
+    signature_sha256: String,
+    body: Vec<u8>,
+    body_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawWebhookFixtureWire {
     event: String,
     delivery_id: String,
     signature_sha256: String,
@@ -56,6 +66,43 @@ impl RawWebhookFixture {
         })
     }
 
+    /// Parses only the exact canonical encoding and recomputes the body digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed JSON, unknown fields, invalid headers/signatures/body,
+    /// a forged body digest, or a non-canonical representation.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, RawWebhookFixtureError> {
+        let wire: RawWebhookFixtureWire =
+            serde_json::from_slice(bytes).map_err(|_| RawWebhookFixtureError::InvalidJson)?;
+        let expected_body_sha256 = wire.body_sha256;
+        let fixture = Self::new(
+            wire.event,
+            wire.delivery_id,
+            wire.signature_sha256,
+            wire.body,
+        )?;
+        if fixture.body_sha256 != expected_body_sha256 {
+            return Err(RawWebhookFixtureError::BodyDigestMismatch);
+        }
+        if fixture.canonical_json()?.as_slice() != bytes {
+            return Err(RawWebhookFixtureError::NonCanonicalEncoding);
+        }
+        Ok(fixture)
+    }
+
+    /// Serializes this fixture as compact canonical JSON with one trailing newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization unexpectedly fails.
+    pub fn canonical_json(&self) -> Result<Vec<u8>, RawWebhookFixtureError> {
+        let mut bytes =
+            serde_json::to_vec(self).map_err(|_| RawWebhookFixtureError::InvalidJson)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
     #[must_use]
     pub fn event(&self) -> &str {
         &self.event
@@ -89,10 +136,16 @@ fn header_token(value: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RawWebhookFixtureError {
+    #[error("webhook fixture JSON is invalid")]
+    InvalidJson,
+    #[error("webhook fixture JSON is not its exact canonical encoding")]
+    NonCanonicalEncoding,
     #[error("webhook fixture header is invalid")]
     InvalidHeader,
     #[error("webhook fixture signature is not an exact SHA-256 header")]
     InvalidSignature,
     #[error("webhook fixture body is empty or oversized")]
     InvalidBody,
+    #[error("webhook fixture body digest does not match its exact bytes")]
+    BodyDigestMismatch,
 }

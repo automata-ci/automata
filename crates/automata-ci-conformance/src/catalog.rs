@@ -97,9 +97,16 @@ pub struct FixtureCatalogEntry {
 }
 
 /// Versioned fixture catalog with a deterministic canonical encoding.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FixtureCatalog {
+    schema_version: u16,
+    entries: Vec<FixtureCatalogEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FixtureCatalogWire {
     schema_version: u16,
     entries: Vec<FixtureCatalogEntry>,
 }
@@ -126,8 +133,15 @@ impl FixtureCatalog {
     ///
     /// Returns a parse or validation error for any non-canonical document.
     pub fn from_json(bytes: &[u8]) -> Result<Self, CatalogError> {
-        let catalog: Self = serde_json::from_slice(bytes).map_err(CatalogError::Json)?;
+        let wire: FixtureCatalogWire = serde_json::from_slice(bytes).map_err(CatalogError::Json)?;
+        let catalog = Self {
+            schema_version: wire.schema_version,
+            entries: wire.entries,
+        };
         catalog.validate()?;
+        if catalog.canonical_json()?.as_slice() != bytes {
+            return Err(CatalogError::NonCanonicalEncoding);
+        }
         Ok(catalog)
     }
 
@@ -141,6 +155,15 @@ impl FixtureCatalog {
     #[must_use]
     pub fn entries(&self) -> &[FixtureCatalogEntry] {
         &self.entries
+    }
+
+    /// Finds an immutable fixture by its exact catalog identity.
+    #[must_use]
+    pub fn entry(&self, identity: &str) -> Option<&FixtureCatalogEntry> {
+        self.entries
+            .binary_search_by(|entry| entry.id.as_str().cmp(identity))
+            .ok()
+            .map(|index| &self.entries[index])
     }
 
     /// Produces the canonical compact JSON representation with one trailing newline.
@@ -195,15 +218,47 @@ impl FixtureCatalog {
 }
 
 fn validate_source(source: &RepositorySourceLock) -> Result<(), CatalogError> {
-    if !source.remote.starts_with("https://")
-        || source.remote.contains('@')
-        || source.remote.contains('#')
-        || source.remote.contains('?')
-    {
+    if !valid_https_remote(&source.remote) {
         return Err(CatalogError::InvalidRemote);
     }
     validate_commit(&source.commit)?;
     validate_sha256(&source.archive_sha256)
+}
+
+fn valid_https_remote(value: &str) -> bool {
+    let Some(coordinate) = value.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((host, path)) = coordinate.split_once('/') else {
+        return false;
+    };
+    if host.is_empty()
+        || !host.contains('.')
+        || host.contains(['@', ':'])
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+        || path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.split('/').any(|component| {
+            component.is_empty()
+                || matches!(component, "." | "..")
+                || !component.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'@' | b'+')
+                })
+        })
+        || value.contains(['?', '#', '\\'])
+    {
+        return false;
+    }
+    true
 }
 
 fn validate_locks(locks: &[ContentLock], required: bool) -> Result<(), CatalogError> {
@@ -230,7 +285,7 @@ fn validate_prerequisites(values: &[ExternalPrerequisite]) -> Result<(), Catalog
     let mut previous = None;
     for value in values {
         validate_identifier(&value.identity)?;
-        validate_text(&value.immutable_revision)?;
+        validate_immutable_revision(&value.immutable_revision)?;
         if !identities.insert(value.identity.as_str()) {
             return Err(CatalogError::DuplicatePrerequisite);
         }
@@ -238,6 +293,25 @@ fn validate_prerequisites(values: &[ExternalPrerequisite]) -> Result<(), Catalog
             return Err(CatalogError::PrerequisitesNotSorted);
         }
         previous = Some(value.identity.as_str());
+    }
+    Ok(())
+}
+
+fn validate_immutable_revision(value: &str) -> Result<(), CatalogError> {
+    validate_text(value)?;
+    let Some((kind, revision)) = value.split_once(':') else {
+        return Err(CatalogError::InvalidImmutableRevision);
+    };
+    validate_identifier(kind).map_err(|_| CatalogError::InvalidImmutableRevision)?;
+    let decimal = !revision.is_empty()
+        && revision.bytes().all(|byte| byte.is_ascii_digit())
+        && !revision.starts_with('0');
+    let digest = matches!(revision.len(), 40 | 64)
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    if !decimal && !digest {
+        return Err(CatalogError::InvalidImmutableRevision);
     }
     Ok(())
 }
@@ -303,6 +377,8 @@ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
 pub enum CatalogError {
     #[error("fixture catalog JSON is invalid: {0}")]
     Json(serde_json::Error),
+    #[error("fixture catalog JSON is not its exact canonical encoding")]
+    NonCanonicalEncoding,
     #[error("unsupported fixture catalog schema {0}")]
     UnsupportedSchema(u16),
     #[error("fixture catalog entry count is invalid")]
@@ -329,6 +405,8 @@ pub enum CatalogError {
     DuplicatePrerequisite,
     #[error("fixture external prerequisites are not identity sorted")]
     PrerequisitesNotSorted,
+    #[error("fixture external prerequisite revision is not immutable")]
+    InvalidImmutableRevision,
     #[error("hermetic fixture declares an external prerequisite")]
     HermeticFixtureHasExternalPrerequisite,
 }

@@ -1,6 +1,6 @@
 use automata_ci_conformance::{
     GithubMutationOutcome, GithubStubError, GithubStubExchange, GithubStubRequest,
-    GithubStubResponse, GithubStubScript,
+    GithubStubResponse, GithubStubScript, MAX_STUB_AGGREGATE_RESPONSE_BYTES,
 };
 
 fn request(path: &str) -> GithubStubRequest {
@@ -10,6 +10,60 @@ fn request(path: &str) -> GithubStubRequest {
         body_sha256: None,
         credential_id: Some("installation-42".to_owned()),
     }
+}
+
+#[test]
+fn only_strict_origin_form_paths_are_accepted() {
+    for path in [
+        "//attacker.example/repos/o/r",
+        "https://github.com/repos/o/r",
+        "/repos/o/r#fragment",
+        "/repos/o/r has-space",
+        "/repos/o/r\\backslash",
+        "/repos/o/r?bad=%zz",
+        "/repos/o/r?one=1?two=2",
+    ] {
+        assert!(matches!(
+            GithubStubScript::new(vec![GithubStubExchange {
+                request: request(path),
+                response: GithubStubResponse::Page {
+                    status: 200,
+                    body: Vec::new(),
+                    next: None,
+                },
+            }]),
+            Err(GithubStubError::InvalidRequest)
+        ));
+    }
+
+    GithubStubScript::new(vec![GithubStubExchange {
+        request: request("/repos/o/r?cursor=a%2Fb&per_page=100"),
+        response: GithubStubResponse::Page {
+            status: 200,
+            body: Vec::new(),
+            next: Some("/repos/o/r?cursor=next%2Fpage".to_owned()),
+        },
+    }])
+    .expect("canonical origin-form request");
+}
+
+#[test]
+fn aggregate_response_bodies_are_bounded() {
+    let body_size = 16 * 1_048_576;
+    let exchanges = (0..=(MAX_STUB_AGGREGATE_RESPONSE_BYTES / body_size))
+        .map(|index| GithubStubExchange {
+            request: request(&format!("/page/{index}")),
+            response: GithubStubResponse::Page {
+                status: 200,
+                body: vec![0; body_size],
+                next: None,
+            },
+        })
+        .collect();
+    assert!(matches!(
+        GithubStubScript::new(exchanges),
+        Err(GithubStubError::AggregateResponseTooLarge)
+    ));
 }
 
 #[test]

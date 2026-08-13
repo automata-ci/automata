@@ -13,15 +13,15 @@ pub use catalog::{
 pub use control::{
     ConformanceClock, DurableTransition, FaultMode, FaultPlan, FaultTarget, FixtureControl,
     FixtureControlError, MAX_CONFORMANCE_SHARDS, ManualConformanceClock, ProductService,
-    RestartRecord, ShardIdentity, ShardPlan,
+    RestartRecord, ServiceObservation, ServiceRestartProbe, ServiceState, ShardIdentity, ShardPlan,
 };
 pub use evidence::{
     AdmissionOutcome, AvailabilityReason, EVIDENCE_SCHEMA_VERSION, EvidenceAvailability,
-    EvidenceEnvelope, EvidenceError, EvidenceProvenance, PrerequisiteState, ProductBuildIdentity,
-    ScenarioAdmission,
+    EvidenceEnvelope, EvidenceError, EvidenceMismatch, EvidenceMismatchKind, EvidenceProvenance,
+    PrerequisiteState, ProductBuildIdentity, ScenarioAdmission, compare_evidence,
 };
 pub use provider_stub::{
     GithubMutationOutcome, GithubStubError, GithubStubExchange, GithubStubRequest,
-    GithubStubResponse, GithubStubScript,
+    GithubStubResponse, GithubStubScript, MAX_STUB_AGGREGATE_RESPONSE_BYTES,
 };
 pub use webhook::{RawWebhookFixture, RawWebhookFixtureError};

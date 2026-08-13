@@ -83,11 +83,11 @@ fn catalog_rejects_mutability_drift_and_ambiguous_order() {
     unsorted_prerequisites.external_prerequisites = vec![
         ExternalPrerequisite {
             identity: "zeta".to_owned(),
-            immutable_revision: "revision-1".to_owned(),
+            immutable_revision: "revision:1".to_owned(),
         },
         ExternalPrerequisite {
             identity: "alpha".to_owned(),
-            immutable_revision: "revision-2".to_owned(),
+            immutable_revision: "revision:2".to_owned(),
         },
     ];
     assert!(matches!(
@@ -101,7 +101,7 @@ fn hermetic_evidence_cannot_claim_live_prerequisites() {
     let mut hermetic = entry("hermetic", EvidenceClass::HermeticProduct);
     hermetic.external_prerequisites.push(ExternalPrerequisite {
         identity: "github-app".to_owned(),
-        immutable_revision: "installation-42".to_owned(),
+        immutable_revision: "installation:42".to_owned(),
     });
     assert!(matches!(
         FixtureCatalog::new(vec![hermetic]),
@@ -111,9 +111,72 @@ fn hermetic_evidence_cannot_claim_live_prerequisites() {
     let mut live = entry("live", EvidenceClass::LiveAutomata);
     live.external_prerequisites.push(ExternalPrerequisite {
         identity: "github-app".to_owned(),
-        immutable_revision: "installation-42".to_owned(),
+        immutable_revision: "installation:42".to_owned(),
     });
     FixtureCatalog::new(vec![live]).expect("live prerequisite remains explicit");
+}
+
+#[test]
+fn catalog_requires_exact_canonical_bytes_and_https_source_coordinates() {
+    let catalog =
+        FixtureCatalog::new(vec![entry("fixture", EvidenceClass::Contract)]).expect("catalog");
+    let canonical = catalog.canonical_json().expect("canonical");
+    let pretty: serde_json::Value = serde_json::from_slice(&canonical).expect("value");
+    assert!(matches!(
+        FixtureCatalog::from_json(
+            &serde_json::to_vec_pretty(&pretty).expect("pretty serialization")
+        ),
+        Err(CatalogError::NonCanonicalEncoding)
+    ));
+
+    for remote in [
+        "http://github.com/example/project.git",
+        "https://user@github.com/example/project.git",
+        "https://github.com/example/project.git?ref=main",
+        "https://github.com/example/project.git#main",
+        "https://github.com:443/example/project.git",
+        "https://github.com",
+        "https://GITHUB.com/example/project.git",
+        "https://github.com/example/%2e%2e/project.git",
+    ] {
+        let mut invalid = entry("fixture", EvidenceClass::Contract);
+        invalid.source.remote = remote.to_owned();
+        assert!(matches!(
+            FixtureCatalog::new(vec![invalid]),
+            Err(CatalogError::InvalidRemote)
+        ));
+    }
+}
+
+#[test]
+fn external_prerequisite_revisions_use_immutable_numeric_or_digest_locks() {
+    for revision in [
+        "main",
+        "latest",
+        "installation:latest",
+        "revision:01",
+        "revision:0",
+        "revision:",
+    ] {
+        let mut invalid = entry("live", EvidenceClass::LiveAutomata);
+        invalid.external_prerequisites.push(ExternalPrerequisite {
+            identity: "github-app".to_owned(),
+            immutable_revision: revision.to_owned(),
+        });
+        assert!(matches!(
+            FixtureCatalog::new(vec![invalid]),
+            Err(CatalogError::InvalidImmutableRevision)
+        ));
+    }
+
+    let mut digest_locked = entry("live", EvidenceClass::LiveGithub);
+    digest_locked
+        .external_prerequisites
+        .push(ExternalPrerequisite {
+            identity: "mirror-repository".to_owned(),
+            immutable_revision: format!("commit:{}", "a".repeat(40)),
+        });
+    FixtureCatalog::new(vec![digest_locked]).expect("digest revision is immutable");
 }
 
 #[test]

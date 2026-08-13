@@ -3,7 +3,10 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::{EvidenceClass, catalog::hex_digest};
+use crate::{
+    EvidenceClass, FixtureCatalog, FixtureCatalogEntry, FixtureProvider, OperatingSystem,
+    catalog::{CatalogError, hex_digest},
+};
 
 /// Current canonical conformance-evidence envelope schema.
 pub const EVIDENCE_SCHEMA_VERSION: u16 = 1;
@@ -81,11 +84,12 @@ pub enum PrerequisiteState {
 }
 
 /// Admission request for one evidence-producing scenario.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ScenarioAdmission {
-    pub required_class: EvidenceClass,
-    pub prerequisites: Vec<(String, PrerequisiteState)>,
+    fixture_id: String,
+    required_class: EvidenceClass,
+    prerequisites: Vec<(String, PrerequisiteState)>,
 }
 
 /// Explicit result of checking external prerequisites and evidence class.
@@ -96,6 +100,57 @@ pub enum AdmissionOutcome {
 }
 
 impl ScenarioAdmission {
+    /// Binds an admission decision to every prerequisite locked by one fixture.
+    ///
+    /// # Errors
+    ///
+    /// Rejects omitted, extra, reordered, or revision-mismatched prerequisite
+    /// observations. An unavailable prerequisite must still be represented.
+    pub fn for_fixture(
+        fixture: &FixtureCatalogEntry,
+        prerequisites: Vec<(String, PrerequisiteState)>,
+    ) -> Result<Self, EvidenceError> {
+        if prerequisites.len() != fixture.external_prerequisites.len() {
+            return Err(EvidenceError::PrerequisiteSetMismatch);
+        }
+        for ((identity, state), expected) in
+            prerequisites.iter().zip(&fixture.external_prerequisites)
+        {
+            validate_text(identity)?;
+            if identity != &expected.identity {
+                return Err(EvidenceError::PrerequisiteSetMismatch);
+            }
+            match state {
+                PrerequisiteState::Available { immutable_revision } => {
+                    if immutable_revision != &expected.immutable_revision {
+                        return Err(EvidenceError::PrerequisiteRevisionMismatch);
+                    }
+                }
+                PrerequisiteState::Unavailable { reason } => validate_text(reason)?,
+            }
+        }
+        Ok(Self {
+            fixture_id: fixture.id.clone(),
+            required_class: fixture.evidence_class,
+            prerequisites,
+        })
+    }
+
+    #[must_use]
+    pub fn fixture_id(&self) -> &str {
+        &self.fixture_id
+    }
+
+    #[must_use]
+    pub const fn required_class(&self) -> EvidenceClass {
+        self.required_class
+    }
+
+    #[must_use]
+    pub fn prerequisites(&self) -> &[(String, PrerequisiteState)] {
+        &self.prerequisites
+    }
+
     /// Evaluates admission without converting unavailable live prerequisites
     /// into a passing record.
     ///
@@ -106,20 +161,11 @@ impl ScenarioAdmission {
         if !actual_class.satisfies(self.required_class) {
             return Err(EvidenceError::EvidenceClassMismatch);
         }
-        let mut previous = None;
         let mut missing = Vec::new();
         for (identity, state) in &self.prerequisites {
-            validate_text(identity)?;
-            if previous.is_some_and(|value: &str| value >= identity.as_str()) {
-                return Err(EvidenceError::PrerequisitesNotSorted);
-            }
-            previous = Some(identity.as_str());
             match state {
-                PrerequisiteState::Available { immutable_revision } => {
-                    validate_text(immutable_revision)?;
-                }
-                PrerequisiteState::Unavailable { reason } => {
-                    validate_text(reason)?;
+                PrerequisiteState::Available { .. } => {}
+                PrerequisiteState::Unavailable { .. } => {
                     missing.push(identity.clone());
                 }
             }
@@ -133,36 +179,80 @@ impl ScenarioAdmission {
 }
 
 /// Versioned canonical evidence wrapper used by every execution class.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidenceEnvelope<T> {
+    schema_version: u16,
+    evidence_class: EvidenceClass,
+    provenance: EvidenceProvenance,
+    evidence: T,
+    expected_evidence_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct EvidenceEnvelopeWire<T> {
     schema_version: u16,
     evidence_class: EvidenceClass,
     provenance: EvidenceProvenance,
     evidence: T,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceEnvelopeRef<'a> {
+    schema_version: u16,
+    evidence_class: EvidenceClass,
+    provenance: &'a EvidenceProvenance,
+    evidence: &'a Value,
+}
+
+impl<T: Serialize> Serialize for EvidenceEnvelope<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        validate_provenance(&self.provenance).map_err(serde::ser::Error::custom)?;
+        let evidence = serde_json::to_value(&self.evidence).map_err(serde::ser::Error::custom)?;
+        validate_expected_evidence(&evidence, &self.expected_evidence_sha256)
+            .map_err(serde::ser::Error::custom)?;
+        EvidenceEnvelopeRef {
+            schema_version: self.schema_version,
+            evidence_class: self.evidence_class,
+            provenance: &self.provenance,
+            evidence: &evidence,
+        }
+        .serialize(serializer)
+    }
+}
+
 impl<T> EvidenceEnvelope<T>
 where
     T: Serialize,
 {
-    /// Creates a current-schema evidence envelope after validating provenance.
+    /// Creates a current-schema envelope bound to its immutable catalog entry.
     ///
     /// # Errors
     ///
-    /// Rejects mutable or malformed provenance.
-    pub fn new(
-        evidence_class: EvidenceClass,
+    /// Rejects mutable or malformed provenance, a catalog mismatch, and evidence
+    /// whose canonical digest differs from the catalog lock.
+    pub fn for_fixture(
+        catalog: &FixtureCatalog,
         provenance: EvidenceProvenance,
         evidence: T,
     ) -> Result<Self, EvidenceError> {
         validate_provenance(&provenance)?;
-        Ok(Self {
+        let fixture = catalog
+            .entry(&provenance.fixture_id)
+            .ok_or(EvidenceError::FixtureNotFound)?;
+        let envelope = Self {
             schema_version: EVIDENCE_SCHEMA_VERSION,
-            evidence_class,
+            evidence_class: fixture.evidence_class,
             provenance,
             evidence,
-        })
+            expected_evidence_sha256: fixture.expected_evidence_sha256.clone(),
+        };
+        envelope.validate_catalog_binding(catalog)?;
+        Ok(envelope)
     }
 
     #[must_use]
@@ -203,6 +293,74 @@ where
     pub fn canonical_sha256(&self) -> Result<String, EvidenceError> {
         Ok(hex_digest(&Sha256::digest(self.canonical_json()?)))
     }
+
+    /// Revalidates that this envelope names the exact immutable fixture,
+    /// catalog digest, provider, operating system, class, and expected evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a specific binding error for any provenance or evidence drift.
+    pub fn validate_catalog_binding(&self, catalog: &FixtureCatalog) -> Result<(), EvidenceError> {
+        let catalog_digest = catalog.canonical_sha256().map_err(EvidenceError::Catalog)?;
+        if self.provenance.fixture_catalog_sha256 != catalog_digest {
+            return Err(EvidenceError::CatalogDigestMismatch);
+        }
+        let fixture = catalog
+            .entry(&self.provenance.fixture_id)
+            .ok_or(EvidenceError::FixtureNotFound)?;
+        if self.evidence_class != fixture.evidence_class {
+            return Err(EvidenceError::EvidenceClassMismatch);
+        }
+        if self.provenance.provider != provider_name(fixture.provider)
+            || self.provenance.operating_system != operating_system_name(fixture.operating_system)
+        {
+            return Err(EvidenceError::FixtureEnvironmentMismatch);
+        }
+        if self.expected_evidence_sha256 != fixture.expected_evidence_sha256 {
+            return Err(EvidenceError::ExpectedEvidenceDigestMismatch);
+        }
+        self.validate_expected_evidence()
+    }
+
+    fn validate_expected_evidence(&self) -> Result<(), EvidenceError> {
+        let evidence = serde_json::to_value(&self.evidence).map_err(EvidenceError::Json)?;
+        validate_expected_evidence(&evidence, &self.expected_evidence_sha256)
+    }
+}
+
+fn validate_expected_evidence(value: &Value, expected_sha256: &str) -> Result<(), EvidenceError> {
+    if contains_null(value) {
+        return Err(EvidenceError::ImplicitUnavailableEvidence);
+    }
+    let encoded =
+        serde_json::to_vec(&sort_json_objects(value.clone())).map_err(EvidenceError::Json)?;
+    if hex_digest(&Sha256::digest(encoded)) != expected_sha256 {
+        return Err(EvidenceError::ExpectedEvidenceDigestMismatch);
+    }
+    Ok(())
+}
+
+fn provider_name(provider: FixtureProvider) -> &'static str {
+    match provider {
+        FixtureProvider::Github => "github",
+    }
+}
+
+fn operating_system_name(operating_system: OperatingSystem) -> &'static str {
+    match operating_system {
+        OperatingSystem::Linux => "linux",
+        OperatingSystem::Windows => "windows",
+        OperatingSystem::Macos => "macos",
+    }
+}
+
+fn contains_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) => values.iter().any(contains_null),
+        Value::Object(values) => values.values().any(contains_null),
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
 }
 
 fn sort_json_objects(value: Value) -> Value {
@@ -231,14 +389,118 @@ where
     /// # Errors
     ///
     /// Rejects unknown fields, unsupported schemas, and malformed provenance.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, EvidenceError> {
-        let envelope: Self = serde_json::from_slice(bytes).map_err(EvidenceError::Json)?;
+    pub fn from_json(catalog: &FixtureCatalog, bytes: &[u8]) -> Result<Self, EvidenceError> {
+        let wire: EvidenceEnvelopeWire<T> =
+            serde_json::from_slice(bytes).map_err(EvidenceError::Json)?;
+        let fixture = catalog
+            .entry(&wire.provenance.fixture_id)
+            .ok_or(EvidenceError::FixtureNotFound)?;
+        let envelope = Self {
+            schema_version: wire.schema_version,
+            evidence_class: wire.evidence_class,
+            provenance: wire.provenance,
+            evidence: wire.evidence,
+            expected_evidence_sha256: fixture.expected_evidence_sha256.clone(),
+        };
         if envelope.schema_version != EVIDENCE_SCHEMA_VERSION {
             return Err(EvidenceError::UnsupportedSchema(envelope.schema_version));
         }
         validate_provenance(&envelope.provenance)?;
+        envelope.validate_catalog_binding(catalog)?;
+        if envelope.canonical_json()?.as_slice() != bytes {
+            return Err(EvidenceError::NonCanonicalEncoding);
+        }
         Ok(envelope)
     }
+}
+
+/// Kind of exact structural difference between expected and observed evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidenceMismatchKind {
+    MissingField,
+    UnexpectedField,
+    TypeMismatch,
+    ArrayLengthMismatch,
+    ValueMismatch,
+}
+
+/// Exact first difference found by [`compare_evidence`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceMismatch {
+    pub path: String,
+    pub kind: EvidenceMismatchKind,
+}
+
+/// Strictly compares serialized evidence without coercion or missing-field defaults.
+///
+/// Object key order is irrelevant; array order, scalar types, availability states,
+/// and every field are exact.
+///
+/// # Errors
+///
+/// Returns serialization errors or the first deterministic structural mismatch.
+pub fn compare_evidence<E: Serialize, A: Serialize>(
+    expected: &E,
+    actual: &A,
+) -> Result<(), EvidenceError> {
+    let expected = serde_json::to_value(expected).map_err(EvidenceError::Json)?;
+    let actual = serde_json::to_value(actual).map_err(EvidenceError::Json)?;
+    compare_values(&expected, &actual, "$")
+}
+
+fn compare_values(expected: &Value, actual: &Value, path: &str) -> Result<(), EvidenceError> {
+    let mismatch = |kind| {
+        Err(EvidenceError::EvidenceMismatch(EvidenceMismatch {
+            path: path.to_owned(),
+            kind,
+        }))
+    };
+    match (expected, actual) {
+        (Value::Object(expected), Value::Object(actual)) => {
+            for (key, expected_value) in expected {
+                let child_path = json_path(path, key);
+                let Some(actual_value) = actual.get(key) else {
+                    return Err(EvidenceError::EvidenceMismatch(EvidenceMismatch {
+                        path: child_path,
+                        kind: EvidenceMismatchKind::MissingField,
+                    }));
+                };
+                compare_values(expected_value, actual_value, &child_path)?;
+            }
+            if let Some(key) = actual.keys().find(|key| !expected.contains_key(*key)) {
+                return Err(EvidenceError::EvidenceMismatch(EvidenceMismatch {
+                    path: json_path(path, key),
+                    kind: EvidenceMismatchKind::UnexpectedField,
+                }));
+            }
+            Ok(())
+        }
+        (Value::Array(expected), Value::Array(actual)) => {
+            if expected.len() != actual.len() {
+                return mismatch(EvidenceMismatchKind::ArrayLengthMismatch);
+            }
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                compare_values(expected, actual, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        (Value::Null, Value::Null)
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_)) => {
+            if expected == actual {
+                Ok(())
+            } else {
+                mismatch(EvidenceMismatchKind::ValueMismatch)
+            }
+        }
+        _ => mismatch(EvidenceMismatchKind::TypeMismatch),
+    }
+}
+
+fn json_path(parent: &str, key: &str) -> String {
+    let escaped = key.replace('~', "~0").replace('/', "~1");
+    format!("{parent}/{escaped}")
 }
 
 fn validate_provenance(value: &EvidenceProvenance) -> Result<(), EvidenceError> {
@@ -321,6 +583,10 @@ fn lower_hex(value: &str) -> bool {
 pub enum EvidenceError {
     #[error("conformance evidence JSON is invalid: {0}")]
     Json(serde_json::Error),
+    #[error("fixture catalog cannot be used for evidence binding: {0}")]
+    Catalog(CatalogError),
+    #[error("conformance evidence JSON is not its exact canonical encoding")]
+    NonCanonicalEncoding,
     #[error("unsupported evidence schema {0}")]
     UnsupportedSchema(u16),
     #[error("evidence provenance commit is invalid")]
@@ -333,6 +599,20 @@ pub enum EvidenceError {
     InvalidBuildIdentity,
     #[error("observed evidence class cannot satisfy the requested class")]
     EvidenceClassMismatch,
-    #[error("scenario prerequisites are not strictly identity sorted")]
-    PrerequisitesNotSorted,
+    #[error("scenario prerequisite observations do not exactly match the fixture catalog")]
+    PrerequisiteSetMismatch,
+    #[error("an available scenario prerequisite revision differs from its catalog lock")]
+    PrerequisiteRevisionMismatch,
+    #[error("evidence fixture does not exist in the bound catalog")]
+    FixtureNotFound,
+    #[error("evidence catalog digest differs from its exact canonical catalog")]
+    CatalogDigestMismatch,
+    #[error("evidence provider or operating system differs from the fixture catalog")]
+    FixtureEnvironmentMismatch,
+    #[error("evidence contains null; unavailable fields must use EvidenceAvailability")]
+    ImplicitUnavailableEvidence,
+    #[error("evidence digest differs from the fixture catalog expectation")]
+    ExpectedEvidenceDigestMismatch,
+    #[error("evidence structures differ at {0:?}")]
+    EvidenceMismatch(EvidenceMismatch),
 }

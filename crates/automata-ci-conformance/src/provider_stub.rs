@@ -3,6 +3,10 @@ use std::{collections::VecDeque, sync::Mutex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Maximum bytes retained across every body in one deterministic script.
+pub const MAX_STUB_AGGREGATE_RESPONSE_BYTES: usize = 64 * 1_048_576;
+const MAX_STUB_RESPONSE_BYTES: usize = 16 * 1_048_576;
+
 /// Exact request expected by the hermetic GitHub HTTP stub.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -66,9 +70,16 @@ impl GithubStubScript {
         if exchanges.is_empty() || exchanges.len() > 4_096 {
             return Err(GithubStubError::InvalidScriptSize);
         }
+        let mut aggregate_response_bytes = 0_usize;
         for exchange in &exchanges {
             validate_request(&exchange.request)?;
             validate_response(&exchange.response)?;
+            aggregate_response_bytes = aggregate_response_bytes
+                .checked_add(response_body_len(&exchange.response))
+                .ok_or(GithubStubError::AggregateResponseTooLarge)?;
+            if aggregate_response_bytes > MAX_STUB_AGGREGATE_RESPONSE_BYTES {
+                return Err(GithubStubError::AggregateResponseTooLarge);
+            }
         }
         Ok(Self(Mutex::new(exchanges.into())))
     }
@@ -118,9 +129,7 @@ fn validate_request(value: &GithubStubRequest) -> Result<(), GithubStubError> {
     if !matches!(
         value.method.as_str(),
         "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
-    ) || !value.path_and_query.starts_with('/')
-        || value.path_and_query.len() > 8_192
-        || value.path_and_query.chars().any(char::is_control)
+    ) || !valid_origin_form(&value.path_and_query)
     {
         return Err(GithubStubError::InvalidRequest);
     }
@@ -144,12 +153,8 @@ fn validate_response(value: &GithubStubResponse) -> Result<(), GithubStubError> 
     match value {
         GithubStubResponse::Page { status, body, next } => {
             if !(200..300).contains(status)
-                || body.len() > 16 * 1_048_576
-                || next.as_ref().is_some_and(|next| {
-                    !next.starts_with('/')
-                        || next.len() > 8_192
-                        || next.chars().any(char::is_control)
-                })
+                || body.len() > MAX_STUB_RESPONSE_BYTES
+                || next.as_ref().is_some_and(|next| !valid_origin_form(next))
             {
                 return Err(GithubStubError::InvalidResponse);
             }
@@ -165,12 +170,84 @@ fn validate_response(value: &GithubStubResponse) -> Result<(), GithubStubError> 
             }
         }
         GithubStubResponse::Mutation { status, body, .. } => {
-            if !(200..600).contains(status) || body.len() > 16 * 1_048_576 {
+            if !(200..600).contains(status) || body.len() > MAX_STUB_RESPONSE_BYTES {
                 return Err(GithubStubError::InvalidResponse);
             }
         }
     }
     Ok(())
+}
+
+fn response_body_len(value: &GithubStubResponse) -> usize {
+    match value {
+        GithubStubResponse::Page { body, .. } | GithubStubResponse::Mutation { body, .. } => {
+            body.len()
+        }
+        GithubStubResponse::RateLimited { .. } | GithubStubResponse::CredentialFailure { .. } => 0,
+    }
+}
+
+fn valid_origin_form(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 8_192
+        || !value.starts_with('/')
+        || value.starts_with("//")
+        || !value.is_ascii()
+        || value.contains('#')
+        || value.contains('\\')
+    {
+        return false;
+    }
+    let mut query = false;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'?' {
+            if query {
+                return false;
+            }
+            query = true;
+            index += 1;
+            continue;
+        }
+        if byte == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        let common = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+                    | b'/'
+            );
+        if !common {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 fn lower_hex(value: &str) -> bool {
@@ -187,6 +264,8 @@ pub enum GithubStubError {
     InvalidRequest,
     #[error("GitHub stub response is invalid")]
     InvalidResponse,
+    #[error("GitHub stub aggregate response body budget is exceeded")]
+    AggregateResponseTooLarge,
     #[error("GitHub stub observed an unexpected extra request")]
     UnexpectedRequest,
     #[error("GitHub stub request does not match the next exact exchange")]

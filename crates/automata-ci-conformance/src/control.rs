@@ -200,23 +200,157 @@ impl DurableTransition {
 }
 
 /// One exact restart retained in fixture evidence.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RestartRecord {
-    pub after: DurableTransition,
-    pub service: ProductService,
-    pub at_millis: i64,
+    after: DurableTransition,
+    service: ProductService,
+    at_millis: i64,
+    stopped_generation: u64,
+    started_generation: u64,
+    stopped_instance: String,
+    started_instance: String,
+}
+
+impl RestartRecord {
+    #[must_use]
+    pub const fn after(&self) -> DurableTransition {
+        self.after
+    }
+
+    #[must_use]
+    pub const fn service(&self) -> ProductService {
+        self.service
+    }
+
+    #[must_use]
+    pub const fn at_millis(&self) -> i64 {
+        self.at_millis
+    }
+
+    #[must_use]
+    pub const fn stopped_generation(&self) -> u64 {
+        self.stopped_generation
+    }
+
+    #[must_use]
+    pub const fn started_generation(&self) -> u64 {
+        self.started_generation
+    }
+
+    #[must_use]
+    pub fn stopped_instance(&self) -> &str {
+        &self.stopped_instance
+    }
+
+    #[must_use]
+    pub fn started_instance(&self) -> &str {
+        &self.started_instance
+    }
+}
+
+/// Observed lifecycle state returned by a product service probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceState {
+    Running,
+    Stopped,
+}
+
+/// Independently observed service generation and process identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceObservation {
+    state: ServiceState,
+    generation: u64,
+    instance: String,
+}
+
+impl ServiceObservation {
+    /// Constructs a bounded observation returned by a process adapter.
+    ///
+    /// # Errors
+    ///
+    /// Rejects generation zero and unsafe or empty instance identities.
+    pub fn new(
+        state: ServiceState,
+        generation: u64,
+        instance: impl Into<String>,
+    ) -> Result<Self, FixtureControlError> {
+        let instance = instance.into();
+        if generation == 0
+            || instance.is_empty()
+            || instance.len() > 256
+            || instance.trim() != instance
+            || instance.chars().any(char::is_control)
+        {
+            return Err(FixtureControlError::InvalidServiceObservation);
+        }
+        Ok(Self {
+            state,
+            generation,
+            instance,
+        })
+    }
+}
+
+/// Adapter boundary used to prove a real stop/start cycle.
+pub trait ServiceRestartProbe: fmt::Debug + Send + Sync {
+    /// Observes the service without mutating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureControlError::ProbeFailed`] when the adapter cannot
+    /// obtain an authoritative lifecycle observation.
+    fn observe(&self, service: ProductService) -> Result<ServiceObservation, FixtureControlError>;
+    /// Requests and waits for the service to stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureControlError::ProbeFailed`] when stop or its wait fails.
+    fn stop(&self, service: ProductService) -> Result<(), FixtureControlError>;
+    /// Requests and waits for the service to start in its next generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureControlError::ProbeFailed`] when start or its wait fails.
+    fn start(&self, service: ProductService) -> Result<(), FixtureControlError>;
 }
 
 /// Stable identities assigned to one parallel shard.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShardIdentity {
-    pub id: String,
-    pub postgres_schema: String,
-    pub object_prefix: String,
-    pub credential_scope: String,
-    pub port_reservation_key: String,
+    id: String,
+    postgres_schema: String,
+    object_prefix: String,
+    credential_scope: String,
+    port_reservation_key: String,
+}
+
+impl ShardIdentity {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn postgres_schema(&self) -> &str {
+        &self.postgres_schema
+    }
+
+    #[must_use]
+    pub fn object_prefix(&self) -> &str {
+        &self.object_prefix
+    }
+
+    #[must_use]
+    pub fn credential_scope(&self) -> &str {
+        &self.credential_scope
+    }
+
+    #[must_use]
+    pub fn port_reservation_key(&self) -> &str {
+        &self.port_reservation_key
+    }
 }
 
 /// Complete isolated shard plan for one run identity.
@@ -272,6 +406,17 @@ impl ShardPlan {
     pub fn shards(&self) -> &[ShardIdentity] {
         &self.0
     }
+
+    /// Returns one identity only from this derived plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an ordinal outside the derived shard count.
+    pub fn shard(&self, ordinal: u16) -> Result<&ShardIdentity, FixtureControlError> {
+        self.0
+            .get(usize::from(ordinal))
+            .ok_or(FixtureControlError::UnknownShard)
+    }
 }
 
 fn domain_digest(domain: &[u8], material: &[u8]) -> String {
@@ -298,13 +443,19 @@ struct FixtureState {
 }
 
 impl FixtureControl {
-    #[must_use]
-    pub fn new(
+    /// Creates controls for an identity selected from a derived shard plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an ordinal not present in the plan.
+    pub fn for_shard(
         clock: Arc<ManualConformanceClock>,
         faults: Arc<FaultPlan>,
-        shard: ShardIdentity,
-    ) -> Self {
-        Self {
+        plan: &ShardPlan,
+        ordinal: u16,
+    ) -> Result<Self, FixtureControlError> {
+        let shard = plan.shard(ordinal)?.clone();
+        Ok(Self {
             clock,
             faults,
             shard,
@@ -313,7 +464,7 @@ impl FixtureControl {
                 restarted_after_current: BTreeSet::new(),
                 restarts: Vec::new(),
             }),
-        }
+        })
     }
 
     #[must_use]
@@ -326,24 +477,58 @@ impl FixtureControl {
         &self.faults
     }
 
-    /// Records a completed stop/start cycle after the current durable checkpoint.
+    /// Executes and verifies a stop/start cycle after the current checkpoint.
     ///
     /// # Errors
     ///
-    /// Rejects a duplicate restart or a poisoned fixture-state lock.
-    pub fn restarted(&self, service: ProductService) -> Result<(), FixtureControlError> {
+    /// Rejects duplicate restarts, probe failures, observations that do not prove
+    /// a stopped old generation and running next generation, or poisoned state.
+    pub fn restart_with(
+        &self,
+        service: ProductService,
+        probe: &dyn ServiceRestartProbe,
+    ) -> Result<(), FixtureControlError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| FixtureControlError::Poisoned)?;
-        if !state.restarted_after_current.insert(service) {
+        if state.restarted_after_current.contains(&service) {
             return Err(FixtureControlError::DuplicateRestart);
         }
+        let before = probe.observe(service)?;
+        if before.state != ServiceState::Running {
+            return Err(FixtureControlError::ServiceNotRunning);
+        }
+        probe.stop(service)?;
+        let stopped = probe.observe(service)?;
+        if stopped.state != ServiceState::Stopped
+            || stopped.generation != before.generation
+            || stopped.instance != before.instance
+        {
+            return Err(FixtureControlError::RestartDidNotStop);
+        }
+        probe.start(service)?;
+        let started = probe.observe(service)?;
+        let expected_generation = before
+            .generation
+            .checked_add(1)
+            .ok_or(FixtureControlError::ServiceGenerationOverflow)?;
+        if started.state != ServiceState::Running
+            || started.generation != expected_generation
+            || started.instance == before.instance
+        {
+            return Err(FixtureControlError::RestartDidNotAdvance);
+        }
+        state.restarted_after_current.insert(service);
         let after = state.transition;
         state.restarts.push(RestartRecord {
             after,
             service,
             at_millis: self.clock.now_millis(),
+            stopped_generation: stopped.generation,
+            started_generation: started.generation,
+            stopped_instance: stopped.instance,
+            started_instance: started.instance,
         });
         Ok(())
     }
@@ -417,6 +602,8 @@ pub enum FixtureControlError {
     InvalidRunIdentity,
     #[error("derived shard identity collided")]
     ShardCollision,
+    #[error("shard ordinal does not exist in the derived plan")]
+    UnknownShard,
     #[error("fixture control lock was poisoned")]
     Poisoned,
     #[error("service was restarted twice at one checkpoint")]
@@ -425,4 +612,16 @@ pub enum FixtureControlError {
     NonContiguousTransition,
     #[error("a service restart is required before the next durable transition")]
     RestartRequired,
+    #[error("service restart probe returned an invalid observation")]
+    InvalidServiceObservation,
+    #[error("service was not running before restart")]
+    ServiceNotRunning,
+    #[error("service restart probe did not observe the old generation stop")]
+    RestartDidNotStop,
+    #[error("service restart probe did not observe exactly the next running generation")]
+    RestartDidNotAdvance,
+    #[error("service generation overflowed")]
+    ServiceGenerationOverflow,
+    #[error("service restart probe operation failed")]
+    ProbeFailed,
 }
