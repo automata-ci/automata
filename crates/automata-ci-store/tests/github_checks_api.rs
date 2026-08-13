@@ -6,13 +6,12 @@ use automata_ci_store::{
     GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionWorkerId, GithubCheckRunId,
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
-    GithubCheckSubjectReceipt, GithubCheckSubjectTarget, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubCheckValueError, GithubRepositoryName,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceRevision, LinkGithubCheckWorkflowRun,
-    MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate, TenantScope,
+    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckValueError,
+    GithubRepositoryName, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceRevision, MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS,
+    MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate,
+    RepositoryId, ResolveGithubCheckRunCreate, TenantScope,
 };
 use uuid::Uuid;
 
@@ -63,6 +62,36 @@ fn provider_facing_values_are_bounded_and_redacted() {
     assert_eq!(
         GithubCheckHeadSha::new([0; 20]),
         Err(GithubCheckValueError::InvalidHeadSha)
+    );
+}
+
+#[test]
+fn static_and_evaluated_job_names_project_without_mutating_durable_text() {
+    for (durable_display_name, expected_check_name) in [
+        ("  build  ", "build"),
+        ("  build (linux, stable)  ", "build (linux, stable)"),
+    ] {
+        let name = GithubCheckName::from_job_display_name(durable_display_name)
+            .expect("legal durable display name must project to a Check name");
+        assert_eq!(name.as_str(), expected_check_name);
+    }
+
+    let durable_display_name = format!("  {}é  ", "x".repeat(254));
+    let name = GithubCheckName::from_job_display_name(&durable_display_name)
+        .expect("legal durable display name must project to a Check name");
+
+    assert_eq!(durable_display_name, format!("  {}é  ", "x".repeat(254)));
+    assert_eq!(name.as_str(), "x".repeat(254));
+    assert!(name.as_str().len() <= 255);
+    assert!(name.as_str().is_char_boundary(name.as_str().len()));
+
+    assert_eq!(
+        GithubCheckName::from_job_display_name("   "),
+        Err(GithubCheckValueError::InvalidCheckName)
+    );
+    assert_eq!(
+        GithubCheckName::from_job_display_name(" build\n"),
+        Err(GithubCheckValueError::InvalidCheckName)
     );
 }
 
@@ -229,19 +258,7 @@ fn prepare_projection(
 }
 
 #[test]
-fn scoped_mutations_reject_nil_run_and_invalid_claim_window() {
-    let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
-    let target = GithubCheckSubjectTarget::new(
-        automata_ci_store::TenantScope::from_authenticated_tenant_id("tenant").expect("tenant"),
-        subject,
-    );
-    assert!(matches!(
-        LinkGithubCheckWorkflowRun::new(target, RunId::from_uuid(Uuid::nil()), UnixMillis::new(1),),
-        Err(GithubCheckValueError::NilUuid(
-            "GitHub Check workflow run ID"
-        ))
-    ));
-
+fn projection_claim_rejects_invalid_window() {
     let connection = ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection ID");
     let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");
     assert!(matches!(

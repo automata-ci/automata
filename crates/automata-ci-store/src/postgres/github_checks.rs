@@ -11,15 +11,16 @@ use crate::{
     GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
-    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
-    GithubCheckSubjectRepository, GithubCheckSubjectTarget, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubCheckTerminalizationRepository, GithubRepositoryName,
-    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceRevision, LinkGithubCheckWorkflowRun, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, StartGithubCheckProjection,
-    StoreError, TenantScope, TerminalizeGithubCheck,
+    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectOrigin,
+    GithubCheckSubjectReceipt, GithubCheckSubjectRepository, GithubCheckSubjectTarget,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository,
+    GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceRevision,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, ProviderConnectionId, ProviderDeliveryId,
+    ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, StartGithubCheckProjection, StoreError, TenantScope,
+    TerminalizeGithubCheck,
 };
 
 use super::PostgresStore;
@@ -593,58 +594,6 @@ impl GithubCheckSubjectRepository for PostgresStore {
         }
         transaction.commit().await.map_err(operation_error)?;
         Ok(existing.receipt)
-    }
-
-    async fn link_github_check_workflow_run(
-        &self,
-        request: LinkGithubCheckWorkflowRun,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-        let query = format!(
-            r"
-            WITH locked_run AS MATERIALIZED (
-                SELECT id, repository_id, head_sha
-                FROM workflow_runs
-                WHERE id = $3 AND status IN ('queued', 'in_progress')
-                FOR UPDATE
-            )
-            UPDATE github_check_subjects AS subject
-            SET workflow_run_id = $3, linked_at_ms = $4
-            FROM locked_run AS run
-            WHERE subject.id = $1
-              AND subject.tenant_id = $2
-              AND subject.subject_kind = 'workflow'
-              AND subject.workflow_run_id IS NULL
-              AND run.id = $3
-              AND run.repository_id = subject.repository_id
-              AND run.head_sha = subject.head_sha
-            RETURNING {SUBJECT_COLUMNS}
-            "
-        );
-        let row = sqlx::query(AssertSqlSafe(query))
-            .bind(request.target().subject_id().as_uuid())
-            .bind(request.target().tenant().as_str())
-            .bind(request.run_id().as_uuid())
-            .bind(request.linked_at().get())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(operation_error)?;
-        if let Some(row) = row {
-            return Ok(decode_subject(&row)?.receipt);
-        }
-        let existing = load_subject(&self.pool, request.target()).await?;
-        match existing {
-            Some(existing)
-                if existing.receipt.workflow_run_id() == Some(request.run_id())
-                    && existing.linked_at == Some(request.linked_at()) =>
-            {
-                Ok(existing.receipt)
-            }
-            Some(existing) if existing.receipt.workflow_run_id().is_none() => {
-                Err(GithubCheckStoreError::AuthorityRejected)
-            }
-            Some(_) => Err(GithubCheckStoreError::TransitionConflict),
-            None => Err(GithubCheckStoreError::NotFound),
-        }
     }
 
     async fn start_github_check_projection(
@@ -1300,7 +1249,6 @@ pub(super) struct DecodedSubject {
     pub(super) identity: GithubCheckSubjectIdentity,
     pub(super) receipt: GithubCheckSubjectReceipt,
     pub(super) created_at: UnixMillis,
-    pub(super) linked_at: Option<UnixMillis>,
     pub(super) desired_updated_at: UnixMillis,
     pub(super) details_target: GithubCheckDetailsTarget,
 }
@@ -1323,10 +1271,27 @@ pub(super) fn decode_subject(
         job_attempt_id,
         workflow_run_id,
     ) {
-        ("workflow", None, None, None, None) => GithubCheckDetailsTarget::Repository,
-        ("workflow", None, None, None, Some(run_id)) => {
-            GithubCheckDetailsTarget::WorkflowRun(run_id)
-        }
+        // Scheduled Checks and the delivery aggregate are externally
+        // claimable before logical admission. GitHub includes details_url in
+        // exact create reconciliation, so those roots retain the repository
+        // target after linkage. An all-direct per-workflow Check is inserted
+        // and linked inside the admission transaction, and a rerun Check is
+        // likewise not visible until its run link commits; their first
+        // claimable identity can therefore use the exact workflow-run target.
+        ("workflow", None, None, None, workflow_run_id) => match identity.origin() {
+            GithubCheckSubjectOrigin::ScheduledFire(_) => GithubCheckDetailsTarget::Repository,
+            GithubCheckSubjectOrigin::ProviderDelivery(_)
+                if identity.subject_key().as_str()
+                    == crate::GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY =>
+            {
+                GithubCheckDetailsTarget::Repository
+            }
+            GithubCheckSubjectOrigin::ProviderDelivery(_)
+            | GithubCheckSubjectOrigin::WorkflowRerun(_) => workflow_run_id.map_or(
+                GithubCheckDetailsTarget::Repository,
+                GithubCheckDetailsTarget::WorkflowRun,
+            ),
+        },
         ("job", Some(parent_id), Some(job_id), Some(attempt_id), Some(run_id))
             if !parent_id.is_nil() && !attempt_id.is_nil() =>
         {
@@ -1346,13 +1311,12 @@ pub(super) fn decode_subject(
     )
     .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let created_at = unix_millis_column(row, "created_at_ms")?;
-    let linked_at = optional_unix_millis_column(row, "linked_at_ms")?;
+    optional_unix_millis_column(row, "linked_at_ms")?;
     let desired_updated_at = unix_millis_column(row, "desired_updated_at_ms")?;
     Ok(DecodedSubject {
         identity,
         receipt,
         created_at,
-        linked_at,
         desired_updated_at,
         details_target,
     })

@@ -107,7 +107,7 @@ fn mixed_document() -> Value {
         None,
     );
     json!({
-        "schema": 1,
+        "schema": 2,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {

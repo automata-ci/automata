@@ -1158,7 +1158,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
 
 fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {

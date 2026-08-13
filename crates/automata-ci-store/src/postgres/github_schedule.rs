@@ -366,6 +366,7 @@ async fn register_schedule_registry(
     let registered_at = database_now(&mut transaction).await?;
     let completed_registry =
         lock_and_verify_registration_discovery(&mut transaction, &request, registered_at).await?;
+    let current_registry = lock_schedule_registration_domain(&mut transaction, &request).await?;
     lock_and_verify_current_manifest(&mut transaction, &request, registered_at).await?;
     if let Some(receipt) = exact_registry_replay(&mut transaction, &request).await? {
         if let Some(completed_registry) = completed_registry {
@@ -394,7 +395,7 @@ async fn register_schedule_registry(
     {
         return Err(GithubScheduleStoreError::Conflict);
     }
-    supersede_current_registry(&mut transaction, &request, registered_at).await?;
+    supersede_current_registry(&mut transaction, current_registry, registered_at).await?;
     insert_registry_revision(&mut transaction, &request, registered_at).await?;
     insert_registry_entries(&mut transaction, &request).await?;
     seal_registry(&mut transaction, &request, registered_at).await?;
@@ -756,9 +757,21 @@ async fn terminalize_scheduled_check(
                terminal_cause = $3,
                desired_revision = desired_revision + 1,
                desired_updated_at_ms = $4
-         WHERE origin_kind = 'scheduled_fire'
+        WHERE origin_kind = 'scheduled_fire'
            AND provider_delivery_id IS NULL
            AND schedule_fire_id = $1
+           AND subject_kind = 'workflow'
+           AND parent_subject_id IS NULL
+           AND job_id IS NULL
+           AND job_attempt_id IS NULL
+           AND workflow_run_id IS NULL
+           AND linked_at_ms IS NULL
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                WHERE run_evidence.schedule_fire_id = $1
+                  AND run_evidence.github_check_subject_id = github_check_subjects.id
+           )
            AND desired_state IN ('queued', 'in_progress')
            AND desired_updated_at_ms <= $4
            AND desired_revision < 9223372036854775807
@@ -777,7 +790,15 @@ async fn terminalize_scheduled_check(
     }
     if changed == 0 {
         let occupied: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM github_check_subjects WHERE schedule_fire_id = $1)",
+            r"
+            SELECT EXISTS (
+                SELECT 1
+                  FROM github_check_subjects
+                 WHERE schedule_fire_id = $1
+                   AND subject_kind = 'workflow'
+                   AND parent_subject_id IS NULL
+            )
+            ",
         )
         .bind(fire_id.as_uuid())
         .fetch_one(&mut **transaction)
@@ -1504,6 +1525,53 @@ async fn complete_schedule_discovery(
     }
 }
 
+// The current-registry row does not exist for the first registration, so it
+// cannot define the lock domain in every state. The repository row is stable
+// across both pointer states and is already the first repository-specific lock
+// taken by provider-manifest bootstrap and logical admission. The remaining
+// order is schedule current, then provider-manifest current.
+async fn lock_schedule_registration_domain(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RegisterGithubScheduleRegistry,
+) -> Result<Option<Uuid>, GithubScheduleStoreError> {
+    let manifest = request.manifest();
+    let repository_id: Option<Uuid> = sqlx::query_scalar(
+        r"
+        SELECT id
+          FROM repositories
+         WHERE tenant_id = $1
+           AND id = $2
+           AND scm_provider = 'github'
+         FOR UPDATE
+        ",
+    )
+    .bind(manifest.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if repository_id != Some(manifest.repository_id().as_uuid()) {
+        return Err(GithubScheduleStoreError::Conflict);
+    }
+
+    sqlx::query_scalar(
+        r"
+        SELECT registry_id
+          FROM github_schedule_registry_current
+         WHERE tenant_id = $1
+           AND repository_id = $2
+           AND provider_connection_id = $3
+         FOR UPDATE
+        ",
+    )
+    .bind(manifest.tenant().as_str())
+    .bind(manifest.repository_id().as_uuid())
+    .bind(manifest.connection_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)
+}
+
 async fn lock_and_verify_current_manifest(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RegisterGithubScheduleRegistry,
@@ -1779,26 +1847,13 @@ async fn replay_entries_are_exact(
 
 async fn supersede_current_registry(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &RegisterGithubScheduleRegistry,
+    old_registry: Option<Uuid>,
     now: UnixMillis,
 ) -> Result<(), GithubScheduleStoreError> {
-    let old_registry: Option<Uuid> = sqlx::query_scalar(
-        r"
-        SELECT registry_id
-          FROM github_schedule_registry_current
-         WHERE tenant_id = $1 AND repository_id = $2 AND provider_connection_id = $3
-         FOR UPDATE
-        ",
-    )
-    .bind(request.manifest().tenant().as_str())
-    .bind(request.manifest().repository_id().as_uuid())
-    .bind(request.manifest().connection_id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
     let Some(old_registry) = old_registry else {
         return Ok(());
     };
+    reject_supersession_during_admission_completion(transaction, old_registry).await?;
     sqlx::query(
         r"
         INSERT INTO github_schedule_fire_attempts (
@@ -1811,6 +1866,11 @@ async fn supersede_current_registry(
                'failed', 'registry_superseded'
           FROM github_schedule_fires
          WHERE registry_id = $1 AND state = 'claimed'
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                WHERE run_evidence.schedule_fire_id = github_schedule_fires.fire_id
+           )
         ON CONFLICT (fire_id, attempt) DO NOTHING
         ",
     )
@@ -1827,6 +1887,11 @@ async fn supersede_current_registry(
                claimed_at_ms = NULL, claim_expires_at_ms = NULL,
                failure_kind = 'registry_superseded', updated_at_ms = $2
          WHERE registry_id = $1 AND state IN ('pending', 'claimed')
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                WHERE run_evidence.schedule_fire_id = github_schedule_fires.fire_id
+           )
         ",
     )
     .bind(old_registry)
@@ -1840,6 +1905,53 @@ async fn supersede_current_registry(
         .await
         .map_err(operation_error)?;
     Ok(())
+}
+
+// Logical admission links the workflow Check and records immutable run
+// evidence before the schedule worker concludes its fire. A crash between
+// those commits leaves the fire claimed even though the run is authoritative.
+// Replacing the registry in that window would delete the runtime row needed to
+// complete the admitted fire and could misclassify its live Check as failed.
+// The current-registry row is already locked exclusively by the caller, while
+// admission takes a shared lock on it, so this check cannot race a new link.
+async fn reject_supersession_during_admission_completion(
+    transaction: &mut Transaction<'_, Postgres>,
+    registry_id: Uuid,
+) -> Result<(), GithubScheduleStoreError> {
+    let admitted_but_unconcluded: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+              FROM github_schedule_fires AS fire
+              JOIN github_check_subjects AS subject
+                ON subject.schedule_fire_id = fire.fire_id
+             WHERE fire.registry_id = $1
+               AND fire.state IN ('pending', 'claimed')
+               AND subject.origin_kind = 'scheduled_fire'
+               AND subject.schedule_fire_id = fire.fire_id
+               AND subject.subject_kind = 'workflow'
+               AND subject.parent_subject_id IS NULL
+               AND (
+                   subject.workflow_run_id IS NOT NULL
+                   OR EXISTS (
+                       SELECT 1
+                         FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                        WHERE run_evidence.schedule_fire_id = fire.fire_id
+                          AND run_evidence.github_check_subject_id = subject.id
+                   )
+               )
+        )
+        ",
+    )
+    .bind(registry_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if admitted_but_unconcluded {
+        Err(GithubScheduleStoreError::Conflict)
+    } else {
+        Ok(())
+    }
 }
 
 async fn terminalize_superseded_scheduled_checks(
@@ -1857,9 +1969,22 @@ async fn terminalize_superseded_scheduled_checks(
                desired_updated_at_ms = $2
           FROM github_schedule_fires AS fire
          WHERE fire.registry_id = $1
+           AND fire.state IN ('pending', 'claimed')
            AND subject.origin_kind = 'scheduled_fire'
            AND subject.provider_delivery_id IS NULL
            AND subject.schedule_fire_id = fire.fire_id
+           AND subject.subject_kind = 'workflow'
+           AND subject.parent_subject_id IS NULL
+           AND subject.job_id IS NULL
+           AND subject.job_attempt_id IS NULL
+           AND subject.workflow_run_id IS NULL
+           AND subject.linked_at_ms IS NULL
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM github_schedule_workflow_run_subject_evidence AS run_evidence
+                WHERE run_evidence.schedule_fire_id = fire.fire_id
+                  AND run_evidence.github_check_subject_id = subject.id
+           )
            AND subject.desired_state IN ('queued', 'in_progress')
            AND subject.desired_updated_at_ms <= $2
            AND subject.desired_revision < 9223372036854775807
@@ -1878,8 +2003,13 @@ async fn terminalize_superseded_scheduled_checks(
               JOIN github_schedule_fires AS fire
                 ON fire.fire_id = subject.schedule_fire_id
              WHERE fire.registry_id = $1
+               AND fire.state IN ('pending', 'claimed')
                AND subject.origin_kind = 'scheduled_fire'
                AND subject.provider_delivery_id IS NULL
+               AND subject.subject_kind = 'workflow'
+               AND subject.parent_subject_id IS NULL
+               AND subject.job_id IS NULL
+               AND subject.job_attempt_id IS NULL
                AND subject.desired_state IN ('queued', 'in_progress')
         )
         ",

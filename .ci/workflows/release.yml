@@ -1,15 +1,9 @@
-name: Release
+name: Release (publication disabled)
 
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag to publish
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -24,7 +18,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     permissions:
-      checks: read
       contents: read
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
@@ -37,38 +30,41 @@ jobs:
       tag_object: ${{ steps.identity.outputs.tag_object }}
       version: ${{ steps.identity.outputs.version }}
     steps:
+      - name: Refuse publication without exact Automata release authority
+        run: |
+          printf '%s\n' \
+            'error: public release publication is disabled.' \
+            'Automata does not yet expose provider-authenticated evidence binding the exact' \
+            'trusted provider App and dashboard origin, repository, commit,' \
+            '.ci/workflows/ci.yml, push event, refs/heads/main,' \
+            'logical distribution job, workflow run, and job attempt required by this gate.' \
+            'A same-name GitHub Check is not release authority.' \
+            'Retry is unavailable; future recovery requires authenticated Automata dispatch.' >&2
+          exit 1
+
       - name: Check out the release tag and main history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Validate release identity
         id: identity
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          DISPATCH_REF: ${{ github.ref }}
+          EVENT_REF: ${{ github.ref }}
           EVENT_NAME: ${{ github.event_name }}
-          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+          REQUESTED_TAG: ${{ github.ref_name }}
         run: |
-          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
-            expected_ref="refs/heads/${DEFAULT_BRANCH}"
-            [[ "$DISPATCH_REF" == "$expected_ref" ]] || {
-              printf 'error: manual release retries must run from %s\n' \
-                "$expected_ref" >&2
-              exit 1
-            }
-          elif [[ "$EVENT_NAME" == push ]]; then
-            [[ "$DISPATCH_REF" == "refs/tags/${REQUESTED_TAG}" ]] || {
-              printf 'error: tag release ref does not match %s\n' \
-                "$REQUESTED_TAG" >&2
-              exit 1
-            }
-          else
+          [[ "$EVENT_NAME" == push ]] || {
             printf 'error: unsupported release event: %s\n' "$EVENT_NAME" >&2
             exit 1
-          fi
+          }
+          [[ "$EVENT_REF" == "refs/tags/${REQUESTED_TAG}" ]] || {
+            printf 'error: tag release ref does not match %s\n' \
+              "$REQUESTED_TAG" >&2
+            exit 1
+          }
 
           version="$(./scripts/ci/workspace-version.sh)"
           [[ "$version" != *+* ]] || {
@@ -181,114 +177,6 @@ jobs:
             printf 'initial_burst_override_approved=%s\n' \
               "${CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED:-false}"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Require successful main CI for the tagged commit
-        env:
-          AUTOMATA_GITHUB_APP_ID: ${{ vars.AUTOMATA_GITHUB_APP_ID }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
-        run: |
-          git show-ref --verify --quiet refs/remotes/origin/main || {
-            printf 'error: origin/main was not fetched\n' >&2
-            exit 1
-          }
-          git merge-base --is-ancestor \
-            "$RELEASE_COMMIT" refs/remotes/origin/main || {
-            printf 'error: release commit %s is not on main\n' \
-              "$RELEASE_COMMIT" >&2
-            exit 1
-          }
-
-          [[ "$AUTOMATA_GITHUB_APP_ID" =~ ^[1-9][0-9]*$ ]] || {
-            printf 'error: AUTOMATA_GITHUB_APP_ID must be a positive integer\n' >&2
-            exit 1
-          }
-          check_name="Static Linux distribution"
-          endpoint="repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs"
-          # The final distribution job runs after its verification fan-out, so
-          # a tag pushed with the main commit can legitimately take about 75
-          # minutes to reach a terminal Automata Check conclusion.
-          deadline="$(( $(date +%s) + 5400 ))"
-          api_failures=0
-          while (( $(date +%s) < deadline )); do
-            if ! checks="$(
-              gh api --method GET "$endpoint" \
-                -f app_id="$AUTOMATA_GITHUB_APP_ID" \
-                -f check_name="$check_name" \
-                -f filter=latest \
-                -f per_page=100 \
-                --jq '.check_runs[] | [
-                  .id,
-                  .head_sha,
-                  .status,
-                  (.conclusion // "-"),
-                  (.details_url // ""),
-                  (.external_id // ""),
-                  (.app.id | tostring)
-                ] | @tsv'
-            )"; then
-              api_failures="$((api_failures + 1))"
-              if (( api_failures >= 3 )); then
-                printf 'error: unable to query Automata Checks for %s\n' \
-                  "$RELEASE_COMMIT" >&2
-                exit 1
-              fi
-              printf 'warning: Automata Check query failed; retrying (%s/3)\n' \
-                "$api_failures" >&2
-              sleep 15
-              continue
-            fi
-            api_failures=0
-
-            success_url=""
-            failed_url=""
-            pending=false
-            observed=0
-            while IFS=$'\t' read -r check_id head_sha status conclusion details_url external_id app_id; do
-              [[ -n "$check_id" ]] || continue
-              observed="$((observed + 1))"
-              [[ "$head_sha" == "$RELEASE_COMMIT" \
-                && "$app_id" == "$AUTOMATA_GITHUB_APP_ID" \
-                && "$external_id" == automata-check:* \
-                && "$details_url" == https://* ]] || {
-                printf 'error: Check %s is not exact Automata evidence for %s\n' \
-                  "$check_id" "$RELEASE_COMMIT" >&2
-                exit 1
-              }
-              if [[ "$status" == completed && "$conclusion" == success ]]; then
-                success_url="$details_url"
-                continue
-              fi
-              if [[ "$status" == completed ]]; then
-                failed_url="$details_url"
-              else
-                pending=true
-              fi
-            done <<< "$checks"
-
-            (( observed <= 1 )) || {
-              printf 'error: ambiguous latest Automata Check evidence for %s\n' \
-                "$RELEASE_COMMIT" >&2
-              exit 1
-            }
-
-            if [[ -n "$success_url" ]]; then
-              printf 'Release gate accepted Automata Check: %s\n' "$success_url"
-              break
-            fi
-            if [[ -n "$failed_url" && "$pending" == false ]]; then
-              printf 'error: Automata CI did not pass for release commit %s: %s\n' \
-                "$RELEASE_COMMIT" "$failed_url" >&2
-              exit 1
-            fi
-            printf 'Waiting for Automata CI on %s...\n' "$RELEASE_COMMIT"
-            sleep 15
-          done
-          [[ -n "${success_url:-}" ]] || {
-            printf 'error: timed out waiting for Automata CI on %s\n' \
-              "$RELEASE_COMMIT" >&2
-            exit 1
-          }
 
   stage_release:
     name: Stage release payloads

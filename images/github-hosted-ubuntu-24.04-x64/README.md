@@ -68,32 +68,32 @@ wrapper never pushes, logs in to a registry, or changes a live runner.
 
 ## Publish a reviewed profile
 
-Profile publication is deliberately separate from product releases and never
-rebuilds an image after its digest is reviewed:
+Automated profile publication is disabled. The checked-in workflow fails before
+checkout because GitHub's hosted attestation identity cannot authenticate an
+Automata job running on a self-hosted runner. It must never be represented as a
+GitHub-hosted build.
 
-1. Commit the proposed Containerfile and manifest changes. The manifest may
-   still name the previous locked image at this point.
-2. From the default branch version of **Publish runner profile**, choose
-   `build-candidate` and paste the proposal's full commit SHA into
-   `candidate_commit`.
-3. Review and test the exact `ghcr.io/...@sha256:...` identity reported in the
-   workflow summary. The workflow also records provenance, an SPDX SBOM, the
-   candidate commit, and hashes of the Containerfile and normalized profile
-   contract.
-4. Put that registry digest in `profile-manifest.json`, recompute the manifest
-   and Containerfile hashes in `profile-lock.json`, and update
-   all three `../../crates/automata-ci-runner/config/runner.local-N.example.json`
-   host configurations. Review and merge that lock commit. The control plane
-   does not yet compose a
-   profile-catalog configuration, so promotion publishes the reviewed image
-   but does not by itself enable hosted-label scheduling.
-5. Make the GHCR package public, then dispatch `promote-locked` from the default
-   branch and paste the reviewed digest. The protected `profile-promotion`
-   environment verifies the lock, attestations, runtime contract, and anonymous
-   pull before copying that exact digest to `profile-v1` and `latest`.
+The safe local preparation path remains:
 
-The candidate source is checked out separately; publication logic and the image
-verifier always come from the trusted default branch. `profile-v1` is immutable:
-an incompatible future profile needs a new versioned tag. Until the exact
-locked digest is remotely and anonymously available, hosted renderer
-reproduction fails closed with a publication-prerequisite diagnostic.
+```console
+images/github-hosted-ubuntu-24.04-x64/build-profile.sh
+images/github-hosted-ubuntu-24.04-x64/verify-profile-image.sh \
+  ghcr.io/automata-ci/automata-ubuntu-24.04-x64:profile-build
+```
+
+This produces and verifies only a local image. Its storage digest is not a
+registry identity. A separately authorized operator may transfer an already
+reviewed image with a least-privilege registry credential, capture the returned
+registry digest, pull the exact `@sha256` identity, and rerun the verifier. That
+manual transfer does not create trusted provenance or authorize `profile-v1`
+or `latest`. Updating `profile-manifest.json`, `profile-lock.json`, runner
+examples, or stable tags still requires independent review binding the exact
+candidate source commit and remote digest.
+
+The workflow may be enabled only after an accepted Automata issuer binds the
+publisher commit, `.ci/workflows/profile-image.yml`, an authenticated Automata
+dispatch, the main ref, candidate commit, and the profile-contract,
+Containerfile, candidate-source, and image digests. GitHub Actions manual
+dispatch is not publication authority. The control plane also does not yet
+compose a profile catalog, so publishing an image would not by itself enable
+hosted-label scheduling.
