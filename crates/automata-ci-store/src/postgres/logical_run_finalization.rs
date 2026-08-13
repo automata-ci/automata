@@ -46,7 +46,7 @@ const LOCK_READY_CANDIDATE_QUERY: &str = r"
           AND invocation.plan_schema = $3
           AND invocation.state IN ('pending', 'active')
           AND invocation.revision < 9223372036854775807
-          AND run.admission_epoch = $4 AND run.plan_schema = $4
+          AND run.admission_epoch = $5 AND run.plan_schema = $4
           AND run.status IN ('queued', 'in_progress', 'cancelled')
           AND (
               claim.run_id IS NULL
@@ -360,6 +360,7 @@ async fn lock_ready_candidate(
         .bind(schemas.logical_orchestration_i16)
         .bind(schemas.workflow_plan_i16)
         .bind(schemas.workflow_plan_i32)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -438,7 +439,7 @@ async fn lock_commit_target(
           AND marker.root_invocation_id = $3
           AND marker.orchestration_schema = $4
           AND invocation.plan_schema = $5
-          AND run.admission_epoch = $6 AND run.plan_schema = $6
+          AND run.admission_epoch = $7 AND run.plan_schema = $6
         FOR UPDATE OF marker, invocation, run, claim
         ",
     )
@@ -448,6 +449,7 @@ async fn lock_commit_target(
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)

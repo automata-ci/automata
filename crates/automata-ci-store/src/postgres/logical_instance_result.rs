@@ -1084,6 +1084,7 @@ async fn lock_target(
         .bind(schemas.logical_orchestration_i16)
         .bind(schemas.workflow_plan_i32)
         .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1271,7 +1272,7 @@ fn target_query() -> &'static str {
       AND terminal.attempt_id = $2
       AND materialization.state = 'materialized'
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = $8
+      AND job.admission_epoch = $10
       AND job.job_ir_schema = $3
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
@@ -1297,7 +1298,7 @@ fn target_query() -> &'static str {
       AND logical_job.execution_kind = 'steps'
       AND invocation.plan_schema = $6
       AND marker.orchestration_schema = $7
-      AND run.admission_epoch = $8
+      AND run.admission_epoch = $10
       AND run.plan_schema = $8
       AND logical_job.state IN ('activated', 'completed', 'skipped', 'cancelled', 'failed')
       AND invocation.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')

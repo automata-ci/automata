@@ -112,6 +112,7 @@ impl LogicalActivationRepository for PostgresStore {
             .bind(schemas.workflow_plan_i16)
             .bind(schemas.logical_orchestration_i16)
             .bind(schemas.workflow_plan_i32)
+            .bind(schemas.admission_epoch_i32)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(operation_error)?
@@ -791,6 +792,7 @@ pub(super) async fn consume_selected_activation_in_transaction(
         .bind(schemas.workflow_plan_i16)
         .bind(schemas.logical_orchestration_i16)
         .bind(schemas.workflow_plan_i32)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -911,7 +913,7 @@ async fn lock_active_activation_graph(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = $3 AND run.plan_schema = $3
+               AND run.admission_epoch = $4 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -921,6 +923,7 @@ async fn lock_active_activation_graph(
     .bind(tenant.as_str())
     .bind(run_id.as_uuid())
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -980,6 +983,7 @@ async fn lock_claim_target(
         .bind(schemas.workflow_plan_i16)
         .bind(schemas.logical_orchestration_i16)
         .bind(schemas.workflow_plan_i32)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -998,6 +1002,7 @@ async fn lock_publication_target(
         .bind(schemas.workflow_plan_i16)
         .bind(schemas.logical_orchestration_i16)
         .bind(schemas.workflow_plan_i32)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1049,7 +1054,7 @@ fn claim_target_query() -> &'static str {
       AND invocation.state IN ('pending', 'active')
       AND marker.orchestration_schema = $6
       AND marker.state IN ('pending', 'active')
-      AND run.admission_epoch = $7
+      AND run.admission_epoch = $8
       AND run.plan_schema = $7
     FOR UPDATE OF job
     "

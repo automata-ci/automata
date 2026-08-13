@@ -68,7 +68,7 @@ const NEXT_REUSABLE_CALL_SQL: &str = r"
       AND marker.state IN ('pending', 'active')
       AND marker.admission_graph_sealed_at_ms IS NOT NULL
       AND run.status IN ('queued', 'in_progress')
-      AND run.admission_epoch = $1 AND run.plan_schema = $1
+      AND run.admission_epoch = $2 AND run.plan_schema = $1
       AND publication.run_id IS NULL
       AND automata_logical_workflow_invocation_published(
           caller.run_id, caller.invocation_id
@@ -243,6 +243,7 @@ async fn load_next_call(
     let schemas = current_durable_schemas();
     let row = sqlx::query(NEXT_REUSABLE_CALL_SQL)
         .bind(schemas.workflow_plan_i32)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(operation_error)?;

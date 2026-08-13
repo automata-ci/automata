@@ -785,7 +785,7 @@ async fn lock_current_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = $20
+          AND job.admission_epoch = $25
           AND job.job_ir_schema = $19
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
@@ -794,7 +794,7 @@ async fn lock_current_execution(
           AND job.requirements @> '{"features":["automata.core/oidc-tokens@v1"]}'::jsonb
           AND run.id = $12
           AND run.workflow_id = $17
-          AND run.admission_epoch = $20
+          AND run.admission_epoch = $25
           AND run.plan_schema = $20
           AND run.status IN ('queued', 'in_progress')
           AND (
@@ -915,6 +915,7 @@ async fn lock_current_execution(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.job_ir_i16)
     .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(oidc_operation_error)?

@@ -407,7 +407,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
               evidence.authenticated_event_git_ref,
               manifest.git_ref
           )
-          AND run.admission_epoch = $24
+          AND run.admission_epoch = $25
           AND run.plan_schema = $24
           AND run.plan_schema = invocation.plan_schema
           AND run.plan_digest = $16
@@ -454,6 +454,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     .bind(request.admission_claim().claimed_at().get())
     .bind(request.admission_claim().expires_at().get())
     .bind(schemas.workflow_plan_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -881,7 +882,7 @@ async fn link_exact_check_to_run(
               manifest.git_ref
           )
           AND run.git_ref = $11
-          AND run.admission_epoch = $24
+          AND run.admission_epoch = $25
           AND run.plan_schema = $24
           AND run.plan_digest = $12
           AND run.created_at_ms = $4
@@ -959,6 +960,7 @@ async fn link_exact_check_to_run(
     .bind(request.admission_claim().expires_at().get())
     .bind(subject_id.as_uuid())
     .bind(schemas.workflow_plan_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?

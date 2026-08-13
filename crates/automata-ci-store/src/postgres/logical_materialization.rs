@@ -998,6 +998,7 @@ async fn lock_instance(
         .bind(schemas.workflow_plan_i32)
         .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
         .bind(LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1033,6 +1034,7 @@ async fn lock_terminal_materialized_instance(
         .bind(schemas.core_i32)
         .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
         .bind(LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -1211,7 +1213,7 @@ fn instance_query() -> &'static str {
               )
           )
       )
-      AND run.admission_epoch = $10
+      AND run.admission_epoch = $13
       AND run.plan_schema = $10
     FOR UPDATE OF instance
     "
@@ -1335,7 +1337,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND invocation.plan_schema = $8
       AND marker.root_invocation_id = invocation.id
       AND marker.orchestration_schema = $9
-      AND run.admission_epoch = $10
+      AND run.admission_epoch = $15
       AND run.plan_schema = $10
       AND claim.state = 'materialized'
       AND concrete.descriptor_digest = claim.descriptor_digest
@@ -1347,7 +1349,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND concrete.claim_expires_at_ms = claim.expires_at_ms
       AND concrete.committed_at_ms = claim.updated_at_ms
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = $10
+      AND job.admission_epoch = $15
       AND job.job_ir_schema = $11
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
@@ -1762,7 +1764,7 @@ async fn load_terminal_job_base_rows(
           AND marker.orchestration_schema = $4
           AND invocation.plan_schema = $5
           AND invocation.plan_media_type = $7
-          AND run.admission_epoch = $6 AND run.plan_schema = $6
+          AND run.admission_epoch = $8 AND run.plan_schema = $6
         ORDER BY job.source_order, job.id
         ",
     )
@@ -1773,6 +1775,7 @@ async fn load_terminal_job_base_rows(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.workflow_plan_i32)
     .bind(LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;

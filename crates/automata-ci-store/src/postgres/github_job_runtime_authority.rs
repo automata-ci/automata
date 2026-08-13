@@ -404,7 +404,7 @@ async fn lock_exact_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = $29
+          AND job.admission_epoch = $36
           AND job.job_ir_schema = $28
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
@@ -413,7 +413,7 @@ async fn lock_exact_execution(
           AND ($16::TEXT IS NULL OR job.job_ir_object_key = $16)
           AND run.id = $12
           AND ($17::UUID IS NULL OR run.workflow_id = $17)
-          AND run.admission_epoch = $29
+          AND run.admission_epoch = $36
           AND run.plan_schema = $29
           AND run.status IN ('queued', 'in_progress')
           AND (
@@ -583,6 +583,7 @@ async fn lock_exact_execution(
     .bind(schemas.runtime_context_i16)
     .bind(GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE)
     .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;

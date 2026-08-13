@@ -50,19 +50,9 @@ jobs:
       - name: Open or update bounded review issue
         if: steps.detect.outputs.drift == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          issue="$(gh issue list \
-            --state open \
-            --search 'GitHub Actions reference drift in:title' \
-            --json number \
-            --jq '.[0].number // empty')"
-          if [[ -n "$issue" ]]; then
-            gh issue edit "$issue" \
-              --title "GitHub Actions reference drift" \
-              --body-file reference-drift.md
-          else
-            gh issue create \
-              --title "GitHub Actions reference drift" \
-              --body-file reference-drift.md
-          fi
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/ci/open-github-actions-reference-drift-issue.py
+          --body-file reference-drift.md

@@ -14,7 +14,8 @@ use super::{
 };
 use crate::{
     AdmissionObject, BindLogicalActivationPreparation, ClaimLogicalActivationPreparation,
-    ClaimedLogicalActivationPreparation, LogicalActivationAggregateStatus,
+    ClaimedLogicalActivationPreparation, LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE,
+    LOGICAL_ACTIVATION_PREPARATION_PLAN_MEDIA_TYPE, LogicalActivationAggregateStatus,
     LogicalActivationBaseContextKind, LogicalActivationExecutionContext,
     LogicalActivationPreparationClaimFence, LogicalActivationPreparationClaimOutcome,
     LogicalActivationPreparationDescriptor, LogicalActivationPreparationGeneration,
@@ -810,7 +811,7 @@ async fn lock_active_preparation_graph(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = $3 AND run.plan_schema = $3
+               AND run.admission_epoch = $4 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -820,6 +821,7 @@ async fn lock_active_preparation_graph(
     .bind(target.tenant().as_str())
     .bind(target.run_id().as_uuid())
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -934,6 +936,7 @@ async fn fetch_locked_target_kind(
     target: &LogicalActivationPreparationTarget,
     execution_kind: &str,
 ) -> Result<Option<PgRow>, LogicalActivationPreparationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(include_str!(
         "sql/logical_activation_preparation_locked_target.sql"
     ))
@@ -942,6 +945,13 @@ async fn fetch_locked_target_kind(
     .bind(target.invocation_id().as_uuid())
     .bind(target.logical_job_id().as_uuid())
     .bind(execution_kind)
+    .bind(schemas.workflow_plan_i16)
+    .bind(LOGICAL_ACTIVATION_PREPARATION_PLAN_MEDIA_TYPE)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)

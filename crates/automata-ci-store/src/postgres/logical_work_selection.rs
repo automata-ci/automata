@@ -645,7 +645,7 @@ async fn require_active_consume_graph_ids(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = $3 AND run.plan_schema = $3
+               AND run.admission_epoch = $4 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -655,6 +655,7 @@ async fn require_active_consume_graph_ids(
     .bind(tenant.as_str())
     .bind(run_id)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1099,7 +1100,7 @@ async fn discover_activation_candidates(
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = $9 AND run.plan_schema = $9
+          AND run.admission_epoch = $10 AND run.plan_schema = $9
           AND (
               (job.state = 'pending' AND (
                   preparation_claim.logical_job_id IS NULL
@@ -1141,6 +1142,7 @@ async fn discover_activation_candidates(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1207,7 +1209,7 @@ async fn discover_materialization_candidates(
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = $12 AND run.plan_schema = $12
+          AND run.admission_epoch = $13 AND run.plan_schema = $12
           AND (claim.instance_id IS NULL
                OR (claim.state = 'materializing'
                    AND claim.expires_at_ms <= database_clock.now_ms))
@@ -1234,6 +1236,7 @@ async fn discover_materialization_candidates(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1549,7 +1552,7 @@ async fn activation_candidate_is_eligible(
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = $7 AND run.plan_schema = $7
+              AND run.admission_epoch = $8 AND run.plan_schema = $7
               AND quarantine.logical_job_id IS NULL
               AND (
                   (job.state = 'pending' AND (
@@ -1588,6 +1591,7 @@ async fn activation_candidate_is_eligible(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_one(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1639,7 +1643,7 @@ async fn materialization_candidate_is_eligible(
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = $10 AND run.plan_schema = $10
+              AND run.admission_epoch = $11 AND run.plan_schema = $10
               AND (claim.instance_id IS NULL
                    OR (claim.state = 'materializing' AND claim.expires_at_ms <= $5))
               AND quarantine.instance_id IS NULL
@@ -1665,6 +1669,7 @@ async fn materialization_candidate_is_eligible(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_one(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -3396,7 +3401,7 @@ async fn require_quarantine_replay_graph(
     let schemas = current_durable_schemas();
     let exact: Option<bool> = sqlx::query_scalar(
         r"
-        SELECT run.admission_epoch = $4 AND run.plan_schema = $4
+        SELECT run.admission_epoch = $7 AND run.plan_schema = $4
                AND marker.orchestration_schema = $5
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $3
@@ -3417,6 +3422,7 @@ async fn require_quarantine_replay_graph(
     .bind(schemas.workflow_plan_i32)
     .bind(schemas.logical_orchestration_i16)
     .bind(schemas.workflow_plan_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;

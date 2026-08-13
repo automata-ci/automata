@@ -32,6 +32,23 @@ class DriftError(RuntimeError):
     """A source could not be checked safely."""
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        del request, file_pointer, code, message, headers, new_url
+        raise DriftError("upstream source redirects are not accepted")
+
+
+OPENER = urllib.request.build_opener(_RejectRedirects())
+
+
 def request_bytes(url: str) -> bytes:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -39,17 +56,28 @@ def request_bytes(url: str) -> bytes:
         "X-GitHub-Api-Version": "2022-11-28",
     }
     token = os.environ.get("GITHUB_TOKEN")
-    if token:
+    if token and api_request(url):
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with OPENER.open(request, timeout=30) as response:
             body = response.read(MAX_SOURCE_BYTES + 1)
     except (OSError, urllib.error.HTTPError, urllib.error.URLError) as error:
         raise DriftError(f"cannot retrieve {url}: {error}") from error
     if len(body) > MAX_SOURCE_BYTES:
         raise DriftError(f"source exceeds {MAX_SOURCE_BYTES} bytes: {url}")
     return body
+
+
+def api_request(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "api.github.com"
+        and parsed.path.startswith("/")
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 def request_json(url: str) -> dict[str, Any]:

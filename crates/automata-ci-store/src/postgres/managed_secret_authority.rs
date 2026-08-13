@@ -263,10 +263,10 @@ async fn resolve_managed_secret_execution_scope(
           AND attempt.lease_expires_at_ms > $14
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = $16
+          AND job.admission_epoch = $21
           AND job.job_ir_schema = $15
           AND run.id = $12
-          AND run.admission_epoch = $16
+          AND run.admission_epoch = $21
           AND run.plan_schema = $16
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
@@ -323,6 +323,7 @@ async fn resolve_managed_secret_execution_scope(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.job_ir_i16)
     .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(pool)
     .await
     .map_err(operation_error)?
@@ -679,11 +680,11 @@ async fn lock_current_execution(
           AND attempt.lease_expires_at_ms > $16
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = $18
+          AND job.admission_epoch = $23
           AND job.job_ir_schema = $17
           AND run.id = $12
           AND run.repository_id = $13
-          AND run.admission_epoch = $18
+          AND run.admission_epoch = $23
           AND run.plan_schema = $18
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
@@ -747,6 +748,7 @@ async fn lock_current_execution(
     .bind(schemas.workflow_plan_i16)
     .bind(schemas.job_ir_i16)
     .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
