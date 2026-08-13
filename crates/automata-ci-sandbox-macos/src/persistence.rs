@@ -535,6 +535,49 @@ mod tests {
         assert!(!fixture.path.join(JOURNAL_FILE_NAME).exists());
     }
 
+    #[test]
+    fn lifecycle_reopen_rejects_noncurrent_durable_schemas() {
+        let fixture = TestRoot::new("schema");
+        let root = fixture.secure_root();
+        let (mut journal, mut snapshot) = LifecycleJournal::open(&root).expect("initialize WAL");
+        let handle = "schema-test-handle".to_owned();
+        journal
+            .append_to_snapshot(
+                &mut snapshot,
+                &DurableEvent::CreateIntent {
+                    create: DurableCreate {
+                        operation_id: OperationId::new(),
+                        fingerprint: [0x51; 32],
+                        handle: handle.clone(),
+                    },
+                    entry: DurableEntry {
+                        handle,
+                        generation: 1,
+                        profile: profile(),
+                        workspace: "/Users/automata-job/workspaces/schema-test".to_owned(),
+                        scratch: "/Users/automata-job/runner/schema-test".to_owned(),
+                        phase: DurableEntryPhase::Intent,
+                    },
+                },
+            )
+            .expect("append current record");
+        drop(journal);
+
+        let journal_path = fixture.path.join(JOURNAL_FILE_NAME);
+        let current = fs::read_to_string(&journal_path).expect("current WAL");
+        let current_schema = format!("\"schema\":{DURABLE_SCHEMA}");
+        assert!(current.contains(&current_schema));
+        for schema in [0, DURABLE_SCHEMA.checked_add(1).expect("test schema")] {
+            let noncurrent = current.replacen(&current_schema, &format!("\"schema\":{schema}"), 1);
+            fs::write(&journal_path, noncurrent).expect("write noncurrent WAL");
+            let error = match LifecycleJournal::open(&root) {
+                Ok(_) => panic!("accepted WAL schema {schema}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
     fn profile() -> EnvironmentProfile {
         EnvironmentProfile::new(
             EnvironmentProfileId::new("automata.dev/macos-15-arm64-vm-v1").expect("profile ID"),

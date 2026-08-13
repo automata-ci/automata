@@ -637,6 +637,26 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_reopen_rejects_noncurrent_durable_schemas() {
+        let fixture = DurableFixture::new("noncurrent-schema");
+        fixture.seed(DurableEntryPhase::Intent);
+        let journal_path = fixture.root.join(JOURNAL_FILE_NAME);
+        let current = fs::read_to_string(&journal_path).expect("current WAL");
+        let current_schema = format!("\"schema\":{DURABLE_SCHEMA}");
+        assert!(current.contains(&current_schema));
+
+        for schema in [0, DURABLE_SCHEMA.checked_add(1).expect("test schema")] {
+            let noncurrent = current.replacen(&current_schema, &format!("\"schema\":{schema}"), 1);
+            fs::write(&journal_path, noncurrent).expect("write noncurrent WAL");
+            let error = match LifecycleJournal::open(&fixture.root) {
+                Ok(_) => panic!("accepted WAL schema {schema}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
     fn streaming_reopen_retains_oldest_witness_after_many_thousand_events() {
         let root = test_root("long-history");
         let guard = TestRoot(root.clone());

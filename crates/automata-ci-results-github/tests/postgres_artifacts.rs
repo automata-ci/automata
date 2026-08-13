@@ -465,6 +465,44 @@ async fn artifact_create_replay_rejects_schema_valid_safety_tampering() -> TestR
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn artifact_create_replay_rejects_noncurrent_publication_safety_schema() -> TestResult {
+    run_with_database(|database| async move {
+        let (repository, authority) =
+            active_attempt_with_safety(&database, "public", "secretless").await?;
+        let upload_id = UploadId::from_uuid(Uuid::new_v4());
+        repository
+            .create(create_request(authority, upload_id))
+            .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_artifacts DROP CONSTRAINT workflow_artifacts_publication_safety_schema",
+        )
+        .execute(database.pool())
+        .await?;
+
+        for schema in [0_i32, 2_i32] {
+            sqlx::query(
+                "UPDATE workflow_artifacts SET publication_safety_schema = $2 WHERE upload_id = $1",
+            )
+            .bind(upload_id.as_uuid())
+            .bind(schema)
+            .execute(database.pool())
+            .await?;
+            let error = repository
+                .create(create_request(
+                    authority,
+                    UploadId::from_uuid(Uuid::new_v4()),
+                ))
+                .await
+                .expect_err("noncurrent publication-safety schema must fail closed");
+            assert_eq!(error.kind(), ArtifactRepositoryErrorKind::CorruptData);
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn concurrent_block_reservations_are_idempotent_and_not_visible_early() -> TestResult {
     run_with_database(|database| async move {
         let (repository, authority) = active_attempt(&database).await?;

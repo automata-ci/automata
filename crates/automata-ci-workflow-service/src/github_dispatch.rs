@@ -769,3 +769,49 @@ pub enum GithubWorkflowDispatchError {
     #[error(transparent)]
     Admission(#[from] WorkflowAdmissionError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_dispatch_evidence_rejects_noncurrent_schemas() {
+        let document = EvidenceDocument {
+            schema: EVIDENCE_SCHEMA,
+            kind: EVIDENCE_KIND.to_owned(),
+            authority: EvidenceAuthority {
+                tenant_id: "tenant-1".to_owned(),
+                principal_id: "principal-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                authorization_revision: 1,
+            },
+            repository: EvidenceRepository {
+                repository_id: Uuid::new_v4(),
+                provider: "github".to_owned(),
+                provider_repository_id: "123".to_owned(),
+                owner: "automata-ci".to_owned(),
+                name: "automata".to_owned(),
+            },
+            workflow: EvidenceWorkflow {
+                workflow_id: Uuid::new_v4(),
+                path: ".github/workflows/ci.yml".to_owned(),
+                git_ref: "refs/heads/main".to_owned(),
+                commit_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            },
+            operation_id: Uuid::new_v4(),
+            inputs: BTreeMap::new(),
+        };
+        let current = serde_json::to_vec(&document).expect("current evidence");
+        GithubWorkflowDispatchEvidence::decode(&current).expect("decode current evidence");
+
+        for schema in [0, EVIDENCE_SCHEMA.checked_add(1).expect("test schema")] {
+            let mut noncurrent = document.clone();
+            noncurrent.schema = schema;
+            let bytes = serde_json::to_vec(&noncurrent).expect("noncurrent evidence");
+            assert!(
+                GithubWorkflowDispatchEvidence::decode(&bytes).is_err(),
+                "accepted schema {schema}"
+            );
+        }
+    }
+}

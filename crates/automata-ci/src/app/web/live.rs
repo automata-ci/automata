@@ -2776,8 +2776,8 @@ mod tests {
     };
 
     use super::{
-        DecodedJobCursor, DecodedLogCursor, DecodedWorkflowCursor, JOB_CURSOR_BYTES,
-        LOG_CURSOR_BYTES, LiveWebData, NavigationPageDirection,
+        CURSOR_VERSION, DecodedJobCursor, DecodedLogCursor, DecodedWorkflowCursor,
+        JOB_CURSOR_BYTES, LOG_CURSOR_BYTES, LiveWebData, NavigationPageDirection,
         REPOSITORY_SETTINGS_READ_PERMISSION, REPOSITORY_SETTINGS_UPDATE_PERMISSION,
         RUN_CURSOR_BYTES, SECRET_METADATA_READ_PERMISSION, WORKFLOW_CURSOR_BYTES,
         conclusion_status, decode_job_cursor, decode_log_cursor, decode_repository_cursor,
@@ -2928,6 +2928,30 @@ mod tests {
             Some(job_cursor)
         );
         assert!(decode_job_cursor(&encoded, &tenant, repository_id, RunId::new()).is_none());
+    }
+
+    #[test]
+    fn repository_cursor_reader_rejects_noncurrent_versions() {
+        let tenant = tenant();
+        let position = HumanRepositoryCursor {
+            normalized_owner: "automata-ci".to_owned(),
+            normalized_name: "automata".to_owned(),
+            id: RepositoryId::from_uuid(WorkflowId::new().as_uuid()),
+        };
+        let current = encode_repository_cursor(&tenant, &position).expect("current cursor");
+        let mut bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &current)
+                .expect("cursor bytes");
+
+        for version in [0, CURSOR_VERSION.checked_add(1).expect("test version")] {
+            bytes[0] = version;
+            let noncurrent =
+                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes);
+            assert!(
+                decode_repository_cursor(&noncurrent, &tenant).is_none(),
+                "accepted cursor version {version}"
+            );
+        }
     }
 
     #[tokio::test]

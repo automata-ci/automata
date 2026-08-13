@@ -258,3 +258,27 @@ pub(crate) fn label_format(container: bool, include_state: bool) -> String {
     }
     format
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_handle_reader_rejects_noncurrent_versions() {
+        let provider = ProviderId::new(PODMAN_PROVIDER_ID).expect("provider ID");
+        let current = ResourceNames::for_create(
+            OperationId::new(),
+            SandboxGeneration::new(1).expect("generation"),
+        )
+        .handle();
+
+        for version in ["p0", "p2"] {
+            let opaque = current.opaque().replacen(HANDLE_VERSION, version, 1);
+            let handle = SandboxHandle::new(provider.clone(), opaque).expect("well-formed handle");
+            assert!(
+                ResourceNames::from_handle(&handle, &provider).is_err(),
+                "accepted handle version {version}"
+            );
+        }
+    }
+}

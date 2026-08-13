@@ -125,4 +125,24 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn schedule_evidence_rejects_noncurrent_schemas() {
+        let current = GithubScheduleEvidence::new("0/5 * * * *", UnixMillis::new(42_000))
+            .expect("valid schedule evidence");
+        let mut document = serde_json::to_value(
+            serde_json::from_slice::<RawEvidence>(&current.encode().expect("canonical evidence"))
+                .expect("current evidence document"),
+        )
+        .expect("evidence value");
+
+        for schema in [0, SCHEMA.checked_add(1).expect("test schema")] {
+            document["schema"] = serde_json::json!(schema);
+            let bytes = serde_json::to_vec(&document).expect("noncurrent evidence");
+            assert!(
+                GithubScheduleEvidence::decode(&bytes).is_err(),
+                "accepted schema {schema}"
+            );
+        }
+    }
 }

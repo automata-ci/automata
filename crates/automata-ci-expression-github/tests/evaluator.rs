@@ -11,7 +11,10 @@ use automata_ci_expression_github::{
     GithubExpressionFunctionProvider, GithubExpressionLimits, GithubObject, GithubStatus,
     GithubValue, MapContext,
 };
-use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use automata_ci_workflow_github::{
+    GITHUB_EXPRESSION_DIALECT, GITHUB_EXPRESSION_DIALECT_VERSION, GithubConditionCompiler,
+    GithubConditionPhase,
+};
 
 fn compile(source: &str) -> automata_ci_core::ExpressionProgram {
     GithubConditionCompiler::default()
@@ -67,6 +70,29 @@ fn resolves_case_insensitive_properties_and_status() {
         !GithubExpressionEvaluator::default()
             .evaluate_condition(&compile("success()"), &failed)
             .expect("status evaluates")
+    );
+}
+
+#[test]
+fn evaluator_rejects_forward_workflow_dialect_version() {
+    let current = compile("true");
+    let forward_version = GITHUB_EXPRESSION_DIALECT_VERSION
+        .checked_add(1)
+        .expect("test dialect version");
+    let forward = automata_ci_core::ExpressionProgram::new(
+        automata_ci_core::ExpressionDialect::new(GITHUB_EXPRESSION_DIALECT, forward_version)
+            .expect("well-formed forward dialect"),
+        current.source(),
+        current.instructions().to_vec(),
+    )
+    .expect("structurally valid forward-dialect program");
+
+    let error = GithubExpressionEvaluator::default()
+        .evaluate(&forward, &context([]))
+        .expect_err("forward dialect must fail closed");
+    assert_eq!(
+        error.kind(),
+        GithubExpressionEvaluationErrorKind::UnsupportedProgram
     );
 }
 

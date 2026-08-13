@@ -1028,6 +1028,24 @@ norlX3KEHNe7cTke5cP4OA==";
     }
 
     #[test]
+    fn manifest_loader_rejects_noncurrent_schemas() {
+        for schema in [0, MANIFEST_SCHEMA.checked_add(1).expect("test schema")] {
+            let mut manifest = raw_manifest();
+            manifest.schema = schema;
+            let bytes = serde_json::to_vec(&manifest).expect("noncurrent manifest");
+            let path = write_private_test_file(
+                &format!("manifest-noncurrent-schema-{schema}.json"),
+                &bytes,
+            );
+            let source = SecretSource::File(path);
+            assert!(matches!(
+                GithubOidcConfig::load(&source, &https_results()),
+                Err(GithubOidcProductError::InvalidConfiguration)
+            ));
+        }
+    }
+
+    #[test]
     fn manifest_enforces_exact_shared_key_and_time_limits() {
         let mut exact = raw_manifest();
         exact.request_bearer.maximum_lifetime_seconds =
