@@ -23,6 +23,7 @@ const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const MAX_CHECK_NAME_BYTES: usize = 255;
 // foundation-governance: parity-limit
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
+// foundation-governance: parity-limit
 const MAX_DETAILS_URL_BYTES: usize = 2_048;
 const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
 const MAX_CHECK_OUTPUT_SUMMARY_BYTES: usize = 65_535;
@@ -203,7 +204,7 @@ impl GithubCheckDetailsUrl {
     /// Rejects non-HTTP(S), non-hierarchical, credential-bearing, fragmented,
     /// or oversized URLs.
     pub fn new(value: Url) -> Result<Self, GithubCheckModelError> {
-        if value.as_str().len() > MAX_DETAILS_URL_BYTES
+        if details_url_byte_rejection(value.as_str().len()).is_some()
             || value.cannot_be_a_base()
             || value.host_str().is_none()
             || !value.username().is_empty()
@@ -964,6 +965,13 @@ const fn check_name_byte_rejection(bytes: usize) -> Option<GithubCheckModelError
 const fn check_external_id_byte_rejection(bytes: usize) -> Option<GithubCheckModelError> {
     if bytes > MAX_EXTERNAL_ID_BYTES {
         return Some(GithubCheckModelError::InvalidExternalId);
+    }
+    None
+}
+
+const fn details_url_byte_rejection(bytes: usize) -> Option<GithubCheckModelError> {
+    if bytes > MAX_DETAILS_URL_BYTES {
+        return Some(GithubCheckModelError::InvalidDetailsUrl);
     }
     None
 }
@@ -2143,9 +2151,9 @@ fn page_value(url: &Url) -> Result<String, GithubChecksError> {
 #[cfg(test)]
 mod limit_contract_tests {
     use super::{
-        GithubCheckModelError, MAX_CHECK_NAME_BYTES, MAX_EXTERNAL_ID_BYTES, MAX_GITHUB_ID,
-        check_external_id_byte_rejection, check_name_byte_rejection,
-        github_check_identifier_rejection,
+        GithubCheckModelError, MAX_CHECK_NAME_BYTES, MAX_DETAILS_URL_BYTES, MAX_EXTERNAL_ID_BYTES,
+        MAX_GITHUB_ID, check_external_id_byte_rejection, check_name_byte_rejection,
+        details_url_byte_rejection, github_check_identifier_rejection,
     };
 
     #[test]
@@ -2181,6 +2189,16 @@ mod limit_contract_tests {
         assert_eq!(
             check_external_id_byte_rejection(MAX_EXTERNAL_ID_BYTES + 1),
             Some(GithubCheckModelError::InvalidExternalId)
+        );
+    }
+
+    #[test]
+    fn check_details_url_byte_limit_has_exact_boundaries() {
+        assert_eq!(details_url_byte_rejection(MAX_DETAILS_URL_BYTES - 1), None);
+        assert_eq!(details_url_byte_rejection(MAX_DETAILS_URL_BYTES), None);
+        assert_eq!(
+            details_url_byte_rejection(MAX_DETAILS_URL_BYTES + 1),
+            Some(GithubCheckModelError::InvalidDetailsUrl)
         );
     }
 }

@@ -11,7 +11,8 @@ use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{
-    CurrentAttemptOutputSafety, PostgresStore, durable_schema::current_durable_schemas,
+    CurrentAttemptOutputSafety, PostgresStore,
+    durable_schema::current_durable_schemas,
     github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
 };
 use crate::{

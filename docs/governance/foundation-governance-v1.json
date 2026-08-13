@@ -12221,6 +12221,40 @@
     {
       "boundary_tests": {
         "at": {
+          "contains": "details_url_byte_rejection(MAX_DETAILS_URL_BYTES),",
+          "function": "check_details_url_byte_limit_has_exact_boundaries",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        "minus_one": {
+          "contains": "MAX_DETAILS_URL_BYTES - 1",
+          "function": "check_details_url_byte_limit_has_exact_boundaries",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        "plus_one": {
+          "contains": "MAX_DETAILS_URL_BYTES + 1",
+          "function": "check_details_url_byte_limit_has_exact_boundaries",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        }
+      },
+      "classification": "automata-stricter",
+      "enforcement_phase": "results",
+      "id": "github.provider.check-details-url-bytes",
+      "owner": "control-plane",
+      "reason_code": "GithubCheckModelError::InvalidDetailsUrl",
+      "reason_source": {
+        "contains": "return Some(GithubCheckModelError::InvalidDetailsUrl);",
+        "path": "crates/automata-ci-github/src/checks.rs"
+      },
+      "source": {
+        "contains": "const MAX_DETAILS_URL_BYTES: usize = 2_048;",
+        "path": "crates/automata-ci-github/src/checks.rs"
+      },
+      "unit": "bytes",
+      "value": 2048
+    },
+    {
+      "boundary_tests": {
+        "at": {
           "contains": "check_external_id_byte_rejection(MAX_EXTERNAL_ID_BYTES),",
           "function": "check_external_id_byte_limit_has_exact_boundaries",
           "path": "crates/automata-ci-github/src/checks.rs"
@@ -15594,7 +15628,7 @@
     "next_sequence": null,
     "owner": "store",
     "reservations": [],
-    "sha256": "cc352fef58cb869d3444f819a8102db5648b8819c3df3ec2d5493f487348b192"
+    "sha256": "cca57ab3fb09f75b2e4cc7577f3d292ef58720cb2bbe38fbaa28b989ff73eb05"
   },
   "owners": [
     {
