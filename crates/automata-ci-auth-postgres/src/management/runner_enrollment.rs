@@ -2,6 +2,7 @@ use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
 use automata_ci_core::{RunnerCapabilities, RunnerGroup};
+use automata_ci_store::MAX_REGISTERED_RUNNERS;
 use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -16,7 +17,6 @@ const ACTION_ENROLL: &str = "runner.enroll";
 const RESOURCE_ENROLLMENT: &str = "runner_enrollment";
 const MIN_TOKEN_LIFETIME_MS: i64 = 60 * 1_000;
 const MAX_TOKEN_LIFETIME_MS: i64 = 60 * 60 * 1_000;
-const MAX_REGISTERED_RUNNERS: i64 = 64;
 const RUNNER_ENROLLMENT_CAPACITY_LOCK: i64 = 0x4155_544f_4d41_5441;
 const RUNNER_ENROLLMENT_CREATE_LOCK_SALT: i64 = 0x454e_524f_4c4c_4d54;
 const MAX_NAME_BYTES: usize = 255;
@@ -173,6 +173,7 @@ struct EnrollmentRow {
     redeem_operation_id: Option<Uuid>,
     redeem_request_sha256: Option<Vec<u8>>,
     redeem_response: Option<Vec<u8>>,
+    redeem_certificate_expires_at_seconds: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -208,21 +209,24 @@ impl EnrollmentRow {
             self.redeem_operation_id,
             self.redeem_request_sha256.as_deref(),
             self.redeem_response.as_deref(),
+            self.redeem_certificate_expires_at_seconds,
         ) {
-            (None, None, None, None, None) => Ok(()),
+            (None, None, None, None, None, None) => Ok(()),
             (
                 Some(consumed_at_ms),
                 Some(runner_id),
                 Some(operation_id),
                 Some(request),
                 Some(response),
+                Some(certificate_expires_at_seconds),
             ) if consumed_at_ms >= self.issued_at_ms
                 && consumed_at_ms < self.expires_at_ms
                 && !runner_id.is_nil()
                 && !operation_id.is_nil()
                 && request.len() == 32
                 && !response.is_empty()
-                && response.len() <= MAX_REDEEM_RESPONSE_BYTES =>
+                && response.len() <= MAX_REDEEM_RESPONSE_BYTES
+                && certificate_expires_at_seconds > consumed_at_ms.div_euclid(1_000) =>
             {
                 Ok(())
             }
@@ -252,6 +256,7 @@ impl EnrollmentRow {
         &self,
         operation_id: Uuid,
         request_sha256: &[u8; 32],
+        database_time_ms: i64,
     ) -> Result<Option<Vec<u8>>, ManagementRepositoryError> {
         self.validate()?;
         if self.consumed_at_ms.is_none() {
@@ -259,6 +264,9 @@ impl EnrollmentRow {
         }
         if self.redeem_operation_id == Some(operation_id)
             && self.redeem_request_sha256.as_deref() == Some(request_sha256.as_slice())
+            && self
+                .redeem_certificate_expires_at_seconds
+                .is_some_and(|expiry| expiry > database_time_ms.div_euclid(1_000))
         {
             Ok(self.redeem_response.clone())
         } else {
@@ -472,7 +480,11 @@ impl PostgresHumanRbacManagementRepository {
         let Some(row) = row else {
             return Ok(RunnerEnrollmentPrepareOutcome::Rejected);
         };
-        if let Some(response) = row.replay(request.operation_id, &request.request_sha256)? {
+        if let Some(response) = row.replay(
+            request.operation_id,
+            &request.request_sha256,
+            now_ms,
+        )? {
             return Ok(RunnerEnrollmentPrepareOutcome::Replayed(response));
         }
         if row.consumed_at_ms.is_some() || row.expires_at_ms <= now_ms {
@@ -518,7 +530,14 @@ impl PostgresHumanRbacManagementRepository {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
         };
-        if let Some(response) = row.replay(request.operation_id, &request.request_sha256)? {
+        let replay_time_ms = database_time_milliseconds(&mut transaction)
+            .await
+            .map_err(map_database_error)?;
+        if let Some(response) = row.replay(
+            request.operation_id,
+            &request.request_sha256,
+            replay_time_ms,
+        )? {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::Replayed(response));
         }
@@ -563,6 +582,8 @@ impl PostgresHumanRbacManagementRepository {
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_database_error)?;
+        let runner_count = usize::try_from(runner_count)
+            .map_err(|_| ManagementRepositoryError::CorruptData)?;
         if runner_count >= MAX_REGISTERED_RUNNERS {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::CapacityExhausted);
@@ -590,13 +611,14 @@ impl PostgresHumanRbacManagementRepository {
             .collect::<Vec<_>>();
         let capabilities = serde_json::to_value(&request.capabilities)
             .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+        let external_identity = enrolled_runner_external_identity(request.runner_id);
         sqlx::query(
             r"
             INSERT INTO runners (
                 id,tenant_id,group_id,name,normalized_name,labels,capabilities,
-                slots,status,generation,external_identity,created_at_ms,updated_at_ms,
-                session_epoch,desired_state
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'offline',1,$9,$10,$10,0,'active')
+                slots,status,generation,created_at_ms,updated_at_ms,session_epoch,
+                external_identity,desired_state
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'offline',1,$9,$9,0,$10,'active')
             ",
         )
         .bind(request.runner_id)
@@ -608,6 +630,7 @@ impl PostgresHumanRbacManagementRepository {
         .bind(capabilities)
         .bind(i32::from(request.capabilities.max_parallel_jobs()))
         .bind(now_ms)
+        .bind(external_identity)
         .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
@@ -621,7 +644,7 @@ impl PostgresHumanRbacManagementRepository {
         .await
         .map_err(map_database_error)?;
         let consumed = sqlx::query(
-            "UPDATE runner_enrollment_tokens SET consumed_at_ms=$2,consumed_runner_id=$3,redeem_operation_id=$4,redeem_request_sha256=$5,redeem_response=$6 WHERE id=$1 AND consumed_at_ms IS NULL",
+            "UPDATE runner_enrollment_tokens SET consumed_at_ms=$2,consumed_runner_id=$3,redeem_operation_id=$4,redeem_request_sha256=$5,redeem_response=$6,redeem_certificate_expires_at_seconds=$7 WHERE id=$1 AND consumed_at_ms IS NULL",
         )
         .bind(prepared.enrollment_id)
         .bind(now_ms)
@@ -629,6 +652,7 @@ impl PostgresHumanRbacManagementRepository {
         .bind(request.operation_id)
         .bind(request.request_sha256.as_slice())
         .bind(&request.response)
+        .bind(request.certificate_expires_at_seconds)
         .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
@@ -655,6 +679,10 @@ impl PostgresHumanRbacManagementRepository {
         commit(transaction).await?;
         Ok(RunnerEnrollmentConsumeOutcome::Applied(request.response))
     }
+}
+
+fn enrolled_runner_external_identity(runner_id: Uuid) -> String {
+    format!("automata:runner:{}", runner_id.hyphenated())
 }
 
 async fn ensure_runner_group(
@@ -701,7 +729,7 @@ async fn load_enrollment(
                    token.expires_at_ms,
                    token.consumed_at_ms,token.consumed_runner_id,
                    token.redeem_operation_id,token.redeem_request_sha256,
-                   token.redeem_response
+                   token.redeem_response,token.redeem_certificate_expires_at_seconds
             FROM runner_enrollment_tokens AS token
             JOIN runner_groups AS groups
               ON groups.tenant_id=token.tenant_id
@@ -721,7 +749,7 @@ async fn load_enrollment(
                    token.expires_at_ms,
                    token.consumed_at_ms,token.consumed_runner_id,
                    token.redeem_operation_id,token.redeem_request_sha256,
-                   token.redeem_response
+                   token.redeem_response,token.redeem_certificate_expires_at_seconds
             FROM runner_enrollment_tokens AS token
             JOIN runner_groups AS groups
               ON groups.tenant_id=token.tenant_id

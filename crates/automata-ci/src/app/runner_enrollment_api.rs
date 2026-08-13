@@ -19,13 +19,14 @@ use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerGroup};
 use automata_ci_store::RunnerCapabilityReadiness;
 use axum::{
     Router,
-    body::to_bytes,
+    body::Bytes,
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures::StreamExt as _;
 use rcgen::{
     CertificateSigningRequestParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
@@ -48,6 +49,7 @@ const TOKEN_ENCODED_BYTES: usize = 43;
 const TOKEN_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
+const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
 const MAX_CSR_BYTES: usize = 32 * 1_024;
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
 const MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES: usize = 64 * 1_024;
@@ -479,10 +481,31 @@ async fn json_document<T: for<'de> Deserialize<'de>>(request: Request) -> Result
     {
         return Err(ApiError::UnsupportedMediaType);
     }
-    let body = to_bytes(request.into_body(), MAX_REQUEST_BYTES)
-        .await
-        .map_err(|_| ApiError::TooLarge)?;
+    let mut stream = request.into_body().into_data_stream();
+    let mut body = Zeroizing::new(Vec::with_capacity(
+        MAX_REQUEST_BYTES.min(INITIAL_REQUEST_CAPACITY_BYTES),
+    ));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ApiError::InvalidRequest)?;
+        let within_limit = body
+            .len()
+            .checked_add(chunk.len())
+            .is_some_and(|length| length <= MAX_REQUEST_BYTES);
+        if within_limit {
+            body.extend_from_slice(&chunk);
+        }
+        wipe_body_chunk(chunk);
+        if !within_limit {
+            return Err(ApiError::TooLarge);
+        }
+    }
     serde_json::from_slice(&body).map_err(|_| ApiError::InvalidRequest)
+}
+
+fn wipe_body_chunk(chunk: Bytes) {
+    if let Ok(mut chunk) = chunk.try_into_mut() {
+        chunk.as_mut().fill(0);
+    }
 }
 
 fn is_json_content_type(headers: &HeaderMap) -> bool {
@@ -670,7 +693,33 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use automata_ci_core::{Architecture, OperatingSystem, RunnerId, RunnerPlatform};
+    use axum::body::Body;
     use rcgen::{BasicConstraints, CertificateParams};
+
+    #[tokio::test]
+    async fn json_collector_accepts_fragmented_documents_and_rejects_oversize_bodies() {
+        let fragments = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(Bytes::from_static(br#"{"runner":"#)),
+            Ok(Bytes::from_static(br#"fragmented"}"#)),
+        ]);
+        let request = Request::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(fragments))
+            .expect("fragmented request");
+        let document: serde_json::Value = json_document(request)
+            .await
+            .expect("valid fragmented document");
+        assert_eq!(document, serde_json::json!({"runner": "fragmented"}));
+
+        let request = Request::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(vec![b'x'; MAX_REQUEST_BYTES + 1]))
+            .expect("oversize request");
+        assert!(matches!(
+            json_document::<serde_json::Value>(request).await,
+            Err(ApiError::TooLarge)
+        ));
+    }
 
     #[test]
     fn token_hash_is_domain_separated_and_exact() {

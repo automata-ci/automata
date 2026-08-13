@@ -3,6 +3,9 @@ use thiserror::Error;
 
 use crate::RepositoryOperationError;
 
+/// Maximum durable runner inventory admitted by enrollment and startup checks.
+pub const MAX_REGISTERED_RUNNERS: usize = 64;
+
 /// Failures from the narrow runner-capability admission boundary.
 #[derive(Debug, Error)]
 pub enum RunnerCapabilityAdmissionError {

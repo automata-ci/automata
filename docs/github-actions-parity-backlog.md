@@ -1161,11 +1161,12 @@ tools, filesystem conventions, and privileges. See
 
 ### Windows
 
-Current Windows execution is a single-slot, trusted-host `run:` boundary for
-PowerShell, `cmd`, and optional Python. Every `uses:` action and all job/service
-containers are rejected; Job Objects bound process lifetime and resource use
-without changing the inherited account, host filesystem, or network. Hosted
-Windows CI is disabled on the current baseline.
+The Windows implementation is a source-only, unprovisionable trusted-host
+`run:` experiment for single-slot PowerShell, `cmd`, and optional Python. Every
+`uses:` action and all job/service containers are rejected; Job Objects bound
+process lifetime and resource use without changing the inherited account, host
+filesystem, or network. It has no enrollment path or hosted release gate on the
+current baseline.
 
 - [ ] Support all `uses:` actions.
 - [ ] Support Node 24 actions.

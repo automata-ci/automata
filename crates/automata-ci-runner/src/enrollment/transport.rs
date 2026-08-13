@@ -1,24 +1,27 @@
 //! Bounded enrollment HTTP response handling.
 
 use anyhow::{Context as _, Result, bail};
+use zeroize::Zeroizing;
 
 pub(super) const MAX_RESPONSE_BYTES: usize = 512 * 1_024;
 const MAX_RESPONSE_BYTES_U64: u64 = 512 * 1_024;
 
-pub(super) async fn read_bounded_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+pub(super) async fn read_bounded_response(
+    mut response: reqwest::Response,
+) -> Result<Zeroizing<Vec<u8>>> {
     if response
         .content_length()
         .is_some_and(|size| size > MAX_RESPONSE_BYTES_U64)
     {
         bail!("runner enrollment response exceeded its size limit");
     }
-    let mut bytes = Vec::with_capacity(
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
         response
             .content_length()
             .and_then(|size| usize::try_from(size).ok())
             .unwrap_or(0)
             .min(MAX_RESPONSE_BYTES),
-    );
+    ));
     while let Some(chunk) = response
         .chunk()
         .await

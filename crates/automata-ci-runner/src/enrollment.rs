@@ -91,7 +91,7 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         ]) {
             bail!("runner enrollment response has an invalid content type");
         }
-        let bytes = Zeroizing::new(read_bounded_response(response).await?);
+        let bytes = read_bounded_response(response).await?;
         destinations.persist_response(&bytes)?;
         bytes
     };
