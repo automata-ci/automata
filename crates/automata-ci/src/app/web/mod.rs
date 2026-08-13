@@ -1,4 +1,4 @@
-mod codec;
+pub(crate) mod codec;
 mod data;
 mod encoding;
 mod live;

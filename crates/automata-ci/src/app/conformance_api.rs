@@ -1,6 +1,6 @@
 //! CLI-authenticated, versioned export of provider delivery and run evidence.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_auth::{
     authorization::{
@@ -13,6 +13,7 @@ use automata_ci_auth::{
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
+use automata_ci_conformance::{AvailabilityReason, EvidenceAvailability};
 #[cfg(test)]
 use automata_ci_core::JobConclusion;
 use automata_ci_core::{
@@ -22,7 +23,8 @@ use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
     ConformanceReadRepository, ConformanceWorkflowOutcome, HumanAuthorizationTarget,
-    HumanJobAttempt, HumanRunConclusion, HumanRunDetail, HumanRunScope,
+    HumanJobAttempt, HumanJobScope, HumanLogSegmentCursor, HumanLogSegmentPageSize,
+    HumanLogSegmentQuery, HumanRunConclusion, HumanRunDetail, HumanRunScope,
     HumanWorkflowReadRepository, JobIrMetadata, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
     LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderRepositoryId, RepositoryId, StoreError,
     TenantScope, WorkflowRunStatus, github_provider_repository_id,
@@ -40,8 +42,15 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 
+use super::web::codec::{LogSegmentExpectation, decode_log_segment};
+
 const CONFORMANCE_READ_PERMISSION: &str = "conformance:read";
 const MAX_CONFORMANCE_EXPORT_BLOB_BYTES: u64 = 128 * 1_048_576;
+const MAX_CONFORMANCE_LOG_SEGMENTS: usize = 4_096;
+
+/// Opt-in media type for the presence-aware complete export contract.
+pub(crate) const CONFORMANCE_EXPORT_V2_MEDIA_TYPE: &str =
+    "application/vnd.automata.conformance.v2+json";
 
 pub(crate) const GITHUB_DELIVERY_EXPORT_PATH: &str =
     "/api/v1/conformance/github/repositories/{provider_repository_id}/deliveries/{delivery_id}";
@@ -127,6 +136,10 @@ async fn export_github_delivery(
     path: Result<Path<(String, String)>, PathRejection>,
     request: Request,
 ) -> Response {
+    let export_version = match requested_export_version(request.headers()) {
+        Ok(version) => version,
+        Err(error) => return error.into_response(),
+    };
     let (provider_repository_id, delivery_id) = match delivery_target(path) {
         Ok(target) => target,
         Err(error) => return error.into_response(),
@@ -154,9 +167,40 @@ async fn export_github_delivery(
         Ok(None) => return ApiError::NotFound.into_response(),
         Err(error) => return store_error(&error).into_response(),
     };
-    match export_document(&state, tenant, repository_id, delivery).await {
-        Ok(document) => json_response(StatusCode::OK, &document),
-        Err(error) => error.into_response(),
+    match export_version {
+        ExportVersion::V1 => match export_document(&state, tenant, repository_id, delivery).await {
+            Ok(document) => json_response(StatusCode::OK, "application/json", &document),
+            Err(error) => error.into_response(),
+        },
+        ExportVersion::V2 => {
+            match export_document_v2(&state, tenant, repository_id, delivery).await {
+                Ok(document) => {
+                    json_response(StatusCode::OK, CONFORMANCE_EXPORT_V2_MEDIA_TYPE, &document)
+                }
+                Err(error) => error.into_response(),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportVersion {
+    V1,
+    V2,
+}
+
+fn requested_export_version(headers: &HeaderMap) -> Result<ExportVersion, ApiError> {
+    let mut values = headers.get_all(header::ACCEPT).iter();
+    let Some(value) = values.next() else {
+        return Ok(ExportVersion::V1);
+    };
+    if values.next().is_some() {
+        return Err(ApiError::InvalidRequest);
+    }
+    match value.to_str().map_err(|_| ApiError::InvalidRequest)? {
+        "application/json" | "*/*" => Ok(ExportVersion::V1),
+        CONFORMANCE_EXPORT_V2_MEDIA_TYPE => Ok(ExportVersion::V2),
+        _ => Err(ApiError::InvalidRequest),
     }
 }
 
@@ -262,6 +306,27 @@ async fn export_document(
     repository_id: RepositoryId,
     delivery: ConformanceDelivery,
 ) -> Result<ConformanceExportDocument, ApiError> {
+    export_document_internal(state, tenant, repository_id, delivery, false).await
+}
+
+async fn export_document_v2(
+    state: &ConformanceApiState,
+    tenant: TenantScope,
+    repository_id: RepositoryId,
+    delivery: ConformanceDelivery,
+) -> Result<ConformanceExportDocumentV2, ApiError> {
+    export_document_internal(state, tenant, repository_id, delivery, true)
+        .await
+        .map(ConformanceExportDocumentV2::from_v1)
+}
+
+async fn export_document_internal(
+    state: &ConformanceApiState,
+    tenant: TenantScope,
+    repository_id: RepositoryId,
+    delivery: ConformanceDelivery,
+    include_logs: bool,
+) -> Result<ConformanceExportDocument, ApiError> {
     let mut run_ids = Vec::new();
     for workflow in delivery.workflows() {
         if let ConformanceWorkflowOutcome::Admitted { run_id } = workflow.outcome()
@@ -279,7 +344,7 @@ async fn export_document(
             .await
             .map_err(|error| store_error(&error))?
             .ok_or(ApiError::Internal)?;
-        runs.push(export_run(state, detail).await?);
+        runs.push(export_run(state, &tenant, repository_id, detail, include_logs).await?);
     }
     Ok(ConformanceExportDocument {
         schema_version: 1,
@@ -290,7 +355,10 @@ async fn export_document(
 
 async fn export_run(
     state: &ConformanceApiState,
+    tenant: &TenantScope,
+    repository_id: RepositoryId,
     detail: HumanRunDetail,
+    include_logs: bool,
 ) -> Result<RunDocument, ApiError> {
     let mut blob_budget = 0_u64;
     for job in &detail.jobs {
@@ -309,6 +377,20 @@ async fn export_run(
     let workflow_path = detail.run.workflow_path.clone();
     let mut jobs = Vec::with_capacity(detail.jobs.len());
     for job in detail.jobs {
+        let logs = if include_logs {
+            load_log_evidence(
+                state,
+                tenant,
+                repository_id,
+                run_id,
+                job.id,
+                job.latest_attempt.as_ref(),
+                &mut blob_budget,
+            )
+            .await?
+        } else {
+            EvidenceAvailability::unavailable(AvailabilityReason::UnsupportedForEvidenceClass)
+        };
         let (job_ir, runtime_context) = load_job_ir(
             state.blobs.as_ref(),
             &job.job_ir,
@@ -331,6 +413,7 @@ async fn export_run(
             job_ir,
             runtime_context,
             latest_attempt,
+            logs,
         });
     }
     let artifacts = detail
@@ -366,6 +449,117 @@ async fn export_run(
         jobs,
         artifacts,
     })
+}
+
+async fn load_log_evidence(
+    state: &ConformanceApiState,
+    tenant: &TenantScope,
+    repository_id: RepositoryId,
+    run_id: RunId,
+    job_id: automata_ci_core::JobId,
+    attempt: Option<&HumanJobAttempt>,
+    blob_budget: &mut u64,
+) -> Result<EvidenceAvailability<LogDocument>, ApiError> {
+    let Some(attempt) = attempt else {
+        return Ok(EvidenceAvailability::unavailable(
+            AvailabilityReason::NotProduced,
+        ));
+    };
+    let scope = || HumanJobScope::new(tenant.clone(), repository_id, run_id, job_id);
+    let detail = state
+        .reads
+        .get_job(&scope())
+        .await
+        .map_err(|error| store_error(&error))?
+        .ok_or(ApiError::Internal)?;
+    if detail.job.id != job_id
+        || detail
+            .job
+            .latest_attempt
+            .as_ref()
+            .is_none_or(|current| current.id != attempt.id)
+    {
+        return Err(ApiError::Internal);
+    }
+    let Some(stream) = detail.log_stream else {
+        return Ok(EvidenceAvailability::unavailable(
+            AvailabilityReason::NotProduced,
+        ));
+    };
+    if stream.attempt_id != attempt.id {
+        return Err(ApiError::Internal);
+    }
+    let stream_id = stream.id;
+    let mut cursor: Option<HumanLogSegmentCursor> = None;
+    let mut segments = Vec::new();
+    loop {
+        let page = state
+            .reads
+            .list_log_segments(&HumanLogSegmentQuery {
+                scope: scope(),
+                stream_id,
+                cursor,
+                limit: HumanLogSegmentPageSize::default(),
+            })
+            .await
+            .map_err(|error| store_error(&error))?
+            .ok_or(ApiError::Internal)?;
+        if page.stream.id != stream_id || page.stream.attempt_id != attempt.id {
+            return Err(ApiError::Internal);
+        }
+        if segments.len().saturating_add(page.segments.len()) > MAX_CONFORMANCE_LOG_SEGMENTS {
+            return Err(ApiError::TooLarge);
+        }
+        for segment in page.segments {
+            *blob_budget = add_blob_budget(*blob_budget, segment.uncompressed_size)?;
+            let blob = state
+                .blobs
+                .get_verified(&segment.descriptor, segment.descriptor.size())
+                .await
+                .map_err(blob_error)?;
+            let expectation = LogSegmentExpectation::new(
+                stream.attempt_id,
+                stream.id,
+                segment.first_sequence,
+                segment.last_sequence,
+                segment.uncompressed_size,
+                segment.end_of_stream,
+            );
+            let frames =
+                tokio::task::spawn_blocking(move || decode_log_segment(&blob, expectation))
+                    .await
+                    .map_err(|_| ApiError::Unavailable)?
+                    .map_err(|_| ApiError::Internal)?;
+            let descriptor = segment.descriptor;
+            segments.push(LogSegmentDocument {
+                first_sequence: segment.first_sequence.get(),
+                last_sequence: segment.last_sequence.get(),
+                object_key: descriptor.key().as_str().to_owned(),
+                sha256: descriptor.digest().to_string(),
+                encoded_size: descriptor.size(),
+                uncompressed_size: segment.uncompressed_size,
+                media_type: descriptor.media_type().as_str().to_owned(),
+                stored_at_ms: segment.stored_at.get(),
+                end_of_stream: segment.end_of_stream,
+                frames,
+            });
+        }
+        let Some(next) = page.newer_cursor else {
+            break;
+        };
+        if cursor == Some(next) {
+            return Err(ApiError::Internal);
+        }
+        cursor = Some(next);
+    }
+    Ok(EvidenceAvailability::present(LogDocument {
+        stream_id: stream.id.as_uuid().to_string(),
+        attempt_id: stream.attempt_id.as_uuid().to_string(),
+        schema_version: stream.schema.get(),
+        opened_at_ms: stream.opened_at.get(),
+        closed_at_ms: stream.closed_at.map(automata_ci_core::UnixMillis::get),
+        segments,
+    }))
 }
 
 fn add_blob_budget(current: u64, size: u64) -> Result<u64, ApiError> {
@@ -529,16 +723,19 @@ const fn blob_error(error: BlobStoreError) -> ApiError {
     }
 }
 
-fn json_response(status: StatusCode, document: &impl Serialize) -> Response {
+fn json_response(
+    status: StatusCode,
+    media_type: &'static str,
+    document: &impl Serialize,
+) -> Response {
     let Ok(body) = serde_json::to_vec(document) else {
         return ApiError::Internal.into_response();
     };
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
     response
 }
 
@@ -696,6 +893,8 @@ struct JobDocument {
     job_ir: JobIrEnvelope,
     runtime_context: RuntimeContextDocument,
     latest_attempt: Option<AttemptDocument>,
+    #[serde(skip)]
+    logs: EvidenceAvailability<LogDocument>,
 }
 
 /// Safe subset of the independently verified runtime context. Inputs, needs,
@@ -735,6 +934,240 @@ struct ArtifactDocument {
     sha256: String,
     expires_at_seconds: Option<i64>,
     finalized_at_seconds: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConformanceExportDocumentV2 {
+    schema_version: u16,
+    delivery: DeliveryDocument,
+    runs: Vec<RunDocumentV2>,
+}
+
+impl ConformanceExportDocumentV2 {
+    fn from_v1(document: ConformanceExportDocument) -> Self {
+        Self {
+            schema_version: 2,
+            delivery: document.delivery,
+            runs: document
+                .runs
+                .into_iter()
+                .map(RunDocumentV2::from_v1)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunDocumentV2 {
+    id: String,
+    workflow_id: String,
+    workflow_path: String,
+    workflow_name: String,
+    run_number: u64,
+    run_attempt: u32,
+    event_name: String,
+    head_commit: String,
+    git_ref: Option<String>,
+    status: &'static str,
+    conclusion: Option<&'static str>,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    jobs: Vec<JobDocumentV2>,
+    artifacts: Vec<ArtifactDocument>,
+    services: EvidenceAvailability<Vec<serde_json::Value>>,
+    caches: EvidenceAvailability<Vec<serde_json::Value>>,
+    effective_authority: EvidenceAvailability<serde_json::Value>,
+    cleanup: EvidenceAvailability<serde_json::Value>,
+}
+
+impl RunDocumentV2 {
+    fn from_v1(run: RunDocument) -> Self {
+        Self {
+            id: run.id,
+            workflow_id: run.workflow_id,
+            workflow_path: run.workflow_path,
+            workflow_name: run.workflow_name,
+            run_number: run.run_number,
+            run_attempt: run.run_attempt,
+            event_name: run.event_name,
+            head_commit: run.head_commit,
+            git_ref: run.git_ref,
+            status: run.status,
+            conclusion: run.conclusion,
+            created_at_ms: run.created_at_ms,
+            updated_at_ms: run.updated_at_ms,
+            finished_at_ms: run.finished_at_ms,
+            jobs: run.jobs.into_iter().map(JobDocumentV2::from_v1).collect(),
+            artifacts: run.artifacts,
+            services: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
+            caches: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
+            effective_authority: EvidenceAvailability::unavailable(
+                AvailabilityReason::NotRetainedBySchema,
+            ),
+            cleanup: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobDocumentV2 {
+    id: String,
+    logical_key: String,
+    display_name: String,
+    created_at_ms: i64,
+    job_ir: EvidenceAvailability<JobIrEnvelope>,
+    runtime_context: EvidenceAvailability<RuntimeContextDocument>,
+    latest_attempt: EvidenceAvailability<AttemptDocumentV2>,
+    logs: EvidenceAvailability<LogDocument>,
+}
+
+impl JobDocumentV2 {
+    fn from_v1(job: JobDocument) -> Self {
+        Self {
+            id: job.id,
+            logical_key: job.logical_key,
+            display_name: job.display_name,
+            created_at_ms: job.created_at_ms,
+            job_ir: EvidenceAvailability::present(job.job_ir),
+            runtime_context: EvidenceAvailability::present(job.runtime_context),
+            latest_attempt: match job.latest_attempt {
+                Some(attempt) => EvidenceAvailability::present(AttemptDocumentV2::from_v1(attempt)),
+                None => EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
+            },
+            logs: job.logs,
+        }
+    }
+}
+
+fn availability<T>(value: Option<T>) -> EvidenceAvailability<T> {
+    match value {
+        Some(value) => EvidenceAvailability::present(value),
+        None => EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttemptDocumentV2 {
+    id: String,
+    number: u32,
+    lifecycle: &'static str,
+    queued_at_ms: i64,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    runner: EvidenceAvailability<RunnerDocument>,
+    result: EvidenceAvailability<JobResultDocumentV2>,
+}
+
+impl AttemptDocumentV2 {
+    fn from_v1(attempt: AttemptDocument) -> Self {
+        Self {
+            id: attempt.id,
+            number: attempt.number,
+            lifecycle: attempt.lifecycle,
+            queued_at_ms: attempt.queued_at_ms,
+            started_at_ms: attempt.started_at_ms,
+            finished_at_ms: attempt.finished_at_ms,
+            runner: availability(attempt.runner),
+            result: match attempt.result {
+                Some(result) => {
+                    EvidenceAvailability::present(JobResultDocumentV2::from_result(result))
+                }
+                None => EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobResultDocumentV2 {
+    schema_version: u16,
+    attempt_id: String,
+    conclusion: automata_ci_core::JobConclusion,
+    secret_exposure: automata_ci_core::JobSecretExposure,
+    outputs: BTreeMap<String, automata_ci_core::JobResultOutput>,
+    steps: Vec<StepResultDocumentV2>,
+    completed_at_ms: i64,
+}
+
+impl JobResultDocumentV2 {
+    fn from_result(result: JobResult) -> Self {
+        Self {
+            schema_version: result.schema_version(),
+            attempt_id: result.attempt_id().as_uuid().to_string(),
+            conclusion: result.conclusion(),
+            secret_exposure: result.secret_exposure(),
+            outputs: result.outputs().clone(),
+            steps: result
+                .steps()
+                .iter()
+                .map(StepResultDocumentV2::from_result)
+                .collect(),
+            completed_at_ms: result.completed_at().get(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StepResultDocumentV2 {
+    id: String,
+    outcome: automata_ci_core::JobConclusion,
+    conclusion: automata_ci_core::JobConclusion,
+    started_at_ms: i64,
+    completed_at_ms: i64,
+    outputs: EvidenceAvailability<BTreeMap<String, automata_ci_core::JobResultOutput>>,
+    summary_markdown: EvidenceAvailability<String>,
+    annotations: Vec<automata_ci_core::StepAnnotation>,
+}
+
+impl StepResultDocumentV2 {
+    fn from_result(result: &automata_ci_core::StepResult) -> Self {
+        Self {
+            id: result.step_id().as_str().to_owned(),
+            outcome: result.outcome(),
+            conclusion: result.conclusion(),
+            started_at_ms: result.started_at().get(),
+            completed_at_ms: result.completed_at().get(),
+            outputs: EvidenceAvailability::unavailable(AvailabilityReason::NotRetainedBySchema),
+            summary_markdown: result.summary_markdown().map_or_else(
+                || EvidenceAvailability::unavailable(AvailabilityReason::NotProduced),
+                |summary| EvidenceAvailability::present(summary.to_owned()),
+            ),
+            annotations: result.annotations().to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogDocument {
+    stream_id: String,
+    attempt_id: String,
+    schema_version: u16,
+    opened_at_ms: i64,
+    closed_at_ms: Option<i64>,
+    segments: Vec<LogSegmentDocument>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogSegmentDocument {
+    first_sequence: u64,
+    last_sequence: u64,
+    object_key: String,
+    sha256: String,
+    encoded_size: u64,
+    uncompressed_size: u64,
+    media_type: String,
+    stored_at_ms: i64,
+    end_of_stream: bool,
+    frames: Vec<automata_ci_core::LogFrame>,
 }
 
 const fn delivery_state(state: ConformanceDeliveryState) -> &'static str {
@@ -861,5 +1294,53 @@ mod tests {
             HeaderValue::from_static("Bearer second-secret"),
         );
         assert_eq!(exact_bearer(&headers), Err(ApiError::Unauthorized));
+    }
+
+    #[test]
+    fn export_schema_is_selected_by_one_exact_accept_media_type() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V1));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V1));
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static(CONFORMANCE_EXPORT_V2_MEDIA_TYPE),
+        );
+        assert_eq!(requested_export_version(&headers), Ok(ExportVersion::V2));
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/vnd.automata.conformance.v3+json"),
+        );
+        assert_eq!(
+            requested_export_version(&headers),
+            Err(ApiError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn v2_step_outputs_are_presence_aware_and_never_synthesized_empty() {
+        let attempt_id = automata_ci_core::AttemptId::from_uuid(uuid::Uuid::from_u128(7));
+        let step = automata_ci_core::StepResult::new(
+            automata_ci_core::StepId::new("build").expect("step ID"),
+            JobConclusion::Success,
+            JobConclusion::Success,
+            automata_ci_core::UnixMillis::new(10),
+            automata_ci_core::UnixMillis::new(20),
+        );
+        let result = JobResult::new(
+            attempt_id,
+            JobConclusion::Success,
+            automata_ci_core::JobSecretExposure::Secretless,
+            automata_ci_core::UnixMillis::new(20),
+        )
+        .with_steps(vec![step]);
+        let v2 = JobResultDocumentV2::from_result(result);
+        let json = serde_json::to_value(v2).expect("v2 JSON");
+        assert_eq!(json["steps"][0]["outputs"]["state"], "unavailable");
+        assert_eq!(
+            json["steps"][0]["outputs"]["reason"],
+            "not_retained_by_schema"
+        );
+        assert!(json["steps"][0]["outputs"].get("value").is_none());
     }
 }

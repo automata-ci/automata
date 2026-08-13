@@ -80,6 +80,14 @@ inputs, artifact bytes, and per-step outputs. The loopback provider emulator is
 protocol evidence only; it cannot prove GitHub.com networking, App
 installation, or live credential behavior.
 
+This package adds an opt-in, media-type-negotiated `schemaVersion: 2` export.
+It returns verified masked log frames and makes every incomplete semantic field
+explicitly `unavailable`; missing per-step outputs are never synthesized as an
+empty map. The product-owned `automata-ci-conformance` crate now defines exact
+catalog, provenance, evidence-class, fake-clock, failure-script, restart,
+webhook, GitHub-stub, live-prerequisite, and shard contracts. Process adapters
+must still use those contracts to close the unchecked end-to-end tasks below.
+
 The companion
 [`automata-integration-tests`](https://github.com/automata-ci/automata-integration-tests)
 repository was audited at `af7e2ca`. It already supplies immutable fixture
@@ -104,11 +112,17 @@ Tasks:
 - [x] Establish a manual reusable fixture composing signed webhook ingress,
   immutable source storage, workflow admission, PostgreSQL scheduling,
   Results, Checks, and real control-plane and runner processes.
-- [ ] Add deterministic fake-clock control.
-- [ ] Inject exact raw webhook bodies and signatures.
-- [ ] Stub paginated GitHub APIs, rate limits, indeterminate mutations, and
+- [x] Publish deterministic fake-clock control for product fixture adapters.
+- [ ] Inject exact raw webhook bodies and signatures through real ingress; the
+  product now publishes the bounded exact-body/signature lock consumed by that
+  adapter.
+- [ ] Serve paginated GitHub APIs, rate limits, indeterminate mutations, and
   credential failures.
-- [ ] Restart individual services between every durable transition.
+  The exact-order fail-closed script exists; the hermetic HTTP server adapter
+  must consume it.
+- [ ] Restart individual services between every durable transition. The product
+  contract requires and records the restarts; the process adapter must perform
+  each stop/start cycle.
 - [ ] Snapshot selected workflows, expanded jobs, dependencies, step results,
   outputs, annotations, summaries, logs, services, artifacts, caches, effective
   authority, and cleanup.
@@ -116,17 +130,19 @@ Tasks:
   operating system, provider, external prerequisites, and expected digest.
 - [ ] Convert current checkout, upload/download-artifact, cache, service, and
   Windows fixtures into catalog entries.
-- [ ] Separate hermetic CI fixtures from deployment-owned live tests.
-- [ ] Make missing live prerequisites skip explicitly rather than report a
+- [x] Separate hermetic CI fixtures from deployment-owned live tests.
+- [x] Make missing live prerequisites skip explicitly rather than report a
   false pass.
 - [ ] Allow the same source/event fixture to consume GitHub-derived expected
   snapshots.
-- [ ] Evolve the existing schema-v1 export with a versioned per-step-output
+- [x] Evolve the existing schema-v1 export with a versioned per-step-output
   boundary; never synthesize missing output maps as empty evidence.
-- [ ] Keep emulator, hermetic GitHub stub, and live-provider evidence as
+- [x] Keep emulator, hermetic GitHub stub, and live-provider evidence as
   distinct catalog classes so one cannot satisfy another's acceptance gate.
-- [ ] Shard without shared rows, ports, credentials, or object prefixes.
-- [ ] Publish the evidence and scenario-admission contracts consumed by
+- [x] Derive isolated shards without shared PostgreSQL schemas,
+  port-reservation keys, credential scopes, or object prefixes; adapters must
+  use every derived identity rather than inventing their own.
+- [x] Publish the evidence and scenario-admission contracts consumed by
   `IT-02`/`IT-03`, and provide exact source/build/profile metadata to the
   `IT-01` release-bundle contract.
 
@@ -138,8 +154,10 @@ Acceptance:
   conflict.
 - [ ] A test can fail source, token, Results, Checks, runner, or object storage
   independently.
-- [ ] Fixture provenance is auditable offline.
-- [ ] Restart snapshots remain deterministic.
+- [x] Fixture provenance is auditable offline.
+- [ ] Restart snapshots from real service processes remain deterministic; the
+  ordering and restart-record contract is complete, while retained process
+  evidence belongs to the pending adapter run.
 
 ### FND-03 — Extract executor integration seams
 

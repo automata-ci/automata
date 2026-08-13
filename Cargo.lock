@@ -220,6 +220,7 @@ dependencies = [
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-build-support",
+ "automata-ci-conformance",
  "automata-ci-control",
  "automata-ci-core",
  "automata-ci-credential-github",
@@ -371,6 +372,16 @@ name = "automata-ci-build-support"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "automata-ci-conformance"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
 ]
 
 [[package]]
