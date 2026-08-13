@@ -37,7 +37,7 @@ use tokio::{
 };
 
 /// Current guest protocol version.
-pub const GUEST_PROTOCOL_VERSION: u16 = 1;
+pub const GUEST_PROTOCOL_VERSION: u16 = 2;
 /// Maximum encoded request or response frame.
 pub const MAX_GUEST_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
@@ -59,6 +59,24 @@ const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestRequest {
+    /// Proves the exact guest agent and sealed template before job traffic.
+    Hello {
+        /// Protocol version selected by the caller.
+        protocol: u16,
+        /// Idempotent operation identifier.
+        operation_id: String,
+        /// Fresh caller nonce returned verbatim by the guest.
+        nonce: String,
+    },
+    /// Applies the hard process-count ceiling before any workflow command.
+    Configure {
+        /// Protocol version selected by the caller.
+        protocol: u16,
+        /// Idempotent operation identifier.
+        operation_id: String,
+        /// Hard per-UID process ceiling inherited by job commands.
+        process_limit: u32,
+    },
     /// Execute one literal argv with an ephemeral environment.
     Exec {
         /// Protocol version selected by the caller.
@@ -105,6 +123,26 @@ pub enum GuestRequest {
 impl fmt::Debug for GuestRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Hello {
+                protocol,
+                operation_id,
+                ..
+            } => formatter
+                .debug_struct("GuestRequest::Hello")
+                .field("protocol", protocol)
+                .field("operation_id", operation_id)
+                .field("nonce", &"[REDACTED]")
+                .finish(),
+            Self::Configure {
+                protocol,
+                operation_id,
+                process_limit,
+            } => formatter
+                .debug_struct("GuestRequest::Configure")
+                .field("protocol", protocol)
+                .field("operation_id", operation_id)
+                .field("process_limit", process_limit)
+                .finish(),
             Self::Exec {
                 protocol,
                 operation_id,
@@ -150,7 +188,9 @@ impl fmt::Debug for GuestRequest {
 impl GuestRequest {
     fn protocol(&self) -> u16 {
         match self {
-            Self::Exec { protocol, .. }
+            Self::Hello { protocol, .. }
+            | Self::Configure { protocol, .. }
+            | Self::Exec { protocol, .. }
             | Self::WriteFile { protocol, .. }
             | Self::ReadFile { protocol, .. } => *protocol,
         }
@@ -158,7 +198,9 @@ impl GuestRequest {
 
     fn operation_id(&self) -> &str {
         match self {
-            Self::Exec { operation_id, .. }
+            Self::Hello { operation_id, .. }
+            | Self::Configure { operation_id, .. }
+            | Self::Exec { operation_id, .. }
             | Self::WriteFile { operation_id, .. }
             | Self::ReadFile { operation_id, .. } => operation_id,
         }
@@ -235,6 +277,34 @@ pub enum GuestTermination {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestResponse {
+    /// Guest identity and nonce proof returned before job operations.
+    Hello {
+        /// Guest protocol version.
+        protocol: u16,
+        /// Fresh caller nonce.
+        nonce: String,
+        /// Exact admitted environment-profile identifier.
+        profile_id: String,
+        /// SHA-256 of the installed guest-agent executable.
+        guest_agent_sha256: String,
+        /// macOS product version verified by the guest agent at startup.
+        macos_version: String,
+        /// macOS build identifier verified by the guest agent at startup.
+        macos_build: String,
+        /// Guest architecture verified by the guest agent at startup.
+        architecture: String,
+        /// Effective UID used for workflow commands.
+        job_uid: u32,
+        /// Effective GID used for workflow commands.
+        job_gid: u32,
+        /// Hard per-UID process ceiling baked into the guest service.
+        process_limit: u32,
+    },
+    /// Guest resource configuration completed.
+    Configured {
+        /// Guest protocol version.
+        protocol: u16,
+    },
     /// Command completed or was terminated by policy.
     Exec {
         /// Guest protocol version.
@@ -270,6 +340,20 @@ pub enum GuestResponse {
 impl fmt::Debug for GuestResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Hello {
+                protocol,
+                profile_id,
+                ..
+            } => formatter
+                .debug_struct("GuestResponse::Hello")
+                .field("protocol", protocol)
+                .field("profile_id", profile_id)
+                .field("attestation", &"[REDACTED]")
+                .finish(),
+            Self::Configured { protocol } => formatter
+                .debug_struct("GuestResponse::Configured")
+                .field("protocol", protocol)
+                .finish(),
             Self::Exec {
                 protocol,
                 termination,
@@ -303,6 +387,28 @@ impl fmt::Debug for GuestResponse {
                 .finish(),
         }
     }
+}
+
+/// Immutable identity baked beside the guest agent in a sealed VM template.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestIdentity {
+    /// Exact admitted environment-profile identifier.
+    pub profile_id: String,
+    /// SHA-256 of the installed guest-agent executable.
+    pub guest_agent_sha256: String,
+    /// Exact macOS product version in the sealed image.
+    pub macos_version: String,
+    /// Exact macOS build identifier in the sealed image.
+    pub macos_build: String,
+    /// Exact guest architecture.
+    pub architecture: String,
+    /// Dedicated non-administrative workflow UID.
+    pub job_uid: u32,
+    /// Dedicated non-administrative workflow GID.
+    pub job_gid: u32,
+    /// Hard process ceiling applied by launchd before the guest agent starts.
+    pub process_limit: u32,
 }
 
 /// Stable, non-sensitive request rejection.
@@ -372,6 +478,24 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<T, Gue
 /// Returns a sanitized transport error when the socket cannot be bound or accepted.
 #[cfg(unix)]
 pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
+    serve_internal(socket, None).await
+}
+
+/// Runs the macOS VM guest server with its mandatory sealed-template identity.
+///
+/// # Errors
+///
+/// Returns a sanitized transport error when the socket cannot be bound or accepted.
+#[cfg(unix)]
+pub async fn serve_vm(socket: &Path, identity: GuestIdentity) -> Result<(), GuestProtocolError> {
+    serve_internal(socket, Some(identity)).await
+}
+
+#[cfg(unix)]
+async fn serve_internal(
+    socket: &Path,
+    identity: Option<GuestIdentity>,
+) -> Result<(), GuestProtocolError> {
     let listener = bind_listener(socket).await?;
     let replay = Arc::new(Mutex::new(ReplayCache::default()));
     let mut connections = JoinSet::new();
@@ -380,8 +504,9 @@ pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let replay = Arc::clone(&replay);
+                let identity = identity.clone();
                 connections.spawn(async move {
-                    let _ = serve_connection(stream, replay).await;
+                    let _ = serve_connection(stream, replay, identity).await;
                 });
             }
             result = connections.join_next(), if !connections.is_empty() => {
@@ -398,6 +523,12 @@ pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
 /// Returns an unsupported transport error on non-Unix platforms.
 #[cfg(not(unix))]
 pub async fn serve(_socket: &Path) -> Result<(), GuestProtocolError> {
+    Err(unsupported_unix_transport().into())
+}
+
+/// Rejects identity-bearing guest service on non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn serve_vm(_socket: &Path, _identity: GuestIdentity) -> Result<(), GuestProtocolError> {
     Err(unsupported_unix_transport().into())
 }
 
@@ -462,10 +593,13 @@ async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
             return UnixListener::from_std(listener);
         }
         #[cfg(not(target_os = "linux"))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "abstract Unix sockets require Linux",
-        ));
+        {
+            let _ = name;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "abstract Unix sockets require Linux",
+            ));
+        }
     }
     match tokio::fs::remove_file(socket).await {
         Ok(()) => {}
@@ -486,10 +620,13 @@ async fn connect_stream(socket: &Path) -> io::Result<UnixStream> {
             return UnixStream::from_std(stream);
         }
         #[cfg(not(target_os = "linux"))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "abstract Unix sockets require Linux",
-        ));
+        {
+            let _ = name;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "abstract Unix sockets require Linux",
+            ));
+        }
     }
     UnixStream::connect(socket).await
 }
@@ -503,10 +640,13 @@ fn connect_probe(socket: &Path) -> io::Result<()> {
             return StdUnixStream::connect_addr(&address).map(|_| ());
         }
         #[cfg(not(target_os = "linux"))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "abstract Unix sockets require Linux",
-        ));
+        {
+            let _ = name;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "abstract Unix sockets require Linux",
+            ));
+        }
     }
     std::os::unix::net::UnixStream::connect(socket).map(|_| ())
 }
@@ -524,6 +664,7 @@ fn abstract_socket_name(socket: &Path) -> Option<&[u8]> {
 async fn serve_connection(
     mut stream: UnixStream,
     replay: Arc<Mutex<ReplayCache>>,
+    identity: Option<GuestIdentity>,
 ) -> Result<(), GuestProtocolError> {
     let frame = read_frame(&mut stream).await?;
     let request: GuestRequest = decode_frame(&frame)?;
@@ -544,7 +685,7 @@ async fn serve_connection(
     }
 
     let (mut reader, mut writer) = stream.into_split();
-    let operation = replay_request(request, replay);
+    let operation = replay_request(request, replay, identity);
     tokio::pin!(operation);
     let response = tokio::select! {
         response = &mut operation => response,
@@ -704,7 +845,11 @@ fn replay_decision(
     })
 }
 
-async fn replay_request(request: GuestRequest, replay: Arc<Mutex<ReplayCache>>) -> GuestResponse {
+async fn replay_request(
+    request: GuestRequest,
+    replay: Arc<Mutex<ReplayCache>>,
+    identity: Option<GuestIdentity>,
+) -> GuestResponse {
     let fingerprint: [u8; 32] = Sha256::digest(
         serde_json::to_vec(&request).expect("validated guest request is serializable"),
     )
@@ -719,7 +864,7 @@ async fn replay_request(request: GuestRequest, replay: Arc<Mutex<ReplayCache>>) 
                 }
             }
             ReplayDecision::Execute(reservation) => {
-                let response = handle_request(request).await;
+                let response = handle_request(request, identity).await;
                 reservation.commit(response.clone());
                 return response;
             }
@@ -742,8 +887,40 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, Gue
     Ok(frame)
 }
 
-async fn handle_request(request: GuestRequest) -> GuestResponse {
+async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) -> GuestResponse {
     match request {
+        GuestRequest::Hello { nonce, .. } => {
+            if valid_attestation_value(&nonce) {
+                identity.map_or_else(
+                    || rejected(GuestRejection::OperationFailed),
+                    |identity| GuestResponse::Hello {
+                        protocol: GUEST_PROTOCOL_VERSION,
+                        nonce,
+                        profile_id: identity.profile_id,
+                        guest_agent_sha256: identity.guest_agent_sha256,
+                        macos_version: identity.macos_version,
+                        macos_build: identity.macos_build,
+                        architecture: identity.architecture,
+                        job_uid: identity.job_uid,
+                        job_gid: identity.job_gid,
+                        process_limit: identity.process_limit,
+                    },
+                )
+            } else {
+                rejected(GuestRejection::InvalidRequest)
+            }
+        }
+        GuestRequest::Configure { process_limit, .. } => {
+            if identity.as_ref().map(|value| value.process_limit) != Some(process_limit) {
+                rejected(GuestRejection::InvalidRequest)
+            } else if configure_process_limit(process_limit).is_err() {
+                rejected(GuestRejection::OperationFailed)
+            } else {
+                GuestResponse::Configured {
+                    protocol: GUEST_PROTOCOL_VERSION,
+                }
+            }
+        }
         GuestRequest::Exec {
             program,
             arguments,
@@ -772,6 +949,31 @@ async fn handle_request(request: GuestRequest) -> GuestResponse {
             path, byte_limit, ..
         } => read_file(&path, byte_limit).await,
     }
+}
+
+fn valid_attestation_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_OPERATION_ID_BYTES
+        && value.is_ascii()
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+#[cfg(unix)]
+fn configure_process_limit(process_limit: u32) -> io::Result<()> {
+    let limit = u64::from(process_limit);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nproc,
+        rustix::process::Rlimit {
+            current: Some(limit),
+            maximum: Some(limit),
+        },
+    )
+    .map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+fn configure_process_limit(_process_limit: u32) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1110,6 +1312,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hello_returns_only_the_baked_identity_and_fresh_nonce() {
+        let identity = GuestIdentity {
+            profile_id: "automata.dev/macos-15-arm64-vm-v1".into(),
+            guest_agent_sha256: "11".repeat(32),
+            macos_version: "15.7".into(),
+            macos_build: "24G222".into(),
+            architecture: "arm64".into(),
+            job_uid: 502,
+            job_gid: 502,
+            process_limit: 512,
+        };
+        let request = GuestRequest::Hello {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: OPERATION_ONE.into(),
+            nonce: "fresh-nonce".into(),
+        };
+        assert_eq!(
+            handle_request(request, Some(identity.clone())).await,
+            GuestResponse::Hello {
+                protocol: GUEST_PROTOCOL_VERSION,
+                nonce: "fresh-nonce".into(),
+                profile_id: identity.profile_id,
+                guest_agent_sha256: identity.guest_agent_sha256,
+                macos_version: identity.macos_version,
+                macos_build: identity.macos_build,
+                architecture: identity.architecture,
+                job_uid: identity.job_uid,
+                job_gid: identity.job_gid,
+                process_limit: identity.process_limit,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn process_configuration_requires_the_exact_baked_vm_identity() {
+        let identity = GuestIdentity {
+            profile_id: "automata.dev/macos-15-arm64-vm-v1".into(),
+            guest_agent_sha256: "11".repeat(32),
+            macos_version: "15.7".into(),
+            macos_build: "24G222".into(),
+            architecture: "arm64".into(),
+            job_uid: 502,
+            job_gid: 502,
+            process_limit: 512,
+        };
+        let request = GuestRequest::Configure {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: OPERATION_ONE.into(),
+            process_limit: 511,
+        };
+        assert_eq!(
+            handle_request(request.clone(), Some(identity)).await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert_eq!(
+            handle_request(request, None).await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+    }
+
+    #[tokio::test]
     async fn replay_is_exact_and_changed_material_fails_closed() {
         let path =
             std::env::temp_dir().join(format!("automata-guest-replay-{}", std::process::id()));
@@ -1123,14 +1386,14 @@ mod tests {
         };
 
         assert!(matches!(
-            replay_request(request.clone(), Arc::clone(&replay)).await,
+            replay_request(request.clone(), Arc::clone(&replay), None).await,
             GuestResponse::WriteFile { .. }
         ));
         tokio::fs::write(&path, b"outside change")
             .await
             .expect("replace fixture");
         assert!(matches!(
-            replay_request(request, Arc::clone(&replay)).await,
+            replay_request(request, Arc::clone(&replay), None).await,
             GuestResponse::WriteFile { .. }
         ));
         assert_eq!(
@@ -1145,7 +1408,7 @@ mod tests {
             content_base64: BASE64.encode(b"different"),
         };
         assert_eq!(
-            replay_request(changed, replay).await,
+            replay_request(changed, replay, None).await,
             rejected(GuestRejection::OperationConflict)
         );
         tokio::fs::remove_file(path).await.expect("remove fixture");

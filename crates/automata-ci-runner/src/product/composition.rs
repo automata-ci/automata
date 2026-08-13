@@ -28,7 +28,7 @@ use automata_ci_runner_transport::{
     HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
     RunnerEphemeralClient, TransportLimits,
 };
-use automata_ci_sandbox_macos::{MacosSandboxProvider, MacosSandboxProviderOptions};
+use automata_ci_sandbox_macos::{MacosVirtualizationProvider, MacosVirtualizationProviderOptions};
 #[cfg(not(target_os = "linux"))]
 use automata_ci_sandbox_podman::PodmanLaunchTrust;
 use automata_ci_sandbox_podman::{
@@ -134,7 +134,9 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
         RunnerProviderConfig::Podman(_) => run_podman(&config, shutdown).await,
         RunnerProviderConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
         RunnerProviderConfig::WindowsNative(_) => run_windows_native(&config, shutdown).await,
-        RunnerProviderConfig::MacosNative(_) => run_macos_native(&config, shutdown).await,
+        RunnerProviderConfig::MacosVirtualization(_) => {
+            run_macos_virtualization(&config, shutdown).await
+        }
     }
 }
 
@@ -251,7 +253,7 @@ async fn run_windows_native(
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
 
-async fn run_macos_native(
+async fn run_macos_virtualization(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
 ) -> Result<(), RunnerProductError> {
@@ -662,22 +664,13 @@ fn admit_configured_environment_profiles(
     let capacity = config.executor().resource_capacity();
     let allocation = automata_ci_core::JobResourceAllocation::new(capacity, capacity)
         .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
-    let policy = if config.macos_native().is_some() {
-        ProfileAdmissionPolicy::host_shared(
-            config.executor().network(),
-            config.executor().root_filesystem(),
-            config.executor().privilege(),
-            allocation,
-        )
-    } else {
-        ProfileAdmissionPolicy::new(
-            config.executor().network(),
-            config.executor().root_filesystem(),
-            config.executor().privilege(),
-            config.executor().resources(),
-            allocation,
-        )
-    };
+    let policy = ProfileAdmissionPolicy::new(
+        config.executor().network(),
+        config.executor().root_filesystem(),
+        config.executor().privilege(),
+        config.executor().resources(),
+        allocation,
+    );
     let toolchain = config.executor().toolchain();
     let policy = match config.provider() {
         RunnerProviderConfig::WindowsNative(_) => policy
@@ -698,8 +691,8 @@ fn admit_configured_environment_profiles(
                 toolchain.python().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
-        RunnerProviderConfig::MacosNative(_) => policy
-            .with_native_macos_shells(
+        RunnerProviderConfig::MacosVirtualization(_) => policy
+            .with_virtualized_macos_shells(
                 config.executor().runner_root().clone(),
                 toolchain
                     .bash()
@@ -934,18 +927,30 @@ fn build_macos_provider(
     config: &RunnerProductConfig,
     metrics: Option<&RunnerMetrics>,
 ) -> Result<Arc<dyn automata_ci_execution::SandboxProvider>, RunnerProductError> {
-    if config.macos_native().is_none() {
+    if config.macos_virtualization().is_none() {
         return Err(RunnerProductError::ProviderConfiguration);
     }
     let state_root = config
         .state()
-        .macos_native()
+        .macos_virtualization()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
-    let executable =
-        std::env::current_exe().map_err(|_| RunnerProductError::ProviderConfiguration)?;
-    let options = MacosSandboxProviderOptions::new(state_root.to_path_buf(), executable)?;
+    let macos = config
+        .macos_virtualization()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let options = MacosVirtualizationProviderOptions::new(
+        state_root.to_path_buf(),
+        macos.helper_executable().to_path_buf(),
+        macos.helper_sha256(),
+        macos.helper_code_requirement().to_owned(),
+        macos.template_manifest().to_path_buf(),
+        macos.template_manifest_sha256(),
+        macos.storage_volume_uuid(),
+        macos.storage_quota_bytes(),
+        macos.boot_timeout(),
+        macos.stop_timeout(),
+    )?;
     let provider: Arc<dyn automata_ci_execution::SandboxProvider> =
-        Arc::new(MacosSandboxProvider::open(options)?);
+        Arc::new(MacosVirtualizationProvider::open(options)?);
     match metrics {
         Some(metrics) => Ok(metrics.instrument_sandbox_provider(provider)),
         None => Ok(provider),
@@ -974,26 +979,15 @@ fn build_executor(
         config.executor(),
         config.github().clone(),
     )?);
-    let executor_config = if matches!(config.provider(), RunnerProviderConfig::MacosNative(_)) {
-        GithubJobExecutorConfig::host_shared(
-            config.executor().network(),
-            config.executor().root_filesystem(),
-            config.executor().privilege(),
-            config.executor().default_step_timeout(),
-            config.executor().maximum_output_bytes(),
-            config.executor().runner_root().clone(),
-        )?
-    } else {
-        GithubJobExecutorConfig::new(
-            config.executor().resources(),
-            config.executor().network(),
-            config.executor().root_filesystem(),
-            config.executor().privilege(),
-            config.executor().default_step_timeout(),
-            config.executor().maximum_output_bytes(),
-            config.executor().runner_root().clone(),
-        )?
-    };
+    let executor_config = GithubJobExecutorConfig::new(
+        config.executor().resources(),
+        config.executor().network(),
+        config.executor().root_filesystem(),
+        config.executor().privilege(),
+        config.executor().default_step_timeout(),
+        config.executor().maximum_output_bytes(),
+        config.executor().runner_root().clone(),
+    )?;
     let executor = Arc::new(GithubJobExecutor::new(
         executor_config,
         GithubJobExecutorPorts::new(
@@ -1118,7 +1112,7 @@ fn build_toolchain(
                 .ok_or(RunnerProductError::ProviderConfiguration)?
                 .clone(),
         )?,
-        RunnerProviderConfig::MacosNative(_) => StaticGithubToolchain::macos(
+        RunnerProviderConfig::MacosVirtualization(_) => StaticGithubToolchain::macos(
             configured
                 .bash()
                 .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -1148,7 +1142,7 @@ fn build_toolchain(
         config.provider(),
         RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::Kubernetes(_)
-            | RunnerProviderConfig::MacosNative(_)
+            | RunnerProviderConfig::MacosVirtualization(_)
     ) && let Some(path) = configured.pwsh()
     {
         toolchain = toolchain.with_pwsh(path.clone())?;
@@ -1304,9 +1298,9 @@ pub enum RunnerProductError {
     /// Kubernetes sandbox adapter configuration failed.
     #[error("runner Kubernetes provider configuration failed")]
     KubernetesConfiguration(#[from] automata_ci_sandbox_kubernetes::KubernetesConfigurationError),
-    /// Native host provider initialization failed.
-    #[error("runner native host provider initialization failed")]
-    NativeProvider(#[from] automata_ci_execution::ProviderError),
+    /// Sandbox provider initialization failed.
+    #[error("runner sandbox provider initialization failed")]
+    SandboxProvider(#[from] automata_ci_execution::ProviderError),
     /// Product configuration and the selected provider path disagreed.
     #[error("runner sandbox provider composition invariant failed")]
     SandboxProviderInvariant,

@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-runner"
-description = "Automata workflow runner for Linux and trusted native Windows/macOS hosts"
+description = "Automata workflow runner for Linux, Windows, and isolated macOS hosts"
 publish.workspace = true
 readme = "README.md"
 keywords = ["ci", "github-actions", "self-hosted", "runner", "automation"]

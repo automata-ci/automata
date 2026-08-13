@@ -88,9 +88,7 @@ fn validated_allocation(
     let allocation = spec
         .resource_allocation()
         .ok_or_else(|| invalid_configuration(automata_ci_execution::ProviderStage::Validate))?;
-    let resources = spec
-        .resources()
-        .ok_or_else(|| invalid_configuration(automata_ci_execution::ProviderStage::Validate))?;
+    let resources = spec.resources();
     if allocation.limits().gpu_count() > 0 && config.gpu_resource_name().is_none() {
         return Err(invalid_configuration(
             automata_ci_execution::ProviderStage::Validate,
@@ -704,7 +702,7 @@ mod tests {
             original.workspace().clone(),
             original.network(),
             original.root_filesystem(),
-            original.resources().expect("enforced resources"),
+            original.resources(),
         );
         assert!(build_objects("a-test-7", &missing_allocation, &config()).is_err());
 
@@ -737,7 +735,7 @@ mod tests {
             original.workspace().clone(),
             original.network(),
             original.root_filesystem(),
-            original.resources().expect("enforced resources"),
+            original.resources(),
         )
         .with_resource_allocation(incoherent);
         assert!(build_objects("a-test-7", &incoherent, &config()).is_err());

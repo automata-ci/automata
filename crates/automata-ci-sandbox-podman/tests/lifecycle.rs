@@ -585,7 +585,7 @@ fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
         baseline.workspace().clone(),
         NetworkPolicy::PrivateEgress,
         RootFilesystemPolicy::Writable,
-        baseline.resources().expect("enforced resources"),
+        baseline.resources(),
     )
     .with_privilege(SandboxPrivilegePolicy::Administrator);
     let created = fixture

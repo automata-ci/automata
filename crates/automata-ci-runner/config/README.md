@@ -1,7 +1,8 @@
 # Local runner bootstrap
 
-This directory contains three checked-in Linux Podman instance configurations
-plus Windows and macOS native configurations for `automata-runner`.
+This directory contains three checked-in Linux Podman instance configurations,
+a native Windows configuration, and an isolated macOS VM configuration for
+`automata-runner`.
 [`runner.local-1.example.json`](runner.local-1.example.json),
 [`runner.local-2.example.json`](runner.local-2.example.json), and
 [`runner.local-3.example.json`](runner.local-3.example.json) select the same
@@ -9,8 +10,9 @@ locked Ubuntu 24.04 profile while keeping every host-local identity, state
 path, credential path, runtime mount, and metrics port distinct.
 [`runner.windows.example.json`](runner.windows.example.json) selects the
 trusted native provider on Windows. [`runner.macos.example.json`](runner.macos.example.json)
-selects the trusted native provider on Apple Silicon macOS 15+. Exactly one of
-the `podman`, `kubernetes`, `windows_native`, and `macos_native` provider
+selects the Virtualization.framework provider on Apple Silicon macOS 15+.
+Exactly one of the `podman`, `kubernetes`, `windows_native`, and
+`macos_virtualization` provider
 objects may be configured.
 
 The Linux examples' local bootstrap digest is not an official promoted profile;
@@ -18,11 +20,12 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema 1 accepts exactly one sandbox provider. Host runners use the
+Product schema v2 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
-`state.podman`, `state.windows_native`, and `state.macos_native` and use a
-top-level `kubernetes` object. Native Windows and macOS runners use their
-matching provider name in both locations. The runner loads
+`state.podman`, `state.windows_native`, and `state.macos_virtualization` and use
+a top-level `kubernetes` object. Windows and macOS runners use their matching
+provider name in both locations. Schema v1 and the removed macOS native key are
+rejected, not migrated. The runner loads
 credentials through Kubernetes' standard in-cluster or ambient kubeconfig
 discovery; the JSON remains secret-free.
 
@@ -130,23 +133,20 @@ host-specific path and follow the
 [Windows source-build boundary](../../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
 before starting `automata-runner run --config C:\path\to\runner.windows.json`.
 
-## macOS native example
+## macOS virtual-machine example
 
-The macOS example is an experimental trusted-workflow path for Apple Silicon
-running macOS 15 or newer. It executes Bash and `sh` scripts through a hidden
-same-binary supervisor which owns a POSIX process group and terminates that
-group on timeout, cancellation, output overflow, or runner disconnect.
-Optional absolute Python and PowerShell Core paths are accepted and probed at
-startup. Every `uses:` action, job or service container, parallel native slot,
-GPU claim, and nonzero ephemeral-disk capacity fails closed.
-
-This provider deliberately uses the dedicated runner account's unchanged host
-identity, filesystem, and network. Its configured CPU, memory, and PID values
-are one-slot scheduling capacity, not hard resource limits. Run only trusted
-workflows under a dedicated non-administrative account. Provision the provider
-root and every existing descendant as that account with mode 0700; the adapter
-opens paths descriptor-relatively, rejects symlink traversal and hard-linked
-copy targets, and keeps a checksummed, exclusively locked lifecycle journal.
+The macOS example accepts only a disposable Virtualization.framework VM on
+Apple Silicon macOS 15 or newer. A digest- and signature-pinned helper APFS
+clones a sealed macOS template for each job, configures exact whole vCPUs and
+memory, omits the virtual NIC and every host-directory share, and communicates
+through a versioned Virtio socket protocol. A dedicated non-admin guest account
+receives the process ceiling. Every action, job or service container, parallel
+slot, GPU claim, fractional CPU, nonzero ephemeral-disk capacity, and policy
+other than disabled-network/writable-guest-root/unprivileged fails closed.
+`storage_volume_uuid` and `storage_quota_bytes` pin the exact roleless APFS
+volume used for both immutable template artifacts and mutable clones. It must be
+the sole volume in a dedicated non-boot container; startup rejects a shared
+startup container, a missing/different quota, or insufficient clone headroom.
 
 The `macos_keychain` secret source selects one exact generic-password item by
 `service` and `account` in the account's default Keychain. Reads are serialized,
@@ -157,13 +157,14 @@ secret bytes. Pre-provision item access for the exact reviewed
 Do not pass secret values on a command line or store them in the JSON.
 
 Copy [`runner.macos.example.json`](runner.macos.example.json) to an ignored
-host-specific path, replace the identity and endpoints, provision its roots and
-Keychain items, then start `automata-runner run --config /absolute/path/to/runner.macos.json`.
-The implementation and remaining VM-isolation work are tracked in the
-[macOS plan](../../../docs/platforms/macos.md).
+host-specific path, replace every helper/template pin plus the identity and
+endpoints, provision its owner-only state roots and Keychain items, then start
+`automata-runner run --config /absolute/path/to/runner.macos.json`. Template
+construction, signing, isolation details, and the physical-host acceptance gate
+are documented in the [macOS guide](../../../docs/platforms/macos.md).
 
 The remainder of this guide describes the three-process rootless-Podman Linux
-host. Windows and macOS each remain one process with one slot.
+host. Windows and macOS each use one runner process with one slot.
 
 ## What the Linux example assumes
 

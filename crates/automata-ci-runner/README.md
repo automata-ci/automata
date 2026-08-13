@@ -8,8 +8,9 @@ the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman or Kubernetes on Linux, or the experimental
-trusted-native provider on Windows or Apple Silicon macOS 15+. The checked-in
+configuration: rootless Podman or Kubernetes on Linux, the experimental
+trusted-native provider on Windows, or disposable Virtualization.framework
+VMs on Apple Silicon macOS 15+. The checked-in
 Linux host examples
 ([one](config/runner.local-1.example.json),
 [two](config/runner.local-2.example.json), and
@@ -17,8 +18,8 @@ Linux host examples
 single-slot Podman processes; the
 [Windows](config/runner.windows.example.json) and
 [macOS](config/runner.macos.example.json) examples each remain one process and
-one slot. The [configuration guide](config/README.md) documents Kubernetes
-and the native trust boundaries.
+one slot. The [configuration guide](config/README.md) documents Kubernetes,
+Windows native containment, and the macOS VM trust boundary.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -99,10 +100,14 @@ and the Windows end-to-end CI gate are implemented together.
 
 The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
 configured Python and PowerShell Core interpreters. Startup probes every
-configured interpreter through the same shipped-binary supervisor used by job
-execution. The provider is single-slot and host-shared: CPU, memory, and PID
-inventory values guide placement but are not hard per-job limits. It does not
-advertise actions, containers, services, GPUs, or ephemeral-disk capacity.
+configured interpreter inside a cold-booted, digest-attested macOS 15-or-newer
+ARM64 VM.
+The provider is single-slot; Virtualization.framework fixes whole-vCPU and
+memory size, and the guest applies the process ceiling before workflow traffic.
+The VM has no virtual NIC or host directory share. It does not advertise
+actions, containers, services, GPUs, or ephemeral-disk capacity.
+Template artifacts and mutable clones must live on one pinned, quota-bounded
+APFS volume that is alone in a dedicated non-boot container.
 
 ## Job boundary
 
@@ -124,9 +129,9 @@ must not access runner state paths. See the
 [Windows source-build boundary](../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
 before supplying environment-backed credentials.
 
-Rootless Podman is a shared-kernel Linux boundary, while Windows and macOS
-native execution are trusted-host boundaries. None is hostile multi-tenant
-isolation. Stronger providers remain planned and are listed in the
+Rootless Podman is a shared-kernel Linux boundary and Windows native execution
+is a trusted-host boundary. macOS uses a disposable Apple VM per job. Stronger
+Linux and Windows providers remain planned and are listed in the
 [implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#provider-scope).
 
 ## Configure a host

@@ -976,14 +976,13 @@ name = "automata-ci-sandbox-macos"
 version = "0.1.0"
 dependencies = [
  "automata-ci-execution",
- "processkit",
+ "automata-ci-sandbox-guest",
+ "base64 0.23.1",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "static_assertions",
- "tokio",
- "uuid",
 ]
 
 [[package]]

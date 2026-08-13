@@ -5,8 +5,8 @@
 //! either requires the configured rootless-Podman network probe and cleanup to
 //! succeed or constructs the authenticated Kubernetes adapter. Trusted Windows
 //! execution uses native processes contained by a Job Object with explicit
-//! host-network and host-filesystem semantics; trusted macOS execution uses
-//! supervised POSIX process groups with the same explicit host semantics.
+//! host-network and host-filesystem semantics; macOS execution uses one
+//! disposable Virtualization.framework machine per job.
 //! Every path exercises configured environments through exact lifecycle
 //! admission before supervising fenced job execution.
 //! [`run`] is the `automata-runner` process entry point; diagnostic and product
@@ -86,9 +86,6 @@ async fn execute(cli: Cli) -> Result<()> {
             doctor::run(args, &cancellation).await
         }
         Command::InternalProbeHttp(args) => probe_http::serve(args).await,
-        Command::InternalMacosJobSupervisor => {
-            automata_ci_sandbox_macos::run_supervisor().map_err(Into::into)
-        }
     }
 }
 

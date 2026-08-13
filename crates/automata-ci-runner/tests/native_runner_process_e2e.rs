@@ -38,7 +38,6 @@ use automata_ci_protocol::{
     ServerToRunner, SessionDisposition,
 };
 use automata_ci_protocol_protobuf::encode_job_runtime_context;
-#[cfg(windows)]
 use automata_ci_runner::product::RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION;
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
@@ -71,7 +70,7 @@ const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
 #[cfg(windows)]
 const PROFILE_ID: &str = "automata.test/windows-process-e2e";
 #[cfg(target_os = "macos")]
-const PROFILE_ID: &str = "automata.test/macos-process-e2e";
+const PROFILE_ID: &str = "automata.dev/macos-15-arm64-vm-v1";
 const S3_BUCKET: &str = "automata-process-e2e";
 const S3_PREFIX: &str = "process-e2e";
 #[cfg(windows)]
@@ -79,16 +78,32 @@ const SENTINEL: &str = "AUTOMATA_WINDOWS_RUNNER_PROCESS_E2E";
 #[cfg(target_os = "macos")]
 const SENTINEL: &str = "AUTOMATA_MACOS_RUNNER_PROCESS_E2E";
 #[cfg(target_os = "macos")]
-const DIFFERENTIAL_REFERENCE_ENV: &str = "AUTOMATA_MACOS_DIFFERENTIAL_REFERENCE";
+const VM_HELPER_ENV: &str = "AUTOMATA_MACOS_VM_HELPER";
 #[cfg(target_os = "macos")]
-const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=native-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
+const VM_HELPER_SHA256_ENV: &str = "AUTOMATA_MACOS_VM_HELPER_SHA256";
+#[cfg(target_os = "macos")]
+const VM_HELPER_REQUIREMENT_ENV: &str = "AUTOMATA_MACOS_VM_HELPER_REQUIREMENT";
+#[cfg(target_os = "macos")]
+const VM_TEMPLATE_MANIFEST_ENV: &str = "AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST";
+#[cfg(target_os = "macos")]
+const VM_TEMPLATE_SHA256_ENV: &str = "AUTOMATA_MACOS_VM_TEMPLATE_SHA256";
+#[cfg(target_os = "macos")]
+const VM_STORAGE_ROOT_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_ROOT";
+#[cfg(target_os = "macos")]
+const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID";
+#[cfg(target_os = "macos")]
+const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
 #[cfg(windows)]
 const REQUIRE_STANDALONE_PWSH_ENV: &str = "AUTOMATA_RUNNER_WINDOWS_E2E_REQUIRE_STANDALONE_PWSH";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "requires a sealed VM template on a physical Apple Silicon runner"
+)]
 #[allow(clippy::too_many_lines)]
-async fn shipped_runner_process_executes_a_claimed_native_shell_job() {
+async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
     let root = TemporaryRoot::new();
     let runner_id = RunnerId::new();
     let session_id = RunnerSessionId::new();
@@ -105,7 +120,7 @@ async fn shipped_runner_process_executes_a_claimed_native_shell_job() {
         runner_id,
         FencingToken::new(1).expect("fencing token"),
         UnixMillis::new(unix_millis().saturating_sub(1_000)),
-        UnixMillis::new(unix_millis().saturating_add(10 * 60 * 1_000)),
+        UnixMillis::new(unix_millis().saturating_add(i64::from(process_control_timeout_millis()))),
     )
     .expect("process test lease");
     let authorities =
@@ -156,31 +171,43 @@ async fn shipped_runner_process_executes_a_claimed_native_shell_job() {
         &mut child,
         &mut stdout_task,
         &mut stderr_task,
-        Duration::from_secs(90),
+        process_result_timeout(),
     )
     .await;
     tokio::time::timeout(Duration::from_secs(10), handler.wait_for_completed_poll())
         .await
         .expect("runner finalizes the completed job and polls its released slot");
+    #[cfg(windows)]
     let workspace = root
         .path()
         .join("native")
         .join("workspaces")
         .join("automata")
         .join("automata");
+    #[cfg(windows)]
     let scratch = root
         .path()
         .join("native")
         .join("runner")
         .join("attempts")
         .join(handler.attempt_id().to_string());
+    #[cfg(windows)]
     assert!(
         !workspace.exists(),
-        "native provider left the completed job workspace behind: {workspace:?}"
+        "provider left the completed job workspace behind: {workspace:?}"
     );
+    #[cfg(windows)]
     assert!(
         !scratch.exists(),
-        "native provider left the per-attempt scratch directory behind: {scratch:?}"
+        "provider left the per-attempt scratch directory behind: {scratch:?}"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        fs::read_dir(
+            PathBuf::from(required_macos_vm_environment(VM_STORAGE_ROOT_ENV)).join("attempts")
+        )
+        .map_or(true, |mut entries| entries.next().is_none()),
+        "virtualization provider left a VM clone behind"
     );
 
     stop_runner(&mut child).await;
@@ -209,7 +236,7 @@ async fn shipped_runner_process_executes_a_claimed_native_shell_job() {
     let logs = String::from_utf8_lossy(&observation.logs);
     assert!(
         logs.contains(SENTINEL),
-        "real native-shell output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
+        "real isolated-shell output did not reach the control plane; logs={logs:?}; stdout={:?}; stderr={:?}",
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr),
     );
@@ -308,11 +335,11 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
     );
     let profile = EnvironmentProfile::new(
         EnvironmentProfileId::new(PROFILE_ID).expect("profile ID"),
-        Sha256Digest::from_bytes([0x08; 32]),
+        process_profile_digest(),
     );
-    let capacity = ResourceCapacity::new(1_000, 1_073_741_824, 0, 0);
+    let capacity = process_resource_capacity();
     let allocation =
-        JobResourceAllocation::new(capacity, capacity).expect("native process allocation");
+        JobResourceAllocation::new(capacity, capacity).expect("isolated process allocation");
     let requirements = RunnerRequirements::default()
         .with_environment_profile(profile)
         .with_resource_allocation(allocation);
@@ -377,7 +404,7 @@ fn native_steps() -> Vec<StepIr> {
         RuntimeBoolean::literal(false),
         SemanticStep::run(RunValueTemplates::new(
             ValueTemplate::literal(
-                "set -eu\nprintf 'differential.bash=ok\\n'\nprintf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\\n' >> \"$GITHUB_ENV\"\nprintf 'fixture=native-output\\n' >> \"$GITHUB_OUTPUT\"\nprintf '%s\\n' native-workspace > differential-artifact.txt",
+                "set -eu\ntest \"$(/usr/sbin/sysctl -n hw.ncpu)\" = 4\ntest \"$(/usr/sbin/sysctl -n hw.memsize)\" = 8589934592\ntest \"$(ulimit -u)\" = 512\ntest ! -e /Library/Automata/bin/automata-macos-vm-helper\nif /sbin/ifconfig -l | /usr/bin/tr ' ' '\\n' | /usr/bin/grep -Eq '^en[0-9]+$'; then exit 1; fi\nprintf 'differential.bash=ok\\nisolation.cpu=4\\nisolation.memory=8589934592\\nisolation.process_limit=512\\nisolation.no_host_helper=true\\nisolation.no_ethernet=true\\n'\nprintf 'AUTOMATA_DIFFERENTIAL_ENV=command-file\\n' >> \"$GITHUB_ENV\"\nprintf 'fixture=vm-output\\n' >> \"$GITHUB_OUTPUT\"\nprintf '%s\\n' vm-workspace > differential-artifact.txt",
             )
             .expect("producer command"),
             ShellTemplate::named(ValueTemplate::literal("bash").expect("Bash shell")),
@@ -389,7 +416,7 @@ fn native_steps() -> Vec<StepIr> {
         RuntimeBoolean::literal(false),
         SemanticStep::run(RunValueTemplates::new(
             ValueTemplate::literal(format!(
-                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$FROM_OUTPUT\" = native-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = native-workspace\nprintf 'differential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
+                "set -eu\ntest \"$AUTOMATA_DIFFERENTIAL_ENV\" = command-file\ntest \"$FROM_OUTPUT\" = vm-output\ntest \"$PWD\" = \"$GITHUB_WORKSPACE\"\ntest \"$(cat differential-artifact.txt)\" = vm-workspace\nprintf 'differential.sh=ok\\ndifferential.environment=%s\\ndifferential.output=%s\\ndifferential.workspace=true\\ndifferential.conclusion=success\\n%s\\n' \"$AUTOMATA_DIFFERENTIAL_ENV\" \"$FROM_OUTPUT\" '{SENTINEL}'"
             ))
             .expect("consumer command"),
             ShellTemplate::named(ValueTemplate::literal("sh").expect("sh shell")),
@@ -413,18 +440,10 @@ fn output_expression(source: &str) -> ExpressionProgram {
 
 #[cfg(target_os = "macos")]
 fn assert_macos_differential_fixture(logs: &str) {
-    let reference = std::env::var_os(DIFFERENTIAL_REFERENCE_ENV).map_or_else(
-        || DIFFERENTIAL_REFERENCE.to_owned(),
-        |path| fs::read_to_string(path).expect("read GitHub-hosted macOS shell reference"),
-    );
-    assert_eq!(
-        reference, DIFFERENTIAL_REFERENCE,
-        "GitHub-hosted Bash/sh reference changed"
-    );
     for expected in DIFFERENTIAL_REFERENCE.lines() {
         assert!(
             logs.lines().any(|line| line == expected),
-            "Automata native shell fixture omitted {expected:?}; logs={logs:?}"
+            "Automata VM shell fixture omitted {expected:?}; logs={logs:?}"
         );
     }
 }
@@ -722,6 +741,7 @@ impl ProcessFlowHandler {
             .clone()
     }
 
+    #[cfg(windows)]
     fn attempt_id(&self) -> AttemptId {
         self.lease.attempt_id()
     }
@@ -766,7 +786,11 @@ impl ProcessFlowHandler {
                 SessionDisposition::Opened,
                 CommandCursor::initial(),
             ),
-            ServerTiming::new(UnixMillis::new(unix_millis()), 1_000, 10 * 60 * 1_000),
+            ServerTiming::new(
+                UnixMillis::new(unix_millis()),
+                1_000,
+                process_control_timeout_millis(),
+            ),
         )))
     }
 
@@ -901,9 +925,52 @@ const fn native_operating_system() -> OperatingSystem {
     OperatingSystem::Windows
 }
 
+#[cfg(windows)]
+const fn process_resource_capacity() -> ResourceCapacity {
+    ResourceCapacity::new(1_000, 1_073_741_824, 0, 0)
+}
+
+#[cfg(windows)]
+const fn process_control_timeout_millis() -> u32 {
+    10 * 60 * 1_000
+}
+
+#[cfg(target_os = "macos")]
+const fn process_control_timeout_millis() -> u32 {
+    30 * 60 * 1_000
+}
+
+#[cfg(windows)]
+const fn process_result_timeout() -> Duration {
+    Duration::from_secs(90)
+}
+
+#[cfg(target_os = "macos")]
+const fn process_result_timeout() -> Duration {
+    Duration::from_mins(15)
+}
+
+#[cfg(target_os = "macos")]
+const fn process_resource_capacity() -> ResourceCapacity {
+    ResourceCapacity::new(4_000, 8_589_934_592, 0, 0)
+}
+
 #[cfg(target_os = "macos")]
 const fn native_operating_system() -> OperatingSystem {
     OperatingSystem::Macos
+}
+
+#[cfg(windows)]
+const fn process_profile_digest() -> Sha256Digest {
+    Sha256Digest::from_bytes([0x08; 32])
+}
+
+#[cfg(target_os = "macos")]
+fn process_profile_digest() -> Sha256Digest {
+    std::env::var(VM_TEMPLATE_SHA256_ENV)
+        .unwrap_or_else(|_| panic!("{VM_TEMPLATE_SHA256_ENV} is required"))
+        .parse()
+        .unwrap_or_else(|_| panic!("{VM_TEMPLATE_SHA256_ENV} must be a lowercase SHA-256"))
 }
 
 impl RunnerControlHandler for ProcessFlowHandler {
@@ -1179,10 +1246,10 @@ fn write_runner_config(
             "groups": ["default"],
             "max_parallel_jobs": 1,
             "resources_per_job": {
-                "cpu_millis": 1000,
-                "memory_bytes": 1_073_741_824_u64,
+                "cpu_millis": 4000,
+                "memory_bytes": 8_589_934_592_u64,
                 "ephemeral_disk_bytes": 0,
-                "pids": 128,
+                "pids": 512,
             },
             "environment_profiles": [{
                 "id": PROFILE_ID,
@@ -1201,10 +1268,10 @@ fn write_runner_config(
         "windows_native": {},
         "executor": {
             "resources": {
-                "cpu_millis": 1000,
-                "memory_bytes": 1_073_741_824_u64,
+                "cpu_millis": 4000,
+                "memory_bytes": 8_589_934_592_u64,
                 "ephemeral_disk_bytes": 0,
-                "pids": 128,
+                "pids": 512,
             },
             "network": "host",
             "root_filesystem": "host",
@@ -1267,23 +1334,21 @@ fn write_runner_config(
 ) -> PathBuf {
     let journal = root.join("journal");
     let spool = root.join("spool");
-    let native = root.join("native");
-    let workspaces = native.join("workspaces");
-    let runner = native.join("runner");
-    let temp = root.join("temp");
-    let home = root.join("home");
-    let tool_cache = root.join("tool-cache");
-    for path in [&temp, &home, &tool_cache] {
-        fs::create_dir_all(path).expect("create runner support directory");
-    }
+    let virtualization = required_macos_vm_environment(VM_STORAGE_ROOT_ENV);
+    let helper = required_macos_vm_environment(VM_HELPER_ENV);
+    let helper_sha256 = required_macos_vm_environment(VM_HELPER_SHA256_ENV);
+    let helper_requirement = required_macos_vm_environment(VM_HELPER_REQUIREMENT_ENV);
+    let template_manifest = required_macos_vm_environment(VM_TEMPLATE_MANIFEST_ENV);
+    let template_sha256 = process_profile_digest().to_string();
+    let storage_volume_uuid = required_macos_vm_environment(VM_STORAGE_VOLUME_UUID_ENV);
     let config = json!({
-        "schema_version": 1,
+        "schema_version": RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
         "runner_id": runner_id.to_string(),
         "control_endpoint": format!("https://{control_address}/"),
         "state": {
             "journal": journal,
             "spool": spool,
-            "macos_native": native,
+            "macos_virtualization": virtualization,
         },
         "tls": {
             "server_roots": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM"},
@@ -1300,36 +1365,46 @@ fn write_runner_config(
             "groups": ["default"],
             "max_parallel_jobs": 1,
             "resources_per_job": {
-                "cpu_millis": 1000,
-                "memory_bytes": 1_073_741_824_u64,
+                "cpu_millis": 4000,
+                "memory_bytes": 8_589_934_592_u64,
                 "ephemeral_disk_bytes": 0,
-                "pids": 128,
+                "pids": 512,
             },
             "environment_profiles": [{
                 "id": PROFILE_ID,
-                "manifest_sha256": "08".repeat(32),
-                "workspace": workspaces,
+                "manifest_sha256": template_sha256.clone(),
+                "workspace": "/Users/automata-job/workspaces",
                 "default_environment": {},
             }],
         },
-        "macos_native": {},
+        "macos_virtualization": {
+            "helper_executable": helper,
+            "helper_sha256": helper_sha256,
+            "helper_code_requirement": helper_requirement,
+            "template_manifest": template_manifest,
+            "template_manifest_sha256": template_sha256,
+            "storage_volume_uuid": storage_volume_uuid,
+            "storage_quota_bytes": 274_877_906_944_u64,
+            "boot_timeout_seconds": 300,
+            "stop_timeout_seconds": 10,
+        },
         "executor": {
             "resources": {
-                "cpu_millis": 1000,
-                "memory_bytes": 1_073_741_824_u64,
+                "cpu_millis": 4000,
+                "memory_bytes": 8_589_934_592_u64,
                 "ephemeral_disk_bytes": 0,
-                "pids": 128,
+                "pids": 512,
             },
-            "network": "host",
-            "root_filesystem": "host",
-            "privilege": "host",
+            "network": "disabled",
+            "root_filesystem": "writable",
+            "privilege": "unprivileged",
             "default_step_timeout_seconds": 60,
             "maximum_output_bytes": 1_048_576,
-            "runner_root": runner,
-            "home": home,
+            "runner_root": "/Users/automata-job/runner",
+            "home": "/Users/automata-job",
             "path": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "temp": temp,
-            "tool_cache": tool_cache,
+            "temp": "/Users/automata-job/tmp",
+            "tool_cache": "/Users/automata-job/tool-cache",
             "toolchain": {
                 "bash": "/bin/bash",
                 "sh": "/bin/sh",
@@ -1372,6 +1447,11 @@ fn write_runner_config(
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
         .expect("restrict runner config");
     config_path
+}
+
+#[cfg(target_os = "macos")]
+fn required_macos_vm_environment(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
 }
 
 #[cfg(windows)]

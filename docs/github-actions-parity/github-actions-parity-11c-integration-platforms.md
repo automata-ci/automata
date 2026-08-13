@@ -97,7 +97,7 @@ Acceptance:
   evidence against a real cluster.
 - [ ] The adapter cannot advertise Kubernetes readiness before `PROV-03`.
 
-### IT-11 — macOS ARM64 native adapter
+### IT-11 — macOS ARM64 VM adapter
 
 **Owner:** P with R and X review. **Size:** L. **Dependencies:** IT-01, IT-07,
 FND-02, PLAT-02.
@@ -107,18 +107,18 @@ containers, Intel, signing jobs, and Xcode profiles stay outside this package.
 
 Tasks:
 
-- [ ] Implement the common adapter contract on a disposable/dedicated Apple
-  Silicon macOS 15+ host.
+- [ ] Implement the common adapter contract through the disposable macOS VM
+  provider on a dedicated Apple Silicon macOS 15+ host.
 - [ ] Record exact OS/build, architecture, runner, shell, optional Python/pwsh,
   identity, filesystem, network, and cleanup boundaries.
-- [ ] Run only the admitted native `run:` smoke without action/container
+- [ ] Run only the admitted VM-backed `run:` smoke without action/container
   substitution.
 - [ ] Prove process-tree termination, workspace cleanup, restart handling, and
   no persistent keychain/developer credential access.
 
 Acceptance:
 
-- [ ] One ARM64 native smoke passes through shipped processes and cleans all
+- [ ] One ARM64 VM smoke passes through shipped processes and cleans all
   owned state.
 - [ ] Intel, actions, containers, signing, and Xcode are still rejected or
   represented by later product packages.

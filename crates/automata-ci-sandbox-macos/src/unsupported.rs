@@ -1,57 +1,66 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, time::Duration};
 
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, ExecutionEndpoint, OperationOutcome,
     ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
-    SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec,
+    SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, Sha256Digest,
 };
 
-/// macOS provider configuration placeholder on unsupported hosts.
+/// macOS virtualization options are unavailable on non-macOS hosts.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MacosSandboxProviderOptions;
+pub struct MacosVirtualizationProviderOptions;
 
-impl MacosSandboxProviderOptions {
-    /// Rejects macOS provider configuration on a non-macOS host.
+impl MacosVirtualizationProviderOptions {
+    /// Rejects Virtualization.framework configuration on a non-macOS host.
     ///
     /// # Errors
     ///
     /// Always returns `UnsupportedPlatform`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _provider_root: impl Into<PathBuf>,
-        _supervisor_executable: impl Into<PathBuf>,
+        _helper_executable: impl Into<PathBuf>,
+        _helper_digest: Sha256Digest,
+        _helper_code_requirement: String,
+        _template_manifest: impl Into<PathBuf>,
+        _template_manifest_digest: Sha256Digest,
+        _storage_volume_uuid: &str,
+        _storage_quota_bytes: u64,
+        _boot_timeout: Duration,
+        _stop_timeout: Duration,
     ) -> Result<Self, ProviderError> {
         Err(unsupported(ProviderStage::Validate))
     }
 }
 
-/// macOS sandbox provider placeholder on unsupported hosts.
-pub struct MacosSandboxProvider {
+/// Virtualization.framework provider placeholder on unsupported hosts.
+pub struct MacosVirtualizationProvider {
     provider_id: ProviderId,
     capabilities: ProviderCapabilities,
 }
 
-impl MacosSandboxProvider {
+impl MacosVirtualizationProvider {
     /// Rejects provider startup on a non-macOS host.
     ///
     /// # Errors
     ///
     /// Always returns `UnsupportedPlatform`.
-    pub fn open(_options: MacosSandboxProviderOptions) -> Result<Self, ProviderError> {
+    pub fn open(_options: MacosVirtualizationProviderOptions) -> Result<Self, ProviderError> {
         Err(unsupported(ProviderStage::Validate))
     }
 }
 
-impl fmt::Debug for MacosSandboxProvider {
+impl fmt::Debug for MacosVirtualizationProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("MacosSandboxProvider")
+            .debug_struct("MacosVirtualizationProvider")
             .field("provider_id", &self.provider_id)
             .field("capabilities", &self.capabilities)
             .finish()
     }
 }
 
-impl SandboxProvider for MacosSandboxProvider {
+impl SandboxProvider for MacosVirtualizationProvider {
     fn provider_id(&self) -> &ProviderId {
         &self.provider_id
     }
@@ -91,18 +100,6 @@ impl SandboxProvider for MacosSandboxProvider {
     ) -> Result<DestroyDisposition, ProviderError> {
         Err(unsupported(ProviderStage::DestroySandbox))
     }
-}
-
-/// Rejects the hidden supervisor command on a non-macOS host.
-///
-/// # Errors
-///
-/// Always returns an unsupported-platform I/O error.
-pub fn run_supervisor() -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "macOS supervisor is unavailable",
-    ))
 }
 
 const fn unsupported(stage: ProviderStage) -> ProviderError {

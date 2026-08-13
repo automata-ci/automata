@@ -400,7 +400,9 @@ fn copy_from_result(response: GuestResponse, byte_limit: usize) -> Result<Vec<u8
 
 const fn response_protocol(response: &GuestResponse) -> u16 {
     match response {
-        GuestResponse::Exec { protocol, .. }
+        GuestResponse::Hello { protocol, .. }
+        | GuestResponse::Configured { protocol }
+        | GuestResponse::Exec { protocol, .. }
         | GuestResponse::WriteFile { protocol }
         | GuestResponse::ReadFile { protocol, .. }
         | GuestResponse::Rejected { protocol, .. } => *protocol,
@@ -420,6 +422,8 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
                 | GuestRejection::OperationConflict,
             ..
         }
+        | GuestResponse::Hello { .. }
+        | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }
         | GuestResponse::WriteFile { .. }
         | GuestResponse::ReadFile { .. } => ExecutionErrorKind::BackendRejected,
