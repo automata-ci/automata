@@ -359,6 +359,15 @@ async fn wait_for_renewal_lock_wait(
     Err("provider-delivery renewal never reached the expected row lock".into())
 }
 
+async fn advance_past_monotonic_deadline(deadline: tokio::time::Instant) {
+    tokio::time::pause();
+    tokio::time::advance(
+        deadline.saturating_duration_since(tokio::time::Instant::now()) + Duration::from_millis(20),
+    )
+    .await;
+    tokio::time::resume();
+}
+
 fn assert_database_constraint(error: &sqlx::Error, expected: &str) {
     let constraint = error
         .as_database_error()
@@ -1231,6 +1240,9 @@ async fn renewal_requires_predeadline_row_lock_but_replays_a_late_exact_successo
         .await?;
 
         let mut blocker = database.pool().begin().await?;
+        let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query("SELECT id FROM provider_delivery_inbox WHERE id = $1 FOR UPDATE")
             .bind(claimed.receipt().id().as_uuid())
             .fetch_one(&mut *blocker)
@@ -1243,17 +1255,14 @@ async fn renewal_requires_predeadline_row_lock_but_replays_a_late_exact_successo
             claimed.expires_at().get() - 800,
             claimed.expires_at().get() + 200,
         )?;
-        let release_blocker = async move {
-            tokio::time::sleep(Duration::from_millis(1_100)).await;
-            blocker.commit().await
-        };
-        let (blocked_result, release_result) = tokio::join!(
-            database
-                .store()
-                .renew_provider_delivery_claim(blocked_request),
-            release_blocker,
-        );
-        release_result?;
+        let deadline = blocked_request.deadline();
+        let store = database.store().clone();
+        let renewal_task =
+            tokio::spawn(async move { store.renew_provider_delivery_claim(blocked_request).await });
+        wait_for_renewal_lock_wait(&database, blocking_backend_pid).await?;
+        advance_past_monotonic_deadline(deadline).await;
+        blocker.commit().await?;
+        let blocked_result = renewal_task.await?;
         assert!(matches!(
             blocked_result,
             Err(ProviderDeliveryStoreError::ClaimRejected)
@@ -1286,7 +1295,7 @@ async fn renewal_requires_predeadline_row_lock_but_replays_a_late_exact_successo
             .store()
             .renew_provider_delivery_claim(replay_request)
             .await?;
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        advance_past_monotonic_deadline(replay_request.deadline()).await;
         assert_eq!(
             database
                 .store()
@@ -1450,7 +1459,7 @@ async fn renewal_cannot_acquire_the_predecessor_row_after_its_deadline() -> Test
             tokio::time::Instant::now() < deadline,
             "the renewal must reach the predecessor lock before its confirmed deadline"
         );
-        tokio::time::sleep_until(deadline + Duration::from_millis(20)).await;
+        advance_past_monotonic_deadline(deadline).await;
         blocker.rollback().await?;
 
         assert!(matches!(
@@ -1526,7 +1535,7 @@ async fn late_exact_replay_waits_for_an_uncommitted_successor() -> TestResult {
         .bind(expires_at)
         .execute(&mut *winner)
         .await?;
-        tokio::time::sleep_until(request.deadline() + Duration::from_millis(20)).await;
+        advance_past_monotonic_deadline(request.deadline()).await;
 
         let store = database.store().clone();
         let replay =

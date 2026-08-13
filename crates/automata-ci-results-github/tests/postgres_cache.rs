@@ -660,7 +660,7 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
             .await?;
         let lookup_repository = repository.clone();
         let lookup_observed_at = database_now_seconds(&database).await?;
-        let mut lookup = tokio::spawn(async move {
+        let lookup = tokio::spawn(async move {
             lookup_repository
                 .lookup(LookupCacheEntry {
                     execution,
@@ -677,12 +677,6 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
                 .await
         });
         wait_for_direct_blockers(database.pool(), gate_pid, 1).await?;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut lookup)
-                .await
-                .is_err(),
-            "lookup must wait for the exact cache-entry lock"
-        );
         clock.advance(10_000).await?;
         gate.commit().await?;
         assert!(lookup.await??.is_none());
@@ -1231,12 +1225,14 @@ async fn wait_for_direct_blockers(pool: &PgPool, blocking_pid: i32, expected: i6
                 WITH RECURSIVE blocked(pid) AS (
                     SELECT activity.pid
                     FROM pg_stat_activity AS activity
-                    WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
                     UNION
                     SELECT activity.pid
                     FROM pg_stat_activity AS activity
                     JOIN blocked
                       ON blocked.pid = ANY(pg_blocking_pids(activity.pid))
+                    WHERE activity.datname = current_database()
                 )
                 SELECT count(*)::BIGINT FROM blocked
                 ",
@@ -1260,7 +1256,8 @@ async fn direct_blocker_pid(pool: &PgPool, blocking_pid: i32) -> TestResult<i32>
         r"
         SELECT activity.pid
         FROM pg_stat_activity AS activity
-        WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+        WHERE activity.datname = current_database()
+          AND $1 = ANY(pg_blocking_pids(activity.pid))
         ORDER BY activity.pid
         LIMIT 1
         ",

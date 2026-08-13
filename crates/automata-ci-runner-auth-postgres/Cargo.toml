@@ -10,6 +10,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+autotests = false
+
+[[test]]
+name = "contracts"
+path = "tests/contracts.rs"
+
+[[test]]
+name = "runner_auth_postgres"
+path = "tests/runner_auth_postgres.rs"
 
 [dependencies]
 async-trait.workspace = true

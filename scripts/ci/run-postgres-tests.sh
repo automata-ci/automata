@@ -112,7 +112,10 @@ run_bounded_tests cargo test \
   -p automata-ci-auth-postgres \
   -p automata-ci-runner-auth-postgres \
   -p automata-ci-secret-postgres \
-  --tests \
+  --test postgres_18 \
+  --test auth_postgres \
+  --test runner_auth_postgres \
+  --test secret_postgres \
   --all-features \
   --locked \
   -- \

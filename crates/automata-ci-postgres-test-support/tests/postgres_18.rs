@@ -1,4 +1,12 @@
-use std::{future::Future, str::FromStr as _, time::Duration};
+use std::{
+    future::Future,
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use automata_ci_postgres_test_support::{
     DATABASE_URL_ENVIRONMENT, NamespaceCleanup, PostgresTestHarness, TestClock, TestNamespace,
@@ -22,6 +30,14 @@ where
     TestFuture: Future<Output = TestResult> + Send + 'static,
 {
     let harness = unique_harness()?;
+    run_with_harness(harness, test).await
+}
+
+async fn run_with_harness<Test, TestFuture>(harness: PostgresTestHarness, test: Test) -> TestResult
+where
+    Test: FnOnce(PostgresTestHarness) -> TestFuture,
+    TestFuture: Future<Output = TestResult> + Send + 'static,
+{
     let cleanup_harness = harness.clone();
     let test_outcome = tokio::spawn(test(harness)).await;
     let cleanup_outcome =
@@ -360,6 +376,72 @@ async fn panicking_test_still_drops_its_exact_database() -> TestResult {
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+async fn incompatible_initializer_fingerprint_cannot_reuse_template() -> TestResult {
+    let database_url = std::env::var(DATABASE_URL_ENVIRONMENT)?;
+    let random = Uuid::new_v4().simple().to_string();
+    let namespace = TestNamespace::new(format!("f{random:.26}"))?;
+    let template_name = format!("at_{namespace}_template");
+    let first_fingerprint = "a".repeat(64);
+    let second_fingerprint = "b".repeat(64);
+    let first = PostgresTestHarness::new(&database_url, namespace.clone())?
+        .with_initializer_fingerprint(first_fingerprint)?;
+    let second = PostgresTestHarness::new(&database_url, namespace)?
+        .with_initializer_fingerprint(second_fingerprint)?;
+    let incompatible_initializer_called = Arc::new(AtomicBool::new(false));
+    let incompatible_initializer_probe = Arc::clone(&incompatible_initializer_called);
+
+    run_with_harness(first, move |first| async move {
+        let template = first
+            .prepare_template(|pool| async move {
+                sqlx::query(
+                    "CREATE TABLE automata_test.fingerprint_marker (value INTEGER NOT NULL)",
+                )
+                .execute(&pool)
+                .await?;
+                sqlx::query("INSERT INTO automata_test.fingerprint_marker (value) VALUES (17)")
+                    .execute(&pool)
+                    .await?;
+                Ok(())
+            })
+            .await?;
+
+        let error = second
+            .prepare_template(move |_pool| async move {
+                incompatible_initializer_probe.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await
+            .expect_err("an incompatible initializer fingerprint must not reuse the template");
+        assert!(
+            error.to_string().contains("ownership marker"),
+            "fingerprint mismatch must fail as an ownership-marker error: {error}"
+        );
+        assert!(
+            !incompatible_initializer_called.load(Ordering::Acquire),
+            "a rejected incompatible initializer must not execute"
+        );
+
+        template
+            .run(|database| async move {
+                let value: i32 = sqlx::query_scalar("SELECT value FROM fingerprint_marker")
+                    .fetch_one(database.pool())
+                    .await?;
+                assert_eq!(value, 17);
+                Ok(())
+            })
+            .await
+    })
+    .await?;
+
+    assert!(
+        !database_exists(&template_name).await?,
+        "the exact fingerprinted namespace must be cleaned after rejection"
+    );
+    Ok(())
 }
 
 #[tokio::test]

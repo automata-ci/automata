@@ -10,6 +10,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+autotests = false
+
+[[test]]
+name = "contracts"
+path = "tests/contracts.rs"
+
+[[test]]
+name = "auth_postgres"
+path = "tests/auth_postgres.rs"
 
 [dependencies]
 automata-ci-auth.workspace = true

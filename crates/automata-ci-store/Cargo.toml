@@ -56,6 +56,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 automata-ci-postgres-test-support.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

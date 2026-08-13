@@ -1,5 +1,3 @@
-mod support;
-
 use std::{
     sync::{
         Arc,
@@ -29,7 +27,7 @@ use automata_ci_store::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 const FIRST_VALUE: &[u8] = b"first-replay-value-3f5bfd0ea8df4ce5";
 const SECOND_VALUE: &[u8] = b"second-replay-value-b9df4ed5e123453e";
