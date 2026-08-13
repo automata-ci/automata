@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
 use automata_ci_action_github::{
@@ -301,33 +301,15 @@ async fn supervise_composition(
     tokio::pin!(runtime);
     tokio::pin!(metrics_service);
     tokio::pin!(metrics_sampler);
-    let result = tokio::select! {
-        runtime_result = &mut runtime => {
-            shutdown.runtime.cancel();
-            let metrics_result = (&mut metrics_service).await;
-            (&mut metrics_sampler).await?;
-            metrics_result?;
-            runtime_result.map_err(RunnerProductError::Runtime)
-        },
-        metrics_result = &mut metrics_service => {
-            shutdown.runtime.cancel();
-            let _runtime_result = (&mut runtime).await;
-            (&mut metrics_sampler).await?;
-            match metrics_result {
-                Ok(()) => Err(RunnerProductError::MetricsExited),
-                Err(error) => Err(error),
-            }
-        },
-        sampler_result = &mut metrics_sampler => {
-            shutdown.runtime.cancel();
-            let _runtime_result = (&mut runtime).await;
-            let _metrics_result = (&mut metrics_service).await;
-            match sampler_result {
-                Ok(()) => Err(RunnerProductError::MetricsSamplerExited),
-                Err(error) => Err(error),
-            }
-        },
-        () = shutdown.runtime.cancelled() => {
+    let selected = select_composition_exit(
+        &shutdown.runtime,
+        runtime.as_mut(),
+        metrics_service.as_mut(),
+        metrics_sampler.as_mut(),
+    )
+    .await;
+    let result = match selected {
+        CompositionExit::Shutdown => {
             let runtime_result = (&mut runtime).await;
             let metrics_result = (&mut metrics_service).await;
             (&mut metrics_sampler).await?;
@@ -335,11 +317,63 @@ async fn supervise_composition(
             metrics_result?;
             runtime_result.map_err(RunnerProductError::Runtime)
         }
+        CompositionExit::Runtime(runtime_result) => {
+            shutdown.runtime.cancel();
+            let metrics_result = (&mut metrics_service).await;
+            (&mut metrics_sampler).await?;
+            metrics_result?;
+            runtime_result.map_err(RunnerProductError::Runtime)
+        }
+        CompositionExit::Metrics(metrics_result) => {
+            shutdown.runtime.cancel();
+            let _runtime_result = (&mut runtime).await;
+            (&mut metrics_sampler).await?;
+            match metrics_result {
+                Ok(()) => Err(RunnerProductError::MetricsExited),
+                Err(error) => Err(error),
+            }
+        }
+        CompositionExit::Sampler(sampler_result) => {
+            shutdown.runtime.cancel();
+            let _runtime_result = (&mut runtime).await;
+            let _metrics_result = (&mut metrics_service).await;
+            match sampler_result {
+                Ok(()) => Err(RunnerProductError::MetricsSamplerExited),
+                Err(error) => Err(error),
+            }
+        }
     };
     if let Some(metrics) = &composition.metrics {
         metrics.set_ready(false);
     }
     result
+}
+
+enum CompositionExit<Runtime, Metrics, Sampler> {
+    Shutdown,
+    Runtime(Runtime),
+    Metrics(Metrics),
+    Sampler(Sampler),
+}
+
+async fn select_composition_exit<RuntimeFuture, MetricsFuture, SamplerFuture>(
+    shutdown: &CancellationToken,
+    runtime: Pin<&mut RuntimeFuture>,
+    metrics: Pin<&mut MetricsFuture>,
+    sampler: Pin<&mut SamplerFuture>,
+) -> CompositionExit<RuntimeFuture::Output, MetricsFuture::Output, SamplerFuture::Output>
+where
+    RuntimeFuture: Future,
+    MetricsFuture: Future,
+    SamplerFuture: Future,
+{
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => CompositionExit::Shutdown,
+        result = runtime => CompositionExit::Runtime(result),
+        result = metrics => CompositionExit::Metrics(result),
+        result = sampler => CompositionExit::Sampler(result),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1633,6 +1667,29 @@ mod tests {
         assert!(matches!(
             bind_metrics_listener(address).await,
             Err(RunnerProductError::MetricsBind(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requested_shutdown_wins_when_every_composition_future_is_ready() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let runtime = std::future::ready("runtime");
+        let metrics = std::future::ready("metrics");
+        let sampler = std::future::ready("sampler");
+        tokio::pin!(runtime);
+        tokio::pin!(metrics);
+        tokio::pin!(sampler);
+
+        assert!(matches!(
+            select_composition_exit(
+                &shutdown,
+                runtime.as_mut(),
+                metrics.as_mut(),
+                sampler.as_mut(),
+            )
+            .await,
+            CompositionExit::Shutdown
         ));
     }
 
