@@ -564,6 +564,11 @@ impl GithubChecksClaimHorizon {
 
 impl GithubChecksPublisher {
     /// Constructs the publisher from explicit provider, durability, authority, and time ports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dashboard origin is not a canonical credential-free HTTP(S)
+    /// origin.
     pub fn new(
         endpoint: GithubHttpEndpoint,
         outbox: Arc<dyn GithubCheckProjectionOutbox>,
@@ -1142,6 +1147,7 @@ impl fmt::Debug for GithubChecksPublisher {
             .field("outbox", &"[configured]")
             .field("credentials", &"[configured]")
             .field("clock", &self.clock)
+            .field("dashboard_origin", &self.dashboard_origin)
             .field("config", &self.config)
             .finish()
     }

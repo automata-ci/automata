@@ -2468,7 +2468,7 @@ impl GithubJobExecutor {
                     call_path.invocation_id(top_step.id().as_str()),
                     cancellation,
                 )?;
-                let outcome = match loaded.definition.execution() {
+                match loaded.definition.execution() {
                     PreparedActionExecution::Javascript(javascript) => {
                         let pre_completed = if !lifecycle.pre_completed
                             && javascript.pre().is_some()
@@ -2555,8 +2555,7 @@ impl GithubJobExecutor {
                         )
                         .await
                     }
-                };
-                outcome
+                }
             }
             .await;
             budget.leave();
