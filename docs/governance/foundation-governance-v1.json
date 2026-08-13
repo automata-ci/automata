@@ -525,24 +525,44 @@
       "version": 1
     },
     {
-      "compatibility_policy": "exact-current-only",
+      "compatibility_policy": "breaking-current-only",
       "id": "github-provider-config",
       "owner": "control-plane",
+      "prior_version_rejections": [
+        {
+          "rejection": {
+            "contains": "if raw.schema != CONFIG_SCHEMA",
+            "path": "crates/automata-ci/src/server/github_provider_config.rs",
+            "symbol": "from_raw"
+          },
+          "tests": [
+            {
+              "function": "noncurrent_provider_config_schema_fails_closed",
+              "outcome": "assert_eq!(load_value(\"schema.json\", &value), expected);",
+              "path": "crates/automata-ci/tests/github_provider_config.rs",
+              "reader_call": "load_value(\"schema.json\", &value)",
+              "reader_symbol": "load_value",
+              "version": "for unsupported in [0, 1, 3, u16::MAX] {"
+            }
+          ],
+          "version": 1
+        }
+      ],
       "sources": [
         {
-          "contains": "const CONFIG_SCHEMA: u16 = 1;",
+          "contains": "const CONFIG_SCHEMA: u16 = 2;",
           "path": "crates/automata-ci/src/server/github_provider_config.rs",
           "role": "version"
         }
       ],
       "tests": [
         {
-          "contains": "value[\"schema\"] = json!(2);",
+          "contains": "for unsupported in [0, 1, 3, u16::MAX] {",
           "function": "noncurrent_provider_config_schema_fails_closed",
           "path": "crates/automata-ci/tests/github_provider_config.rs"
         }
       ],
-      "version": 1
+      "version": 2
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -640,24 +660,44 @@
       "version": 1
     },
     {
-      "compatibility_policy": "exact-current-only",
+      "compatibility_policy": "breaking-current-only",
       "id": "guest-protocol",
       "owner": "sandbox",
+      "prior_version_rejections": [
+        {
+          "rejection": {
+            "contains": "let immediate_response = if request.protocol() != GUEST_PROTOCOL_VERSION {",
+            "path": "crates/automata-ci-sandbox-guest/src/lib.rs",
+            "symbol": "serve_connection"
+          },
+          "tests": [
+            {
+              "function": "listener_lifecycle_protocol_and_malformed_connections_fail_closed",
+              "outcome": "assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);",
+              "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs",
+              "reader_call": "exchange(&socket, &unsupported).await",
+              "reader_symbol": "exchange",
+              "version": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {"
+            }
+          ],
+          "version": 1
+        }
+      ],
       "sources": [
         {
-          "contains": "pub const GUEST_PROTOCOL_VERSION: u16 = 1;",
+          "contains": "pub const GUEST_PROTOCOL_VERSION: u16 = 2;",
           "path": "crates/automata-ci-sandbox-guest/src/lib.rs",
           "role": "version"
         }
       ],
       "tests": [
         {
-          "contains": "protocol: GUEST_PROTOCOL_VERSION + 1,",
+          "contains": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {",
           "function": "listener_lifecycle_protocol_and_malformed_connections_fail_closed",
           "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs"
         }
       ],
-      "version": 1
+      "version": 2
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -790,6 +830,46 @@
           "contains": "DURABLE_SCHEMA.checked_add(1)",
           "function": "lifecycle_reopen_rejects_noncurrent_durable_schemas",
           "path": "crates/automata-ci-sandbox-macos/src/persistence.rs"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "compatibility_policy": "exact-current-only",
+      "id": "macos-template-manifest",
+      "owner": "sandbox",
+      "sources": [
+        {
+          "contains": "const TEMPLATE_SCHEMA_VERSION: u16 = 1;",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs",
+          "role": "version"
+        }
+      ],
+      "tests": [
+        {
+          "contains": "assert!(!current_template_schema(TEMPLATE_SCHEMA_VERSION + 1));",
+          "function": "template_manifest_accepts_only_the_current_schema",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs"
+        }
+      ],
+      "version": 1
+    },
+    {
+      "compatibility_policy": "exact-current-only",
+      "id": "macos-vm-host-helper-protocol",
+      "owner": "sandbox",
+      "sources": [
+        {
+          "contains": "const HOST_HELPER_PROTOCOL_VERSION: u16 = 1;",
+          "path": "crates/automata-ci-sandbox-macos/src/vm.rs",
+          "role": "version"
+        }
+      ],
+      "tests": [
+        {
+          "contains": "HOST_HELPER_PROTOCOL_VERSION + 1",
+          "function": "host_helper_accepts_only_the_current_protocol",
+          "path": "crates/automata-ci-sandbox-macos/src/vm.rs"
         }
       ],
       "version": 1
@@ -1060,12 +1140,32 @@
       "version": 1
     },
     {
-      "compatibility_policy": "exact-current-only",
+      "compatibility_policy": "breaking-current-only",
       "id": "runner-product-config",
       "owner": "runner-contract",
+      "prior_version_rejections": [
+        {
+          "rejection": {
+            "contains": "if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {",
+            "path": "crates/automata-ci-runner/src/product/config.rs",
+            "symbol": "validate"
+          },
+          "tests": [
+            {
+              "function": "only_the_current_product_schema_is_accepted",
+              "outcome": "parse_value(&document).expect_err(\"noncurrent schema must fail closed\"),",
+              "path": "crates/automata-ci-runner/tests/runner_product_config.rs",
+              "reader_call": "parse_value(&document)",
+              "reader_symbol": "parse_value",
+              "version": "for unsupported in [0, 1, u16::MAX] {"
+            }
+          ],
+          "version": 1
+        }
+      ],
       "sources": [
         {
-          "contains": "pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 1;",
+          "contains": "pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;",
           "path": "crates/automata-ci-runner/src/product/config.rs",
           "role": "version"
         }
@@ -1077,7 +1177,7 @@
           "path": "crates/automata-ci-runner/tests/runner_product_config.rs"
         }
       ],
-      "version": 1
+      "version": 2
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -5804,23 +5904,58 @@
     {
       "classification": "operational",
       "constants": [
-        "MAX_REQUEST_BYTES",
-        "MAX_RESPONSE_BYTES"
+        "MAX_DISKUTIL_PLIST_BYTES",
+        "MINIMUM_STORAGE_HEADROOM"
       ],
       "owner": "sandbox",
-      "path": "crates/automata-ci-sandbox-macos/src/supervisor.rs",
+      "path": "crates/automata-ci-sandbox-macos/src/provider.rs",
       "phase": "executor-admission",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
       "uses": [
         {
-          "constant": "MAX_REQUEST_BYTES",
-          "contains": "if encoded.is_empty() || encoded.len() > MAX_REQUEST_BYTES {",
-          "path": "crates/automata-ci-sandbox-macos/src/supervisor.rs"
+          "constant": "MAX_DISKUTIL_PLIST_BYTES",
+          "contains": "|| output.stdout.len() > MAX_DISKUTIL_PLIST_BYTES",
+          "path": "crates/automata-ci-sandbox-macos/src/provider.rs"
         },
         {
-          "constant": "MAX_RESPONSE_BYTES",
-          "contains": ".spawn(move || read_bounded(stdout, MAX_RESPONSE_BYTES))",
-          "path": "crates/automata-ci-sandbox-macos/src/supervisor.rs"
+          "constant": "MINIMUM_STORAGE_HEADROOM",
+          "contains": ".and_then(|bytes| bytes.checked_add(MINIMUM_STORAGE_HEADROOM))",
+          "path": "crates/automata-ci-sandbox-macos/src/provider.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_ENTITLEMENTS_BYTES",
+        "MAX_HARDWARE_MODEL_BYTES",
+        "MAX_TEMPLATE_MANIFEST_BYTES",
+        "MIN_JOB_UID"
+      ],
+      "owner": "sandbox",
+      "path": "crates/automata-ci-sandbox-macos/src/template.rs",
+      "phase": "executor-admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_ENTITLEMENTS_BYTES",
+          "contains": "let parsed = plist_to_json(xml, MAX_ENTITLEMENTS_BYTES)?;",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs"
+        },
+        {
+          "constant": "MAX_HARDWARE_MODEL_BYTES",
+          "contains": "|| hardware_model.len() > MAX_HARDWARE_MODEL_BYTES",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs"
+        },
+        {
+          "constant": "MAX_TEMPLATE_MANIFEST_BYTES",
+          "contains": "if metadata.len() == 0 || metadata.len() > MAX_TEMPLATE_MANIFEST_BYTES {",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs"
+        },
+        {
+          "constant": "MIN_JOB_UID",
+          "contains": "|| raw.job_uid < MIN_JOB_UID",
+          "path": "crates/automata-ci-sandbox-macos/src/template.rs"
         }
       ]
     },

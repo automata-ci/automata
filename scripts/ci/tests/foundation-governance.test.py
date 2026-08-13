@@ -265,6 +265,46 @@ class FoundationGovernanceTests(unittest.TestCase):
             "version": version,
         }
 
+    def prior_rejection(
+        self, version: int, *, ignored: bool = False
+    ) -> dict[str, object]:
+        source = self.root / "crates" / "automata-ci-core" / "src" / "version.rs"
+        source.write_text(
+            source.read_text(encoding="utf-8")
+            + "fn decode_current(version: u16) -> Result<(), ()> {\n"
+            + "    if version != FORMAT_VERSION { return Err(()); }\n"
+            + "    Ok(())\n"
+            + "}\n",
+            encoding="utf-8",
+        )
+        test = self.root / "crates" / "automata-ci-core" / "tests" / "rejection.rs"
+        attributes = "#[test]\n#[ignore]\n" if ignored else "#[test]\n"
+        test.write_text(
+            f"{attributes}fn rejects_prior_v{version}() {{\n"
+            f"    let prior_version: u16 = {version};\n"
+            "    assert!(decode_current(prior_version).is_err());\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return {
+            "rejection": {
+                "contains": "if version != FORMAT_VERSION { return Err(()); }",
+                "path": "crates/automata-ci-core/src/version.rs",
+                "symbol": "decode_current",
+            },
+            "tests": [
+                {
+                    "function": f"rejects_prior_v{version}",
+                    "outcome": "assert!(decode_current(prior_version).is_err());",
+                    "path": "crates/automata-ci-core/tests/rejection.rs",
+                    "reader_call": "decode_current(prior_version)",
+                    "reader_symbol": "decode_current",
+                    "version": f"let prior_version: u16 = {version};",
+                }
+            ],
+            "version": version,
+        }
+
     def add_limit_alias(self, *, value: int = 6) -> None:
         source = self.root / "crates" / "automata-ci-runtime" / "src" / "limits.rs"
         source.write_text(
@@ -934,6 +974,60 @@ class FoundationGovernanceTests(unittest.TestCase):
         self.write_registry()
 
         self.assert_invalid(r"exact-current-only.*cannot declare sequenced version 2")
+
+    def test_breaking_current_only_requires_prior_rejection_evidence(self) -> None:
+        self.set_format_version(2)
+        self.registry["formats"][0]["compatibility_policy"] = "breaking-current-only"
+        self.write_registry()
+
+        self.assert_invalid(
+            r"breaking version 2 requires prior_version_rejections for \[1\]"
+        )
+
+    def test_breaking_current_only_with_complete_rejection_is_accepted(self) -> None:
+        self.set_format_version(2)
+        self.registry["formats"][0]["compatibility_policy"] = "breaking-current-only"
+        self.registry["formats"][0]["prior_version_rejections"] = [
+            self.prior_rejection(1)
+        ]
+        self.write_registry()
+
+        governance.validate_repository(self.root)
+
+    def test_breaking_rejection_inventory_must_cover_every_prior_version(self) -> None:
+        self.set_format_version(3)
+        self.registry["formats"][0]["compatibility_policy"] = "breaking-current-only"
+        self.registry["formats"][0]["prior_version_rejections"] = [
+            self.prior_rejection(1)
+        ]
+        self.write_registry()
+
+        self.assert_invalid(
+            r"prior_version_rejections must cover every rejected prior version: "
+            r"expected \[1, 2\], found \[1\]"
+        )
+
+    def test_breaking_rejection_test_must_not_be_ignored(self) -> None:
+        self.set_format_version(2)
+        self.registry["formats"][0]["compatibility_policy"] = "breaking-current-only"
+        self.registry["formats"][0]["prior_version_rejections"] = [
+            self.prior_rejection(1, ignored=True)
+        ]
+        self.write_registry()
+
+        self.assert_invalid(
+            r"prior-version rejection test must not be ignored or cfg-gated"
+        )
+
+    def test_breaking_rejection_requires_the_declared_reader_call(self) -> None:
+        self.set_format_version(2)
+        self.registry["formats"][0]["compatibility_policy"] = "breaking-current-only"
+        rejection = self.prior_rejection(1)
+        rejection["tests"][0]["reader_symbol"] = "decode_other"
+        self.registry["formats"][0]["prior_version_rejections"] = [rejection]
+        self.write_registry()
+
+        self.assert_invalid(r"reader_call must invoke declared test reader 'decode_other'")
 
     def test_named_exact_current_protocol_cannot_silently_advance_to_v2(self) -> None:
         source = self.root / "crates" / "automata-ci-core" / "src" / "version.rs"

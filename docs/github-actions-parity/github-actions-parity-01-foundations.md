@@ -202,9 +202,10 @@ Tasks:
   event evidence, provider-owned persistence, and the separately mapped
   canonical Store migration. Ordinary unversioned public JSON APIs are
   explicitly outside this inventory.
-- [x] Require a source-bound, non-ignored compatibility-reader test for every
-  prior version whenever a named/versioned durable or wire format advances
-  beyond v1; `exact-current-only` cannot advance to v2.
+- [x] Require source-bound, non-ignored evidence for every prior version when a
+  named/versioned durable or wire format advances beyond v1: either a
+  compatibility-reader acceptance test or an explicit production-guard
+  rejection test; `exact-current-only` cannot advance to v2.
 - [x] Expand the machine-readable inventory to every GitHub and stricter
   Automata limit, enforcement phase, and reason code.
 - [x] Require every registered limit to bind distinct boundary-minus-one,
@@ -217,8 +218,9 @@ Acceptance:
 - [x] Migration inventory drift fails before parallel branches can claim a
   nonexistent next sequence.
 - [x] No governed named/versioned internal durable or wire format changes
-  without a version and compatibility test, with complete reader coverage for
-  all prior versions after v1.
+  without a version and complete prior-version evidence after v1, using either
+  compatibility-reader acceptance or explicit rejection for each prior
+  version.
 - [x] Limits have one owner and one enforcing phase.
 
 ---

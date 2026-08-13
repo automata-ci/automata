@@ -875,12 +875,12 @@ fn typed_values_and_nested_sources_fail_closed() {
 
 #[test]
 fn noncurrent_provider_config_schema_fails_closed() {
-    let mut value = manifest(vec![private_repository()]);
-    value["schema"] = json!(2);
-    assert_eq!(
-        load_value("noncurrent-schema.json", &value),
-        Err(GithubProviderConfigError)
-    );
+    let expected = Err(GithubProviderConfigError);
+    for unsupported in [0, 1, 3, u16::MAX] {
+        let mut value = manifest(vec![private_repository()]);
+        value["schema"] = json!(unsupported);
+        assert_eq!(load_value("schema.json", &value), expected);
+    }
 }
 
 fn set_path(value: &mut Value, path: &[&str], replacement: Value) {

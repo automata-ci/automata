@@ -57,6 +57,7 @@ TYPESCRIPT_TEST_FUNCTION = (
 )
 FORMAT_COMPATIBILITY_POLICIES = {
     "backward-compatible",
+    "breaking-current-only",
     "exact-current-only",
     "generated-v1-package",
 }
@@ -850,6 +851,169 @@ def _validate_prior_version_readers(
         )
 
 
+def _validate_prior_rejection_tests(
+    repository_root: Path,
+    values: Any,
+    version: int | str,
+    context: str,
+) -> None:
+    bindings = _array(values, context, nonempty=True)
+    identities: list[str] = []
+    for index, raw_binding in enumerate(bindings):
+        binding_context = f"{context}[{index}]"
+        binding = _object(
+            raw_binding,
+            {
+                "function",
+                "outcome",
+                "path",
+                "reader_call",
+                "reader_symbol",
+                "version",
+            },
+            binding_context,
+        )
+        relative = _string(binding["path"], f"{binding_context}.path")
+        function = _string(binding["function"], f"{binding_context}.function")
+        reader_symbol = _string(
+            binding["reader_symbol"], f"{binding_context}.reader_symbol"
+        )
+        for field, symbol in (("function", function), ("reader_symbol", reader_symbol)):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol) is None:
+                _fail(f"{binding_context}.{field} must be a function name")
+        path = _existing_path(
+            repository_root,
+            relative,
+            f"{binding_context}.path",
+            kind="file",
+        )
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            _fail(f"cannot read prior-version rejection test {relative}: {error}")
+        section = _bound_test_section(path, source, function, binding_context)
+        version_fragment = _string(binding["version"], f"{binding_context}.version")
+        reader_call = _string(binding["reader_call"], f"{binding_context}.reader_call")
+        outcome = _string(binding["outcome"], f"{binding_context}.outcome")
+        if len({version_fragment, reader_call, outcome}) != 3:
+            _fail(
+                f"{binding_context} must use distinct version, reader_call, and "
+                "outcome fragments"
+            )
+        if not _fragment_binds_version(version_fragment, version):
+            _fail(f"{binding_context}.version must bind prior version {version}")
+        if re.search(rf"\b{re.escape(reader_symbol)}\s*\(", reader_call) is None:
+            _fail(
+                f"{binding_context}.reader_call must invoke declared test reader "
+                f"{reader_symbol!r}"
+            )
+        if reader_call not in outcome or re.search(
+            r"(?:\bassert(?:_[A-Za-z0-9_]+)?!\s*\(|\bassert_[A-Za-z0-9_]+\s*\(|"
+            r"\bmatches!\s*\(|"
+            r"\.expect(?:_err)?\s*\()",
+            outcome,
+        ) is None:
+            _fail(
+                f"{binding_context}.outcome must assert the declared reader_call "
+                "is rejected"
+            )
+        if path.suffix == ".rs":
+            pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
+            match = pattern.search(source)
+            if match is None:
+                _fail(f"{binding_context} names missing Rust test function {function!r}")
+            attributes = match.group("attributes")
+            if re.search(r"#\[\s*(?:ignore|cfg(?:_attr)?\b)", attributes):
+                _fail(
+                    f"{binding_context} prior-version rejection test must not be "
+                    "ignored or cfg-gated"
+                )
+        body_start = section.find("{")
+        body = section[body_start + 1 : -1] if body_start >= 0 else ""
+        code = _mask_source_comments(body, typescript=path.suffix in {".ts", ".tsx"})
+        for label, fragment in (
+            ("version", version_fragment),
+            ("reader_call", reader_call),
+            ("outcome", outcome),
+        ):
+            if code.count(fragment) != 1:
+                _fail(
+                    f"{binding_context}.{label} must occur exactly once inside the "
+                    "prior-version rejection test body outside comments"
+                )
+        identities.append(f"{relative}::{function}")
+    _sorted_unique(identities, context)
+
+
+def _validate_prior_version_rejections(
+    repository_root: Path,
+    values: Any,
+    expected_versions: list[int | str],
+    context: str,
+) -> None:
+    rejections = _array(values, context, nonempty=True)
+    actual_versions: list[int | str] = []
+    for index, raw_rejection in enumerate(rejections):
+        rejection_context = f"{context}[{index}]"
+        rejection = _object(
+            raw_rejection, {"rejection", "tests", "version"}, rejection_context
+        )
+        version = _format_version(rejection["version"], f"{rejection_context}.version")
+        actual_versions.append(version)
+        source = _object(
+            rejection["rejection"],
+            {"contains", "path", "symbol"},
+            f"{rejection_context}.rejection",
+        )
+        symbol = _string(source["symbol"], f"{rejection_context}.rejection.symbol")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", symbol) is None:
+            _fail(f"{rejection_context}.rejection.symbol must be a Rust function name")
+        fragment = _validate_sources(
+            repository_root,
+            [{"contains": source["contains"], "path": source["path"]}],
+            f"{rejection_context}.rejection",
+        )[0]
+        rejection_path = _existing_path(
+            repository_root,
+            _string(source["path"], f"{rejection_context}.rejection.path"),
+            f"{rejection_context}.rejection.path",
+            kind="file",
+        )
+        try:
+            rejection_source = rejection_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            _fail(f"cannot read prior-version rejection source {rejection_path}: {error}")
+        rejection_match = re.compile(RUST_FUNCTION.format(name=re.escape(symbol))).search(
+            rejection_source
+        )
+        if rejection_match is None:
+            _fail(
+                f"{rejection_context}.rejection.symbol names no Rust function {symbol!r}"
+            )
+        rejection_section = _braced_function_section(
+            rejection_source,
+            rejection_match,
+            symbol,
+            f"{rejection_context}.rejection",
+        )
+        if _mask_source_comments(rejection_section).count(fragment) != 1:
+            _fail(
+                f"{rejection_context}.rejection fragment must occur exactly once inside "
+                f"declared rejection function {symbol!r} outside comments"
+            )
+        _validate_prior_rejection_tests(
+            repository_root,
+            rejection["tests"],
+            version,
+            f"{rejection_context}.tests",
+        )
+    if actual_versions != expected_versions:
+        _fail(
+            f"{context} must cover every rejected prior version: expected "
+            f"{expected_versions}, found {actual_versions}"
+        )
+
+
 def _validate_format_sources(
     repository_root: Path,
     values: Any,
@@ -939,7 +1103,7 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
             raw_format,
             {"compatibility_policy", "id", "owner", "sources", "tests", "version"},
             context,
-            optional={"prior_version_readers"},
+            optional={"prior_version_readers", "prior_version_rejections"},
         )
         format_ids.append(_string(format_contract["id"], f"{context}.id", identifier=True))
         _validate_owner_reference(format_contract["owner"], owner_ids, f"{context}.owner")
@@ -962,32 +1126,61 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
         )
         prior_versions = _prior_format_versions(version)
         if prior_versions:
-            if compatibility_policy != "backward-compatible":
+            if compatibility_policy == "backward-compatible":
+                if "prior_version_readers" not in format_contract:
+                    _fail(
+                        f"{context} version {version} requires prior_version_readers "
+                        f"for {prior_versions}"
+                    )
+                if "prior_version_rejections" in format_contract:
+                    _fail(
+                        f"{context}.prior_version_rejections conflicts with "
+                        "'backward-compatible'"
+                    )
+                _validate_prior_version_readers(
+                    repository_root,
+                    format_contract["prior_version_readers"],
+                    prior_versions,
+                    f"{context}.prior_version_readers",
+                )
+            elif compatibility_policy == "breaking-current-only":
+                if "prior_version_rejections" not in format_contract:
+                    _fail(
+                        f"{context} breaking version {version} requires "
+                        f"prior_version_rejections for {prior_versions}"
+                    )
+                if "prior_version_readers" in format_contract:
+                    _fail(
+                        f"{context}.prior_version_readers conflicts with "
+                        "'breaking-current-only'"
+                    )
+                _validate_prior_version_rejections(
+                    repository_root,
+                    format_contract["prior_version_rejections"],
+                    prior_versions,
+                    f"{context}.prior_version_rejections",
+                )
+            else:
                 _fail(
                     f"{context}.compatibility_policy {compatibility_policy!r} cannot "
                     f"declare sequenced version {version}; use 'backward-compatible' "
-                    "and bind readers for every prior version"
+                    "with readers or 'breaking-current-only' with explicit rejection "
+                    "evidence for every prior version"
                 )
-            if "prior_version_readers" not in format_contract:
-                _fail(
-                    f"{context} version {version} requires prior_version_readers "
-                    f"for {prior_versions}"
-                )
-            _validate_prior_version_readers(
-                repository_root,
-                format_contract["prior_version_readers"],
-                prior_versions,
-                f"{context}.prior_version_readers",
-            )
         else:
-            if compatibility_policy == "backward-compatible":
+            if compatibility_policy in {"backward-compatible", "breaking-current-only"}:
                 _fail(
-                    f"{context}.compatibility_policy 'backward-compatible' requires "
+                    f"{context}.compatibility_policy {compatibility_policy!r} requires "
                     "a sequenced version greater than v1"
                 )
             if "prior_version_readers" in format_contract:
                 _fail(
                     f"{context}.prior_version_readers is only valid for a sequenced "
+                    "version greater than v1"
+                )
+            if "prior_version_rejections" in format_contract:
+                _fail(
+                    f"{context}.prior_version_rejections is only valid for a sequenced "
                     "version greater than v1"
                 )
         _validate_test_bindings(repository_root, format_contract["tests"], f"{context}.tests")

@@ -28,6 +28,10 @@ const TRANSPORT_GRACE: Duration = Duration::from_secs(10);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
 const PREPARE_OUTPUT_BYTES: usize = 16 * 1024;
 
+const fn current_host_helper_protocol(protocol: u16) -> bool {
+    protocol == HOST_HELPER_PROTOCOL_VERSION
+}
+
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchRequest<'a> {
@@ -180,7 +184,7 @@ impl VmProcess {
         )?;
         let response: LaunchResponse = decode_json_frame(&response)?;
         match response {
-            LaunchResponse::Ready { protocol } if protocol == HOST_HELPER_PROTOCOL_VERSION => {
+            LaunchResponse::Ready { protocol } if current_host_helper_protocol(protocol) => {
                 Ok(Self {
                     child: guard.disarm()?,
                     input: Some(input),
@@ -190,7 +194,7 @@ impl VmProcess {
             }
             LaunchResponse::Ready { .. } => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
             LaunchResponse::Rejected { protocol, kind } => {
-                let error_kind = if protocol == HOST_HELPER_PROTOCOL_VERSION {
+                let error_kind = if current_host_helper_protocol(protocol) {
                     kind.error_kind()
                 } else {
                     io::ErrorKind::InvalidData
@@ -426,4 +430,17 @@ fn execution_io_error(error: ExecutionError) -> io::Error {
 
 const fn execution_error(kind: ExecutionErrorKind, stage: ExecutionStage) -> ExecutionError {
     ExecutionError::new(kind, stage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HOST_HELPER_PROTOCOL_VERSION, current_host_helper_protocol};
+
+    #[test]
+    fn host_helper_accepts_only_the_current_protocol() {
+        assert!(current_host_helper_protocol(HOST_HELPER_PROTOCOL_VERSION));
+        assert!(!current_host_helper_protocol(
+            HOST_HELPER_PROTOCOL_VERSION + 1
+        ));
+    }
 }

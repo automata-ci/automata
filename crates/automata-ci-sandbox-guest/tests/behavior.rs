@@ -401,16 +401,16 @@ async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     let task = spawn_server(socket.clone()).await;
     assert!(probe(&socket));
 
-    let unsupported = GuestRequest::ReadFile {
-        protocol: GUEST_PROTOCOL_VERSION + 1,
-        operation_id: FIRST_OPERATION.into(),
-        path: "/tmp/unreached".into(),
-        byte_limit: 1,
-    };
-    assert_rejected(
-        exchange(&socket, &unsupported).await,
-        GuestRejection::UnsupportedProtocol,
-    );
+    let expected_rejection = GuestRejection::UnsupportedProtocol;
+    for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {
+        let unsupported = GuestRequest::ReadFile {
+            protocol: unsupported_protocol,
+            operation_id: FIRST_OPERATION.into(),
+            path: "/tmp/unreached".into(),
+            byte_limit: 1,
+        };
+        assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);
+    }
 
     for operation_id in ["", "contains space", "line\nbreak"] {
         let request = GuestRequest::ReadFile {

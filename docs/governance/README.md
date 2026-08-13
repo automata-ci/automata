@@ -48,14 +48,18 @@ sources bind related generated or encoding material without masquerading as a
 version. Named, attributed Rust tests are part of each entry. Update the
 implementation first, then update the registry to the same exact evidence.
 An initial sequenced v1 may use `exact-current-only` without a prior reader. A
-sequenced version above v1 must use `backward-compatible` and declare a real
-reader plus a non-ignored, non-empty attributed test for every prior version.
-The validator rejects an `exact-current-only` v2 and incomplete prior-version
-coverage; compatibility must not be inferred from permissive deserialization.
-Each prior-reader test binding names the real reader symbol and binds three
-distinct fragments inside the attributed, non-ignored test body: the prior
+sequenced version above v1 must choose one explicit policy. A
+`backward-compatible` format declares a real reader plus a non-ignored,
+non-empty attributed acceptance test for every prior version. A deliberately
+incompatible `breaking-current-only` format instead binds the production
+rejection guard and a non-ignored, non-empty attributed rejection test for
+every prior version. The validator rejects an `exact-current-only` v2 and
+incomplete prior-version coverage; compatibility must not be inferred from
+permissive deserialization, and a breaking change must not masquerade as a
+reader migration. Each prior-version test binding names the invoked reader and
+binds three distinct fragments inside the attributed test body: the prior
 version, the reader call, and the asserted outcome. Comments and helper
-functions cannot satisfy those bindings.
+functions outside the attributed test cannot satisfy those bindings.
 
 ## Changing the store schema
 
