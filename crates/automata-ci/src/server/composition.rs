@@ -87,7 +87,6 @@ use super::github_oidc::{
     GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
 };
 use super::state_metrics::ControlPlaneStateSampler;
-use super::static_registration::load_static_runner_fleet;
 use super::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, GithubProviderRuntime,
     GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder, MaintenanceClock,
@@ -112,6 +111,7 @@ use crate::app::{
         OperationalRepositorySecretWebData, RepositorySecretWebData,
         repository_secret_browser_router,
     },
+    runner_enrollment_api::{RunnerCertificateIssuer, runner_enrollment_api_router},
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
@@ -544,36 +544,16 @@ impl ProductionComponents {
 }
 
 async fn apply_product_bootstrap(
-    config: &ServerConfig,
+    _config: &ServerConfig,
     store: &PostgresStore,
     readiness: RunnerCapabilityReadiness,
 ) -> Result<(), ServerCompositionError> {
-    // This audit must precede the no-configuration return. Both durable and
-    // static capability inventory are admitted against products whose full
-    // operational readiness this replica has already proved.
+    // Durable capability inventory is admitted only against products whose
+    // full operational readiness this replica has already proved.
     store
         .verify_runner_capability_readiness(readiness)
         .await
         .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    if config.static_runner_registration_file.is_none() {
-        return Ok(());
-    }
-    let observed_seconds = i64::try_from(SystemClock.now().as_seconds())
-        .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-
-    let fleet = config
-        .static_runner_registration_file
-        .as_deref()
-        .map(|path| load_static_runner_fleet(path, observed_seconds, readiness))
-        .transpose()
-        .map_err(|_| ServerCompositionError::InvalidStaticRunnerRegistration)?;
-
-    if let Some(fleet) = fleet {
-        store
-            .apply_static_runner_fleet(fleet)
-            .await
-            .map_err(|_| ServerCompositionError::ProductBootstrap)?;
-    }
     Ok(())
 }
 
@@ -1480,6 +1460,26 @@ async fn build_human_api(
         None => Router::new(),
     };
 
+    let enrollment_issuer = if config.human_auth().is_some() {
+        let client_ca = config.load_client_ca_pem()?;
+        let client_ca_key = config.load_client_ca_private_key_pem()?;
+        let server_ca = config.load_runner_server_ca_pem()?;
+        let authority = config
+            .runner_public_authority
+            .as_ref()
+            .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?;
+        Some(Arc::new(
+            RunnerCertificateIssuer::from_pem(
+                &client_ca,
+                &client_ca_key,
+                &server_ca,
+                format!("https://{authority}/"),
+            )
+            .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
+        ))
+    } else {
+        None
+    };
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {
             router,
@@ -1591,6 +1591,11 @@ async fn build_human_api(
 
     let management = Arc::new(PostgresHumanRbacManagementRepository::new(
         store.postgres_pool().clone(),
+    ));
+    router = router.merge(runner_enrollment_api_router(
+        Arc::clone(&management),
+        enrollment_issuer.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+        Arc::clone(runtime.clock()),
     ));
     let management_api_repository: Arc<
         dyn automata_ci_auth::management::HumanRbacManagementRepository,
@@ -1874,6 +1879,9 @@ pub enum ServerCompositionError {
     /// The configured human-authentication adapters or policies are invalid.
     #[error("human authentication configuration is invalid")]
     InvalidHumanAuthentication,
+    /// Runner enrollment CA material or public endpoint was invalid.
+    #[error("runner enrollment configuration is invalid")]
+    InvalidRunnerEnrollment,
     /// The configured built-in provider violates the encrypted secret contract.
     #[error("secret management configuration is invalid")]
     InvalidSecretManagement,
@@ -1886,9 +1894,6 @@ pub enum ServerCompositionError {
     /// Installation setup could not be armed from the exact operator configuration.
     #[error("human authentication installation setup could not be armed")]
     HumanAuthenticationSetup,
-    /// The privileged static-runner document or its certificate set was invalid.
-    #[error("static runner registration configuration is invalid")]
-    InvalidStaticRunnerRegistration,
     /// Validated product bootstrap state could not be applied transactionally.
     #[error("product bootstrap state could not be applied")]
     ProductBootstrap,

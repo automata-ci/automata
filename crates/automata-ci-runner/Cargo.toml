@@ -51,6 +51,7 @@ http.workspace = true
 kube.workspace = true
 reqwest.workspace = true
 prometheus-client.workspace = true
+rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use super::{
     AdminCommand, Command, OutputFormat, auth::execute_auth_command,
     environment_review::execute_environment_review_command, rerun::execute_rerun_command,
-    secret::execute_secret_command,
+    runner::execute_runner_command, secret::execute_secret_command,
 };
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -220,6 +220,7 @@ pub async fn execute_control_plane_command(
             execute_environment_review_command(server_url, output, args).await
         }
         Command::Rerun(args) => execute_rerun_command(server_url, output, args).await,
+        Command::Runner(args) => execute_runner_command(server_url, output, args).await,
         Command::Server(_) | Command::Preview(_) => {
             bail!("service commands cannot be sent to a running control plane")
         }

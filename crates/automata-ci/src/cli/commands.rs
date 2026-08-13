@@ -27,6 +27,8 @@ pub enum Command {
     EnvironmentReview(EnvironmentReviewArgs),
     /// Create an authenticated rerun of one completed workflow run.
     Rerun(RerunArgs),
+    /// Manage self-hosted runners and one-time enrollment tokens.
+    Runner(RunnerArgs),
     /// Inspect control-plane status.
     Admin(AdminArgs),
 }
@@ -40,10 +42,40 @@ impl Command {
             Self::Secret(args) => Some(&args.operator),
             Self::EnvironmentReview(args) => Some(&args.operator),
             Self::Rerun(args) => Some(&args.operator),
+            Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
             Self::Server(_) | Self::Preview(_) => None,
         }
     }
+}
+
+#[derive(Debug, Args)]
+/// Authenticated runner administration commands.
+pub struct RunnerArgs {
+    /// Connection and output policy for this operator command.
+    #[command(flatten)]
+    pub operator: OperatorArgs,
+    /// Runner operation to perform.
+    #[command(subcommand)]
+    pub command: RunnerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+/// Runner operations supported by the operator CLI.
+pub enum RunnerCommand {
+    /// Create a short-lived, one-use runner enrollment token.
+    Token(RunnerTokenArgs),
+}
+
+#[derive(Debug, Args)]
+/// Scope and lifetime for a new one-use enrollment token.
+pub struct RunnerTokenArgs {
+    /// Canonical runner group to create or select.
+    #[arg(long, default_value = "default")]
+    pub group: String,
+    /// Token lifetime in seconds (60-3600).
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(60..=3600))]
+    pub expires_in_seconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize)]
@@ -524,14 +556,32 @@ pub struct ServerArgs {
     )]
     pub s3_session_token_source: Option<SecretSource>,
 
-    /// PEM bundle reference containing trusted runner client certificate roots.
+    /// PEM certificate for the CA that authenticates runner clients.
     #[arg(
-        long,
-        env = "AUTOMATA_RUNNER_CLIENT_CA_SOURCE",
-        default_value = "env:AUTOMATA_RUNNER_CLIENT_CA_PEM",
+        long = "runner-client-ca-cert-source",
+        env = "AUTOMATA_RUNNER_CLIENT_CA_CERT_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_CLIENT_CA_CERT_PEM",
         value_name = "env:NAME|file:PATH"
     )]
-    pub runner_client_ca_source: SecretSource,
+    pub runner_client_ca_certificate_source: SecretSource,
+
+    /// PEM private key for issuing runner client certificates.
+    #[arg(
+        long,
+        env = "AUTOMATA_RUNNER_CLIENT_CA_KEY_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_CLIENT_CA_KEY_PEM",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub runner_client_ca_key_source: SecretSource,
+
+    /// PEM trust-anchor bundle installed on enrolled runners for server authentication.
+    #[arg(
+        long,
+        env = "AUTOMATA_RUNNER_SERVER_CA_SOURCE",
+        default_value = "env:AUTOMATA_RUNNER_SERVER_CA_PEM",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub runner_server_ca_source: SecretSource,
 
     /// PEM chain reference for the runner-control server identity.
     #[arg(
@@ -604,14 +654,6 @@ pub struct ServerArgs {
         default_value = "local"
     )]
     pub fallback_tenant_id: String,
-
-    /// Privileged static runner-fleet registration document loaded during startup.
-    #[arg(
-        long,
-        env = "AUTOMATA_STATIC_RUNNER_REGISTRATION_FILE",
-        value_name = "ABSOLUTE_PATH"
-    )]
-    pub static_runner_registration_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

@@ -391,9 +391,9 @@ impl RunnerPayloadEncryption {
         Self {
             codec: Arc::new(EnvelopeCodec::new(provider)),
             command_purpose: KeyPurpose::new(RUNNER_COMMAND_ENCRYPTION_PURPOSE)
-                .expect("the static runner command encryption purpose is valid"),
+                .expect("the runner command encryption purpose is valid"),
             response_purpose: KeyPurpose::new(RUNNER_RPC_RESPONSE_ENCRYPTION_PURPOSE)
-                .expect("the static runner RPC response encryption purpose is valid"),
+                .expect("the runner RPC response encryption purpose is valid"),
         }
     }
 }

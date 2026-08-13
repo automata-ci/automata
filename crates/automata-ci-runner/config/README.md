@@ -416,10 +416,10 @@ Each instance `N` expects:
   matching the JSON configuration.
 
 Before starting the host, follow the control-plane guide's
-[static runner bootstrap](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
-for all three configurations: render three canonical capability documents,
-issue three client-only leaves, and bind each digest to its exact distinct
-runner identity. Automated enrollment remains unavailable.
+[runner enrollment](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#enroll-the-three-runners)
+for all three configurations. Create a separate one-use token for each process;
+each runner generates its private key locally, submits its canonical capability
+document, and installs the returned client-only chain and server roots.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

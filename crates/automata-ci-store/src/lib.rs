@@ -73,9 +73,7 @@ pub use blocked::{
     BlockedAttempt, BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt,
 };
 pub use bootstrap::{
-    EnsureTenant, MAX_STATIC_RUNNERS, ProductBootstrapRepository, ProductBootstrapStoreError,
-    RunnerCapabilityReadiness, StaticBootstrapValueError, StaticRunnerFleet,
-    StaticRunnerRegistration,
+    EnsureTenant, ProductBootstrapRepository, ProductBootstrapStoreError, RunnerCapabilityReadiness,
 };
 pub use cancellation::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,

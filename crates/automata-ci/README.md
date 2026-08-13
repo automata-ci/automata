@@ -64,7 +64,7 @@ private-interface bind.
 1. validates configuration and secret references;
 2. binds the three mandatory listeners and the optional metrics listener;
 3. connects to PostgreSQL and applies embedded migrations;
-4. applies the configured static runner fleet;
+4. verifies durable runner capabilities against this replica;
 5. initializes the immutable S3 adapter;
 6. writes and verifies a readiness object; and
 7. composes Results, runner control, maintenance, database-time logical-run
@@ -118,13 +118,17 @@ Required server sources are:
 | `--s3-secret-key-source` | `env:AUTOMATA_S3_SECRET_KEY` |
 | `--results-signing-key-source` | `env:AUTOMATA_RESULTS_SIGNING_KEY` |
 | `--control-plane-encryption-key-source` | `env:AUTOMATA_CONTROL_PLANE_ENCRYPTION_KEY` |
-| `--runner-client-ca-source` | `env:AUTOMATA_RUNNER_CLIENT_CA_PEM` |
+| `--runner-client-ca-cert-source` | `env:AUTOMATA_RUNNER_CLIENT_CA_CERT_PEM` |
+| `--runner-client-ca-key-source` | `env:AUTOMATA_RUNNER_CLIENT_CA_KEY_PEM` |
+| `--runner-server-ca-source` | `env:AUTOMATA_RUNNER_SERVER_CA_PEM` |
 | `--runner-server-cert-source` | `env:AUTOMATA_RUNNER_SERVER_CERT_PEM` |
 | `--runner-server-key-source` | `env:AUTOMATA_RUNNER_SERVER_KEY_PEM` |
 
 The runner trust bundle must contain at least one PEM certificate. The server
 identity must contain a PEM certificate chain and exactly one supported private
-key. Runner transport requires TLS 1.3 and direct client-certificate validation.
+key. Runner transport requires TLS 1.3, `TLS_AES_256_GCM_SHA384`, HTTP/2, and
+direct client-certificate validation. Runner keys are generated locally by
+`automata-runner enroll`; the server stores only each signed leaf digest.
 
 The mandatory control-plane encryption source must resolve to exactly 32 random
 bytes. It protects durable runner command/RPC payloads and GitHub App
@@ -219,15 +223,14 @@ worker subsequently supervises logical preparation, activation, and
 materialization. End-to-end runner, provider, and service-image acceptance
 remains a separate gate.
 
-## Static runner bootstrap
+## Runner enrollment
 
-The server has no automated runner enrollment API yet. Operators can supply
-one absolute, privileged fleet document with
-`--static-runner-registration-file`; it is applied after migrations and before
-readiness, and exact replay is idempotent. Use the repository's
-[static runner walkthrough](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#bootstrap-three-static-local-runners)
-to derive canonical capabilities, issue a client-only certificate, and satisfy
-the root-owned file and coordinated-rotation rules.
+After CLI login, `automata runner token` creates a one-use tenant/group-scoped
+token with a 15-minute default lifetime. `automata-runner enroll` consumes it,
+generates the private key locally, registers the exact configured capability
+ceiling, and creates new TLS credential files without overwriting. The server
+stores only a domain-separated token digest and the signed leaf digest. See the
+[runner security and lifecycle plan](../../docs/runner-control-plane-security-and-enrollment.md).
 
 ## Human authentication
 

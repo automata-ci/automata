@@ -12,6 +12,12 @@ use crate::ConfigurationError;
 
 static TLS13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&TLS13];
 
+fn reviewed_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = ring::default_provider();
+    provider.cipher_suites = vec![ring::cipher_suite::TLS13_AES_256_GCM_SHA384];
+    Arc::new(provider)
+}
+
 /// Reviewed rustls server configuration with mandatory `WebPKI` client authentication.
 #[derive(Clone)]
 pub struct ServerTlsConfig {
@@ -46,7 +52,7 @@ impl ServerTlsConfig {
             return Err(ConfigurationError::InvalidIdentity);
         }
 
-        let provider = Arc::new(ring::default_provider());
+        let provider = reviewed_crypto_provider();
         let verifier = WebPkiClientVerifier::builder_with_provider(
             Arc::new(client_roots),
             Arc::clone(&provider),
@@ -79,6 +85,7 @@ impl fmt::Debug for ServerTlsConfig {
         formatter
             .debug_struct("ServerTlsConfig")
             .field("protocol", &"TLSv1.3")
+            .field("cipher_suite", &"TLS_AES_256_GCM_SHA384")
             .field("client_root_count", &self.client_root_count)
             .field("certificate_count", &self.certificate_count)
             .field("alpn", &"h2")
@@ -118,7 +125,7 @@ impl ClientTlsConfig {
             return Err(ConfigurationError::InvalidIdentity);
         }
 
-        let provider = Arc::new(ring::default_provider());
+        let provider = reviewed_crypto_provider();
         let inner = ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(TLS13_ONLY)
             .map_err(|_| ConfigurationError::Tls13Unavailable)?
@@ -143,6 +150,7 @@ impl fmt::Debug for ClientTlsConfig {
         formatter
             .debug_struct("ClientTlsConfig")
             .field("protocol", &"TLSv1.3")
+            .field("cipher_suite", &"TLS_AES_256_GCM_SHA384")
             .field("server_root_count", &self.server_root_count)
             .field("certificate_count", &self.certificate_count)
             .field("alpn", &"h2")

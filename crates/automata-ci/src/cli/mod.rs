@@ -21,6 +21,11 @@ mod rerun;
 #[path = "rerun_unsupported.rs"]
 mod rerun;
 #[cfg(unix)]
+mod runner;
+#[cfg(not(unix))]
+#[path = "runner_unsupported.rs"]
+mod runner;
+#[cfg(unix)]
 mod secret;
 #[cfg(not(unix))]
 #[path = "secret_unsupported.rs"]
@@ -32,8 +37,9 @@ use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 pub use commands::{
     AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport,
     EnvironmentReviewArgs, EnvironmentReviewDecision, OperatorArgs, PreviewArgs, RerunArgs,
-    RerunSelection, SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
-    SecretProviderArgs, SecretProviderCommand, ServerArgs,
+    RerunSelection, RunnerArgs, RunnerCommand, RunnerTokenArgs, SecretArgs, SecretCommand,
+    SecretCreateArgs, SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand,
+    ServerArgs,
 };
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};

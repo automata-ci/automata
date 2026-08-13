@@ -9,8 +9,6 @@ mod adapter_port;
 mod admission_event_limits;
 #[path = "attempt_api.rs"]
 mod attempt_api;
-#[path = "bootstrap_api.rs"]
-mod bootstrap_api;
 #[path = "g1_api.rs"]
 mod g1_api;
 #[path = "github_authenticated_event.rs"]

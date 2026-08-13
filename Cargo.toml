@@ -141,7 +141,7 @@ kube = { version = "4.2.0", default-features = false, features = ["client", "rin
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
 processkit = { version = "=3.3.1", default-features = false, features = ["limits"] }
 prometheus-client = "=0.25.0"
-rcgen = { version = "=0.14.8", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["pem", "ring", "x509-parser"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["http2", "json", "rustls-tls-webpki-roots"] }
 ring = { version = "=0.17.14", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
