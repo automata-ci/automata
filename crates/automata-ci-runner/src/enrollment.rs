@@ -24,11 +24,13 @@ use crate::{
     product::{RunnerProductConfig, SecretSource},
 };
 
+// foundation-governance: derived-contract owner=runner-contract kind=wire-discriminator
 const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
 const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
+// foundation-governance: operational-limit
 const MAX_TOKEN_BYTES: usize = TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

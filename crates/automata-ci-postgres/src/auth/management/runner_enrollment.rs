@@ -14,21 +14,28 @@ use super::{
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
 const ACTION_ENROLL: &str = "runner.enroll";
 const RESOURCE_ENROLLMENT: &str = "runner_enrollment";
+// foundation-governance: operational-limit
 const MIN_TOKEN_LIFETIME_MS: i64 = 60 * 1_000;
+// foundation-governance: operational-limit
 const MAX_TOKEN_LIFETIME_MS: i64 = 60 * 60 * 1_000;
 const RUNNER_ENROLLMENT_CAPACITY_LOCK: i64 = 0x4155_544f_4d41_5441;
 const RUNNER_ENROLLMENT_CREATE_LOCK_SALT: i64 = 0x454e_524f_4c4c_4d54;
+// foundation-governance: operational-limit
 const MAX_NAME_BYTES: usize = 255;
+// foundation-governance: operational-limit
 const MAX_GROUP_CHARACTERS: usize = 256;
+// foundation-governance: operational-limit
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
 
 /// Maximum lifetime used by the control-plane certificate profile. A leaf is
 /// shorter when its issuing CA expires first.
+// foundation-governance: operational-limit
 pub const MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Minimum certificate lifetime remaining when enrollment commits. This
 /// covers the bounded HTTP exchange and durable credential publication so a
 /// one-use token cannot be consumed for a certificate that expires in transit.
+// foundation-governance: operational-limit
 pub const MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS: i64 = 5 * 60;
 
 /// Authorized request to create a short-lived runner enrollment token record.

@@ -28,4 +28,5 @@ pub use resource::{
 pub use selector::{RunnerGroup, RunnerLabel, SelectorError};
 
 /// Maximum durable runner inventory admitted by enrollment and startup checks.
+// foundation-governance: operational-limit
 pub const MAX_REGISTERED_RUNNERS: usize = 64;

@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_token};
 use crate::product::{RunnerProductConfig, SecretSource};
 
+// foundation-governance: operational-limit
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
 const STAGE_SCHEMA: u8 = 1;
 
@@ -190,6 +191,13 @@ pub(super) struct EnrollmentStage {
 }
 
 impl EnrollmentStage {
+    fn validate_schema(&self) -> Result<()> {
+        if self.schema != STAGE_SCHEMA {
+            bail!("runner enrollment request stage has an unsupported schema");
+        }
+        Ok(())
+    }
+
     fn new(
         config: &RunnerProductConfig,
         origin: &Url,
@@ -226,8 +234,8 @@ impl EnrollmentStage {
         origin: &Url,
         runner_name: &str,
     ) -> Result<()> {
-        if self.schema != STAGE_SCHEMA
-            || self.operation_id.is_nil()
+        self.validate_schema()?;
+        if self.operation_id.is_nil()
             || self.server_origin != origin.as_str()
             || self.runner_name != runner_name
             || self.capabilities != *config.inventory()
@@ -1053,6 +1061,28 @@ mod tests {
         assert_eq!(decoded.csr_pem, csr_pem);
         assert_eq!(decoded.token.as_str(), "atm_re_staged-secret");
         assert_eq!(decoded.private_key_pem.as_str(), private_key_pem);
+    }
+
+    #[test]
+    fn request_stage_reader_rejects_noncurrent_schema_versions() {
+        let mut document = serde_json::json!({
+            "schema": STAGE_SCHEMA,
+            "operation_id": Uuid::new_v4(),
+            "server_origin": "https://ci.example.test/",
+            "runner_name": "runner-one",
+            "capabilities": RunnerCapabilities::new(
+                RunnerId::new(),
+                RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+            ),
+            "csr_pem": "unused by schema validation",
+            "token": "unused by schema validation",
+            "private_key_pem": "unused by schema validation",
+        });
+        document["schema"] = serde_json::json!(STAGE_SCHEMA + 1);
+        let stage: EnrollmentStage = serde_json::from_value(document).expect("stage shape");
+        stage
+            .validate_schema()
+            .expect_err("forward stage schema must be rejected");
     }
 
     #[test]

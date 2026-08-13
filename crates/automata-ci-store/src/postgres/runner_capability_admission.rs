@@ -11,6 +11,7 @@ use crate::{
 
 use super::PostgresStore;
 
+// foundation-governance: operational-limit
 const RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE: usize = 16;
 
 #[async_trait]

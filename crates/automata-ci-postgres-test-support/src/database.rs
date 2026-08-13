@@ -22,12 +22,15 @@ use crate::{
 
 const DATABASE_PREFIX: &str = "at_";
 const TEMPLATE_SUFFIX: &str = "_template";
+// foundation-governance: operational-limit
 const MAX_NAMESPACE_LENGTH: usize = 27;
 const DEFAULT_POOL_CONNECTIONS: u32 = 16;
+// foundation-governance: operational-limit
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 const TEMPLATE_MARKER_VERSION: &str = "automata-ci-postgres-test-support:v1";
 const TEMPLATE_LOCK_SALT: i64 = 6_482_851_405_936_141_723;
-const INITIALIZER_FINGERPRINT_LENGTH: usize = 64;
+// foundation-governance: operational-limit
+const INITIALIZER_FINGERPRINT_LENGTH_LIMIT: usize = 64;
 
 const CLEANUP_LIVE: u8 = 0;
 const CLEANUP_RUNNING: u8 = 1;
@@ -42,13 +45,13 @@ struct InitializerFingerprint(String);
 impl InitializerFingerprint {
     fn new(value: impl Into<String>) -> TestResult<Self> {
         let value = value.into();
-        if value.len() != INITIALIZER_FINGERPRINT_LENGTH
+        if value.len() != INITIALIZER_FINGERPRINT_LENGTH_LIMIT
             || !value
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
             return Err(message_error(format!(
-                "PostgreSQL template initializer fingerprint must be exactly {INITIALIZER_FINGERPRINT_LENGTH} lowercase hexadecimal characters"
+                "PostgreSQL template initializer fingerprint must be exactly {INITIALIZER_FINGERPRINT_LENGTH_LIMIT} lowercase hexadecimal characters"
             )));
         }
         Ok(Self(value))
@@ -1242,7 +1245,7 @@ const fn cleanup_state_name(state: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatabaseIdentifier, INITIALIZER_FINGERPRINT_LENGTH, InitializerFingerprint,
+        DatabaseIdentifier, INITIALIZER_FINGERPRINT_LENGTH_LIMIT, InitializerFingerprint,
         MAX_NAMESPACE_LENGTH, TEMPLATE_MARKER_VERSION, TestNamespace,
     };
 
@@ -1277,7 +1280,7 @@ mod tests {
 
     #[test]
     fn initializer_fingerprint_accepts_exact_lowercase_sha256() {
-        let fingerprint = "9".repeat(INITIALIZER_FINGERPRINT_LENGTH);
+        let fingerprint = "9".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT);
         assert_eq!(
             InitializerFingerprint::new(&fingerprint)
                 .expect("canonical SHA-256 fingerprint")
@@ -1289,10 +1292,10 @@ mod tests {
     #[test]
     fn initializer_fingerprint_rejects_ambiguous_values() {
         for invalid in [
-            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH - 1),
-            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH + 1),
-            "A".repeat(INITIALIZER_FINGERPRINT_LENGTH),
-            "g".repeat(INITIALIZER_FINGERPRINT_LENGTH),
+            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT - 1),
+            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT + 1),
+            "A".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT),
+            "g".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT),
         ] {
             assert!(InitializerFingerprint::new(invalid).is_err());
         }
@@ -1301,7 +1304,7 @@ mod tests {
     #[test]
     fn initializer_fingerprint_is_part_of_template_ownership_marker() {
         let namespace = TestNamespace::new("fingerprint_contract").expect("valid namespace");
-        let fingerprint = "b".repeat(INITIALIZER_FINGERPRINT_LENGTH);
+        let fingerprint = "b".repeat(INITIALIZER_FINGERPRINT_LENGTH_LIMIT);
         let harness = super::PostgresTestHarness::new(
             "postgres://postgres@localhost/postgres",
             namespace.clone(),

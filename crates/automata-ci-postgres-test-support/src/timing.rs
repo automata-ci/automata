@@ -10,6 +10,9 @@ use std::{
 use crate::{TIMING_INVOCATION_ENVIRONMENT, TIMING_RUN_ENVIRONMENT, TIMINGS_DIRECTORY_ENVIRONMENT};
 
 static TIMING_WRITE_LOCK: Mutex<()> = Mutex::new(());
+const TIMING_RECORD_SCHEMA: &str = "automata-postgres-test-timing/v1";
+// foundation-governance: operational-limit
+const MAX_TIMING_INVOCATION_LENGTH: usize = 64;
 
 #[derive(Clone, Copy)]
 pub(crate) enum TimingOperation {
@@ -153,7 +156,7 @@ impl TimingContext {
         }
         let invocation = env::var(TIMING_INVOCATION_ENVIRONMENT).ok()?;
         if invocation.is_empty()
-            || invocation.len() > 64
+            || invocation.len() > MAX_TIMING_INVOCATION_LENGTH
             || !invocation
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
@@ -186,7 +189,7 @@ fn append_timing_record(
         .join(format!("postgres-test-timings-{process_id}.jsonl"));
     let record = format!(
         concat!(
-            "{{\"schema\":\"automata-postgres-test-timing/v1\",",
+            "{{\"schema\":\"{timing_record_schema}\",",
             "\"pid\":{process_id},",
             "\"invocation\":\"{invocation}\",",
             "\"run\":{run},",
@@ -197,6 +200,7 @@ fn append_timing_record(
             "\"elapsed_ns\":{elapsed_ns}}}\n"
         ),
         process_id = process_id,
+        timing_record_schema = TIMING_RECORD_SCHEMA,
         invocation = context.invocation.as_str(),
         run = context.run,
         operation = operation.as_str(),
@@ -218,5 +222,15 @@ fn append_timing_record(
     };
     if output.write_all(record.as_bytes()).is_ok() {
         let _ = output.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TIMING_RECORD_SCHEMA;
+
+    #[test]
+    fn timing_record_schema_is_exact_v1() {
+        assert_eq!(TIMING_RECORD_SCHEMA, "automata-postgres-test-timing/v1");
     }
 }

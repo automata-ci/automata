@@ -18,6 +18,7 @@ use super::{
     credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
 };
 
+// foundation-governance: derived-contract owner=control-plane kind=wire-discriminator
 const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 const TOKEN_PREFIX: &str = "atm_re_";
 const TOKEN_BYTES: usize = 32;
