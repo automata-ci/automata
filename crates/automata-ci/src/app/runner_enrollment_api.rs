@@ -1136,6 +1136,43 @@ mod tests {
                 .is_err(),
             "published server trust roots must be current at issuance"
         );
+
+        let future_root_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("future root key");
+        let future_root_key_pem = future_root_key.serialize_pem();
+        let mut future_root_params = CertificateParams::default();
+        future_root_params.not_before =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60)
+                .expect("future root not-before");
+        future_root_params.not_after =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 3_600)
+                .expect("future root not-after");
+        future_root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        future_root_params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let future_root = future_root_params
+            .self_signed(&future_root_key)
+            .expect("future root");
+        let future_root_pem = future_root.pem();
+        let future_server_pem = server_certificate_chain_pem(
+            &future_root_pem,
+            &future_root_key_pem,
+            "runner.example.test",
+        );
+        let issuer = RunnerCertificateIssuer::from_pem(
+            long_lived_ca_pem.as_bytes(),
+            long_lived_key_pem.as_bytes(),
+            future_root_pem.as_bytes(),
+            future_server_pem.as_bytes(),
+            "https://runner.example.test/".to_owned(),
+        )
+        .expect("structurally valid future server trust material");
+        assert!(
+            issuer
+                .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
+                .is_err(),
+            "published server trust roots must already be valid at issuance"
+        );
     }
 
     #[test]
