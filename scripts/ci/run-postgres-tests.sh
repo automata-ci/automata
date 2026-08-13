@@ -46,32 +46,18 @@ run_command() {
   fi
 }
 
-run_ignored_tests() {
-  if [[ "$plan" == true ]]; then
-    run_command "$@"
-    return
-  fi
-
+run_bounded_tests() {
   local argument
-  local listing
-  local selected_count
-  local replaced=false
-  local -a list_command=()
+  local bounded=false
   for argument in "$@"; do
-    if [[ "$argument" == --test-threads=* ]]; then
-      list_command+=(--list)
-      replaced=true
-    else
-      list_command+=("$argument")
+    if [[ "$argument" =~ ^--test-threads=[1-9][0-9]*$ ]]; then
+      bounded=true
     fi
   done
-  if [[ "$replaced" != true ]]; then
+  if [[ "$bounded" != true ]]; then
     printf 'error: PostgreSQL test command has no libtest thread limit\n' >&2
     exit 2
   fi
-  listing="$(LLVM_PROFILE_FILE=/dev/null "${list_command[@]}")"
-  selected_count="$(python3 scripts/ci/check-ignored-test-list.py <<<"$listing")"
-  printf 'PostgreSQL command selected %d ignored test(s)\n' "$selected_count" >&2
   run_command "$@"
 }
 
@@ -108,7 +94,7 @@ if [[ "$plan" != true ]]; then
 fi
 
 printf 'PostgreSQL lane: Store current-schema suites\n' >&2
-run_ignored_tests cargo test \
+run_bounded_tests cargo test \
   -p automata-ci-store \
   --test store_postgres_execution \
   --test store_postgres_orchestration \
@@ -121,7 +107,7 @@ run_ignored_tests cargo test \
   --test-threads=4
 
 printf 'PostgreSQL lane: fixture and adapter packages\n' >&2
-run_ignored_tests cargo test \
+run_bounded_tests cargo test \
   -p automata-ci-postgres-test-support \
   -p automata-ci-auth-postgres \
   -p automata-ci-runner-auth-postgres \
@@ -134,7 +120,7 @@ run_ignored_tests cargo test \
   --test-threads=4
 
 printf 'PostgreSQL lane: GitHub Results integration\n' >&2
-run_ignored_tests cargo test \
+run_bounded_tests cargo test \
   -p automata-ci-results-github \
   --test postgres_artifacts \
   --test postgres_cache \
@@ -145,7 +131,7 @@ run_ignored_tests cargo test \
   --test-threads=4
 
 printf 'PostgreSQL lane: end-to-end provider matrix\n' >&2
-run_ignored_tests cargo test \
+run_bounded_tests cargo test \
   -p automata-ci \
   --test github_provider_end_to_end_matrix \
   --all-features \

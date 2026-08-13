@@ -223,6 +223,7 @@ test("CI pins one PostgreSQL 18 service and covers every database-only ignored s
   );
   assert.match(runner, /trap cleanup_postgres_tests EXIT/);
   assert.match(runner, /automata_cleanup_postgres_test_namespace/);
+  assert.doesNotMatch(runner, /--list|check-ignored-test-list\.py/);
 
   const broadDatabasePackages = new Set([
     "automata-ci-auth-postgres",
