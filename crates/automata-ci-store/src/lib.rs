@@ -514,7 +514,7 @@ pub use web::{
 pub use workflow_rerun::{
     MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow, RerunWorkflowByName,
     WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
-    WorkflowRerunValueError,
+    WorkflowRerunValueError, next_workflow_rerun_attempt,
 };
 pub use workflow_runtime_policy::{
     MAX_WORKFLOW_RUNTIME_POLICY_BYTES, MAX_WORKFLOW_RUNTIME_POLICY_FEATURES,

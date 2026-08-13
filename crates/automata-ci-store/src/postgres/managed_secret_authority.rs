@@ -394,9 +394,10 @@ async fn lock_delivery_operation(
     let delivery = request
         .delivery()
         .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    sqlx::query(
+    let row = sqlx::query(
         r"
-        SELECT credential_sha256, state, usable_until_ms, acknowledged_at_ms,
+        SELECT authority_evidence_schema, credential_sha256, state,
+               usable_until_ms, acknowledged_at_ms,
                (repository_id = $3 AND run_id = $4 AND job_id = $5
                 AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
                 AND runner_id = $9 AND runner_session_id = $10
@@ -430,7 +431,9 @@ async fn lock_delivery_operation(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
-    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)
+    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
+    validate_authority_evidence_schema(&row)?;
+    Ok(row)
 }
 
 async fn expire_delivery_operation(
@@ -1778,15 +1781,16 @@ async fn reserve_delivery_operation(
             attempt_id, lease_id, fencing_token, runner_id,
             runner_session_id, runner_session_epoch, runner_generation,
             runner_slot, runtime_context_digest, binding_set_digest,
-            authority_evidence_digest, credential_key_id, credential_sha256,
+            authority_evidence_schema, authority_evidence_digest,
+            credential_key_id, credential_sha256,
             state, created_at_ms, usable_until_ms, acknowledged_at_ms
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9,
             $10, $11, $12,
             $13, $14, $15,
-            $16, $17, $18,
-            'pending', $19, $20, NULL
+            $16, $17, $18, $19,
+            'pending', $20, $21, NULL
         )
         ON CONFLICT DO NOTHING
         ",
@@ -1809,6 +1813,10 @@ async fn reserve_delivery_operation(
     )
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(binding_set_digest.as_bytes().as_slice())
+    .bind(
+        i16::try_from(MANAGED_SECRET_AUTHORITY_SCHEMA)
+            .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
+    )
     .bind(authority_evidence_digest.as_bytes().as_slice())
     .bind(delivery.credential_key_id())
     .bind(delivery.credential_sha256().as_bytes().as_slice())
@@ -1821,7 +1829,8 @@ async fn reserve_delivery_operation(
     let row = if request.machine().is_none() {
         sqlx::query(
             r"
-            SELECT operation_id, credential_key_id, credential_sha256
+            SELECT operation_id, authority_evidence_schema,
+                   credential_key_id, credential_sha256
             FROM managed_secret_delivery_operations
             WHERE tenant_id = $1 AND repository_id = $2
               AND run_id = $3 AND job_id = $4 AND attempt_id = $5
@@ -1865,7 +1874,8 @@ async fn reserve_delivery_operation(
     } else {
         sqlx::query(
             r"
-        SELECT operation_id, credential_key_id, credential_sha256, (
+        SELECT operation_id, authority_evidence_schema,
+               credential_key_id, credential_sha256, (
             repository_id = $3 AND run_id = $4 AND job_id = $5
             AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
             AND runner_id = $9 AND runner_session_id = $10
@@ -1910,6 +1920,7 @@ async fn reserve_delivery_operation(
     let Some(row) = row else {
         return Err(ManagedSecretAuthorityStoreError::Unauthorized);
     };
+    validate_authority_evidence_schema(&row)?;
     let reserved_operation_id =
         ManagedSecretDeliveryOperationId::from_uuid(field(&row, "operation_id")?)
             .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
@@ -1934,6 +1945,17 @@ async fn reserve_delivery_operation(
         })
     } else {
         Err(ManagedSecretAuthorityStoreError::Unauthorized)
+    }
+}
+
+fn validate_authority_evidence_schema(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(), ManagedSecretAuthorityStoreError> {
+    let schema: i16 = field(row, "authority_evidence_schema")?;
+    if u16::try_from(schema).ok() == Some(MANAGED_SECRET_AUTHORITY_SCHEMA) {
+        Ok(())
+    } else {
+        Err(ManagedSecretAuthorityStoreError::CorruptData)
     }
 }
 

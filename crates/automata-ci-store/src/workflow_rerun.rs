@@ -19,6 +19,19 @@ pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;
 pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
+/// Returns the next physical attempt while the 50-rerun budget remains.
+///
+/// Attempt one is the original execution, so attempt 51 is the final allowed
+/// physical execution and represents rerun 50.
+#[must_use]
+pub const fn next_workflow_rerun_attempt(current_attempt: u32) -> Option<u32> {
+    if current_attempt >= MAX_WORKFLOW_RERUN_ATTEMPTS {
+        None
+    } else {
+        current_attempt.checked_add(1)
+    }
+}
+
 /// Closed selection mode for a durable workflow rerun.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkflowRerunSelection {
@@ -515,6 +528,25 @@ mod tests {
         assert_eq!(
             WorkflowRerunReceipt::new(source, rerun, 1, 1, 0, false),
             Err(WorkflowRerunValueError::InvalidReceipt)
+        );
+    }
+
+    #[test]
+    fn fifty_rerun_limit_is_exact_at_minus_one_at_and_plus_one() {
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS - 1),
+            Some(MAX_WORKFLOW_RERUN_ATTEMPTS),
+            "attempt 50 must admit the final (50th) rerun",
+        );
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS),
+            None,
+            "attempt 51 has consumed the 50-rerun budget",
+        );
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS + 1),
+            None,
+            "a malformed future attempt cannot reopen the budget",
         );
     }
 }

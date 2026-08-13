@@ -26,6 +26,7 @@ use crate::{
     MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow, RerunWorkflowByName, StoreError,
     WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowConcurrency, WorkflowRerunReceipt,
     WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
+    next_workflow_rerun_attempt,
 };
 
 const RERUN_PERMISSION: &str = "runs:rerun";
@@ -1487,12 +1488,7 @@ async fn next_attempt(
         .map_err(operation_error)?
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| StoreError::corrupt_data("workflow rerun attempt is invalid"))?;
-    if maximum >= MAX_WORKFLOW_RERUN_ATTEMPTS {
-        return Err(WorkflowRerunStoreError::AttemptLimitReached);
-    }
-    maximum
-        .checked_add(1)
-        .ok_or(WorkflowRerunStoreError::AttemptLimitReached)
+    next_workflow_rerun_attempt(maximum).ok_or(WorkflowRerunStoreError::AttemptLimitReached)
 }
 
 async fn load_triggering_actor(

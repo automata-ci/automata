@@ -361,6 +361,35 @@ async fn exact_replay_rejects_tampered_publication_snapshot_evidence() -> TestRe
         .execute(database.pool())
         .await?;
 
+        assert_legacy_corruption(&database.store().admit_workflow(legacy.clone()).await);
+
+        sqlx::query(
+            "ALTER TABLE workflow_runs DISABLE TRIGGER workflow_runs_publication_snapshot_immutable",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_runs DROP CONSTRAINT workflow_runs_publication_safety_schema",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET effective_dashboard_visibility = 'public',
+                publication_safety_schema = 2
+            WHERE id = $1
+            ",
+        )
+        .bind(legacy.run_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_runs ENABLE TRIGGER workflow_runs_publication_snapshot_immutable",
+        )
+        .execute(database.pool())
+        .await?;
+
         assert_legacy_corruption(&database.store().admit_workflow(legacy).await);
         assert_logical_unsupported(&database.store().admit_logical_workflow(logical).await);
         Ok(())

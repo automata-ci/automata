@@ -11116,6 +11116,7 @@ BEGIN
        OR NEW.runner_slot IS DISTINCT FROM OLD.runner_slot
        OR NEW.runtime_context_digest IS DISTINCT FROM OLD.runtime_context_digest
        OR NEW.binding_set_digest IS DISTINCT FROM OLD.binding_set_digest
+       OR NEW.authority_evidence_schema IS DISTINCT FROM OLD.authority_evidence_schema
        OR NEW.authority_evidence_digest IS DISTINCT FROM OLD.authority_evidence_digest
        OR NEW.credential_key_id IS DISTINCT FROM OLD.credential_key_id
        OR NEW.credential_sha256 IS DISTINCT FROM OLD.credential_sha256
@@ -25426,6 +25427,7 @@ CREATE TABLE managed_secret_delivery_operations (
     runner_slot smallint NOT NULL,
     runtime_context_digest bytea CONSTRAINT managed_secret_delivery_operati_runtime_context_digest_not_null NOT NULL,
     binding_set_digest bytea NOT NULL,
+    authority_evidence_schema smallint DEFAULT 1 NOT NULL,
     authority_evidence_digest bytea CONSTRAINT managed_secret_delivery_oper_authority_evidence_digest_not_null NOT NULL,
     credential_key_id text NOT NULL,
     credential_sha256 bytea NOT NULL,
@@ -25433,6 +25435,7 @@ CREATE TABLE managed_secret_delivery_operations (
     created_at_ms bigint NOT NULL,
     usable_until_ms bigint NOT NULL,
     acknowledged_at_ms bigint,
+    CONSTRAINT managed_secret_delivery_operations_authority_schema CHECK ((authority_evidence_schema = 1)),
     CONSTRAINT managed_secret_delivery_operations_digests CHECK (((octet_length(runtime_context_digest) = 32) AND (octet_length(binding_set_digest) = 32) AND (octet_length(authority_evidence_digest) = 32) AND (octet_length(credential_sha256) = 32))),
     CONSTRAINT managed_secret_delivery_operations_fences_positive CHECK (((fencing_token > 0) AND (runner_session_epoch > 0) AND (runner_generation > 0) AND (runner_slot > 0))),
     CONSTRAINT managed_secret_delivery_operations_key_shape CHECK ((((octet_length(credential_key_id) >= 1) AND (octet_length(credential_key_id) <= 128)) AND (credential_key_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'::text))),
