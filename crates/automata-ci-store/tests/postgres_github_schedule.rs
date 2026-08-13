@@ -8,10 +8,13 @@ use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis, WorkflowId,
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
+    BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
     ClaimDueGithubScheduleFire, ClaimGithubCheckProjection, ClaimGithubScheduleDiscovery,
-    ClaimedGithubScheduleFire, CompleteGithubScheduleFire, EnsureGithubServerServiceAuthority,
-    GITHUB_SCHEDULE_ATTEMPTS_EXHAUSTED_FAILURE, GITHUB_SCHEDULE_SERVICE_ACTOR, GithubCheckName,
-    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckSubjectKey,
+    ClaimedGithubScheduleFire, CompleteGithubCheckProjection, CompleteGithubScheduleFire,
+    EnsureGithubServerServiceAuthority, GITHUB_SCHEDULE_ATTEMPTS_EXHAUSTED_FAILURE,
+    GITHUB_SCHEDULE_SERVICE_ACTOR, GithubCheckDetailsTarget, GithubCheckName,
+    GithubCheckProjectionAction, GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunId, GithubCheckSubjectKey, GithubCheckSuiteId,
     GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRepository as _, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
@@ -349,6 +352,71 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
         assert_eq!(check_origin.1, None);
         assert_eq!(check_origin.2, Some(second.claim().fire_id().as_uuid()));
 
+        // Persist the irreversible provider-create cutoff before admission.
+        // The later run link must not change the exact details target used to
+        // reconcile that possibly-created Check Run.
+        let check_worker =
+            GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(0x5907))?;
+        let projection_now = database_now(database.pool()).await?;
+        let ensure_suite = database
+            .store()
+            .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                connection,
+                check_worker,
+                projection_now,
+                UnixMillis::new(projection_now.get() + 60_000),
+            )?)
+            .await?
+            .expect("scheduled Check suite projection");
+        assert_eq!(ensure_suite.claim().subject_id(), check.subject_id());
+        assert_eq!(
+            ensure_suite.action(),
+            GithubCheckProjectionAction::EnsureSuite
+        );
+        assert_eq!(
+            ensure_suite.details_target(),
+            GithubCheckDetailsTarget::Repository
+        );
+        let suite_id = GithubCheckSuiteId::new(59_071)?;
+        database
+            .store()
+            .bind_github_check_suite(BindGithubCheckSuite::new(
+                ensure_suite.claim(),
+                suite_id,
+                ensure_suite.claimed_at(),
+            )?)
+            .await?;
+
+        let create_now = database_now(database.pool()).await?;
+        let prepare_create = database
+            .store()
+            .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                connection,
+                check_worker,
+                create_now,
+                UnixMillis::new(create_now.get() + 25),
+            )?)
+            .await?
+            .expect("scheduled Check create projection");
+        assert_eq!(prepare_create.claim().subject_id(), check.subject_id());
+        assert_eq!(
+            prepare_create.action(),
+            GithubCheckProjectionAction::PrepareRunCreate
+        );
+        assert_eq!(
+            prepare_create.details_target(),
+            GithubCheckDetailsTarget::Repository
+        );
+        let reconcile_not_before = UnixMillis::new(prepare_create.expires_at().get() + 1);
+        database
+            .store()
+            .begin_github_check_run_create(BeginGithubCheckRunCreate::new(
+                &prepare_create,
+                prepare_create.claimed_at(),
+                reconcile_not_before,
+            )?)
+            .await?;
+
         let admitted_at = database_now(database.pool()).await?;
         let command = scheduled_command(&manifest, &second, admitted_at)?;
         let admitted = database
@@ -364,24 +432,115 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
                 .run_id(),
             admitted.run_id()
         );
-
-        let projection_now = database_now(database.pool()).await?;
-        let projected = database
+        wait_until_database_at_or_after(database.pool(), reconcile_not_before.get()).await?;
+        let reconcile_now = database_now(database.pool()).await?;
+        let reconcile = database
             .store()
             .claim_github_check_projection(ClaimGithubCheckProjection::new(
                 connection,
-                GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(0x5907))?,
-                projection_now,
-                UnixMillis::new(projection_now.get() + 60_000),
+                check_worker,
+                reconcile_now,
+                UnixMillis::new(reconcile_now.get() + 60_000),
             )?)
             .await?
-            .expect("scheduled Check projection");
-        assert_eq!(projected.claim().subject_id(), check.subject_id());
+            .expect("scheduled Check create reconciliation");
+        assert_eq!(reconcile.claim().subject_id(), check.subject_id());
         assert_eq!(
-            projected.identity().schedule_fire_id(),
+            reconcile.action(),
+            GithubCheckProjectionAction::ReconcileRunCreate
+        );
+        assert_eq!(
+            reconcile.details_target(),
+            GithubCheckDetailsTarget::Repository
+        );
+        assert_eq!(
+            reconcile.identity().schedule_fire_id(),
             Some(second.claim().fire_id())
         );
-        assert_eq!(projected.identity().delivery_id(), None);
+        assert_eq!(reconcile.identity().delivery_id(), None);
+        let check_run_id = GithubCheckRunId::new(59_072)?;
+        database
+            .store()
+            .bind_github_check_run(BindGithubCheckRun::new(
+                GithubCheckRunBindingFence::Reconciliation(reconcile.claim()),
+                suite_id,
+                check_run_id,
+                reconcile.claimed_at(),
+            )?)
+            .await?;
+        let publish_now = database_now(database.pool()).await?;
+        let publish = database
+            .store()
+            .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                connection,
+                check_worker,
+                publish_now,
+                UnixMillis::new(publish_now.get() + 60_000),
+            )?)
+            .await?
+            .expect("linked scheduled Check publication");
+        assert_eq!(publish.claim().subject_id(), check.subject_id());
+        assert_eq!(publish.action(), GithubCheckProjectionAction::Publish);
+        assert_eq!(
+            publish.details_target(),
+            GithubCheckDetailsTarget::Repository
+        );
+        database
+            .store()
+            .complete_github_check_projection(CompleteGithubCheckProjection::new(
+                publish.claim(),
+                publish.desired(),
+                publish.claimed_at(),
+            )?)
+            .await?;
+
+        // Admission and its Check link commit before the fire conclusion. A
+        // registry refresh in this crash window must fail atomically so the
+        // old runtime remains available to conclude the admitted fire.
+        let successor_claim = claim_discovery(
+            database.store(),
+            GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x5906))?,
+            manifest.clone(),
+            source_authority.clone(),
+            discovery_worker,
+        )
+        .await?;
+        let successor_registry = registry(
+            successor_claim,
+            manifest.clone(),
+            source_authority.clone(),
+            "2222222222222222222222222222222222222222",
+            [23; 32],
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .register_github_schedule_registry(successor_registry.clone())
+                .await,
+            Err(GithubScheduleStoreError::Conflict)
+        ));
+        let crash_window_state: (Uuid, String, Option<Uuid>, String) = sqlx::query_as(
+            r"
+            SELECT current.registry_id, fire.state, subject.workflow_run_id,
+                   subject.desired_state
+              FROM github_schedule_registry_current AS current
+              JOIN github_schedule_fires AS fire
+                ON fire.registry_id = current.registry_id
+               AND fire.fire_id = $1
+              JOIN github_check_subjects AS subject
+                ON subject.schedule_fire_id = fire.fire_id
+               AND subject.subject_kind = 'workflow'
+             WHERE current.provider_connection_id = $2
+            ",
+        )
+        .bind(second.claim().fire_id().as_uuid())
+        .bind(connection.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(crash_window_state.0, created.registry_id().as_uuid());
+        assert_eq!(crash_window_state.1, "claimed");
+        assert_eq!(crash_window_state.2, Some(admitted.run_id().as_uuid()));
+        assert_eq!(crash_window_state.3, "in_progress");
 
         let origin_mutation = sqlx::query(
             r"
@@ -442,24 +601,9 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
                 superseded_claim.claim(),
             ))
             .await?;
-        let second_claim = claim_discovery(
-            database.store(),
-            GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x5906))?,
-            manifest.clone(),
-            source_authority.clone(),
-            discovery_worker,
-        )
-        .await?;
-        let second_registry = registry(
-            second_claim,
-            manifest,
-            source_authority,
-            "2222222222222222222222222222222222222222",
-            [23; 32],
-        )?;
         database
             .store()
-            .register_github_schedule_registry(second_registry)
+            .register_github_schedule_registry(successor_registry)
             .await?;
         let terminal: (String, Option<String>) = sqlx::query_as(
             "SELECT state, failure_kind FROM github_schedule_fires WHERE fire_id = $1",
@@ -485,6 +629,38 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
                 Some("failure".into()),
                 Some("system_unknown".into())
             )
+        );
+        let admitted_run_check: (Option<Uuid>, String, Option<String>, i64) = sqlx::query_as(
+            r"
+            SELECT workflow_run_id, desired_state, desired_conclusion,
+                   desired_revision
+              FROM github_check_subjects
+             WHERE id = $1
+               AND subject_kind = 'workflow'
+            ",
+        )
+        .bind(check.subject_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            admitted_run_check,
+            (
+                Some(admitted.run_id().as_uuid()),
+                "in_progress".into(),
+                None,
+                2,
+            ),
+            "registry supersession must not terminalize the admitted run Check"
+        );
+        let active_logical_jobs: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM logical_workflow_jobs WHERE run_id = $1 AND state = 'pending'",
+        )
+        .bind(admitted.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            active_logical_jobs, 1,
+            "the admitted job must remain active across schedule-registry supersession"
         );
         assert!(matches!(
             database

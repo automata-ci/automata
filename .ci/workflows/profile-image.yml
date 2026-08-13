@@ -1,4 +1,4 @@
-name: Publish runner profile
+name: Publish runner profile (disabled)
 
 on:
   workflow_dispatch:
@@ -40,6 +40,16 @@ jobs:
       locked_digest: ${{ steps.profile.outputs.locked_digest }}
       locked_image: ${{ steps.profile.outputs.locked_image }}
     steps:
+      - name: Refuse publication without an accepted Automata attestation issuer
+        run: |
+          printf '%s\n' \
+            'error: runner-profile publication is disabled.' \
+            'These jobs run on self-hosted Automata runners, while the configured GHCR' \
+            'attestation and protected-environment verifiers authenticate GitHub-hosted' \
+            'Actions identities. Automata must not claim that issuer or runner identity.' \
+            'Build and verify a local candidate with the reviewed scripts instead.' >&2
+          exit 1
+
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

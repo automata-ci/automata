@@ -141,7 +141,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 1,
+        "schema": 2,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -402,6 +402,34 @@ fn dashboard_url_is_a_canonical_public_automata_origin() {
     non_loopback_http["dashboard_url"] = json!("http://ci.automata.example/");
     assert_eq!(
         load_value("dashboard-non-loopback-http.json", &non_loopback_http),
+        Err(GithubProviderConfigError)
+    );
+}
+
+#[test]
+fn dashboard_url_uses_an_explicit_schema_two_migration() {
+    let explicit = manifest(vec![public_repository()]);
+    let configured = load_value("dashboard-schema-two.json", &explicit)
+        .expect("schema 2 requires and accepts an explicit trusted dashboard origin");
+    assert_eq!(
+        configured.dashboard_url().as_str(),
+        "https://ci.automata.example/"
+    );
+
+    let mut legacy = explicit.clone();
+    legacy["schema"] = json!(1);
+    assert_eq!(
+        load_value("dashboard-schema-one.json", &legacy),
+        Err(GithubProviderConfigError)
+    );
+
+    let mut missing = explicit;
+    missing
+        .as_object_mut()
+        .expect("provider manifest object")
+        .remove("dashboard_url");
+    assert_eq!(
+        load_value("dashboard-schema-two-missing.json", &missing),
         Err(GithubProviderConfigError)
     );
 }
@@ -772,7 +800,7 @@ fn document_and_repository_bounds_are_exact() {
 fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
     let mut cases = Vec::new();
     let mut value = manifest(vec![private_repository()]);
-    value["schema"] = json!(2);
+    value["schema"] = json!(3);
     cases.push(("schema", value));
     for (case, path) in [
         ("app-id", vec!["app", "id"]),

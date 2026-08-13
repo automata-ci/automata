@@ -328,6 +328,11 @@ an `env:NAME` or absolute `file:/path` reference accepted by the secret-source
 policy; secret bytes do not belong in the manifest. File sources must be
 owner-only regular files and cannot be symlinks.
 
+The current provider manifest is schema 2. It requires an explicit top-level
+`dashboard_url`, which is the trusted canonical Automata origin used for Check
+Run links. Migrate schema-1 files by adding that validated URL and changing
+`schema` to `2`; the server deliberately does not guess a dashboard origin.
+
 The required `transport` selects one closed origin policy. Use
 `{"mode":"github_dot_com"}` in production. The integration suite can select
 `loopback_emulator` with an exact `http://...localhost:PORT/api/v3/` control

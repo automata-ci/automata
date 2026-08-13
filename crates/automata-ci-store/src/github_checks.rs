@@ -168,10 +168,15 @@ impl GithubCheckName {
     ///
     /// # Errors
     ///
-    /// Rejects empty, edge-whitespace, or control-bearing job names. Names over
+    /// Rejects names that are empty after trimming or contain control characters.
+    /// Edge whitespace is removed only from the provider projection; names over
     /// the provider byte ceiling are truncated at a UTF-8 scalar boundary.
     pub fn from_job_display_name(value: &str) -> Result<Self, GithubCheckValueError> {
-        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        if value.chars().any(char::is_control) {
+            return Err(GithubCheckValueError::InvalidCheckName);
+        }
+        let value = value.trim();
+        if value.is_empty() {
             return Err(GithubCheckValueError::InvalidCheckName);
         }
         let mut end = value.len().min(MAX_CHECK_NAME_BYTES);
@@ -613,55 +618,6 @@ impl GithubCheckSubjectTarget {
     #[must_use]
     pub const fn subject_id(&self) -> GithubCheckSubjectId {
         self.subject_id
-    }
-}
-
-/// Links a pre-admission subject to its exact admitted workflow run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LinkGithubCheckWorkflowRun {
-    target: GithubCheckSubjectTarget,
-    run_id: RunId,
-    linked_at: UnixMillis,
-}
-
-impl LinkGithubCheckWorkflowRun {
-    /// Constructs an immutable run-link request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects timestamps before the Unix epoch.
-    pub fn new(
-        target: GithubCheckSubjectTarget,
-        run_id: RunId,
-        linked_at: UnixMillis,
-    ) -> Result<Self, GithubCheckValueError> {
-        validate_timestamp(linked_at, "GitHub Check run-link time")?;
-        if run_id.as_uuid().is_nil() {
-            return Err(GithubCheckValueError::NilUuid(
-                "GitHub Check workflow run ID",
-            ));
-        }
-        Ok(Self {
-            target,
-            run_id,
-            linked_at,
-        })
-    }
-
-    /// Returns the exact subject target.
-    #[must_use]
-    pub const fn target(&self) -> &GithubCheckSubjectTarget {
-        &self.target
-    }
-    /// Returns the admitted run identity.
-    #[must_use]
-    pub const fn run_id(&self) -> RunId {
-        self.run_id
-    }
-    /// Returns the immutable link time.
-    #[must_use]
-    pub const fn linked_at(&self) -> UnixMillis {
-        self.linked_at
     }
 }
 
@@ -1732,12 +1688,6 @@ pub trait GithubCheckSubjectRepository: Send + Sync {
     async fn register_github_check_subject(
         &self,
         request: RegisterGithubCheckSubject,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
-
-    /// Immutably links a subject to one exact repository/SHA workflow run.
-    async fn link_github_check_workflow_run(
-        &self,
-        request: LinkGithubCheckWorkflowRun,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
 
     /// Advances a queued subject to in-progress desired state.

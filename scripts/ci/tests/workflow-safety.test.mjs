@@ -80,6 +80,81 @@ function workflowJob(text, name) {
   return text.slice(start.index, endIndex);
 }
 
+function workflowJobNames(text) {
+  const jobsStart = text.indexOf("\njobs:\n");
+  assert.notEqual(jobsStart, -1, "missing workflow jobs mapping");
+  return [
+    ...text.slice(jobsStart + "\njobs:\n".length).matchAll(
+      /^  ([A-Za-z_][A-Za-z0-9_-]*):[ \t]*$/gm,
+    ),
+  ].map((match) => match[1]);
+}
+
+function workflowJobNeeds(job) {
+  const match = /^    needs:[ \t]*(.+)$/m.exec(job);
+  if (match === null) return [];
+  const value = match[1].trim();
+  if (value.startsWith("[") && value.endsWith("]")) {
+    return value
+      .slice(1, -1)
+      .split(",")
+      .map((dependency) => dependency.trim())
+      .filter(Boolean);
+  }
+  assert.match(value, /^[A-Za-z_][A-Za-z0-9_-]*$/);
+  return [value];
+}
+
+function assertEveryDownstreamJobDependsOn(text, rootJob) {
+  const jobNames = workflowJobNames(text);
+  assert.ok(jobNames.includes(rootJob), `missing root job: ${rootJob}`);
+  const dependencies = new Map(
+    jobNames.map((name) => [name, workflowJobNeeds(workflowJob(text, name))]),
+  );
+
+  function reachesRoot(name, visiting = new Set()) {
+    if (name === rootJob) return true;
+    assert.ok(!visiting.has(name), `cyclic job dependencies include ${name}`);
+    const nextVisiting = new Set(visiting).add(name);
+    return (dependencies.get(name) ?? []).some((dependency) => {
+      assert.ok(
+        dependencies.has(dependency),
+        `${name} needs unknown job ${dependency}`,
+      );
+      return reachesRoot(dependency, nextVisiting);
+    });
+  }
+
+  for (const name of jobNames) {
+    if (name === rootJob) continue;
+    assert.ok(
+      reachesRoot(name),
+      `${name} must transitively depend on fail-closed root job ${rootJob}`,
+    );
+  }
+}
+
+function assertLiteralFirstRefusal(job, refusalName) {
+  const escapedName = refusalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(
+    job,
+    new RegExp(`\\n    steps:\\n      - name: ${escapedName}\\n`),
+    `${refusalName} must be the literal first step`,
+  );
+  const refusalStart = job.indexOf(`      - name: ${refusalName}\n`);
+  assert.notEqual(refusalStart, -1, `missing fail-closed step: ${refusalName}`);
+  const nextStep = job.indexOf("\n      - ", refusalStart + 1);
+  const refusal = job.slice(
+    refusalStart,
+    nextStep === -1 ? job.length : nextStep,
+  );
+  assert.doesNotMatch(refusal, /^        if\s*:/m);
+  assert.doesNotMatch(refusal, /^        continue-on-error\s*:/m);
+  assert.match(refusal, /^        run: \|$/m);
+  assert.match(refusal, /^          exit 1$/m);
+  return refusal;
+}
+
 function checkReleaseOrder(
   pages,
   { tag = "v1.2.3", version = "1.2.3", prerelease = false } = {},
@@ -705,17 +780,63 @@ test("Pages and profile publication isolate concurrency and environments", () =>
   assert.match(promote, /environment: profile-promotion/);
 });
 
-test("Automata publication retains native workflow signer identities", () => {
+test("Automata publication fails closed before any provider-facing work", () => {
+  const release = source(".ci/workflows/release.yml");
   const profile = source(".ci/workflows/profile-image.yml");
   const serviceProxy = source(".ci/workflows/service-proxy-image.yml");
+  const policy = source("scripts/ci/service-proxy-publication.py");
+  const releaseGate = workflowJob(release, "gate");
+  const profileValidate = workflowJob(profile, "validate");
+  const serviceProxyValidate = workflowJob(serviceProxy, "validate");
 
+  for (const [workflow, rootName, job, refusal, checkout] of [
+    [
+      release,
+      "gate",
+      releaseGate,
+      "Refuse publication without exact Automata release authority",
+      "Check out the release tag and main history",
+    ],
+    [
+      profile,
+      "validate",
+      profileValidate,
+      "Refuse publication without an accepted Automata attestation issuer",
+      "Check out repository",
+    ],
+    [
+      serviceProxy,
+      "validate",
+      serviceProxyValidate,
+      "Refuse publication without an accepted Automata attestation issuer",
+      "Check out trusted publisher source",
+    ],
+  ]) {
+    assertLiteralFirstRefusal(job, refusal);
+    const checkoutIndex = job.indexOf(`- name: ${checkout}`);
+    assert.notEqual(checkoutIndex, -1, `missing checkout boundary: ${checkout}`);
+    assertEveryDownstreamJobDependsOn(workflow, rootName);
+  }
+
+  const finalize = workflowJob(release, "finalize_release");
+  const finalizeCondition = section(finalize, "    if: >-", "    runs-on:");
   assert.match(
-    profile,
-    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.ci\/workflows\/profile-image\.yml/,
+    finalize,
+    /needs: \[gate, stage_release, prepare_crates, publish_crates\]/,
   );
+  assert.match(finalizeCondition, /always\(\)/);
+  assert.match(finalizeCondition, /needs\.gate\.result == 'success'/);
+
+  assert.match(releaseGate, /same-name GitHub Check is not release authority/);
+  assert.match(profileValidate, /self-hosted Automata runners/);
+  assert.match(serviceProxyValidate, /self-hosted Automata runners/);
   assert.match(
-    serviceProxy,
-    /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.ci\/workflows\/service-proxy-image\.yml/,
+    policy,
+    /GitHub-hosted [\s\S]+provenance cannot authenticate a self-hosted Automata job/,
+  );
+  assert.doesNotMatch(
+    policy,
+    /runner_environment[^\n]+github-hosted|WORKFLOW_PATH = "\.ci\/workflows/,
   );
 });
 
@@ -739,7 +860,7 @@ test("registry attestations use the isolated Docker credential home", () => {
   });
 });
 
-test("service-proxy publication is Automata-hosted, two-phase, and least-privileged", () => {
+test("disabled service-proxy publication retains a least-privilege dormant plan", () => {
   const {
     candidate,
     candidateBuild,
@@ -752,6 +873,11 @@ test("service-proxy publication is Automata-hosted, two-phase, and least-privile
   assert.match(
     workflow,
     /group: publish-service-proxy-\$\{\{ inputs\.operation \}\}/,
+  );
+  assert.match(workflow, /^name: Publish service proxy image \(disabled\)$/m);
+  assert.match(
+    validate,
+    /Refuse publication without an accepted Automata attestation issuer[\s\S]+exit 1/,
   );
   assert.doesNotMatch(workflow, /runs-on: (?:self-hosted|\[[^\]]*self-hosted)/);
   for (const job of [
@@ -941,7 +1067,7 @@ test("service-proxy publication policy unit tests remain in the CI Node lane", (
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
-test("release publication is globally serialized and fails early on registry capacity", () => {
+test("disabled release retains its future serialized registry-capacity plan", () => {
   const { gate, release } = releaseJobs();
   const identity = section(
     gate,
@@ -953,18 +1079,19 @@ test("release publication is globally serialized and fails early on registry cap
     "      - name: Require unambiguous release order",
     "      - name: Require crates.io name ownership and first-publish capacity",
   );
-  const capacity = section(
-    gate,
+  const capacityStart = gate.indexOf(
     "      - name: Require crates.io name ownership and first-publish capacity",
-    "      - name: Require successful main CI for the tagged commit",
   );
+  assert.notEqual(capacityStart, -1);
+  const capacity = gate.slice(capacityStart);
 
   assert.match(
     release,
     /concurrency:\n  group: automata-public-release\n  cancel-in-progress: false/,
   );
-  assert.match(identity, /manual release retries must run from %s/);
-  assert.match(identity, /refs\/heads\/\$\{DEFAULT_BRANCH\}/);
+  assert.match(identity, /\[\[ "\$EVENT_NAME" == push \]\]/);
+  assert.match(identity, /refs\/tags\/\$\{REQUESTED_TAG\}/);
+  assert.doesNotMatch(release, /workflow_dispatch|inputs\.tag|manual release retr/);
   assert.match(identity, /git cat-file -t "\$tag_object"/);
   assert.match(stableOrder, /gh api --paginate --slurp/);
   assert.match(stableOrder, /scripts\/ci\/check-release-order\.py/);
@@ -977,23 +1104,36 @@ test("release publication is globally serialized and fails early on registry cap
   assert.match(release, /Revalidate identity before the immutable image binding/);
 });
 
-test("release gating trusts the exact final Automata job Check", () => {
-  const { gate } = releaseJobs();
-  const checkGateStart = gate.indexOf(
-    "      - name: Require successful main CI for the tagged commit",
+test("release gate refuses incomplete Check evidence", () => {
+  const { gate, release } = releaseJobs();
+  const refusal = assertLiteralFirstRefusal(
+    gate,
+    "Refuse publication without exact Automata release authority",
   );
-  assert.notEqual(checkGateStart, -1, "missing Automata Check release gate");
-  const checkGate = gate.slice(checkGateStart);
+  const checkoutStart = gate.indexOf(
+    "      - name: Check out the release tag and main history",
+  );
+  assert.notEqual(checkoutStart, -1, "missing dormant checkout boundary");
 
-  assert.match(gate, /permissions:\n      checks: read\n      contents: read/);
-  assert.match(checkGate, /AUTOMATA_GITHUB_APP_ID/);
-  assert.match(checkGate, /commits\/\$\{RELEASE_COMMIT\}\/check-runs/);
-  assert.match(checkGate, /check_name="Static Linux distribution"/);
-  assert.match(checkGate, /-f app_id="\$AUTOMATA_GITHUB_APP_ID"/);
-  assert.match(checkGate, /-f check_name="\$check_name"/);
-  assert.match(checkGate, /"\$external_id" == automata-check:\*/);
-  assert.match(checkGate, /"\$details_url" == https:\/\/\*/);
-  assert.doesNotMatch(checkGate, /actions\/workflows|workflow_runs/);
+  assert.match(release, /^name: Release \(publication disabled\)$/m);
+  assert.match(gate, /permissions:\n      contents: read/);
+  assert.match(
+    refusal,
+    /trusted provider App and dashboard origin, repository, commit/,
+  );
+  assert.match(refusal, /\.ci\/workflows\/ci\.yml, push event/);
+  assert.match(refusal, /refs\/heads\/main/);
+  assert.match(refusal, /logical distribution job, workflow run, and job attempt/);
+  assert.match(refusal, /same-name GitHub Check is not release authority/);
+  assert.match(
+    refusal,
+    /Retry is unavailable; future recovery requires authenticated Automata dispatch/,
+  );
+  assert.match(refusal, /exit 1/);
+  assert.doesNotMatch(
+    gate,
+    /AUTOMATA_GITHUB_APP_ID|commits\/\$\{RELEASE_COMMIT\}\/check-runs|check_name=/,
+  );
 });
 
 test("release order validation handles drafts, retries, and stable monotonicity", () => {
@@ -1253,12 +1393,100 @@ test("profile promotion rechecks the reviewed default-branch head", () => {
   assert.match(freshness, /remote_sha != dispatch_sha/);
 });
 
-test("release documentation requires all publication controls", () => {
+test("release documentation records the disabled boundary and future controls", () => {
   const guide = source("docs/releasing.md");
+  const profileGuide = source(
+    "images/github-hosted-ubuntu-24.04-x64/README.md",
+  );
   const release = source(".ci/workflows/release.yml");
   const productPolicy = source("scripts/ci/verify-product-targets.sh");
   assert.match(guide, /`release`,\n`crates-io`, and `profile-promotion`/);
-  assert.match(guide, /`release` as the\nunattended staging boundary/);
+  assert.match(guide, /Automated public publication is currently disabled/);
+  assert.match(guide, /trusted provider App and dashboard origin/);
+  assert.match(guide, /same-name\n?>? Check|same-name Check/);
+  assert.match(guide, /GitHub-hosted signer claim as authority/);
+  assert.match(guide, /local,\n?unpublished candidate/);
+  assert.match(
+    guide,
+    /Stable `v1` and `latest` tags remain disabled until a verifier/,
+  );
+  assert.match(guide, /Publication retry is unavailable/);
+  assert.match(guide, /only through an authenticated Automata dispatch/);
+  assert.doesNotMatch(
+    guide,
+    /Actions → Release → Run workflow|rerun the same tag|manual workflow input|dispatching its retry/,
+  );
+  assert.match(
+    guide,
+    /future pipeline must perform these gates[\s\S]+ancestor of current `main`/,
+  );
+  assert.match(
+    guide,
+    /ordinary CI \[`dist_build` recipe\]\(\.\.\/\.ci\/workflows\/ci\.yml\)/,
+  );
+  for (const prerequisite of [
+    "./scripts/ci/generate-sboms.sh",
+    "./scripts/ci/prepare-third-party-license-sources.sh",
+    "./scripts/ci/generate-third-party-licenses.sh",
+  ]) {
+    assert.match(guide, new RegExp(prerequisite.replaceAll(".", "\\.")));
+  }
+  const contextRecipe = section(
+    guide,
+    "./scripts/ci/prepare-service-proxy-context.sh",
+    "AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME=podman",
+  );
+  for (const argument of [
+    "target/service-proxy-context",
+    '"$AUTOMATA_EXPECTED_VERSION"',
+    '"$AUTOMATA_EXPECTED_GIT_SHA"',
+    '"$AUTOMATA_RELEASE_CREATED"',
+    '"$SOURCE_DATE_EPOCH"',
+  ]) {
+    assert.ok(
+      contextRecipe.includes(argument),
+      `missing context argument: ${argument}`,
+    );
+  }
+  assert.equal(
+    (guide.match(/build-service-proxy-candidate\.sh/g) ?? []).length,
+    2,
+  );
+  assert.match(guide, /compare the two candidate archives|cmp --/);
+  const policyReview = section(
+    guide,
+    "python3 scripts/ci/service-proxy-publication.py prepare-candidate",
+    "sha256sum",
+  );
+  for (const argument of [
+    "--candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar",
+    "--source-directory .",
+    '--candidate-commit "$AUTOMATA_EXPECTED_GIT_SHA"',
+    '--publisher-commit "$AUTOMATA_EXPECTED_GIT_SHA"',
+    "--run-id 1",
+    "--run-attempt 1",
+    "--output target/service-proxy-policy-review",
+  ]) {
+    assert.ok(policyReview.includes(argument), `missing policy argument: ${argument}`);
+  }
+  assert.match(
+    guide,
+    /operator handoff is\n`target\/service-proxy-policy-review\/automata-service-proxy\.oci\.tar`/,
+  );
+  assert.match(
+    guide,
+    /outer\n`automata-service-proxy-candidate-\*\.tar` is only the reproducible policy input/,
+  );
+  assert.match(profileGuide, /Automated profile publication is disabled/);
+  assert.match(profileGuide, /self-hosted runner/);
+  assert.match(profileGuide, /must never be represented as a\nGitHub-hosted build/);
+  assert.match(profileGuide, /candidate-source, and image digests/);
+  assert.match(profileGuide, /authenticated Automata\ndispatch/);
+  assert.match(
+    profileGuide,
+    /GitHub Actions manual\ndispatch is not publication authority/,
+  );
+  assert.match(guide, /`release` as the\s+unattended staging boundary/);
   assert.match(
     guide,
     /`crates-io`[\s\S]+required reviewer[\s\S]+prevent self-review/,
@@ -1272,7 +1500,6 @@ test("release documentation requires all publication controls", () => {
   assert.match(guide, /\.ci\/workflows\/profile-image\.yml/);
   assert.match(guide, /\.ci\/workflows\/release\.yml/);
   assert.match(guide, /crates\.io\/docs\/rate-limits/);
-  assert.match(guide, /rechecks?[^.]+default\s+branch/i);
   assert.match(guide, /ordinary CI permits a truthful pre-tag changelog/);
   assert.match(
     release,

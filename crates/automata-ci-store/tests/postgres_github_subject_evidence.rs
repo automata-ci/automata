@@ -10,12 +10,12 @@ use automata_ci_store::{
     BindGithubCheckRun, BindGithubCheckSuite, ClaimGithubCheckProjection, ClaimProviderDelivery,
     ClaimedGithubCheckProjection, CompleteGithubCheckProjection, CompleteProviderDelivery,
     EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
-    GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
-    GithubCheckRunId, GithubCheckSubjectRepository as _, GithubCheckSubjectTarget,
-    GithubCheckSuiteId, GithubCheckTerminalCause, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckProjectionAction, GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunId, GithubCheckSubjectId,
+    GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubCheckSuiteId,
+    GithubCheckTerminalCause, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryDispatchEvidenceRepository as _, GithubRepositoryDispatchResolution,
     GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
@@ -24,10 +24,11 @@ use automata_ci_store::{
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubSubjectEvidenceRepository as _, GithubSubjectEvidenceStoreError,
     LogicalWorkflowAdmissionRepository as _, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
+    ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
+    ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowOutcome, ProviderDeliveryWorkflowSourceState, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
@@ -45,6 +46,7 @@ const REPOSITORY_ID: u64 = 202;
 const APP_ID: u64 = 303;
 const OWNER_ID: u64 = 404;
 const HEAD_SHA: [u8; 20] = [9; 20];
+const CREATE_BEFORE_ADMISSION_WORKFLOW_PATH: &str = ".ci/workflows/build.yml";
 
 #[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 struct AcceptedDeliveryState {
@@ -889,6 +891,289 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn webhook_aggregate_create_before_admission_reconciles_with_stable_target() -> TestResult {
+    run_with_database(|database| async move {
+        let scenario = setup_create_before_admission(&database).await?;
+        let pending_create = begin_aggregate_create(&database, &scenario).await?;
+        let admitted = admit_create_before_admission_workflow(&database, &scenario).await?;
+        reconcile_aggregate_create(&database, &scenario, pending_create, admitted).await?;
+        Ok(())
+    })
+    .await
+}
+
+struct CreateBeforeAdmissionScenario {
+    fixture: Fixture,
+    accepted: ManifestPinnedGithubDeliveryReceipt,
+    delivery_claim: AuthenticatedGithubDeliveryClaim,
+}
+
+struct PendingAggregateCreate {
+    worker: GithubCheckProjectionWorkerId,
+    suite_id: GithubCheckSuiteId,
+    reconcile_not_before: UnixMillis,
+}
+
+#[derive(Clone, Copy)]
+struct AdmittedWorkflowCheck {
+    run_id: RunId,
+    subject_id: GithubCheckSubjectId,
+}
+
+async fn setup_create_before_admission(
+    database: &TestDatabase,
+) -> TestResult<CreateBeforeAdmissionScenario> {
+    let fixture = bootstrap_all_direct(
+        database,
+        "subject-evidence-create-before-link",
+        0x28a,
+        ProviderRepositoryVisibility::Public,
+        100,
+    )
+    .await?;
+    let accepted = database
+        .store()
+        .accept_manifest_pinned_github_delivery(acceptance(
+            &fixture,
+            "delivery-create-before-link",
+            OWNER_ID,
+            OWNER_ID,
+            HEAD_SHA,
+            fixture.activated_at.get(),
+            24,
+        ))
+        .await?;
+    let delivery_claim = claim_delivery(database, accepted.delivery_id(), 0x28b, 60_000).await?;
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        fixture.manifest.digest(),
+        "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        Sha256Digest::from_bytes([0x56; 32]),
+        vec![ProviderDeliveryWorkflowInventoryEntry::new(
+            CREATE_BEFORE_ADMISSION_WORKFLOW_PATH,
+            ProviderDeliveryWorkflowSourceState::Ready(Sha256Digest::from_bytes([0x36; 32])),
+        )?],
+    )?;
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                delivery_claim.claim(),
+                inventory,
+                delivery_claim.claimed_at(),
+            )?,
+        )
+        .await?;
+    Ok(CreateBeforeAdmissionScenario {
+        fixture,
+        accepted,
+        delivery_claim,
+    })
+}
+
+async fn begin_aggregate_create(
+    database: &TestDatabase,
+    scenario: &CreateBeforeAdmissionScenario,
+) -> TestResult<PendingAggregateCreate> {
+    let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(0x28c))?;
+    let subject_id = scenario.accepted.check_subject_id();
+    let ensure_suite = claim_projection(
+        database,
+        scenario.fixture.connection,
+        worker,
+        60_000,
+        "accepted webhook Check suite projection",
+    )
+    .await?;
+    assert_projection(
+        &ensure_suite,
+        subject_id,
+        GithubCheckProjectionAction::EnsureSuite,
+        GithubCheckDetailsTarget::Repository,
+    );
+    let suite_id = GithubCheckSuiteId::new(28_001)?;
+    database
+        .store()
+        .bind_github_check_suite(BindGithubCheckSuite::new(
+            ensure_suite.claim(),
+            suite_id,
+            ensure_suite.claimed_at(),
+        )?)
+        .await?;
+
+    let prepare = claim_projection(
+        database,
+        scenario.fixture.connection,
+        worker,
+        25,
+        "accepted webhook Check create projection",
+    )
+    .await?;
+    assert_projection(
+        &prepare,
+        subject_id,
+        GithubCheckProjectionAction::PrepareRunCreate,
+        GithubCheckDetailsTarget::Repository,
+    );
+    let reconcile_not_before = checked_add_millis(prepare.expires_at(), 1)?;
+    database
+        .store()
+        .begin_github_check_run_create(BeginGithubCheckRunCreate::new(
+            &prepare,
+            prepare.claimed_at(),
+            reconcile_not_before,
+        )?)
+        .await?;
+    Ok(PendingAggregateCreate {
+        worker,
+        suite_id,
+        reconcile_not_before,
+    })
+}
+
+async fn admit_create_before_admission_workflow(
+    database: &TestDatabase,
+    scenario: &CreateBeforeAdmissionScenario,
+) -> TestResult<AdmittedWorkflowCheck> {
+    let admitted_at = database_now(database.pool()).await?;
+    let command = logical_command_at_path(
+        &scenario.fixture,
+        "logical-create-before-link",
+        0x66,
+        25,
+        0x2_8a0,
+        admitted_at,
+        CREATE_BEFORE_ADMISSION_WORKFLOW_PATH,
+        [0x36; 32],
+    );
+    let run_id = command.run_id();
+    database
+        .store()
+        .admit_authenticated_github_delivery(command, scenario.delivery_claim, admitted_at)
+        .await?;
+    let workflow_subject: (Uuid, Option<Uuid>) = sqlx::query_as(
+        r"
+        SELECT id, workflow_run_id
+          FROM github_check_subjects
+         WHERE provider_delivery_id = $1
+           AND subject_key = $2
+           AND subject_kind = 'workflow'
+        ",
+    )
+    .bind(scenario.accepted.delivery_id().as_uuid())
+    .bind(CREATE_BEFORE_ADMISSION_WORKFLOW_PATH)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(workflow_subject.1, Some(run_id.as_uuid()));
+    let aggregate_run: Option<Uuid> =
+        sqlx::query_scalar("SELECT workflow_run_id FROM github_check_subjects WHERE id = $1")
+            .bind(scenario.accepted.check_subject_id().as_uuid())
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        aggregate_run, None,
+        "the delivery aggregate is not a run parent"
+    );
+    Ok(AdmittedWorkflowCheck {
+        run_id,
+        subject_id: GithubCheckSubjectId::from_uuid(workflow_subject.0)?,
+    })
+}
+
+async fn reconcile_aggregate_create(
+    database: &TestDatabase,
+    scenario: &CreateBeforeAdmissionScenario,
+    pending: PendingAggregateCreate,
+    admitted: AdmittedWorkflowCheck,
+) -> TestResult {
+    // The admitted per-workflow root is independently claimable. Lock its
+    // outbox so this proof deterministically reconciles the older aggregate.
+    let mut workflow_projection_lock = database.pool().begin().await?;
+    let locked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT subject_id FROM github_check_projection_outbox \
+         WHERE subject_id = $1 FOR UPDATE",
+    )
+    .bind(admitted.subject_id.as_uuid())
+    .fetch_all(&mut *workflow_projection_lock)
+    .await?;
+    assert_eq!(locked, vec![admitted.subject_id.as_uuid()]);
+
+    wait_until_database_at_or_after(database.pool(), pending.reconcile_not_before.get()).await?;
+    let aggregate_id = scenario.accepted.check_subject_id();
+    let reconcile = claim_projection(
+        database,
+        scenario.fixture.connection,
+        pending.worker,
+        60_000,
+        "webhook aggregate Check create reconciliation",
+    )
+    .await?;
+    assert_projection(
+        &reconcile,
+        aggregate_id,
+        GithubCheckProjectionAction::ReconcileRunCreate,
+        GithubCheckDetailsTarget::Repository,
+    );
+    database
+        .store()
+        .bind_github_check_run(BindGithubCheckRun::new(
+            GithubCheckRunBindingFence::Reconciliation(reconcile.claim()),
+            pending.suite_id,
+            GithubCheckRunId::new(28_002)?,
+            reconcile.claimed_at(),
+        )?)
+        .await?;
+    workflow_projection_lock.rollback().await?;
+
+    let workflow_ensure = claim_projection(
+        database,
+        scenario.fixture.connection,
+        pending.worker,
+        60_000,
+        "admitted workflow Check suite projection",
+    )
+    .await?;
+    assert_projection(
+        &workflow_ensure,
+        admitted.subject_id,
+        GithubCheckProjectionAction::EnsureSuite,
+        GithubCheckDetailsTarget::WorkflowRun(admitted.run_id),
+    );
+    Ok(())
+}
+
+async fn claim_projection(
+    database: &TestDatabase,
+    connection: ProviderConnectionId,
+    worker: GithubCheckProjectionWorkerId,
+    lease_millis: i64,
+    expected: &'static str,
+) -> TestResult<ClaimedGithubCheckProjection> {
+    let now = database_now(database.pool()).await?;
+    Ok(database
+        .store()
+        .claim_github_check_projection(ClaimGithubCheckProjection::new(
+            connection,
+            worker,
+            now,
+            checked_add_millis(now, lease_millis)?,
+        )?)
+        .await?
+        .expect(expected))
+}
+
+fn assert_projection(
+    projection: &ClaimedGithubCheckProjection,
+    subject_id: GithubCheckSubjectId,
+    action: GithubCheckProjectionAction,
+    details_target: GithubCheckDetailsTarget,
+) {
+    assert_eq!(projection.claim().subject_id(), subject_id);
+    assert_eq!(projection.action(), action);
+    assert_eq!(projection.details_target(), details_target);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn public_api_decodes_historical_manifest_profile_and_runner_policy() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(
@@ -1508,6 +1793,16 @@ async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {
             .fetch_one(pool)
             .await?,
     ))
+}
+
+async fn wait_until_database_at_or_after(pool: &sqlx::PgPool, target: i64) -> TestResult {
+    for _ in 0..5_000 {
+        if database_now(pool).await?.get() >= target {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    Err("database clock did not reach Check reconciliation time".into())
 }
 
 fn checked_add_millis(base: UnixMillis, duration_millis: i64) -> TestResult<UnixMillis> {

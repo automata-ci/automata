@@ -32,16 +32,6 @@ sys.modules[CANDIDATE_SPEC.name] = candidate
 CANDIDATE_SPEC.loader.exec_module(candidate)
 
 IMAGE_NAME = "ghcr.io/automata-ci/automata-service-proxy"
-IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
-GITHUB_WORKFLOW_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
-REPOSITORY_URI = "https://github.com/automata-ci/automata"
-WORKFLOW_PATH = ".ci/workflows/service-proxy-image.yml"
-SBOM_TYPE = "https://cyclonedx.org/bom"
-SOURCE_IDENTITY_TYPE = (
-    "https://github.com/automata-ci/automata/attestations/"
-    "service-proxy-source-identity/v1"
-)
 SHA256 = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -51,7 +41,6 @@ CREATED = re.compile(
     r"(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 MAX_CANDIDATE_SIZE = 160 * 1024 * 1024
-MAX_ATTESTATION_RESULTS_SIZE = 32 * 1024 * 1024
 MAX_EXPANDED_LAYER_SIZE = 64 * 1024 * 1024
 LOCK_KEYS = {
     "binary_sha256",
@@ -848,122 +837,6 @@ def validate_source_identity(value: object, lock: dict | None = None) -> dict:
     return identity
 
 
-def statement_matches(statement: object, lock: dict) -> bool:
-    if not isinstance(statement, dict):
-        return False
-    digest = lock["image"].removeprefix(f"{IMAGE_NAME}@sha256:")
-    return (
-        statement.get("_type") == IN_TOTO_STATEMENT_TYPE
-        and statement.get("subject")
-        == [{"digest": {"sha256": digest}, "name": IMAGE_NAME}]
-    )
-
-
-def validate_build_provenance(value: object, lock: dict) -> None:
-    provenance = exact_object(
-        value, {"buildDefinition", "runDetails"}, "build provenance"
-    )
-    definition = exact_object(
-        provenance["buildDefinition"],
-        {
-            "buildType",
-            "externalParameters",
-            "internalParameters",
-            "resolvedDependencies",
-        },
-        "build provenance definition",
-    )
-    if definition["buildType"] != GITHUB_WORKFLOW_BUILD_TYPE:
-        fail("build provenance type differs")
-    external = exact_object(
-        definition["externalParameters"], {"workflow"}, "build external parameters"
-    )
-    workflow = exact_object(
-        external["workflow"], {"path", "ref", "repository"}, "build workflow"
-    )
-    source_ref = workflow["ref"]
-    if (
-        workflow["path"] != WORKFLOW_PATH
-        or workflow["repository"] != REPOSITORY_URI
-        or not isinstance(source_ref, str)
-        or not source_ref.startswith("refs/heads/")
-        or "\n" in source_ref
-        or "\r" in source_ref
-    ):
-        fail("build provenance workflow identity differs")
-    internal = exact_object(
-        definition["internalParameters"], {"github"}, "build internal parameters"
-    )
-    github = exact_object(
-        internal["github"],
-        {
-            "event_name",
-            "repository_id",
-            "repository_owner_id",
-            "runner_environment",
-        },
-        "build GitHub parameters",
-    )
-    if (
-        github["event_name"] != "workflow_dispatch"
-        or github["runner_environment"] != "github-hosted"
-        or not isinstance(github["repository_id"], str)
-        or POSITIVE_INTEGER.fullmatch(github["repository_id"]) is None
-        or not isinstance(github["repository_owner_id"], str)
-        or POSITIVE_INTEGER.fullmatch(github["repository_owner_id"]) is None
-    ):
-        fail("build provenance GitHub identity differs")
-    dependency = {
-        "digest": {"gitCommit": lock["publisher_commit"]},
-        "uri": f"git+{REPOSITORY_URI}@{source_ref}",
-    }
-    if definition["resolvedDependencies"] != [dependency]:
-        fail("build provenance source dependency differs")
-    run_details = exact_object(
-        provenance["runDetails"], {"builder", "metadata"}, "build run details"
-    )
-    if run_details["builder"] != {
-        "id": f"{REPOSITORY_URI}/{WORKFLOW_PATH}@{source_ref}"
-    }:
-        fail("build provenance builder differs")
-    metadata = exact_object(
-        run_details["metadata"], {"invocationId"}, "build invocation metadata"
-    )
-    invocation = metadata["invocationId"]
-    expected_invocation = re.escape(f"{REPOSITORY_URI}/actions/runs/")
-    if not isinstance(invocation, str) or re.fullmatch(
-        rf"{expected_invocation}[1-9][0-9]*/attempts/[1-9][0-9]*", invocation
-    ) is None:
-        fail("build provenance invocation differs")
-
-
-def predicates(
-    results_path: pathlib.Path, lock: dict, label: str, predicate_type: str
-) -> list[dict]:
-    value = load_canonical_or_transport_json(
-        read_regular(results_path, MAX_ATTESTATION_RESULTS_SIZE), label
-    )
-    if not isinstance(value, list) or not value:
-        fail(f"{label} contains no verified attestations")
-    found: list[dict] = []
-    for result in value:
-        if not isinstance(result, dict):
-            fail(f"{label} contains a malformed verification result")
-        verification = result.get("verificationResult")
-        if not isinstance(verification, dict):
-            fail(f"{label} contains a malformed verification result")
-        statement = verification.get("statement")
-        if not statement_matches(statement, lock) or statement.get(
-            "predicateType"
-        ) != predicate_type:
-            fail(f"{label} contains no exact locked-image subject")
-        predicate = statement.get("predicate")
-        if not isinstance(predicate, dict):
-            fail(f"{label} contains a malformed predicate")
-        found.append(predicate)
-    return found
-
-
 def load_canonical_or_transport_json(contents: bytes, label: str) -> object:
     try:
         return json.loads(
@@ -976,55 +849,11 @@ def load_canonical_or_transport_json(contents: bytes, label: str) -> object:
 
 
 def verify_attestations(arguments: argparse.Namespace) -> None:
-    lock = load_lock(arguments.lock)
-    provenances = predicates(
-        arguments.provenance_results,
-        lock,
-        "build provenance results",
-        PROVENANCE_TYPE,
+    del arguments
+    fail(
+        "Automata publication attestations are unsupported: GitHub-hosted "
+        "Actions provenance cannot authenticate a self-hosted Automata job"
     )
-    for provenance in provenances:
-        validate_build_provenance(provenance, lock)
-
-    identities = predicates(
-        arguments.identity_results,
-        lock,
-        "source identity results",
-        SOURCE_IDENTITY_TYPE,
-    )
-    matching_identities: list[dict] = []
-    for identity in identities:
-        if sha256(canonical_json(identity)) != lock["source_identity_sha256"]:
-            fail("verified source identity conflicts with the reviewed lock")
-        matching_identities.append(validate_source_identity(identity, lock))
-    first_identity = canonical_json(matching_identities[0])
-    if any(
-        canonical_json(value) != first_identity for value in matching_identities[1:]
-    ):
-        fail("verified source identities conflict")
-
-    sboms = predicates(arguments.sbom_results, lock, "SBOM results", SBOM_TYPE)
-    for sbom in sboms:
-        if sha256(canonical_json(sbom)) != lock["sbom_sha256"]:
-            fail("verified SBOM conflicts with the reviewed lock")
-        validate_cyclonedx(
-            sbom,
-            matching_identities[0]["artifacts"]["binary_sha256"],
-            matching_identities[0]["release"]["version"],
-            "verified SBOM",
-        )
-
-    write_exclusive(arguments.identity_output, first_identity)
-    identity = matching_identities[0]
-    outputs = {
-        "candidate_commit": identity["build"]["candidate_commit"],
-        "created": identity["release"]["created"],
-        "source_date_epoch": str(identity["release"]["source_date_epoch"]),
-        "version": identity["release"]["version"],
-    }
-    write_outputs(arguments.github_output, outputs)
-    for name, value in outputs.items():
-        print(f"{name}={value}")
 
 
 def verify_image_config(arguments: argparse.Namespace) -> None:

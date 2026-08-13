@@ -27,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 1;
+const CONFIG_SCHEMA: u16 = 2;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

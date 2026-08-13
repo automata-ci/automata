@@ -96,7 +96,7 @@ pub use github_checks::{
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
     GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
     GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
-    GithubCheckTerminalizationRepository, GithubCheckValueError, LinkGithubCheckWorkflowRun,
+    GithubCheckTerminalizationRepository, GithubCheckValueError,
     MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
     MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
     RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, ResolveGithubCheckRunCreate,

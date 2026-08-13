@@ -113,7 +113,7 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {

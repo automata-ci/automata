@@ -1,4 +1,4 @@
-name: Publish service proxy image
+name: Publish service proxy image (disabled)
 
 on:
   workflow_dispatch:
@@ -41,6 +41,16 @@ jobs:
       locked_image: ${{ steps.request.outputs.locked_image }}
       publisher_commit: ${{ steps.request.outputs.publisher_commit }}
     steps:
+      - name: Refuse publication without an accepted Automata attestation issuer
+        run: |
+          printf '%s\n' \
+            'error: service-proxy publication is disabled.' \
+            'These jobs run on self-hosted Automata runners, while the configured GHCR' \
+            'attestation and protected-environment verifiers authenticate GitHub-hosted' \
+            'Actions identities. Automata must not claim that issuer or runner identity.' \
+            'Build and verify the canonical local candidate for operator review instead.' >&2
+          exit 1
+
       - name: Check out trusted publisher source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
