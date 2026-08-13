@@ -504,9 +504,10 @@ fn test_offer_command(
     let payload = serde_json::to_vec(&serde_json::json!({
         "job": job,
         "lease": lease,
+        "managed_secret_bindings": ManagedSecretBindingOverlay::empty(lease),
         "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
         "runtime_authorities": claimed_runtime_authorities(job, lease),
-        "schema": 2,
+        "schema": 1,
         "slot": slot.get(),
     }))
     .expect("offer payload");
@@ -514,8 +515,8 @@ fn test_offer_command(
         EnqueueRunnerCommand::new(
             fence,
             operation_id,
-            RunnerOperationKind::new("automata.runner.lease-offer.v2").expect("offer kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(2).expect("schema"), payload)
+            RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
                 .expect("offer payload"),
             UnixMillis::new(2_000),
         ),
@@ -524,7 +525,7 @@ fn test_offer_command(
     )
 }
 
-fn test_offer_command_v3(
+fn test_offer_command_with_bindings(
     fence: RunnerSessionFence,
     operation_id: OperationId,
     sequence: CommandSequence,
@@ -539,7 +540,7 @@ fn test_offer_command_v3(
         "managed_secret_bindings": managed_secret_bindings,
         "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
         "runtime_authorities": claimed_runtime_authorities(job, lease),
-        "schema": 3,
+        "schema": 1,
         "slot": slot.get(),
     }))
     .expect("offer payload");
@@ -547,8 +548,8 @@ fn test_offer_command_v3(
         EnqueueRunnerCommand::new(
             fence,
             operation_id,
-            RunnerOperationKind::new("automata.runner.lease-offer.v3").expect("offer kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(3).expect("schema"), payload)
+            RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
                 .expect("offer payload"),
             UnixMillis::new(2_000),
         ),
@@ -920,7 +921,15 @@ async fn durable_v2_and_v3_offer_replays_decode_their_exact_secret_overlay_shape
         let command = if schema == 2 {
             test_offer_command(fence, operation_id, sequence, slot, &job, &lease)
         } else {
-            test_offer_command_v3(fence, operation_id, sequence, slot, &job, &lease, &overlay)
+            test_offer_command_with_bindings(
+                fence,
+                operation_id,
+                sequence,
+                slot,
+                &job,
+                &lease,
+                &overlay,
+            )
         };
         harness
             .commands
@@ -1147,7 +1156,7 @@ async fn post_kms_offer_revocation_commits_no_work_before_admitting_successor() 
     )));
     let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command_v3(
+        LeaseOfferReplayResolution::Published(test_offer_command_with_bindings(
             fence,
             offer_operation_id,
             offer_sequence,
@@ -1540,7 +1549,7 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
     )));
     let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     *harness.publisher.replay.lock().expect("offer replay lock") = Some(Ok(
-        LeaseOfferReplayResolution::Published(test_offer_command_v3(
+        LeaseOfferReplayResolution::Published(test_offer_command_with_bindings(
             fence,
             published_operation_id,
             published_sequence,
@@ -1654,7 +1663,7 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
         let operation_id = OperationId::new();
         let sequence = CommandSequence::new(1).expect("sequence");
         let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
-        let command = test_offer_command_v3(
+        let command = test_offer_command_with_bindings(
             fence,
             operation_id,
             sequence,

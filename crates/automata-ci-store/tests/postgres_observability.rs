@@ -28,12 +28,14 @@ use automata_ci_store::{
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RunnerCommandOutbox as _, RunnerCommandPayload, RunnerDesiredState, RunnerGeneration,
-    RunnerObservedState, RunnerOperationKind, RunnerSessionFence, RunnerSessionState, SessionEpoch,
-    TenantScope, WORKFLOW_ADMISSION_EPOCH, WorkflowAdmissionIdempotency, WorkflowRunStatus,
-    WorkflowSnapshotId,
+    ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RegisterProviderDeliveryWorkflowInventory, RunnerCommandOutbox as _, RunnerCommandPayload,
+    RunnerDesiredState, RunnerGeneration, RunnerObservedState, RunnerOperationKind,
+    RunnerSessionFence, RunnerSessionState, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
+    WorkflowAdmissionIdempotency, WorkflowRunStatus, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -198,8 +200,8 @@ fn assert_logical_snapshot(
     assert_eq!(snapshot.workflow_runs().get(WorkflowRunStatus::Queued), 2);
     assert_eq!(
         snapshot
-            .workflow_plan_v2_runs()
-            .get(automata_ci_store::WorkflowPlanV2RunState::Active),
+            .logical_workflow_runs()
+            .get(automata_ci_store::LogicalWorkflowRunState::Active),
         1
     );
     assert_eq!(
@@ -697,7 +699,7 @@ async fn insert_logical_metrics_state(
     wait_until_database_after(database, expired.expires_at().get()).await?;
 
     let pending_since: i64 =
-        sqlx::query_scalar("SELECT created_at_ms FROM workflow_plan_v2_jobs WHERE id = $1")
+        sqlx::query_scalar("SELECT created_at_ms FROM logical_workflow_jobs WHERE id = $1")
             .bind(fixture.pending_job.as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -813,6 +815,91 @@ async fn admit_logical_metrics_fixture(
     fixture: &mut LogicalMetricsFixture,
 ) -> TestResult {
     let manifest = &fixture.manifest;
+    bootstrap_logical_metrics_manifest(database, manifest).await?;
+    let accepted_at = UnixMillis::new(database_now_ms(database).await?);
+    let accepted = database
+        .store()
+        .accept_manifest_pinned_github_delivery(AcceptManifestPinnedGithubDelivery::new(
+            AcceptProviderDelivery::new(
+                ProviderDeliveryIdentity::new(
+                    manifest.tenant().clone(),
+                    "github",
+                    manifest.connection_id(),
+                    manifest.installation_id(),
+                    ProviderRepositoryCoordinates::new(
+                        manifest.github_repository_id(),
+                        manifest.repository_visibility(),
+                        manifest.github_repository_name().as_str(),
+                    )?,
+                    format!("metrics-logical-{}", fixture.suffix),
+                )?,
+                fixture.command.request_digest(),
+                common::authenticated_github_event_object(fixture.command.event())?,
+                accepted_at,
+            )?,
+            ProviderRepositoryOwnerId::new(9_100_004)?,
+            ProviderRepositoryOwnerId::new(9_100_004)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
+            GithubCheckHeadSha::new([20; 20])?,
+            manifest.webhook_verifier_fingerprint(),
+            manifest.webhook_verifier_revision(),
+        )?)
+        .await?;
+    let claim_observed_at = database_now_ms(database).await?;
+    let claimed = database
+        .store()
+        .claim_provider_delivery(ClaimProviderDelivery::new(
+            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())?,
+            UnixMillis::new(claim_observed_at),
+            UnixMillis::new(claim_observed_at + 60_000),
+        )?)
+        .await?
+        .ok_or("accepted metrics delivery was not claimable")?;
+    assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        fixture.command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(
+                            fixture.command.source().digest(),
+                        ),
+                    )?],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
+    fixture.command = logical_metrics_command_at(&fixture.command, claimed.claimed_at())?;
+    database
+        .store()
+        .admit_authenticated_github_delivery(
+            fixture.command.clone(),
+            AuthenticatedGithubDeliveryClaim::new(
+                claimed.claim(),
+                claimed.attempt(),
+                claimed.claimed_at(),
+                claimed.expires_at(),
+            )?,
+            fixture.command.admitted_at(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn bootstrap_logical_metrics_manifest(
+    database: &TestDatabase,
+    manifest: &GithubProviderManifest,
+) -> TestResult {
     database
         .store()
         .bootstrap_github_provider_repository(
@@ -844,59 +931,6 @@ async fn admit_logical_metrics_fixture(
             )?,
             UnixMillis::new(database_now_ms(database).await?),
         )?)
-        .await?;
-    let accepted_at = UnixMillis::new(database_now_ms(database).await?);
-    let accepted = database
-        .store()
-        .accept_manifest_pinned_github_delivery(AcceptManifestPinnedGithubDelivery::new(
-            AcceptProviderDelivery::new(
-                ProviderDeliveryIdentity::new(
-                    manifest.tenant().clone(),
-                    "github",
-                    manifest.connection_id(),
-                    manifest.installation_id(),
-                    ProviderRepositoryCoordinates::new(
-                        manifest.github_repository_id(),
-                        manifest.repository_visibility(),
-                        manifest.github_repository_name().as_str(),
-                    )?,
-                    format!("metrics-logical-{}", fixture.suffix),
-                )?,
-                fixture.command.request_digest(),
-                fixture.command.event().clone(),
-                accepted_at,
-            )?,
-            ProviderRepositoryOwnerId::new(9_100_004)?,
-            ProviderRepositoryOwnerId::new(9_100_004)?,
-            GithubCheckHeadSha::new([20; 20])?,
-            manifest.webhook_verifier_fingerprint(),
-            manifest.webhook_verifier_revision(),
-        )?)
-        .await?;
-    let claim_observed_at = database_now_ms(database).await?;
-    let claimed = database
-        .store()
-        .claim_provider_delivery(ClaimProviderDelivery::new(
-            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(claim_observed_at),
-            UnixMillis::new(claim_observed_at + 60_000),
-        )?)
-        .await?
-        .ok_or("accepted metrics delivery was not claimable")?;
-    assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
-    fixture.command = logical_metrics_command_at(&fixture.command, claimed.claimed_at())?;
-    database
-        .store()
-        .admit_authenticated_github_delivery(
-            fixture.command.clone(),
-            AuthenticatedGithubDeliveryClaim::new(
-                claimed.claim(),
-                claimed.attempt(),
-                claimed.claimed_at(),
-                claimed.expires_at(),
-            )?,
-            fixture.command.admitted_at(),
-        )
         .await?;
     Ok(())
 }
@@ -971,7 +1005,7 @@ async fn assert_logical_admission_evidence(
           ON delivery.provider_delivery_id = subject.provider_delivery_id
          AND delivery.tenant_id = subject.tenant_id
          AND delivery.repository_id = subject.repository_id
-        JOIN workflow_plan_v2_runtime_policy_pins AS pin
+        JOIN logical_workflow_runtime_policy_pins AS pin
           ON pin.run_id = subject.run_id
          AND pin.tenant_id = subject.tenant_id
          AND pin.repository_id = subject.repository_id
@@ -1008,7 +1042,7 @@ async fn activate_logical_metrics_run(
         WITH stamp AS (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         )
-        UPDATE workflow_plan_v2_runs
+        UPDATE logical_workflow_runs
         SET state = 'active', revision = revision + 1,
             updated_at_ms = stamp.now_ms
         FROM stamp
@@ -1024,7 +1058,7 @@ async fn activate_logical_metrics_run(
         WITH stamp AS (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
         )
-        UPDATE workflow_plan_v2_invocations
+        UPDATE logical_workflow_invocations
         SET state = 'active', revision = revision + 1,
             updated_at_ms = stamp.now_ms
         FROM stamp
@@ -1188,8 +1222,8 @@ async fn insert_metrics_workflow(
         ) VALUES (
             $1, $2, $3, $4, 1, 'push', 'metrics/event', $5, 128,
             'application/json', $6, 'metrics/plan', 128,
-            'application/vnd.automata.workflow-plan.protobuf', 2,
-            $7, 'queued', $8, 1, 1, 3
+            'application/vnd.automata.workflow-plan.protobuf', 1,
+            $7, 'queued', $8, 1, 1, 1
         )
         ",
     )
@@ -1258,7 +1292,7 @@ async fn insert_metrics_runner(
             id, runner_id, protocol_version, job_ir_schema, capability_snapshot,
             connected_at_ms, heartbeat_at_ms, runner_generation, session_epoch,
             last_command_sequence, acknowledged_command_sequence
-        ) VALUES ($1, $2, 5, $3, $4::jsonb, 2, 2, 1, 1, 0, 0)
+        ) VALUES ($1, $2, 1, $3, $4::jsonb, 2, 2, 1, 1, 0, 0)
         ",
     )
     .bind(session_id.as_uuid())
@@ -1396,7 +1430,7 @@ async fn insert_artifact_state(
         INSERT INTO workflow_artifacts (
             upload_id, tenant_id, repository_id, run_id, job_id, attempt_id,
             fencing_token, name, protocol_version, mime_type, created_at_seconds
-        ) VALUES ($1, $2, $3, $4, $5, $6, 1, 'pending', 7, 'application/octet-stream', 10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, 1, 'pending', 1, 'application/octet-stream', 10)
         RETURNING id
         ",
     )
@@ -1420,7 +1454,7 @@ async fn insert_artifact_state(
             finalization_generation, finalization_claimed_size_bytes,
             finalization_claim_expires_at_seconds, manifest_bytes
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'reserved', 7, 'application/octet-stream',
+            $1, $2, $3, $4, $5, $6, 1, 'reserved', 1, 'application/octet-stream',
             'pending', $7, 0, 'metrics/manifest-reserved', $8, 1,
             'application/json', 10, 'reserved', 20, 1, 0, 100, $9
         )
@@ -1450,7 +1484,7 @@ async fn insert_artifact_state(
             finalization_claimed_size_bytes, finalization_claim_expires_at_seconds,
             manifest_bytes
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'finalized', 7, 'application/octet-stream',
+            $1, $2, $3, $4, $5, $6, 1, 'finalized', 1, 'application/octet-stream',
             'finalized', $7, 0, 'metrics/manifest-finalized', $8, 1,
             'application/json', 10, 40, 'ready', 30, 1, 0, 100, $9
         )

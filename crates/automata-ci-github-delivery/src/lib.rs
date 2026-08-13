@@ -10,7 +10,7 @@
 //! # Request digest
 //!
 //! The request digest is SHA-256 over the domain
-//! `automata.github-delivery-ingress.request.v3\0`, an unsigned big-endian
+//! `automata.github-delivery-ingress.event-request\0`, an unsigned big-endian
 //! 16-bit field count, and thirteen ordered fields. Each field is encoded as an
 //! unsigned big-endian 16-bit label length and label bytes followed by an
 //! unsigned big-endian 64-bit value length and value bytes. In order, those
@@ -21,9 +21,7 @@
 //! complete [`ProviderDeliveryIdentity`]. Numeric provider IDs are encoded as unsigned
 //! big-endian 64-bit values and the UUID uses its canonical 16 bytes. This
 //! encoding makes header or routing drift a durable replay conflict instead
-//! of silently aliasing changed evidence. Version-one generic events use a
-//! separate digest domain and media type while retaining the same ordered
-//! fields, so legacy push rows are never reinterpreted.
+//! of silently aliasing changed evidence.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -68,11 +66,11 @@ pub use schedule::{
 };
 
 pub use worker::{
-    GithubDeliveryClaimSnapshot, GithubDeliveryEventWorkflowRequest, GithubDeliverySourceAuthority,
-    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
-    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowProcessor, GithubDeliveryWorkflowProcessorCompletion,
-    GithubDeliveryWorkflowProcessorError, GithubDeliveryWorkflowRequest,
+    GithubDeliveryClaimSnapshot, GithubDeliverySourceAuthority, GithubDeliveryWorker,
+    GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError,
+    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
+    GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
+    GithubDeliveryWorkflowRequest,
 };
 
 use std::{
@@ -83,14 +81,16 @@ use std::{
 
 use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
+#[cfg(test)]
+use automata_ci_github::VerifiedGithubPush;
 use automata_ci_github::{
-    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubPush,
-    VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubWebhook,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
-    AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEventKind,
-    GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubProviderWebhookVerifierFingerprint,
+    AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubProviderWebhookVerifierFingerprint,
     GithubRepositoryDispatchEvidenceRepository, GithubServerServiceRevision,
     GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
@@ -105,18 +105,15 @@ use thiserror::Error;
 
 /// Canonical media type retained for an authenticated raw GitHub push event.
 pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
-/// Version-one media type for a generic authenticated raw GitHub event.
-pub const GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE: &str =
-    automata_ci_github::GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE;
+/// Media type for a generic authenticated raw GitHub event.
+pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
+    automata_ci_github::GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE;
 /// Maximum exact repository connections accepted by one webhook verifier.
 pub const MAX_GITHUB_DELIVERY_CONNECTIONS: usize = 256;
 
 const PROVIDER: &str = "github";
-const RAW_OBJECT_KEY_PREFIX: &str = "provider-deliveries/github/push/sha256";
-const RAW_EVENT_V1_OBJECT_KEY_PREFIX: &str = "provider-deliveries/github/event-v1/sha256";
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.github-delivery-ingress.request.v3\0";
-const EVENT_V1_REQUEST_DIGEST_DOMAIN: &[u8] =
-    b"automata.github-delivery-ingress.event-request.v1\0";
+const RAW_EVENT_OBJECT_KEY_PREFIX: &str = "provider-deliveries/github/event/sha256";
+const EVENT_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.github-delivery-ingress.event-request\0";
 const REQUEST_DIGEST_FIELD_COUNT: u16 = 13;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
 
@@ -244,18 +241,6 @@ impl GithubDeliveryConnection {
     #[must_use]
     pub fn default_branch_ref(&self) -> Option<&str> {
         self.default_branch_ref.as_deref()
-    }
-
-    fn matches_selected(
-        &self,
-        push: &VerifiedGithubPush,
-        signed_repository_owner_id: ProviderRepositoryOwnerId,
-    ) -> bool {
-        self.matches_repository(
-            push.installation_id().get(),
-            push.repository(),
-            signed_repository_owner_id,
-        )
     }
 
     fn matches_selected_event(
@@ -573,131 +558,16 @@ impl GithubDeliveryIngress {
         &self.connections
     }
 
-    /// Authenticates and durably accepts one exact GitHub push request.
+    /// Authenticates and durably accepts one supported GitHub event.
     ///
-    /// The raw object put always completes before the provider-inbox port is
-    /// invoked. Thus an inbox transaction can never include blob or provider
-    /// I/O. Exact durable replays return the same credential-free acceptance
-    /// evidence; changed evidence under the same delivery identity fails
-    /// closed in the provider inbox.
-    ///
-    /// # Errors
-    ///
-    /// Rejects failed webhook verification, configured identity drift,
-    /// invalid trusted time, immutable-object failures, and durable inbox
-    /// failures using only sanitized error classes.
-    pub async fn accept(
-        &self,
-        headers: &HeaderMap,
-        raw_body: Bytes,
-    ) -> Result<AcceptedGithubDelivery, GithubDeliveryIngressError> {
-        let push = self
-            .verifier
-            .verify(headers, raw_body)
-            .map_err(GithubDeliveryIngressError::Webhook)?;
-        let installation_id = ProviderInstallationId::new(push.installation_id().get())
-            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let repository_id = ProviderRepositoryId::new(push.repository().id().get())
-            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let signed_repository_owner_id =
-            ProviderRepositoryOwnerId::new(push.repository().owner_id().get())
-                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let connection_index = self
-            .connection_by_selector
-            .get(&(installation_id, repository_id))
-            .copied()
-            .ok_or(GithubDeliveryIngressError::ConfiguredIdentityMismatch)?;
-        let connection = self
-            .connections
-            .get(connection_index)
-            .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
-        if !connection.matches_selected(&push, signed_repository_owner_id) {
-            return Err(GithubDeliveryIngressError::ConfiguredIdentityMismatch);
-        }
-
-        let accepted_at = self.clock.now();
-        if accepted_at.get() < 0 {
-            return Err(GithubDeliveryIngressError::InvalidTrustedTime);
-        }
-
-        let repository_visibility = provider_visibility(push.repository().visibility());
-        let repository = ProviderRepositoryCoordinates::new(
-            connection.repository_id,
-            repository_visibility,
-            connection.repository_identity(),
-        )
-        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let identity = ProviderDeliveryIdentity::new(
-            connection.tenant.clone(),
-            PROVIDER,
-            connection.connection_id,
-            connection.installation_id,
-            repository,
-            push.delivery_id(),
-        )
-        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-
-        let request_digest =
-            canonical_request_digest(headers, &push, &identity, signed_repository_owner_id)?;
-        let body_digest = Sha256Digest::from_bytes(*push.body_sha256().as_bytes());
-        let object_key = format!("{RAW_OBJECT_KEY_PREFIX}/{body_digest}.json");
-        let blob_key = BlobKey::new(object_key.clone())
-            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let media_type = MediaType::new(GITHUB_PUSH_EVENT_MEDIA_TYPE)
-            .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let payload = BlobPayload::from_bytes(blob_key, media_type, push.raw_body().clone());
-        if payload.descriptor().digest() != body_digest {
-            return Err(GithubDeliveryIngressError::InvariantViolation);
-        }
-        self.objects
-            .put_if_absent(payload)
-            .await
-            .map_err(|error| GithubDeliveryIngressError::RawObject { kind: error.kind() })?;
-
-        let raw_event = AdmissionObject::new_event(
-            body_digest,
-            ObjectKey::new(object_key)
-                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
-            u64::try_from(push.raw_body().len())
-                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
-            GITHUB_PUSH_EVENT_MEDIA_TYPE,
-        )
-        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let delivery =
-            AcceptProviderDelivery::new(identity, request_digest, raw_event.clone(), accepted_at)
-                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let request = AcceptManifestPinnedGithubDelivery::new(
-            delivery,
-            signed_repository_owner_id,
-            connection.repository_owner_id,
-            check_head_sha(&push)?,
-            self.verifier_fingerprint,
-            self.verifier_revision,
-        )
-        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let receipt = self
-            .deliveries
-            .accept_manifest_pinned_github_delivery(request)
-            .await
-            .map_err(|error| GithubDeliveryIngressError::from_subject_store(&error))?;
-        Ok(AcceptedGithubDelivery {
-            receipt,
-            request_digest,
-            raw_event,
-        })
-    }
-
-    /// Authenticates and durably accepts one supported version-one GitHub event.
-    ///
-    /// This generic path stores explicit event/ref coordinates and a distinct
-    /// media type. It accepts push, pull-request, and merge-group evidence;
-    /// [`Self::accept`] remains the stable legacy push-only API.
+    /// The canonical path stores explicit event and ref coordinates for push,
+    /// pull-request, and merge-group evidence.
     ///
     /// # Errors
     ///
     /// Returns the same sanitized verification, authority, object, time, and
     /// inbox failures as [`Self::accept`].
-    pub async fn accept_authenticated_event_v1(
+    pub async fn accept(
         &self,
         headers: &HeaderMap,
         raw_body: Bytes,
@@ -714,7 +584,7 @@ impl GithubDeliveryIngress {
         let prepared = self
             .persist_authenticated_event(headers, &selected, connection)
             .await?;
-        let request = AcceptManifestPinnedGithubDelivery::new_authenticated_event_v1(
+        let request = AcceptManifestPinnedGithubDelivery::new(
             prepared.delivery,
             selected.signed_repository_owner_id,
             connection.repository_owner_id,
@@ -761,7 +631,7 @@ impl GithubDeliveryIngress {
             return Err(GithubDeliveryIngressError::InvariantViolation);
         };
         let connection = self.selected_connection(selected.connection_index)?;
-        let event = GithubAuthenticatedEventV1::new(
+        let event = GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             dispatch.git_ref(),
         )
@@ -857,17 +727,17 @@ impl GithubDeliveryIngress {
             selected.event.delivery_id(),
         )
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let request_digest = canonical_event_v1_request_digest(
+        let request_digest = canonical_event_request_digest(
             headers,
             &selected.event,
             &identity,
             selected.signed_repository_owner_id,
         )?;
         let body_digest = Sha256Digest::from_bytes(*selected.event.body_sha256().as_bytes());
-        let object_key = format!("{RAW_EVENT_V1_OBJECT_KEY_PREFIX}/{body_digest}.json");
+        let object_key = format!("{RAW_EVENT_OBJECT_KEY_PREFIX}/{body_digest}.json");
         let blob_key = BlobKey::new(object_key.clone())
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let media_type = MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE)
+        let media_type = MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE)
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         let payload =
             BlobPayload::from_bytes(blob_key, media_type, selected.event.raw_body().clone());
@@ -884,7 +754,7 @@ impl GithubDeliveryIngress {
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
             u64::try_from(selected.event.raw_body().len())
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
-            GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+            GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         )
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         let delivery =
@@ -981,29 +851,14 @@ impl GithubDeliveryIngressError {
     }
 }
 
-fn canonical_request_digest(
-    headers: &HeaderMap,
-    push: &VerifiedGithubPush,
-    identity: &ProviderDeliveryIdentity,
-    repository_owner_id: ProviderRepositoryOwnerId,
-) -> Result<Sha256Digest, GithubDeliveryIngressError> {
-    canonical_request_digest_with_domain(
-        REQUEST_DIGEST_DOMAIN,
-        headers,
-        push.raw_body(),
-        identity,
-        repository_owner_id,
-    )
-}
-
-fn canonical_event_v1_request_digest(
+fn canonical_event_request_digest(
     headers: &HeaderMap,
     event: &VerifiedGithubWebhook,
     identity: &ProviderDeliveryIdentity,
     repository_owner_id: ProviderRepositoryOwnerId,
 ) -> Result<Sha256Digest, GithubDeliveryIngressError> {
     canonical_request_digest_with_domain(
-        EVENT_V1_REQUEST_DIGEST_DOMAIN,
+        EVENT_REQUEST_DIGEST_DOMAIN,
         headers,
         event.raw_body(),
         identity,
@@ -1096,7 +951,7 @@ fn canonical_request_digest_with_domain(
 }
 
 struct AuthenticatedEventCoordinates {
-    event: GithubAuthenticatedEventV1,
+    event: GithubAuthenticatedEvent,
     head_sha: GithubCheckHeadSha,
 }
 
@@ -1128,7 +983,7 @@ fn authenticated_event_coordinates(
         ),
         _ => return Err(GithubDeliveryIngressError::InvariantViolation),
     };
-    let event = GithubAuthenticatedEventV1::new(kind, git_ref)
+    let event = GithubAuthenticatedEvent::new(kind, git_ref)
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
     Ok(AuthenticatedEventCoordinates {
         event,
@@ -1136,6 +991,7 @@ fn authenticated_event_coordinates(
     })
 }
 
+#[cfg(test)]
 fn check_head_sha(
     push: &VerifiedGithubPush,
 ) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {

@@ -116,7 +116,7 @@ const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
            publication.runtime_policy_digest AS publication_runtime_policy_digest,
            (
                SELECT COUNT(*)
-               FROM workflow_plan_v2_activation_work_selections AS all_selection
+               FROM logical_workflow_activation_work_selections AS all_selection
                WHERE all_selection.run_id = job.run_id
                  AND all_selection.invocation_id = job.invocation_id
                  AND all_selection.logical_job_id = job.id
@@ -124,26 +124,26 @@ const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
            ) AS activation_selection_count,
            (
                SELECT COUNT(*)
-               FROM workflow_plan_v2_activation_renewal_receipts AS all_renewal
+               FROM logical_workflow_activation_renewal_receipts AS all_renewal
                WHERE all_renewal.logical_job_id = job.id
                  AND all_renewal.authority_kind = 'activation'
            ) AS activation_renewal_count,
            (
                SELECT COUNT(*)
-               FROM workflow_plan_v2_activation_renewal_receipts AS later_renewal
+               FROM logical_workflow_activation_renewal_receipts AS later_renewal
                WHERE later_renewal.logical_job_id = job.id
                  AND later_renewal.authority_kind = 'activation'
                  AND later_renewal.successor_generation >= 3
            ) AS later_activation_renewal_count
-    FROM workflow_plan_v2_jobs AS job
+    FROM logical_workflow_jobs AS job
     JOIN workflow_runs AS run ON run.id = job.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
-    JOIN workflow_plan_v2_activation_work_selections AS selection
+    JOIN logical_workflow_activation_work_selections AS selection
       ON selection.selection_id = job.activation_origin_selection_id
-    JOIN workflow_plan_v2_activation_renewal_receipts AS renewal
+    JOIN logical_workflow_activation_renewal_receipts AS renewal
       ON renewal.logical_job_id = job.id
      AND renewal.authority_kind = 'activation'
-    JOIN workflow_plan_v2_activation_publications AS publication
+    JOIN logical_workflow_activation_publications AS publication
       ON publication.run_id = job.run_id
      AND publication.invocation_id = job.invocation_id
      AND publication.logical_job_id = job.id
@@ -980,21 +980,21 @@ async fn assert_durable_profiles_and_job_ir(pool: &PgPool, blobs: &MemoryBlobSto
                concrete.authority_profile::text AS concrete_profile,
                instance.job_ir_digest, instance.job_ir_object_key,
                instance.job_ir_size_bytes, instance.job_ir_media_type
-        FROM workflow_plan_v2_jobs AS job
+        FROM logical_workflow_jobs AS job
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_activation_preparation_claims AS claim
+        JOIN logical_workflow_activation_preparation_claims AS claim
           ON claim.logical_job_id = job.id
-        JOIN workflow_plan_v2_activation_preparations AS preparation
+        JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.logical_job_id = job.id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.logical_job_id = job.id
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_instances AS instance
           ON instance.logical_job_id = job.id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.logical_job_id = job.id
          AND materialization.instance_id = instance.id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.logical_job_id = job.id
          AND concrete.instance_id = instance.id
         ORDER BY repository.owner, repository.name

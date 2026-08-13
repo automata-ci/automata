@@ -227,18 +227,18 @@ async fn resolve_managed_secret_execution_scope(
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete ON concrete.job_id = job.id
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_concrete_jobs AS concrete ON concrete.job_id = job.id
+        JOIN logical_workflow_instances AS instance
           ON instance.id = concrete.instance_id
          AND instance.run_id = concrete.run_id
          AND instance.invocation_id = concrete.invocation_id
          AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = concrete.run_id
          AND invocation.id = concrete.invocation_id
         JOIN runners AS runner ON runner.id = attempt.runner_id
@@ -261,29 +261,29 @@ async fn resolve_managed_secret_execution_scope(
           AND attempt.lease_expires_at_ms > $14
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 4
-          AND job.job_ir_schema = 5
+          AND job.admission_epoch = 1
+          AND job.job_ir_schema = 1
           AND run.id = $12
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 5
+          AND instance.job_ir_version = 1
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 2
+          AND instance.runtime_context_schema = 1
           AND instance.runtime_context_digest = $13
-          AND concrete.runtime_context_schema = 2
+          AND concrete.runtime_context_schema = 1
           AND concrete.runtime_context_digest = $13
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -297,7 +297,7 @@ async fn resolve_managed_secret_execution_scope(
           AND runner_session.id = $8
           AND runner_session.session_epoch = $9
           AND runner_session.runner_generation = $10
-          AND runner_session.job_ir_schema = 5
+          AND runner_session.job_ir_schema = 1
           AND runner_session.disconnected_at_ms IS NULL
         ",
     )
@@ -633,18 +633,18 @@ async fn lock_current_execution(
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workflow_runs AS run ON run.id = job.run_id
         JOIN repositories AS repository ON repository.id = run.repository_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_concrete_jobs AS concrete ON concrete.job_id = job.id
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_concrete_jobs AS concrete ON concrete.job_id = job.id
+        JOIN logical_workflow_instances AS instance
           ON instance.id = concrete.instance_id
          AND instance.run_id = concrete.run_id
          AND instance.invocation_id = concrete.invocation_id
          AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = concrete.run_id
          AND invocation.id = concrete.invocation_id
         JOIN runners AS runner ON runner.id = attempt.runner_id
@@ -667,32 +667,32 @@ async fn lock_current_execution(
           AND attempt.lease_expires_at_ms > $16
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 4
-          AND job.job_ir_schema = 5
+          AND job.admission_epoch = 1
+          AND job.job_ir_schema = 1
           AND run.id = $12
           AND run.repository_id = $13
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
           AND repository.id = $13
           AND repository.tenant_id = $14
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 5
+          AND instance.job_ir_version = 1
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 2
+          AND instance.runtime_context_schema = 1
           AND instance.runtime_context_digest = $15
-          AND concrete.runtime_context_schema = 2
+          AND concrete.runtime_context_schema = 1
           AND concrete.runtime_context_digest = $15
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -706,7 +706,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 5
+          AND session.job_ir_schema = 1
           AND session.disconnected_at_ms IS NULL
         FOR UPDATE OF attempt, job
         FOR SHARE OF run, repository, marker, concrete, instance,

@@ -1,31 +1,23 @@
 mod common;
 mod github_manifest_fixture;
 
-use automata_ci_auth::{
-    human::{PrincipalId, TenantId},
-    management::{ManagementActor, ManagementRevision},
-    session::SessionId,
-    time::UnixTimestamp,
-};
 use automata_ci_core::{
     CompiledValueTemplate, JobAuthorityProfile, JobConclusion, Located, LogicalJobKind,
     LogicalJobTemplate, LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind,
-    LogicalStepTemplate, OperationId, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, RunId,
-    Sha256Digest, StepJobTemplate, UnixMillis, WorkflowEventProvenance, WorkflowId, WorkflowJobKey,
-    WorkflowPlan, WorkflowSourceProvenance, WorkflowStepKey,
+    LogicalStepTemplate, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, RunId, Sha256Digest,
+    StepJobTemplate, UnixMillis, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
+    WorkflowSourceProvenance, WorkflowStepKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation, ClaimGithubCheckProjection,
-    ClaimLogicalJobResult, ClaimLogicalRunFinalization, ClaimNextLogicalJobOrchestration,
-    ClaimProviderDelivery, ClaimedLogicalJobActivation, ClaimedLogicalRunFinalization,
-    CommitLogicalJobResult, CommitLogicalRunFinalization, ConsumeSelectedLogicalJobOrchestration,
+    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation, ClaimLogicalJobResult,
+    ClaimLogicalRunFinalization, ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
+    ClaimedLogicalJobActivation, ClaimedLogicalRunFinalization, CommitLogicalJobResult,
+    CommitLogicalRunFinalization, ConsumeSelectedLogicalJobOrchestration,
     ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
-    GithubCheckDesiredProjection, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckTerminalCause,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubCheckHeadSha, GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -40,11 +32,12 @@ use automata_ci_store::{
     LogicalWorkSelectionId, LogicalWorkSelectionRepository as _,
     LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RerunWorkflow, RerunWorkflowByName, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowConcurrency, WorkflowRerunRepository as _,
-    WorkflowRerunSelection, WorkflowSnapshotId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RegisterProviderDeliveryWorkflowInventory, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowConcurrency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -59,1077 +52,6 @@ struct Fixture {
     job_ids: Vec<LogicalWorkflowJobId>,
     plan: WorkflowPlan,
     plan_bytes: Vec<u8>,
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn zero_job_current_run_is_rejected_at_transaction_commit() -> TestResult {
-    run_with_database(|database| async move {
-        let fixture = fixture("run-finalization-zero", 119_000, 1);
-        seed_tenant(&database, &fixture.tenant).await?;
-        admit_authenticated_fixture(&database, &fixture).await?;
-        let mut transaction = database.pool().begin().await?;
-        let deletion = sqlx::query("DELETE FROM workflow_plan_v2_jobs WHERE id = $1")
-            .bind(fixture.job_ids[0].as_uuid())
-            .execute(&mut *transaction)
-            .await;
-        assert!(
-            deletion.is_err(),
-            "retained result evidence rejects removing the final logical job"
-        );
-        transaction.rollback().await?;
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_jobs WHERE run_id = $1")
-                .bind(fixture.command.run_id().as_uuid())
-                .fetch_one(database.pool())
-                .await?;
-        assert_eq!(count, 1, "failed deferred validation rolls back deletion");
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn linked_public_and_private_checks_terminalize_atomically_and_replay() -> TestResult {
-    run_with_database(|database| async move {
-        for (index, visibility) in [
-            ProviderRepositoryVisibility::Public,
-            ProviderRepositoryVisibility::Private,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert_linked_check_terminalization(
-                &database,
-                visibility,
-                125_000 + u128::try_from(index)? * 1_000,
-            )
-            .await?;
-        }
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines, clippy::type_complexity)] // One scenario audits the full rerun tuple.
-async fn terminal_rerun_replays_and_projects_one_fresh_check_to_completion() -> TestResult {
-    run_with_database(|database| async move {
-        let namespace = 126_000;
-        let fixture = fixture("workflow-rerun-entire", namespace, 1);
-        let source_subject_id = admit_authenticated_fixture(&database, &fixture).await?;
-        prepare_all_jobs(&database, &fixture).await?;
-        finalize_skipped_job(&database, &fixture, 0).await?;
-        let claimed = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 100, 60_000).await?)
-            .await?
-            .ok_or("terminal rerun source was not ready for finalization")?;
-        let source = database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&claimed)?)
-            .await?;
-        let actor = seed_rerun_actor(
-            &database,
-            &fixture.tenant,
-            fixture.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-        let denied_repository_id = Uuid::from_u128(namespace + 190);
-        sqlx::query(
-            r"
-            INSERT INTO repositories (
-                id, tenant_id, scm_provider, provider_repository_id,
-                owner, name, created_at_ms, updated_at_ms
-            ) VALUES ($1, $2, 'github', $3, 'denied-owner', 'denied-repository', 1, 1)
-            ",
-        )
-        .bind(denied_repository_id)
-        .bind(&fixture.tenant)
-        .bind(format!("denied-{namespace}"))
-        .execute(database.pool())
-        .await?;
-        for (owner, repository, operation) in [
-            ("missing-owner", "missing-repository", namespace + 191),
-            ("denied-owner", "denied-repository", namespace + 192),
-        ] {
-            let rejected = RerunWorkflowByName::new(
-                actor.clone(),
-                owner,
-                repository,
-                source.target().run_id(),
-                WorkflowRerunSelection::EntireWorkflow,
-                OperationId::from_uuid(Uuid::from_u128(operation)),
-            )?;
-            assert!(matches!(
-                database.store().rerun_workflow_by_name(rejected).await,
-                Err(automata_ci_store::WorkflowRerunStoreError::AuthorityRejected)
-            ));
-        }
-        let unauthorized_receipts: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_admission_receipts WHERE idempotency_key IN ($1, $2)",
-        )
-        .bind(format!(
-            "workflow-rerun:{}",
-            Uuid::from_u128(namespace + 191)
-        ))
-        .bind(format!(
-            "workflow-rerun:{}",
-            Uuid::from_u128(namespace + 192)
-        ))
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(unauthorized_receipts, 0);
-        let operation_id = OperationId::from_uuid(Uuid::from_u128(namespace + 200));
-        let named_request = RerunWorkflowByName::new(
-            actor.clone(),
-            "EXAMPLE",
-            format!("PROJECT-{namespace}"),
-            source.target().run_id(),
-            WorkflowRerunSelection::EntireWorkflow,
-            operation_id,
-        )?;
-        let rerun = database
-            .store()
-            .rerun_workflow_by_name(named_request.clone())
-            .await?;
-        assert_eq!(rerun.source_run_id(), source.target().run_id());
-        assert_eq!(rerun.run_attempt(), 2);
-        assert!(!rerun.is_replay());
-        let replay = database
-            .store()
-            .rerun_workflow_by_name(named_request)
-            .await?;
-        assert!(replay.is_replay());
-        assert_eq!(replay.run_id(), rerun.run_id());
-        assert_eq!(replay.public_run_id(), rerun.public_run_id());
-        let request = RerunWorkflow::new(
-            actor,
-            fixture.manifest.repository_id(),
-            source.target().run_id(),
-            WorkflowRerunSelection::EntireWorkflow,
-            operation_id,
-        )?;
-        let resolved_replay = database.store().rerun_workflow(request.clone()).await?;
-        assert!(resolved_replay.is_replay());
-        assert_eq!(resolved_replay.run_id(), rerun.run_id());
-        let audit: Vec<(Uuid, Uuid, i64, String, String, String, String, bool)> = sqlx::query_as(
-            r"
-                SELECT event.actor_principal_id, event.actor_session_id,
-                       event.authorization_revision, event.action, event.outcome,
-                       event.resource_kind, event.resource_id,
-                       event.tenant_id = request.tenant_id
-                       AND event.occurred_at_ms = attempt.created_at_ms
-                       AND evidence.recorded_at_ms = attempt.created_at_ms
-                       AND evidence.request_digest = request.request_digest
-                FROM workflow_rerun_audit_evidence AS evidence
-                JOIN workflow_rerun_attempts AS attempt
-                  ON attempt.run_id = evidence.run_id
-                JOIN workflow_rerun_requests AS request
-                  ON request.tenant_id = evidence.tenant_id
-                 AND request.operation_id = evidence.operation_id
-                 AND request.rerun_run_id = evidence.run_id
-                JOIN security_audit_events AS event
-                  ON event.event_id = evidence.event_id
-                WHERE evidence.run_id = $1
-                ",
-        )
-        .bind(rerun.run_id().as_uuid())
-        .fetch_all(database.pool())
-        .await?;
-        assert_eq!(audit.len(), 1, "replay must not duplicate its audit event");
-        assert_eq!(
-            audit[0].0,
-            Uuid::parse_str(request.actor().principal_id().as_str())?
-        );
-        assert_eq!(
-            audit[0].1,
-            Uuid::parse_str(request.actor().session_id().as_str())?
-        );
-        assert_eq!(
-            audit[0].2,
-            i64::try_from(request.actor().authorization_revision().value())?
-        );
-        assert_eq!(audit[0].3, "workflow.rerun");
-        assert_eq!(audit[0].4, "succeeded");
-        assert_eq!(audit[0].5, "workflow_run");
-        assert_eq!(audit[0].6, rerun.run_id().to_string());
-        assert!(audit[0].7);
-
-        let conflicting_request = RerunWorkflow::new(
-            request.actor().clone(),
-            request.repository_id(),
-            request.source_run_id(),
-            WorkflowRerunSelection::JobAndDependents(fixture.job_ids[0]),
-            request.operation_id(),
-        )?;
-        assert!(matches!(
-            database.store().rerun_workflow(conflicting_request).await,
-            Err(automata_ci_store::WorkflowRerunStoreError::IdempotencyConflict)
-        ));
-        let rejected_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 225));
-        let rejected_request = RerunWorkflow::new(
-            request.actor().clone(),
-            request.repository_id(),
-            request.source_run_id(),
-            WorkflowRerunSelection::JobAndDependents(LogicalWorkflowJobId::from_uuid(
-                Uuid::from_u128(namespace + 226),
-            )?),
-            rejected_operation,
-        )?;
-        assert!(matches!(
-            database.store().rerun_workflow(rejected_request).await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        let rolled_back: (i64, i64) = sqlx::query_as(
-            r"
-            SELECT
-                (SELECT count(*) FROM workflow_admission_receipts
-                 WHERE idempotency_key = $1),
-                (SELECT count(*) FROM workflow_rerun_requests
-                 WHERE operation_id = $2)
-            ",
-        )
-        .bind(format!("workflow-rerun:{rejected_operation}"))
-        .bind(rejected_operation.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(rolled_back, (0, 0));
-        let failed_selection_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 227));
-        let failed_selection = RerunWorkflow::new(
-            request.actor().clone(),
-            request.repository_id(),
-            request.source_run_id(),
-            WorkflowRerunSelection::FailedJobsAndDependents,
-            failed_selection_operation,
-        )?;
-        assert!(matches!(
-            database.store().rerun_workflow(failed_selection).await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        let failed_selection_writes: (i64, i64) = sqlx::query_as(
-            r"
-            SELECT
-                (SELECT count(*) FROM workflow_admission_receipts
-                 WHERE idempotency_key = $1),
-                (SELECT count(*) FROM workflow_rerun_requests
-                 WHERE operation_id = $2)
-            ",
-        )
-        .bind(format!("workflow-rerun:{failed_selection_operation}"))
-        .bind(failed_selection_operation.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(failed_selection_writes, (0, 0));
-
-        let projected: (Uuid, Uuid, String, i64, String, i64, i64, bool, bool, bool) =
-            sqlx::query_as(
-                r"
-            SELECT evidence.source_github_check_subject_id,
-                   evidence.github_check_subject_id,
-                   subject.desired_state, subject.desired_revision,
-                   outbox.state, outbox.attempt_count::BIGINT,
-                   outbox.projected_revision,
-                   source.subject_key = subject.subject_key
-                   AND source.provider_connection_id = subject.provider_connection_id
-                   AND source.provider_installation_id = subject.provider_installation_id
-                   AND source.github_repository_id = subject.github_repository_id
-                   AND source.github_repository_name = subject.github_repository_name
-                   AND source.github_app_id = subject.github_app_id
-                   AND source.head_sha = subject.head_sha
-                   AND source.check_name = subject.check_name,
-                   authority.state = 'active'
-                   AND authority.id = evidence.checks_authority_id
-                   AND authority.identity_digest =
-                       evidence.checks_authority_identity_digest
-                   AND authority.app_configuration_revision =
-                       evidence.checks_authority_app_configuration_revision
-                   AND authority.policy_revision =
-                       evidence.checks_authority_policy_revision,
-                   run_evidence.github_check_subject_id = subject.id
-                   AND run_evidence.github_check_head_sha = subject.head_sha
-                   AND run_evidence.admitted_at_ms = evidence.recorded_at_ms
-                   AND octet_length(run_evidence.subject_evidence_sha256) = 32
-            FROM workflow_rerun_check_evidence AS evidence
-            JOIN github_check_subjects AS subject
-              ON subject.id = evidence.github_check_subject_id
-            JOIN github_check_subjects AS source
-              ON source.id = evidence.source_github_check_subject_id
-            JOIN github_check_projection_outbox AS outbox
-              ON outbox.subject_id = subject.id
-            JOIN github_server_service_authorities AS authority
-              ON authority.tenant_id = evidence.tenant_id
-             AND authority.id = evidence.checks_authority_id
-            JOIN github_workflow_rerun_subject_evidence AS run_evidence
-              ON run_evidence.tenant_id = evidence.tenant_id
-             AND run_evidence.operation_id = evidence.operation_id
-             AND run_evidence.run_id = evidence.run_id
-             AND run_evidence.github_check_subject_id =
-                 evidence.github_check_subject_id
-            WHERE evidence.run_id = $1
-            ",
-            )
-            .bind(rerun.run_id().as_uuid())
-            .fetch_one(database.pool())
-            .await?;
-        assert_eq!(projected.0, source_subject_id);
-        assert_ne!(projected.1, source_subject_id);
-        assert_eq!(projected.2, "in_progress");
-        assert_eq!(projected.3, 2);
-        assert_eq!(projected.4, "pending");
-        assert_eq!(projected.5, 0);
-        assert_eq!(projected.6, 0);
-        assert!(
-            projected.7,
-            "fresh Check routing must exactly match the source"
-        );
-        assert!(projected.8, "rerun Check must bind a live exact authority");
-        assert!(
-            projected.9,
-            "rerun run-subject evidence must be fresh and sealed"
-        );
-
-        let immutable_error = sqlx::query(
-            r"
-            UPDATE github_workflow_rerun_subject_evidence
-            SET admitted_at_ms = admitted_at_ms + 1
-            WHERE run_id = $1
-            ",
-        )
-        .bind(rerun.run_id().as_uuid())
-        .execute(database.pool())
-        .await
-        .expect_err("rerun run-subject evidence must be immutable");
-        assert_eq!(
-            immutable_error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::constraint),
-            Some("github_workflow_rerun_subject_evidence_immutable"),
-        );
-
-        finalize_rerun_skipped_job(&database, &fixture, rerun.run_id(), 0).await?;
-        let claimed = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 300, 60_000).await?)
-            .await?
-            .ok_or("rerun was not ready for finalization")?;
-        assert_eq!(claimed.claim().target().run_id(), rerun.run_id());
-        let commit = commit_at_claim_start(&claimed)?;
-        let finalized = database
-            .store()
-            .commit_logical_run_finalization(commit.clone())
-            .await?;
-        assert_eq!(finalized.conclusion(), JobConclusion::Skipped);
-        assert!(
-            database
-                .store()
-                .commit_logical_run_finalization(commit)
-                .await?
-                .is_replay()
-        );
-        let checks: Vec<(Uuid, String, i64, Option<String>)> = sqlx::query_as(
-            r"
-            SELECT id, desired_state, desired_revision, desired_conclusion
-            FROM github_check_subjects
-            WHERE workflow_run_id IN ($1, $2)
-            ORDER BY workflow_run_id, id
-            ",
-        )
-        .bind(source.target().run_id().as_uuid())
-        .bind(rerun.run_id().as_uuid())
-        .fetch_all(database.pool())
-        .await?;
-        assert_eq!(checks.len(), 2);
-        assert!(checks.iter().all(|(_, state, revision, conclusion)| {
-            state == "completed" && *revision == 3 && conclusion.as_deref() == Some("skipped")
-        }));
-        let projection_now = database_now_ms(&database).await?;
-        let first_projection = database
-            .store()
-            .claim_github_check_projection(ClaimGithubCheckProjection::new(
-                fixture.manifest.connection_id(),
-                GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(namespace + 250))?,
-                UnixMillis::new(projection_now),
-                UnixMillis::new(projection_now + 60_000),
-            )?)
-            .await?
-            .ok_or("a terminal Check projection was not claimable")?;
-        let claimed_projection = if first_projection.claim().subject_id().as_uuid() == projected.1 {
-            first_projection
-        } else {
-            assert_eq!(
-                first_projection.claim().subject_id().as_uuid(),
-                source_subject_id,
-                "only the source Check may precede the fresh rerun Check"
-            );
-            database
-                .store()
-                .claim_github_check_projection(ClaimGithubCheckProjection::new(
-                    fixture.manifest.connection_id(),
-                    GithubCheckProjectionWorkerId::from_uuid(Uuid::from_u128(namespace + 251))?,
-                    UnixMillis::new(projection_now),
-                    UnixMillis::new(projection_now + 60_000),
-                )?)
-                .await?
-                .ok_or("terminal rerun Check projection was not claimable")?
-        };
-        assert_eq!(
-            claimed_projection.claim().subject_id().as_uuid(),
-            projected.1
-        );
-        assert_eq!(
-            claimed_projection.identity().rerun_run_id(),
-            Some(rerun.run_id())
-        );
-        assert_eq!(claimed_projection.identity().delivery_id(), None);
-        assert_eq!(claimed_projection.identity().schedule_fire_id(), None);
-        assert_eq!(claimed_projection.desired_revision(), 3);
-        assert_eq!(
-            claimed_projection.desired(),
-            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowSkipped)
-        );
-        let durable_counts: (i64, i64, i64, i64) = sqlx::query_as(
-            r"
-            SELECT
-                (SELECT count(*) FROM workflow_rerun_requests WHERE rerun_run_id = $1),
-                (SELECT count(*) FROM workflow_rerun_check_evidence WHERE run_id = $1),
-                (SELECT count(*) FROM github_workflow_rerun_subject_evidence
-                 WHERE run_id = $1),
-                (SELECT count(*) FROM github_check_projection_outbox AS outbox
-                 JOIN workflow_rerun_check_evidence AS evidence
-                   ON evidence.github_check_subject_id = outbox.subject_id
-                 WHERE evidence.run_id = $1)
-            ",
-        )
-        .bind(rerun.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(durable_counts, (1, 1, 1, 1));
-
-        let concurrent_left = RerunWorkflow::new(
-            request.actor().clone(),
-            request.repository_id(),
-            rerun.run_id(),
-            WorkflowRerunSelection::EntireWorkflow,
-            OperationId::from_uuid(Uuid::from_u128(namespace + 600)),
-        )?;
-        let concurrent_right = RerunWorkflow::new(
-            request.actor().clone(),
-            request.repository_id(),
-            rerun.run_id(),
-            WorkflowRerunSelection::EntireWorkflow,
-            OperationId::from_uuid(Uuid::from_u128(namespace + 601)),
-        )?;
-        let (left, right) = tokio::join!(
-            database.store().rerun_workflow(concurrent_left),
-            database.store().rerun_workflow(concurrent_right),
-        );
-        let mut attempts = [left?.run_attempt(), right?.run_attempt()];
-        attempts.sort_unstable();
-        assert_eq!(attempts, [3, 4]);
-        let concurrent_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
-            r"
-            SELECT count(*)::BIGINT,
-                   count(DISTINCT attempt.run_id)::BIGINT,
-                   count(DISTINCT attempt.attempt)::BIGINT,
-                   (SELECT count(*) FROM workflow_rerun_requests
-                    WHERE repository_id = $2),
-                   (SELECT count(*) FROM workflow_rerun_check_evidence
-                    WHERE repository_id = $2)
-            FROM workflow_rerun_attempts AS attempt
-            WHERE attempt.root_run_id = $1
-            ",
-        )
-        .bind(source.target().run_id().as_uuid())
-        .bind(request.repository_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(concurrent_shape, (4, 4, 4, 3, 3));
-
-        let authority_now = database_now_ms(&database).await?;
-        let retired = sqlx::query(
-            r"
-            UPDATE github_server_service_authorities
-            SET state = 'retiring', current_issuance_generation = NULL,
-                refresh_issuance_generation = NULL, state_updated_at_ms = $2
-            WHERE id = $1 AND state = 'active'
-            ",
-        )
-        .bind(
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT checks_authority_id FROM workflow_rerun_check_evidence WHERE run_id = $1",
-            )
-            .bind(rerun.run_id().as_uuid())
-            .fetch_one(database.pool())
-            .await?,
-        )
-        .bind(authority_now)
-        .execute(database.pool())
-        .await?;
-        assert_eq!(retired.rows_affected(), 1);
-        let stale_authority_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 700));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    request.actor().clone(),
-                    request.repository_id(),
-                    rerun.run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    stale_authority_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        let stale_authority_writes: (i64, i64) = sqlx::query_as(
-            r"
-            SELECT
-                (SELECT count(*) FROM workflow_admission_receipts
-                 WHERE idempotency_key = $1),
-                (SELECT count(*) FROM workflow_rerun_requests
-                 WHERE operation_id = $2)
-            ",
-        )
-        .bind(format!("workflow-rerun:{stale_authority_operation}"))
-        .bind(stale_authority_operation.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(stale_authority_writes, (0, 0));
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)] // Closed rerun failures share exact no-write assertions.
-async fn workflow_rerun_closed_errors_are_atomic_and_database_timed() -> TestResult {
-    run_with_database(|database| async move {
-        let namespace = 126_300;
-        let fixture = fixture("workflow-rerun-closed-errors", namespace, 1);
-        admit_authenticated_fixture(&database, &fixture).await?;
-        let actor = seed_rerun_actor(
-            &database,
-            &fixture.tenant,
-            fixture.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-
-        let missing_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 100));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    actor.clone(),
-                    fixture.manifest.repository_id(),
-                    RunId::from_uuid(Uuid::from_u128(namespace + 101)),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    missing_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::NotFound)
-        ));
-        assert_rerun_operation_has_no_writes(&database, missing_operation).await?;
-
-        let live_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 110));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    actor.clone(),
-                    fixture.manifest.repository_id(),
-                    fixture.command.run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    live_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::SourceNotTerminal)
-        ));
-        assert_rerun_operation_has_no_writes(&database, live_operation).await?;
-
-        prepare_all_jobs(&database, &fixture).await?;
-        finalize_skipped_job(&database, &fixture, 0).await?;
-        let source_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 120, 60_000).await?)
-            .await?
-            .ok_or("closed-error source was not ready")?;
-        database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&source_claim)?)
-            .await?;
-
-        let now = database_now_ms(&database).await?;
-        for (offset, label) in [
-            (
-                -(automata_ci_store::MAX_WORKFLOW_RERUN_AGE_MILLIS + 1),
-                "expired",
-            ),
-            (60_000, "future"),
-        ] {
-            sqlx::query(
-                "ALTER TABLE workflow_runs DISABLE TRIGGER workflow_runs_enforce_plan_v2_immutable",
-            )
-            .execute(database.pool())
-            .await?;
-            sqlx::query("UPDATE workflow_runs SET created_at_ms = $2 WHERE repository_id = $1")
-                .bind(fixture.manifest.repository_id().as_uuid())
-                .bind(now.saturating_add(offset))
-                .execute(database.pool())
-                .await?;
-            sqlx::query(
-                "ALTER TABLE workflow_runs ENABLE TRIGGER workflow_runs_enforce_plan_v2_immutable",
-            )
-            .execute(database.pool())
-            .await?;
-            let operation = OperationId::new();
-            let result = database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    actor.clone(),
-                    fixture.manifest.repository_id(),
-                    fixture.command.run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    operation,
-                )?)
-                .await;
-            assert!(
-                matches!(
-                    result,
-                    Err(automata_ci_store::WorkflowRerunStoreError::SourceExpired)
-                ),
-                "{label} source must be closed"
-            );
-            assert_rerun_operation_has_no_writes(&database, operation).await?;
-        }
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)] // Unsupported authority, concurrency, and context share no-write proof.
-async fn private_rerun_authority_is_live_and_grouped_sources_fail_closed() -> TestResult {
-    run_with_database(|database| async move {
-        let namespace = 126_400;
-        let private = fixture_with_visibility(
-            "workflow-rerun-private",
-            namespace,
-            1,
-            ProviderRepositoryVisibility::Private,
-            false,
-        );
-        admit_and_finalize_all_skipped(&database, &private).await?;
-        let source_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 100, 60_000).await?)
-            .await?
-            .ok_or("private source was not ready")?;
-        let source = database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&source_claim)?)
-            .await?;
-        let actor = seed_rerun_actor(
-            &database,
-            &private.tenant,
-            private.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-        let rerun = database
-            .store()
-            .rerun_workflow(RerunWorkflow::new(
-                actor.clone(),
-                private.manifest.repository_id(),
-                source.target().run_id(),
-                WorkflowRerunSelection::EntireWorkflow,
-                OperationId::from_uuid(Uuid::from_u128(namespace + 200)),
-            )?)
-            .await?;
-        let private_evidence: bool = sqlx::query_scalar(
-            r"
-            SELECT evidence.private_source_authority_id =
-                       origin.private_source_authority_id
-                   AND evidence.private_source_authority_identity_digest =
-                       origin.private_source_authority_identity_digest
-            FROM workflow_rerun_check_evidence AS evidence
-            JOIN workflow_rerun_attempts AS attempt
-              ON attempt.run_id = evidence.run_id
-            JOIN github_workflow_run_base_manifest_origins AS origin
-              ON origin.run_id = attempt.root_run_id
-            WHERE evidence.run_id = $1
-            ",
-        )
-        .bind(rerun.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert!(private_evidence);
-        finalize_rerun_skipped_job(&database, &private, rerun.run_id(), 0).await?;
-        let rerun_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 300, 60_000).await?)
-            .await?
-            .ok_or("private rerun was not ready")?;
-        database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&rerun_claim)?)
-            .await?;
-
-        let now = database_now_ms(&database).await?;
-        let retired = sqlx::query(
-            r"
-            UPDATE github_server_service_authorities
-            SET state = 'retiring', current_issuance_generation = NULL,
-                refresh_issuance_generation = NULL, state_updated_at_ms = $2
-            WHERE id = (
-                SELECT private_source_authority_id
-                FROM github_workflow_run_base_manifest_origins
-                WHERE run_id = $1
-            )
-              AND state = 'active'
-            ",
-        )
-        .bind(source.target().run_id().as_uuid())
-        .bind(now)
-        .execute(database.pool())
-        .await?;
-        assert_eq!(retired.rows_affected(), 1);
-        let retired_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 400));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    actor,
-                    private.manifest.repository_id(),
-                    rerun.run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    retired_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        assert_rerun_operation_has_no_writes(&database, retired_operation).await?;
-
-        let grouped = fixture_with_concurrency(
-            "workflow-rerun-grouped-unsupported",
-            namespace + 500,
-            1,
-            true,
-        );
-        admit_and_finalize_all_skipped(&database, &grouped).await?;
-        let grouped_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 700, 60_000).await?)
-            .await?
-            .ok_or("grouped source was not ready")?;
-        let grouped_source = database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&grouped_claim)?)
-            .await?;
-        let grouped_actor = seed_rerun_actor(
-            &database,
-            &grouped.tenant,
-            grouped.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-        let grouped_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 800));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    grouped_actor,
-                    grouped.manifest.repository_id(),
-                    grouped_source.target().run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    grouped_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        assert_rerun_operation_has_no_writes(&database, grouped_operation).await?;
-
-        let legacy = fixture("workflow-rerun-legacy-context", namespace + 900, 1);
-        admit_and_finalize_all_skipped(&database, &legacy).await?;
-        let legacy_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 1_100, 60_000).await?)
-            .await?
-            .ok_or("legacy-context source was not ready")?;
-        let legacy_source = database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&legacy_claim)?)
-            .await?;
-        sqlx::query(
-            "ALTER TABLE workflow_plan_v2_runs DISABLE TRIGGER workflow_plan_v2_runs_base_context_immutable",
-        )
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            UPDATE workflow_plan_v2_runs
-            SET base_context_digest = NULL,
-                base_context_object_key = NULL,
-                base_context_size_bytes = NULL,
-                base_context_media_type = NULL,
-                base_context_schema = NULL
-            WHERE run_id = $1
-            ",
-        )
-        .bind(legacy_source.target().run_id().as_uuid())
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            "ALTER TABLE workflow_plan_v2_runs ENABLE TRIGGER workflow_plan_v2_runs_base_context_immutable",
-        )
-        .execute(database.pool())
-        .await?;
-        let legacy_actor = seed_rerun_actor(
-            &database,
-            &legacy.tenant,
-            legacy.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-        let legacy_operation = OperationId::from_uuid(Uuid::from_u128(namespace + 1_200));
-        assert!(matches!(
-            database
-                .store()
-                .rerun_workflow(RerunWorkflow::new(
-                    legacy_actor,
-                    legacy.manifest.repository_id(),
-                    legacy_source.target().run_id(),
-                    WorkflowRerunSelection::EntireWorkflow,
-                    legacy_operation,
-                )?)
-                .await,
-            Err(automata_ci_store::WorkflowRerunStoreError::UnsupportedSelection)
-        ));
-        assert_rerun_operation_has_no_writes(&database, legacy_operation).await?;
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)] // Nested selection and effective carry evidence stay together.
-async fn partial_rerun_carries_prerequisites_through_a_nested_rerun() -> TestResult {
-    run_with_database(|database| async move {
-        let namespace = 126_500;
-        let fixture = fixture_with_visibility_and_dependencies(
-            "workflow-rerun-nested",
-            namespace,
-            3,
-            ProviderRepositoryVisibility::Public,
-            false,
-            true,
-        );
-        admit_authenticated_fixture(&database, &fixture).await?;
-        for index in 0..3 {
-            finalize_skipped_job(&database, &fixture, index).await?;
-        }
-        let source_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 100, 60_000).await?)
-            .await?
-            .ok_or("source chain was not ready")?;
-        let source = database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&source_claim)?)
-            .await?;
-        let actor = seed_rerun_actor(
-            &database,
-            &fixture.tenant,
-            fixture.manifest.repository_id().as_uuid(),
-        )
-        .await?;
-        let first = database
-            .store()
-            .rerun_workflow(RerunWorkflow::new(
-                actor.clone(),
-                fixture.manifest.repository_id(),
-                source.target().run_id(),
-                WorkflowRerunSelection::JobAndDependents(fixture.job_ids[1]),
-                OperationId::from_uuid(Uuid::from_u128(namespace + 200)),
-            )?)
-            .await?;
-        let first_shape: (i64, i64, i64) = sqlx::query_as(
-            r"
-            SELECT count(*)::BIGINT,
-                   count(*) FILTER (WHERE mapping.selected)::BIGINT,
-                   count(*) FILTER (WHERE NOT mapping.selected)::BIGINT
-            FROM workflow_rerun_attempt_jobs AS mapping
-            WHERE mapping.run_id = $1
-            ",
-        )
-        .bind(first.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(first_shape, (3, 2, 1));
-        finalize_rerun_skipped_job(&database, &fixture, first.run_id(), 1).await?;
-        finalize_rerun_skipped_job(&database, &fixture, first.run_id(), 2).await?;
-        let first_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 300, 60_000).await?)
-            .await?
-            .ok_or("first partial rerun was not ready")?;
-        database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&first_claim)?)
-            .await?;
-
-        let nested_source_job = LogicalWorkflowJobId::from_uuid(
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM workflow_plan_v2_jobs WHERE run_id = $1 AND source_order = 2",
-            )
-            .bind(first.run_id().as_uuid())
-            .fetch_one(database.pool())
-            .await?,
-        )?;
-        let nested = database
-            .store()
-            .rerun_workflow(RerunWorkflow::new(
-                actor,
-                fixture.manifest.repository_id(),
-                first.run_id(),
-                WorkflowRerunSelection::JobAndDependents(nested_source_job),
-                OperationId::from_uuid(Uuid::from_u128(namespace + 400)),
-            )?)
-            .await?;
-        assert_eq!(nested.run_attempt(), 3);
-        let nested_shape: (i64, i64, i64, i64, bool) = sqlx::query_as(
-            r"
-            SELECT count(*)::BIGINT,
-                   count(*) FILTER (WHERE mapping.selected)::BIGINT,
-                   count(*) FILTER (WHERE NOT mapping.selected)::BIGINT,
-                   (SELECT count(*)::BIGINT
-                    FROM workflow_rerun_carried_job_results
-                    WHERE run_id = $1),
-                   bool_and(
-                       mapping.selected
-                       OR effective.carried
-                       AND effective.claim_state = 'finalized'
-                   )
-            FROM workflow_rerun_attempt_jobs AS mapping
-            LEFT JOIN workflow_plan_v2_effective_job_results AS effective
-              ON effective.run_id = mapping.run_id
-             AND effective.logical_job_id = mapping.logical_job_id
-            WHERE mapping.run_id = $1
-            ",
-        )
-        .bind(nested.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(nested_shape, (3, 1, 2, 2, true));
-        assert_late_rerun_carry_mutations_are_rejected(&database, nested.run_id()).await?;
-        let check_chain_exact: bool = sqlx::query_scalar(
-            r"
-            SELECT evidence.source_github_check_subject_id = source_subject.id
-            FROM workflow_rerun_check_evidence AS evidence
-            JOIN github_check_subjects AS source_subject
-              ON source_subject.workflow_run_id = $2
-            WHERE evidence.run_id = $1
-            ",
-        )
-        .bind(nested.run_id().as_uuid())
-        .bind(first.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert!(check_chain_exact);
-
-        finalize_rerun_skipped_job(&database, &fixture, nested.run_id(), 2).await?;
-        let nested_claim = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 500, 60_000).await?)
-            .await?
-            .ok_or("nested partial rerun was not ready")?;
-        database
-            .store()
-            .commit_logical_run_finalization(commit_at_claim_start(&nested_claim)?)
-            .await?;
-        let terminal_checks: i64 = sqlx::query_scalar(
-            r"
-            SELECT count(*)::BIGINT
-            FROM github_check_subjects
-            WHERE workflow_run_id IN ($1, $2, $3)
-              AND desired_state = 'completed'
-              AND desired_revision = 3
-            ",
-        )
-        .bind(source.target().run_id().as_uuid())
-        .bind(first.run_id().as_uuid())
-        .bind(nested.run_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(terminal_checks, 3);
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn mismatched_linked_check_rolls_back_the_entire_finalization() -> TestResult {
-    run_with_database(|database| async move {
-        let namespace = 127_000;
-        let fixture = fixture("run-finalization-check-mismatch", namespace, 1);
-        let subject_id = admit_authenticated_fixture(&database, &fixture).await?;
-        set_linked_check_back_to_queued(&database, subject_id).await?;
-        finalize_skipped_job(&database, &fixture, 0).await?;
-        let claimed = database
-            .store()
-            .claim_logical_run_finalization(run_claim(&database, namespace + 100, 60_000).await?)
-            .await?
-            .ok_or("mismatched linked run was not ready for finalization")?;
-        let commit = commit_at_claim_start(&claimed)?;
-
-        assert!(matches!(
-            database
-                .store()
-                .commit_logical_run_finalization(commit.clone())
-                .await,
-            Err(LogicalRunFinalizationStoreError::Store(_))
-        ));
-        let unchanged: (i64, String, String, i64) = sqlx::query_as(
-            r"
-            SELECT
-                (SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1),
-                run.status, subject.desired_state, subject.desired_revision
-            FROM workflow_runs AS run
-            JOIN github_check_subjects AS subject
-              ON subject.workflow_run_id = run.id
-            WHERE run.id = $1 AND subject.id = $2
-            ",
-        )
-        .bind(fixture.command.run_id().as_uuid())
-        .bind(subject_id)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(unchanged, (0, "queued".into(), "queued".into(), 1));
-
-        sqlx::query(
-            r"
-            UPDATE github_check_subjects
-            SET desired_state = 'in_progress', desired_revision = 2,
-                desired_updated_at_ms = linked_at_ms
-            WHERE id = $1
-            ",
-        )
-        .bind(subject_id)
-        .execute(database.pool())
-        .await?;
-        assert_eq!(
-            database
-                .store()
-                .commit_logical_run_finalization(commit)
-                .await?
-                .conclusion(),
-            JobConclusion::Skipped
-        );
-        Ok(())
-    })
-    .await
 }
 
 #[tokio::test]
@@ -1168,7 +90,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         // rejection trigger is disabled for the narrow update and restored
         // before 0031 observes or claims any evidence.
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results DISABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -1182,7 +104,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         {
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_job_results
+                UPDATE logical_workflow_job_results
                 SET effective_conclusion = $2, closure_has_failure = $3,
                     closure_has_cancelled = $4, closure_has_skipped = $5,
                     commit_digest = $6
@@ -1198,7 +120,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
             .execute(database.pool())
             .await?;
             sqlx::query(
-                "UPDATE workflow_plan_v2_jobs SET state = $2 WHERE id = $1",
+                "UPDATE logical_workflow_jobs SET state = $2 WHERE id = $1",
             )
             .bind(fixture.job_ids[index].as_uuid())
             .bind(state)
@@ -1206,7 +128,7 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
             .await?;
         }
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results ENABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results ENABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -1226,8 +148,8 @@ async fn incomplete_run_is_excluded_and_sql_precedence_matches_domain() -> TestR
         let states: (String, String, String) = sqlx::query_as(
             r"
             SELECT invocation.state, marker.state, run.status
-            FROM workflow_plan_v2_runs AS marker
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_runs AS marker
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = marker.run_id
              AND invocation.id = marker.root_invocation_id
             JOIN workflow_runs AS run ON run.id = marker.run_id
@@ -1281,9 +203,9 @@ async fn preterminal_concurrency_cancellation_closes_with_immutable_run_evidence
             SELECT invocation.state, marker.state, run.status,
                    result.effective_conclusion, invocation.updated_at_ms,
                    marker.updated_at_ms, run.updated_at_ms
-            FROM workflow_plan_v2_run_results AS result
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = result.run_id
-            JOIN workflow_plan_v2_invocations AS invocation
+            FROM logical_workflow_run_results AS result
+            JOIN logical_workflow_runs AS marker ON marker.run_id = result.run_id
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = result.run_id
              AND invocation.id = result.root_invocation_id
             JOIN workflow_runs AS run ON run.id = result.run_id
@@ -1407,7 +329,7 @@ async fn assert_clock_skew_is_side_effect_free(
         ));
     }
     let claim_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_run_result_claims WHERE run_id = $1",
+        "SELECT count(*) FROM logical_workflow_run_result_claims WHERE run_id = $1",
     )
     .bind(fixture.command.run_id().as_uuid())
     .fetch_one(database.pool())
@@ -1436,7 +358,7 @@ async fn assert_database_time_commit_fence(database: &TestDatabase) -> TestResul
         Err(LogicalRunFinalizationStoreError::ClaimRejected)
     ));
     let result_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM logical_workflow_run_results WHERE run_id = $1")
             .bind(fixture.command.run_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -1477,7 +399,7 @@ async fn assert_database_time_expired_fresh_commit(database: &TestDatabase) -> T
         Err(LogicalRunFinalizationStoreError::ClaimRejected)
     ));
     let result_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM workflow_plan_v2_run_results WHERE run_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM logical_workflow_run_results WHERE run_id = $1")
             .bind(fixture.command.run_id().as_uuid())
             .fetch_one(database.pool())
             .await?;
@@ -1485,92 +407,6 @@ async fn assert_database_time_expired_fresh_commit(database: &TestDatabase) -> T
         result_count, 0,
         "an expired fresh commit is side-effect free"
     );
-    Ok(())
-}
-
-async fn assert_linked_check_terminalization(
-    database: &TestDatabase,
-    visibility: ProviderRepositoryVisibility,
-    namespace: u128,
-) -> TestResult {
-    let visibility_name = match visibility {
-        ProviderRepositoryVisibility::Public => "public",
-        ProviderRepositoryVisibility::Private => "private",
-    };
-    let fixture = fixture_with_visibility(
-        &format!("run-finalization-check-{visibility_name}"),
-        namespace,
-        1,
-        visibility,
-        false,
-    );
-    let subject_id = admit_authenticated_fixture(database, &fixture).await?;
-    finalize_skipped_job(database, &fixture, 0).await?;
-
-    let claimed = database
-        .store()
-        .claim_logical_run_finalization(run_claim(database, namespace + 100, 60_000).await?)
-        .await?
-        .ok_or("linked GitHub run was not ready for finalization")?;
-    let commit = commit_at_claim_start(&claimed)?;
-    let receipt = database
-        .store()
-        .commit_logical_run_finalization(commit.clone())
-        .await?;
-    assert_eq!(receipt.conclusion(), JobConclusion::Skipped);
-    assert!(!receipt.is_replay());
-    assert!(
-        database
-            .store()
-            .commit_logical_run_finalization(commit.clone())
-            .await?
-            .is_replay()
-    );
-
-    let state: (
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-        String,
-        i64,
-    ) = sqlx::query_as(
-        r"
-            SELECT subject.desired_state, subject.desired_conclusion,
-                   subject.terminal_cause, subject.desired_revision,
-                   subject.desired_updated_at_ms, outbox.state,
-                   outbox.state_updated_at_ms
-            FROM github_check_subjects AS subject
-            JOIN github_check_projection_outbox AS outbox
-              ON outbox.subject_id = subject.id
-            WHERE subject.id = $1
-            ",
-    )
-    .bind(subject_id)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(
-        state,
-        (
-            "completed".into(),
-            Some("skipped".into()),
-            Some("workflow_skipped".into()),
-            3,
-            receipt.finalized_at().get(),
-            "pending".into(),
-            receipt.finalized_at().get(),
-        )
-    );
-
-    seed_additional_linked_github_check(database, &fixture, subject_id, namespace + 500).await?;
-    assert!(matches!(
-        database
-            .store()
-            .commit_logical_run_finalization(commit)
-            .await,
-        Err(LogicalRunFinalizationStoreError::CommitConflict)
-    ));
     Ok(())
 }
 
@@ -1629,6 +465,26 @@ async fn admit_authenticated_fixture(
     if claimed.claim().delivery_id() != accepted.delivery_id() {
         return Err("the fixture claimed a different provider delivery".into());
     }
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        fixture.command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(
+                            fixture.command.source().digest(),
+                        ),
+                    )?],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     let authenticated_claim = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -1704,11 +560,15 @@ fn fixture_delivery_request(
         AcceptProviderDelivery::new(
             identity,
             fixture.command.request_digest(),
-            fixture.command.event().clone(),
+            common::authenticated_github_event_object(fixture.command.event())?,
             UnixMillis::new(observed_at),
         )?,
         ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace)? + 1)?,
         ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace)? + 1)?,
+        automata_ci_store::GithubAuthenticatedEvent::new(
+            automata_ci_store::GithubAuthenticatedEventKind::Push,
+            "refs/heads/main",
+        )?,
         GithubCheckHeadSha::new([0x14; 20])?,
         manifest.webhook_verifier_fingerprint(),
         manifest.webhook_verifier_revision(),
@@ -1774,7 +634,7 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_concurrency_cancellations (
+        INSERT INTO logical_workflow_concurrency_cancellations (
             run_id, root_invocation_id, preempting_run_id,
             prior_workflow_status, prior_workflow_updated_at_ms,
             prior_marker_state, prior_marker_revision, prior_marker_updated_at_ms,
@@ -1786,8 +646,8 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
                marker.state, marker.revision, marker.updated_at_ms,
                invocation.state, invocation.revision, invocation.updated_at_ms, $3
         FROM workflow_runs AS run
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = marker.run_id
          AND invocation.id = marker.root_invocation_id
         WHERE run.id = $1
@@ -1805,105 +665,6 @@ async fn record_concurrency_cancellation(database: &TestDatabase, fixture: &Fixt
         .await?;
     transaction.commit().await?;
     Ok(())
-}
-
-async fn set_linked_check_back_to_queued(database: &TestDatabase, subject_id: Uuid) -> TestResult {
-    sqlx::query(
-        "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_update_guard",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_wake_projection",
-    )
-    .execute(database.pool())
-    .await?;
-    let mutation: TestResult = async {
-        sqlx::query(
-            r"
-            UPDATE github_check_subjects
-            SET desired_state = 'queued', desired_revision = 1,
-                desired_updated_at_ms = created_at_ms
-            WHERE id = $1
-            ",
-        )
-        .bind(subject_id)
-        .execute(database.pool())
-        .await?;
-        Ok(())
-    }
-    .await;
-    sqlx::query(
-        "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_wake_projection",
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_update_guard",
-    )
-    .execute(database.pool())
-    .await?;
-    mutation
-}
-
-async fn seed_additional_linked_github_check(
-    database: &TestDatabase,
-    fixture: &Fixture,
-    original_subject_id: Uuid,
-    namespace: u128,
-) -> TestResult<Uuid> {
-    let subject_id = Uuid::from_u128(namespace);
-    sqlx::query(
-        "ALTER TABLE github_check_subjects DISABLE TRIGGER github_check_subjects_00_delivery_evidence_exact",
-    )
-    .execute(database.pool())
-    .await?;
-    let mutation: TestResult<Uuid> = async {
-        let mut transaction = database.pool().begin().await?;
-        sqlx::query(
-            r"
-            INSERT INTO github_check_subjects (
-                id, tenant_id, repository_id, provider_delivery_id, subject_key,
-                provider_connection_id, provider_installation_id,
-                github_repository_id, github_app_id, head_sha, check_name,
-                external_id, created_at_ms, desired_updated_at_ms
-            )
-            SELECT $2, tenant_id, repository_id, provider_delivery_id,
-                   subject_key || '/duplicate', provider_connection_id,
-                   provider_installation_id, github_repository_id, github_app_id,
-                   head_sha, check_name || ' duplicate',
-                   'automata-check:' || $2::TEXT, 1_401, 1_401
-            FROM github_check_subjects
-            WHERE id = $1
-            ",
-        )
-        .bind(original_subject_id)
-        .bind(subject_id)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            r"
-            UPDATE github_check_subjects
-            SET workflow_run_id = $2, linked_at_ms = 1_401,
-                desired_state = 'in_progress', desired_revision = 2,
-                desired_updated_at_ms = 1_401
-            WHERE id = $1
-            ",
-        )
-        .bind(subject_id)
-        .bind(fixture.command.run_id().as_uuid())
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(subject_id)
-    }
-    .await;
-    sqlx::query(
-        "ALTER TABLE github_check_subjects ENABLE TRIGGER github_check_subjects_00_delivery_evidence_exact",
-    )
-    .execute(database.pool())
-    .await?;
-    mutation
 }
 
 async fn claim_two_ready_runs(
@@ -1948,7 +709,7 @@ async fn assert_claimed_graph_and_evidence_are_immutable(
     // late source-level jobs before any terminal transition.
     let late_job = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_jobs (
+        INSERT INTO logical_workflow_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence,
             created_at_ms, updated_at_ms
@@ -2060,9 +821,9 @@ async fn assert_takeover_replay_and_atomic_terminal_state(
         r"
         SELECT invocation.state, marker.state, run.status,
                result.effective_conclusion
-        FROM workflow_plan_v2_run_results AS result
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = result.run_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        FROM logical_workflow_run_results AS result
+        JOIN logical_workflow_runs AS marker ON marker.run_id = result.run_id
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = result.run_id
          AND invocation.id = result.root_invocation_id
         JOIN workflow_runs AS run ON run.id = result.run_id
@@ -2083,7 +844,7 @@ async fn assert_takeover_replay_and_atomic_terminal_state(
     );
     assert!(
         sqlx::query(
-            "UPDATE workflow_plan_v2_run_results SET effective_conclusion = 'failure' WHERE run_id = $1",
+            "UPDATE logical_workflow_run_results SET effective_conclusion = 'failure' WHERE run_id = $1",
         )
         .bind(receipt.target().run_id().as_uuid())
         .execute(database.pool())
@@ -2151,244 +912,6 @@ async fn finalize_skipped_job(
     Ok(())
 }
 
-async fn finalize_rerun_skipped_job(
-    database: &TestDatabase,
-    fixture: &Fixture,
-    run_id: RunId,
-    source_order: i32,
-) -> TestResult {
-    let (invocation_id, logical_job_id): (Uuid, Uuid) = sqlx::query_as(
-        r"
-        SELECT marker.root_invocation_id, job.id
-        FROM workflow_plan_v2_runs AS marker
-        JOIN workflow_plan_v2_jobs AS job
-          ON job.run_id = marker.run_id
-         AND job.invocation_id = marker.root_invocation_id
-        WHERE marker.run_id = $1
-          AND job.source_order = $2
-          AND NOT job.rerun_carried
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .bind(source_order)
-    .fetch_one(database.pool())
-    .await?;
-    let invocation_id = LogicalWorkflowInvocationId::from_uuid(invocation_id)?;
-    let logical_job_id = LogicalWorkflowJobId::from_uuid(logical_job_id)?;
-    let target = LogicalActivationPreparationTarget::new(
-        TenantScope::from_authenticated_tenant_id(&fixture.tenant)?,
-        run_id,
-        invocation_id,
-        logical_job_id,
-    )?;
-    let owner = 0x1260_0000_u128
-        + (run_id.as_uuid().as_u128() & 0x000f_ffff) * 4_096
-        + u128::try_from(source_order)? * 4;
-    let preparation = match select_orchestration(database, &target, owner).await? {
-        ConsumedLogicalJobOrchestrationAuthority::Preparation(claimed) => claimed,
-        authority @ ConsumedLogicalJobOrchestrationAuthority::Activation(_) => {
-            return Err(format!("expected rerun preparation, got {authority:?}").into());
-        }
-    };
-    database
-        .store()
-        .bind_logical_activation_preparation(BindLogicalActivationPreparation::new(
-            preparation.descriptor().clone(),
-            preparation.claim().clone(),
-            preparation.descriptor().base_context().clone(),
-            admission_object(
-                format!("run-finalization/rerun-{owner}/needs-context.pb"),
-                &[0x72; 64],
-                "application/vnd.automata.job-runtime-context.protobuf",
-            ),
-            preparation.claim().claimed_at(),
-        )?)
-        .await?;
-    let activation = match select_orchestration(database, &target, owner + 1).await? {
-        ConsumedLogicalJobOrchestrationAuthority::Activation(claimed) => claimed,
-        authority @ ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
-            return Err(format!("expected rerun activation, got {authority:?}").into());
-        }
-    };
-    database
-        .store()
-        .publish_logical_job_activation(automata_ci_store::PublishLogicalJobActivation::new(
-            activation.claim().clone(),
-            false,
-            Vec::new(),
-            activation.claim().claimed_at(),
-        )?)
-        .await?;
-
-    let result_target = LogicalJobResultTarget::new(
-        TenantScope::from_authenticated_tenant_id(&fixture.tenant)?,
-        run_id,
-        invocation_id,
-        logical_job_id,
-    )?;
-    let observed_at = database_now_ms(database).await?;
-    let claimed = match database
-        .store()
-        .claim_logical_job_result(ClaimLogicalJobResult::new(
-            result_target,
-            LogicalJobResultWorkerId::from_uuid(Uuid::from_u128(owner + 2))?,
-            UnixMillis::new(observed_at),
-            UnixMillis::new(observed_at + 60_000),
-        )?)
-        .await?
-    {
-        LogicalJobResultClaimOutcome::Claimed(claimed) => claimed,
-        other => return Err(format!("rerun job result was not ready: {other:?}").into()),
-    };
-    let commit = CommitLogicalJobResult::new(
-        &claimed,
-        &fixture.plan_bytes,
-        &fixture.plan,
-        claimed.claim().claimed_at(),
-    )?;
-    let receipt = database.store().commit_logical_job_result(commit).await?;
-    assert_eq!(receipt.effective_conclusion(), JobConclusion::Skipped);
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines)] // Both late-mutation attacks share one committed fixture.
-async fn assert_late_rerun_carry_mutations_are_rejected(
-    database: &TestDatabase,
-    run_id: RunId,
-) -> TestResult {
-    let carried_job_id: Uuid = sqlx::query_scalar(
-        r"
-        SELECT logical_job_id
-        FROM workflow_rerun_carried_job_results
-        WHERE run_id = $1
-        ORDER BY logical_job_id
-        LIMIT 1
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .fetch_one(database.pool())
-    .await?;
-    let timestamp_error = sqlx::query(
-        r"
-        UPDATE workflow_plan_v2_jobs
-        SET updated_at_ms = updated_at_ms + 1
-        WHERE id = $1
-        ",
-    )
-    .bind(carried_job_id)
-    .execute(database.pool())
-    .await
-    .expect_err("a carried job timestamp must remain exact after commit");
-    assert_eq!(
-        timestamp_error
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("workflow_rerun_carried_job_immutable"),
-    );
-    let output_error = sqlx::query(
-        r"
-        INSERT INTO workflow_rerun_carried_job_outputs (
-            logical_job_id, output_name, sensitivity, public_value
-        ) VALUES ($1, 'forged-late-output', 'public', 'forged')
-        ",
-    )
-    .bind(carried_job_id)
-    .execute(database.pool())
-    .await
-    .expect_err("post-commit carried output insertion must be rejected");
-    assert_eq!(
-        output_error
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("workflow_rerun_carried_job_source_exact"),
-    );
-    let forged_outputs: i64 = sqlx::query_scalar(
-        r"
-        SELECT count(*)::BIGINT
-        FROM workflow_rerun_carried_job_outputs
-        WHERE logical_job_id = $1 AND output_name = 'forged-late-output'
-        ",
-    )
-    .bind(carried_job_id)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(forged_outputs, 0);
-
-    let selected_job_id: Uuid = sqlx::query_scalar(
-        r"
-        SELECT logical_job_id
-        FROM workflow_rerun_attempt_jobs
-        WHERE run_id = $1 AND selected
-        ORDER BY logical_job_id
-        LIMIT 1
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .fetch_one(database.pool())
-    .await?;
-    let carry_error = sqlx::query(
-        r"
-        INSERT INTO workflow_rerun_carried_job_results (
-            logical_job_id, run_id, invocation_id, source_run_id,
-            source_logical_job_id, result_descriptor_digest, logical_key,
-            source_order, plan_digest, plan_object_key, plan_size_bytes,
-            plan_media_type, plan_schema, activation_output_digest,
-            condition_matched, instance_count, instances_digest,
-            prerequisite_count, prerequisites_digest, effective_conclusion,
-            closure_has_failure, closure_has_cancelled, closure_has_skipped,
-            output_count, outputs_digest, commit_digest, claim_owner_id,
-            claim_generation, claim_started_at_ms, claim_expires_at_ms,
-            finalized_at_ms
-        )
-        SELECT mapping.logical_job_id, mapping.run_id, job.invocation_id,
-               mapping.source_run_id, mapping.source_logical_job_id,
-               source.descriptor_digest, source.logical_key,
-               source.source_order, source.plan_digest, source.plan_object_key,
-               source.plan_size_bytes, source.plan_media_type,
-               source.plan_schema, source.activation_output_digest,
-               source.condition_matched, source.instance_count,
-               source.instances_digest, source.prerequisite_count,
-               source.prerequisites_digest, source.effective_conclusion,
-               source.closure_has_failure, source.closure_has_cancelled,
-               source.closure_has_skipped, source.output_count,
-               source.outputs_digest, source.commit_digest,
-               source.claim_owner_id, source.claim_generation,
-               source.claim_started_at_ms, source.claim_expires_at_ms,
-               source.finalized_at_ms
-        FROM workflow_rerun_attempt_jobs AS mapping
-        JOIN workflow_plan_v2_jobs AS job
-          ON job.run_id = mapping.run_id
-         AND job.id = mapping.logical_job_id
-        JOIN workflow_plan_v2_effective_job_results AS source
-          ON source.run_id = mapping.source_run_id
-         AND source.logical_job_id = mapping.source_logical_job_id
-         AND source.claim_state = 'finalized'
-        WHERE mapping.run_id = $1
-          AND mapping.logical_job_id = $2
-          AND mapping.selected
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .bind(selected_job_id)
-    .execute(database.pool())
-    .await
-    .expect_err("a selected rerun mapping must never gain a carried result");
-    assert_eq!(
-        carry_error
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::constraint),
-        Some("workflow_rerun_carried_job_exact"),
-    );
-    let forged_results: i64 = sqlx::query_scalar(
-        "SELECT count(*)::BIGINT FROM workflow_rerun_carried_job_results WHERE logical_job_id = $1",
-    )
-    .bind(selected_job_id)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(forged_results, 0);
-    Ok(())
-}
-
 fn job_owner(fixture: &Fixture, index: usize) -> TestResult<u128> {
     Ok(130_000 + u128::try_from(index)? + (fixture.command.run_id().as_uuid().as_u128() & 0xff))
 }
@@ -2453,7 +976,7 @@ async fn claim_activation(
         logical_job_id,
     )?;
     let has_preparation: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM workflow_plan_v2_activation_preparations WHERE logical_job_id = $1)",
+        "SELECT EXISTS (SELECT 1 FROM logical_workflow_activation_preparations WHERE logical_job_id = $1)",
     )
     .bind(logical_job_id.as_uuid())
     .fetch_one(database.pool())
@@ -2774,144 +1297,6 @@ fn workflow_plan(job_count: usize, chained: bool) -> WorkflowPlan {
     .expect("workflow plan")
 }
 
-async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
-    sqlx::query(
-        "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Run finalization test', 1, 1)",
-    )
-    .bind(tenant)
-    .execute(database.pool())
-    .await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines)] // Explicit relational setup keeps current rerun authority auditable.
-async fn seed_rerun_actor(
-    database: &TestDatabase,
-    tenant: &str,
-    repository_id: Uuid,
-) -> TestResult<ManagementActor> {
-    let principal_id = Uuid::new_v4();
-    let session_id = Uuid::new_v4();
-    let provider_subject = u64::from(principal_id.as_fields().0).max(1).to_string();
-    let provider_login = format!("rerun-actor-{}", principal_id.simple());
-    sqlx::query(
-        "INSERT INTO human_principals (id, display_name, created_at_ms, updated_at_ms) VALUES ($1, 'Rerun actor', 1, 1)",
-    )
-    .bind(principal_id)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        INSERT INTO human_provider_identities (
-            principal_id, provider_id, provider_subject, provider_login,
-            normalized_login, first_authenticated_at_ms, last_authenticated_at_ms,
-            last_observed_at_ms, created_at_ms, updated_at_ms
-        ) VALUES ($1, 'github', $2, $3, $3, 1, 1, 1, 1, 1)
-        ",
-    )
-    .bind(principal_id)
-    .bind(&provider_subject)
-    .bind(&provider_login)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "INSERT INTO tenant_human_memberships (tenant_id, principal_id, created_at_ms, updated_at_ms) VALUES ($1, $2, 1, 1)",
-    )
-    .bind(tenant)
-    .bind(principal_id)
-    .execute(database.pool())
-    .await?;
-    let role_id = Uuid::new_v4();
-    sqlx::query(
-        r"
-        INSERT INTO rbac_roles (
-            tenant_id, id, name, display_name, role_kind, immutable,
-            created_by_principal_id, created_at_ms, updated_at_ms
-        ) VALUES ($1, $2, $3, 'Workflow rerunner', 'custom', FALSE, $4, 1, 1)
-        ",
-    )
-    .bind(tenant)
-    .bind(role_id)
-    .bind(format!("workflow-rerunner-{}", role_id.simple()))
-    .bind(principal_id)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        INSERT INTO rbac_role_permissions (
-            tenant_id, role_id, permission_name,
-            granted_by_principal_id, granted_at_ms
-        ) VALUES ($1, $2, 'runs:rerun', $3, 1)
-        ",
-    )
-    .bind(tenant)
-    .bind(role_id)
-    .bind(principal_id)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r"
-        INSERT INTO rbac_role_bindings (
-            tenant_id, id, principal_id, role_id, scope_kind, repository_id,
-            assignment_source, created_by_principal_id, created_at_ms
-        ) VALUES ($1, $2, $3, $4, 'repository', $5, 'manual', $3, 1)
-        ",
-    )
-    .bind(tenant)
-    .bind(Uuid::new_v4())
-    .bind(principal_id)
-    .bind(role_id)
-    .bind(repository_id)
-    .execute(database.pool())
-    .await?;
-    let revision: i64 = sqlx::query_scalar(
-        "SELECT authorization_revision FROM tenant_human_memberships WHERE tenant_id=$1 AND principal_id=$2",
-    )
-    .bind(tenant)
-    .bind(principal_id)
-    .fetch_one(database.pool())
-    .await?;
-    let now_ms = database_now_ms(database).await?;
-    let issued_at = now_ms.saturating_sub(1_000);
-    let idle_expires_at = now_ms.checked_add(3_600_000).ok_or("clock overflow")?;
-    let expires_at = now_ms.checked_add(7_200_000).ok_or("clock overflow")?;
-    let mut token_hash = [0_u8; 32];
-    token_hash[..16].copy_from_slice(session_id.as_bytes());
-    token_hash[16..].copy_from_slice(session_id.as_bytes());
-    sqlx::query(
-        r"
-        INSERT INTO human_sessions (
-            id, tenant_id, principal_id, provider_id, provider_subject,
-            session_kind, audience, token_hash, token_hash_key_id,
-            authorization_revision, issued_at_ms, last_seen_at_ms,
-            idle_expires_at_ms, expires_at_ms
-        ) VALUES (
-            $1,$2,$3,'github',$4,'browser','automata.web',$5,
-            'rerun-session-v1',$6,$7,$7,$8,$9
-        )
-        ",
-    )
-    .bind(session_id)
-    .bind(tenant)
-    .bind(principal_id)
-    .bind(provider_subject)
-    .bind(token_hash.as_slice())
-    .bind(revision)
-    .bind(issued_at)
-    .bind(idle_expires_at)
-    .bind(expires_at)
-    .execute(database.pool())
-    .await?;
-    Ok(ManagementActor::new(
-        TenantId::new(tenant)?,
-        PrincipalId::new(principal_id.hyphenated().to_string())?,
-        SessionId::new(session_id.hyphenated().to_string())?,
-        ManagementRevision::new(u64::try_from(revision)?)?,
-        None,
-        UnixTimestamp::from_seconds(u64::try_from(now_ms / 1_000)?),
-    ))
-}
-
 async fn run_claim(
     database: &TestDatabase,
     owner: u128,
@@ -2953,35 +1338,6 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
             .fetch_one(database.pool())
             .await?,
     )
-}
-
-async fn assert_rerun_operation_has_no_writes(
-    database: &TestDatabase,
-    operation_id: OperationId,
-) -> TestResult {
-    let counts: (i64, i64, i64, i64) = sqlx::query_as(
-        r"
-        SELECT
-            (SELECT count(*) FROM workflow_admission_receipts
-             WHERE idempotency_key = $1),
-            (SELECT count(*) FROM workflow_rerun_requests
-             WHERE operation_id = $2),
-            (SELECT count(*) FROM workflow_rerun_audit_evidence
-             WHERE operation_id = $2),
-            (SELECT count(*) FROM security_audit_events
-             WHERE action = 'workflow.rerun'
-               AND event_id IN (
-                   SELECT event_id FROM workflow_rerun_audit_evidence
-                   WHERE operation_id = $2
-               ))
-        ",
-    )
-    .bind(format!("workflow-rerun:{operation_id}"))
-    .bind(operation_id.as_uuid())
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(counts, (0, 0, 0, 0));
-    Ok(())
 }
 
 async fn wait_until_database_time(database: &TestDatabase, target: i64) -> TestResult {

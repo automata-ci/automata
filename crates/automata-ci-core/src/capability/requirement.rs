@@ -13,7 +13,7 @@ use super::{
 /// This version is independent from capability-advertisement schemas. Adding a
 /// required constraint is not forward-compatible with a peer that would ignore
 /// the field, so requirements advance separately from optional advertisements.
-pub const RUNNER_REQUIREMENTS_SCHEMA_VERSION: u16 = 3;
+pub const RUNNER_REQUIREMENTS_SCHEMA_VERSION: u16 = 1;
 
 /// Versioned job requirements used by scheduler policies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

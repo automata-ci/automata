@@ -202,7 +202,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         );
         assert!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_job_terminal_counters SET last_ordinal = last_ordinal + 1 WHERE logical_job_id = $1",
+                "UPDATE logical_workflow_job_terminal_counters SET last_ordinal = last_ordinal + 1 WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -212,7 +212,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         );
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_job_terminal_counters WHERE logical_job_id = $1",
+                "DELETE FROM logical_workflow_job_terminal_counters WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -298,7 +298,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         let instance_receipts = [left?, right?];
         assert_eq!(instance_receipts.len(), 2);
         let due_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_job_result_due WHERE logical_job_id = $1",
+            "SELECT count(*) FROM logical_workflow_job_result_due WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
@@ -307,7 +307,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         let tamper_claim_observed_at = database_now_ms(&database).await?;
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_job_result_due WHERE logical_job_id = $1",
+                "DELETE FROM logical_workflow_job_result_due WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -316,25 +316,25 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "the trigger-authoritative job due row cannot be deleted"
         );
         let original_outputs_digest: Vec<u8> = sqlx::query_scalar(
-            "SELECT outputs_digest FROM workflow_plan_v2_instance_results WHERE instance_id = $1",
+            "SELECT outputs_digest FROM logical_workflow_instance_results WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .fetch_one(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results DISABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results DISABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_instance_results SET outputs_digest = $2 WHERE instance_id = $1",
+            "UPDATE logical_workflow_instance_results SET outputs_digest = $2 WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .bind(vec![0xA5_u8; 32])
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results ENABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results ENABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -357,42 +357,42 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "a stored output digest cannot launder different child rows"
         );
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results DISABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results DISABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_instance_results SET outputs_digest = $2 WHERE instance_id = $1",
+            "UPDATE logical_workflow_instance_results SET outputs_digest = $2 WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .bind(original_outputs_digest)
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results ENABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results ENABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         let original_commit_digest: Vec<u8> = sqlx::query_scalar(
-            "SELECT commit_digest FROM workflow_plan_v2_instance_results WHERE instance_id = $1",
+            "SELECT commit_digest FROM logical_workflow_instance_results WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .fetch_one(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results DISABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results DISABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_instance_results SET commit_digest = $2 WHERE instance_id = $1",
+            "UPDATE logical_workflow_instance_results SET commit_digest = $2 WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .bind(vec![0x5A_u8; 32])
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results ENABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results ENABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -415,40 +415,40 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "a stored instance commit digest cannot launder altered root evidence"
         );
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results DISABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results DISABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_instance_results SET commit_digest = $2 WHERE instance_id = $1",
+            "UPDATE logical_workflow_instance_results SET commit_digest = $2 WHERE instance_id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .bind(original_commit_digest)
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instance_results ENABLE TRIGGER workflow_plan_v2_instance_results_reject_update",
+            "ALTER TABLE logical_workflow_instance_results ENABLE TRIGGER logical_workflow_instance_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         let original_workspace: String = sqlx::query_scalar(
-            "SELECT workspace FROM workflow_plan_v2_instances WHERE id = $1",
+            "SELECT workspace FROM logical_workflow_instances WHERE id = $1",
         )
         .bind(prepared[0].activated.id().as_uuid())
         .fetch_one(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances DISABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances DISABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
-        sqlx::query("UPDATE workflow_plan_v2_instances SET workspace = $2 WHERE id = $1")
+        sqlx::query("UPDATE logical_workflow_instances SET workspace = $2 WHERE id = $1")
             .bind(prepared[0].activated.id().as_uuid())
             .bind("/tampered-activation-workspace")
             .execute(database.pool())
             .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances ENABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances ENABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -471,17 +471,17 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "a stored publication digest cannot launder altered instance descriptors"
         );
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances DISABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances DISABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
-        sqlx::query("UPDATE workflow_plan_v2_instances SET workspace = $2 WHERE id = $1")
+        sqlx::query("UPDATE logical_workflow_instances SET workspace = $2 WHERE id = $1")
             .bind(prepared[0].activated.id().as_uuid())
             .bind(original_workspace)
             .execute(database.pool())
             .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances ENABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances ENABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -500,7 +500,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             fixture.logical_job_id,
         )?;
         let available_at: i64 = sqlx::query_scalar(
-            "SELECT available_at_ms FROM workflow_plan_v2_job_result_due WHERE logical_job_id = $1",
+            "SELECT available_at_ms FROM logical_workflow_job_result_due WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
@@ -623,7 +623,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         assert_eq!(left.commit_digest(), right.commit_digest());
         assert_eq!(left.output_count(), 3);
         let due_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_job_result_due WHERE logical_job_id = $1",
+            "SELECT count(*) FROM logical_workflow_job_result_due WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
@@ -631,7 +631,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         assert_eq!(due_count, 0, "finalization removes the bounded due row");
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_job_result_claims WHERE logical_job_id = $1",
+                "DELETE FROM logical_workflow_job_result_claims WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -654,7 +654,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         ));
 
         let state: String = sqlx::query_scalar(
-            "SELECT state FROM workflow_plan_v2_jobs WHERE id = $1",
+            "SELECT state FROM logical_workflow_jobs WHERE id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
@@ -663,7 +663,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         let outputs: Vec<(String, String, Option<String>)> = sqlx::query_as(
             r#"
             SELECT output_name, sensitivity, public_value
-            FROM workflow_plan_v2_job_result_outputs
+            FROM logical_workflow_job_result_outputs
             WHERE logical_job_id = $1 ORDER BY output_name COLLATE "C"
             "#,
         )
@@ -684,25 +684,25 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         );
 
         let original_claim_started_at: i64 = sqlx::query_scalar(
-            "SELECT claim_started_at_ms FROM workflow_plan_v2_job_results WHERE logical_job_id = $1",
+            "SELECT claim_started_at_ms FROM logical_workflow_job_results WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .fetch_one(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results DISABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_job_results SET claim_started_at_ms = $2 WHERE logical_job_id = $1",
+            "UPDATE logical_workflow_job_results SET claim_started_at_ms = $2 WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .bind(original_claim_started_at + 1)
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results ENABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results ENABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -720,36 +720,36 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             Err(LogicalJobResultStoreError::Store(StoreError::CorruptData(_)))
         ));
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results DISABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_job_results SET claim_started_at_ms = $2 WHERE logical_job_id = $1",
+            "UPDATE logical_workflow_job_results SET claim_started_at_ms = $2 WHERE logical_job_id = $1",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .bind(original_claim_started_at)
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results ENABLE TRIGGER workflow_plan_v2_job_results_reject_update",
+            "ALTER TABLE logical_workflow_job_results ENABLE TRIGGER logical_workflow_job_results_reject_update",
         )
         .execute(database.pool())
         .await?;
 
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_result_outputs DISABLE TRIGGER workflow_plan_v2_job_result_outputs_reject_update",
+            "ALTER TABLE logical_workflow_job_result_outputs DISABLE TRIGGER logical_workflow_job_result_outputs_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_job_result_outputs SET public_value = 'tampered' WHERE logical_job_id = $1 AND output_name = 'missing'",
+            "UPDATE logical_workflow_job_result_outputs SET public_value = 'tampered' WHERE logical_job_id = $1 AND output_name = 'missing'",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_result_outputs ENABLE TRIGGER workflow_plan_v2_job_result_outputs_reject_update",
+            "ALTER TABLE logical_workflow_job_result_outputs ENABLE TRIGGER logical_workflow_job_result_outputs_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -767,25 +767,25 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             Err(LogicalJobResultStoreError::Store(StoreError::CorruptData(_)))
         ));
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_result_outputs DISABLE TRIGGER workflow_plan_v2_job_result_outputs_reject_update",
+            "ALTER TABLE logical_workflow_job_result_outputs DISABLE TRIGGER logical_workflow_job_result_outputs_reject_update",
         )
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "UPDATE workflow_plan_v2_job_result_outputs SET public_value = '' WHERE logical_job_id = $1 AND output_name = 'missing'",
+            "UPDATE logical_workflow_job_result_outputs SET public_value = '' WHERE logical_job_id = $1 AND output_name = 'missing'",
         )
         .bind(fixture.logical_job_id.as_uuid())
         .execute(database.pool())
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_result_outputs ENABLE TRIGGER workflow_plan_v2_job_result_outputs_reject_update",
+            "ALTER TABLE logical_workflow_job_result_outputs ENABLE TRIGGER logical_workflow_job_result_outputs_reject_update",
         )
         .execute(database.pool())
         .await?;
 
         assert!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_job_results SET effective_conclusion = 'failure' WHERE logical_job_id = $1",
+                "UPDATE logical_workflow_job_results SET effective_conclusion = 'failure' WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -795,7 +795,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
         );
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_job_result_instances WHERE logical_job_id = $1",
+                "DELETE FROM logical_workflow_job_result_instances WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .execute(database.pool())
@@ -804,7 +804,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "logical-job child evidence cannot be deleted"
         );
         assert!(
-            sqlx::query("TRUNCATE workflow_plan_v2_job_result_instances")
+            sqlx::query("TRUNCATE logical_workflow_job_result_instances")
                 .execute(database.pool())
                 .await
                 .is_err(),
@@ -845,7 +845,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             LogicalJobResultClaimNextOutcome::Idle
         ));
         let old_idle_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_job_result_selections WHERE selection_id = $1",
+            "SELECT count(*) FROM logical_workflow_job_result_selections WHERE selection_id = $1",
         )
         .bind(short_idle_request.selection_id().as_uuid())
         .fetch_one(database.pool())
@@ -855,7 +855,7 @@ async fn logical_result_is_ordered_fenced_replayable_and_terminal() -> TestResul
             "expired Idle receipts are cleaned in bounded batches"
         );
         let old_claimed_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_job_result_selections WHERE selection_id = $1",
+            "SELECT count(*) FROM logical_workflow_job_result_selections WHERE selection_id = $1",
         )
         .bind(Uuid::from_u128(90_599))
         .fetch_one(database.pool())
@@ -911,7 +911,7 @@ async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> 
         assert!(
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_result_selection_replay_horizons
+                UPDATE logical_workflow_result_selection_replay_horizons
                 SET replay_floor_ms = $1, updated_at_ms = $1
                 WHERE queue_name = 'job'
                 ",
@@ -1008,7 +1008,7 @@ async fn zero_instance_publication_is_immediately_ready_and_skipped() -> TestRes
         assert_eq!(receipt.effective_conclusion(), JobConclusion::Skipped);
         assert!(receipt.closure_has_skipped());
         let state: String =
-            sqlx::query_scalar("SELECT state FROM workflow_plan_v2_jobs WHERE id = $1")
+            sqlx::query_scalar("SELECT state FROM logical_workflow_jobs WHERE id = $1")
                 .bind(fixture.logical_job_id.as_uuid())
                 .fetch_one(database.pool())
                 .await?;
@@ -1086,13 +1086,13 @@ async fn poison_zero_instance_publication(
     fixture: &Fixture,
 ) -> TestResult {
     sqlx::query(
-        "ALTER TABLE workflow_plan_v2_activation_publications DISABLE TRIGGER workflow_plan_v2_activation_publications_reject_update",
+        "ALTER TABLE logical_workflow_activation_publications DISABLE TRIGGER logical_workflow_activation_publications_reject_update",
     )
     .execute(database.pool())
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_publications
+        UPDATE logical_workflow_activation_publications
         SET condition_matched = TRUE, instance_count = 1
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
@@ -1103,7 +1103,7 @@ async fn poison_zero_instance_publication(
     .execute(database.pool())
     .await?;
     sqlx::query(
-        "ALTER TABLE workflow_plan_v2_activation_publications ENABLE TRIGGER workflow_plan_v2_activation_publications_reject_update",
+        "ALTER TABLE logical_workflow_activation_publications ENABLE TRIGGER logical_workflow_activation_publications_reject_update",
     )
     .execute(database.pool())
     .await?;
@@ -1118,7 +1118,7 @@ async fn assert_relational_job_quarantine(
         r"
         SELECT tenant_id, logical_job_id, failure_kind,
                claim_owner_id IS NULL
-        FROM workflow_plan_v2_job_result_quarantines
+        FROM logical_workflow_job_result_quarantines
         WHERE logical_job_id = $1
         ",
     )
@@ -1135,7 +1135,7 @@ async fn assert_relational_job_quarantine(
         )
     );
     let poisoned_due_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_job_result_due WHERE logical_job_id = $1",
+        "SELECT count(*) FROM logical_workflow_job_result_due WHERE logical_job_id = $1",
     )
     .bind(fixture.logical_job_id.as_uuid())
     .fetch_one(database.pool())
@@ -1165,7 +1165,7 @@ async fn dependent_claim_reauthenticates_prerequisite_child_evidence() -> TestRe
         let original_commit_digest: Vec<u8> = sqlx::query_scalar(
             r"
             SELECT prerequisite_commit_digest
-            FROM workflow_plan_v2_job_result_prerequisites
+            FROM logical_workflow_job_result_prerequisites
             WHERE logical_job_id = $1 AND prerequisite_job_id = $2
             ",
         )
@@ -1226,7 +1226,7 @@ async fn assert_dependency_edge_retained(
     assert!(
         sqlx::query(
             r"
-            DELETE FROM workflow_plan_v2_dependencies
+            DELETE FROM logical_workflow_dependencies
             WHERE run_id = $1 AND invocation_id = $2
               AND logical_job_id = $3 AND prerequisite_job_id = $4
             ",
@@ -1250,13 +1250,13 @@ async fn replace_prerequisite_commit_digest(
     digest: &[u8],
 ) -> TestResult {
     sqlx::query(
-        "ALTER TABLE workflow_plan_v2_job_result_prerequisites DISABLE TRIGGER workflow_plan_v2_job_result_prerequisites_reject_update",
+        "ALTER TABLE logical_workflow_job_result_prerequisites DISABLE TRIGGER logical_workflow_job_result_prerequisites_reject_update",
     )
     .execute(database.pool())
     .await?;
     sqlx::query(
         r"
-        UPDATE workflow_plan_v2_job_result_prerequisites
+        UPDATE logical_workflow_job_result_prerequisites
         SET prerequisite_commit_digest = $3
         WHERE logical_job_id = $1 AND prerequisite_job_id = $2
         ",
@@ -1267,7 +1267,7 @@ async fn replace_prerequisite_commit_digest(
     .execute(database.pool())
     .await?;
     sqlx::query(
-        "ALTER TABLE workflow_plan_v2_job_result_prerequisites ENABLE TRIGGER workflow_plan_v2_job_result_prerequisites_reject_update",
+        "ALTER TABLE logical_workflow_job_result_prerequisites ENABLE TRIGGER logical_workflow_job_result_prerequisites_reject_update",
     )
     .execute(database.pool())
     .await?;
@@ -1570,7 +1570,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                     format!("logical-job-result-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(
@@ -1578,6 +1578,10 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
             )?,
             ProviderRepositoryOwnerId::new(
                 u64::try_from(fixture.namespace + 104).expect("repository owner"),
+            )?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
             )?,
             GithubCheckHeadSha::new([0x14; 20])?,
             manifest.webhook_verifier_fingerprint(),
@@ -1986,7 +1990,7 @@ async fn open_runner(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             capability_snapshot,
             UnixMillis::new(database_now_ms(database).await?),
@@ -2054,7 +2058,7 @@ async fn seed_terminal_result(
     .rows_affected();
     assert_eq!(inserted, 1, "terminal evidence must be inserted once");
     let due_before_lifecycle: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+        "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
     )
     .bind(attempt_id.as_uuid())
     .fetch_one(&mut *transaction)
@@ -2081,7 +2085,7 @@ async fn seed_terminal_result(
     .rows_affected();
     assert_eq!(transitioned, 1, "the active attempt must terminalize once");
     let due_after_lifecycle: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+        "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
     )
     .bind(attempt_id.as_uuid())
     .fetch_one(&mut *transaction)
@@ -2156,7 +2160,7 @@ async fn terminal_ordinal(
     attempt_id: automata_ci_core::AttemptId,
 ) -> TestResult<i64> {
     Ok(sqlx::query_scalar(
-        "SELECT workflow_plan_v2_terminal_ordinal FROM attempt_terminal_results WHERE attempt_id = $1",
+        "SELECT logical_workflow_terminal_ordinal FROM attempt_terminal_results WHERE attempt_id = $1",
     )
     .bind(attempt_id.as_uuid())
     .fetch_one(database.pool())
@@ -2168,7 +2172,7 @@ async fn terminal_counter(
     logical_job_id: LogicalWorkflowJobId,
 ) -> TestResult<i64> {
     Ok(sqlx::query_scalar(
-        "SELECT last_ordinal FROM workflow_plan_v2_job_terminal_counters WHERE logical_job_id = $1",
+        "SELECT last_ordinal FROM logical_workflow_job_terminal_counters WHERE logical_job_id = $1",
     )
     .bind(logical_job_id.as_uuid())
     .fetch_one(database.pool())

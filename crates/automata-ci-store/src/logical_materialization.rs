@@ -345,13 +345,13 @@ impl LogicalInstanceMaterializationDescriptor {
         &self.workspace
     }
 
-    /// Returns the immutable JobIR-v5 object descriptor.
+    /// Returns the immutable `JobIR` object descriptor.
     #[must_use]
     pub const fn job_ir(&self) -> &LogicalActivationObject {
         &self.job_ir
     }
 
-    /// Returns the immutable runtime-context-v2 object descriptor.
+    /// Returns the immutable runtime-context object descriptor.
     #[must_use]
     pub const fn runtime_context(&self) -> &LogicalActivationObject {
         &self.runtime_context
@@ -741,7 +741,7 @@ pub struct CommitLogicalInstanceMaterialization {
 }
 
 impl CommitLogicalInstanceMaterialization {
-    /// Verifies decoded JobIR-v5 evidence and builds one fenced SQL commit.
+    /// Verifies decoded `JobIR` evidence and builds one fenced SQL commit.
     ///
     /// `encoded_job_ir` and `encoded_runtime_context` must be the exact
     /// immutable bytes named by the claimed descriptor. Decoding them into
@@ -1049,7 +1049,7 @@ pub enum LogicalMaterializationValueError {
     #[error("loaded runtime-context bytes disagree with the activated descriptor")]
     RuntimeContextBlobMismatch,
     /// The decoded envelope was not valid current `JobIR`.
-    #[error("decoded JobIR is invalid or not schema v5")]
+    #[error("decoded JobIR is invalid or not current schema")]
     InvalidJobIr,
     /// The decoded envelope disagreed with durable identity or content refs.
     #[error("decoded JobIR disagrees with its activated instance")]
@@ -1096,7 +1096,7 @@ pub trait LogicalMaterializationRepository: std::fmt::Debug + Send + Sync {
         request: RenewLogicalInstanceMaterialization,
     ) -> Result<RenewedLogicalInstanceMaterialization, LogicalMaterializationStoreError>;
 
-    /// Atomically inserts the deterministic JobIR-v5 job and its initial
+    /// Atomically inserts the deterministic `JobIR` job and its initial
     /// queued attempt under the exact live fence. No legacy dependency edge is
     /// written. Exact same-fence commits replay their receipt.
     async fn commit_logical_instance_materialization(

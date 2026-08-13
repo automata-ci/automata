@@ -6,23 +6,8 @@ harnesses must not query Automata's PostgreSQL tables or object store directly.
 
 ## Repository workflow selection
 
-Each repository in the GitHub provider configuration selects either one direct
-workflow path:
-
-```json
-{
-  "workflow_path": ".ci/workflows/main.yml"
-}
-```
-
-or every direct workflow:
-
-```json
-{
-  "workflow_selection": { "mode": "all_direct" }
-}
-```
-
+Each configured repository discovers every direct `.ci/workflows/*.yml` and
+`.ci/workflows/*.yaml` file on its configured default branch.
 Rename `.github` to `.ci` (or move only `.github/workflows` to
 `.ci/workflows` when the repository keeps other GitHub metadata). Workflow YAML
 does not change. After `actions/checkout`, Automata exposes the checked-out

@@ -1,11 +1,11 @@
 use std::fmt::Write as _;
 
 use automata_ci_github::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GithubMergeGroupAction, GithubPullRequestAction,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubMergeGroupAction, GithubPullRequestAction,
     GithubPushRefKind, GithubRepositoryVisibility, GithubStoredWebhookError,
     GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookVerifier,
-    StoredAuthenticatedGithubWebhookV1, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
-    X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_webhook_v1,
+    StoredAuthenticatedGithubWebhook, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
+    X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_webhook,
 };
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -397,7 +397,7 @@ fn durable_event_v1_rehydrates_each_supported_kind_without_reserialization() {
     ] {
         let body = encode(&payload);
         let stored = stored_event_v1(&body, event_name, delivery_id);
-        let event = rehydrate_stored_authenticated_github_webhook_v1(stored)
+        let event = rehydrate_stored_authenticated_github_webhook(stored)
             .expect("rehydrated authenticated event");
         assert_eq!(event.event_name(), event_name);
         assert_eq!(event.delivery_id(), delivery_id);
@@ -411,7 +411,7 @@ fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
     let body = encode(&pull_request_payload());
     let wrong_event = stored_event_v1(&body, "merge_group", "durable-pr-7");
     assert_eq!(
-        rehydrate_stored_authenticated_github_webhook_v1(wrong_event)
+        rehydrate_stored_authenticated_github_webhook(wrong_event)
             .expect_err("event-name drift must fail"),
         GithubStoredWebhookError::MalformedPayload
     );
@@ -426,7 +426,7 @@ fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
         .into_bytes();
     let stored = stored_event_v1(&duplicate, "pull_request", "durable-pr-7");
     assert_eq!(
-        rehydrate_stored_authenticated_github_webhook_v1(stored)
+        rehydrate_stored_authenticated_github_webhook(stored)
             .expect_err("duplicate JSON must fail"),
         GithubStoredWebhookError::MalformedPayload
     );
@@ -588,16 +588,16 @@ fn stored_event_v1(
     body: &[u8],
     event_name: &str,
     delivery_id: &str,
-) -> StoredAuthenticatedGithubWebhookV1 {
+) -> StoredAuthenticatedGithubWebhook {
     let body_digest: [u8; 32] = digest::digest(&digest::SHA256, body)
         .as_ref()
         .try_into()
         .expect("SHA-256 length");
-    StoredAuthenticatedGithubWebhookV1::from_durable_coordinates(
+    StoredAuthenticatedGithubWebhook::from_durable_coordinates(
         Bytes::copy_from_slice(body),
         GithubWebhookBodyDigest::from_bytes(body_digest),
         u64::try_from(body.len()).expect("fixture size"),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         event_name,
         delivery_id,
         71,

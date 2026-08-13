@@ -1,5 +1,5 @@
 use automata_ci_store::{
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubSubjectEvidenceValueError,
+    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubSubjectEvidenceValueError,
 };
 
 #[test]
@@ -21,7 +21,7 @@ fn event_kind_and_full_ref_are_exact_and_bounded() {
             "refs/heads/merge-queue/main/group-7",
         ),
     ] {
-        let event = GithubAuthenticatedEventV1::new(kind, git_ref).expect("valid event");
+        let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("valid event");
         assert_eq!(event.kind(), kind);
         assert_eq!(kind.as_str(), name);
         assert_eq!(event.git_ref(), git_ref);
@@ -40,7 +40,7 @@ fn malformed_or_excessive_refs_fail_closed() {
         &format!("refs/heads/{}", "x".repeat(1_025)),
     ] {
         assert_eq!(
-            GithubAuthenticatedEventV1::new(GithubAuthenticatedEventKind::Push, git_ref)
+            GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, git_ref)
                 .expect_err("invalid ref"),
             GithubSubjectEvidenceValueError::InvalidAuthenticatedEvent
         );

@@ -17,7 +17,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
     let job_count = count_i32(expansion.job_count())?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+        INSERT INTO logical_workflow_reusable_workflow_runs (
             tenant_id, repository_id, run_id, root_invocation_id,
             expansion_digest, catalog_entry_count, invocation_count,
             expanded_job_count, maximum_depth, planned_at_ms
@@ -41,7 +41,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
     for entry in expansion.catalog() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+            INSERT INTO logical_workflow_reusable_workflow_catalog (
                 run_id, catalog_entry_id, workflow_path, source_revision,
                 source_digest, source_object_key, source_size_bytes,
                 source_media_type, plan_digest, plan_object_key,
@@ -93,7 +93,7 @@ pub(super) async fn validate_reusable_workflow_expansion_replay(
         r"
         SELECT expansion_digest, catalog_entry_count, invocation_count,
                expanded_job_count, maximum_depth
-        FROM workflow_plan_v2_reusable_workflow_runs
+        FROM logical_workflow_reusable_workflow_runs
         WHERE run_id = $1 AND root_invocation_id = $2
         FOR SHARE
         ",
@@ -154,7 +154,7 @@ async fn insert_invocation_descriptor(
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+        INSERT INTO logical_workflow_reusable_invocation_expansions (
             run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
             catalog_entry_id, depth, call_path, workflow_path, source_digest,
             plan_digest, call_reference_digest, input_bindings_digest,
@@ -215,7 +215,7 @@ async fn insert_invocation_contract(
     for (source_order, input) in invocation.inputs().iter().enumerate() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_input_bindings (
+            INSERT INTO logical_workflow_reusable_input_bindings (
                 run_id, invocation_id, input_key, input_type, binding_kind,
                 value_digest, source_order
             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -239,7 +239,7 @@ async fn insert_invocation_contract(
     for (source_order, secret) in invocation.secrets().iter().enumerate() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_secret_bindings (
+            INSERT INTO logical_workflow_reusable_secret_bindings (
                 run_id, invocation_id, target_name, source_name, source_order
             ) VALUES ($1,$2,$3,$4,$5)
             ",
@@ -256,7 +256,7 @@ async fn insert_invocation_contract(
     for (source_order, output) in invocation.outputs().iter().enumerate() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_outputs (
+            INSERT INTO logical_workflow_reusable_outputs (
                 run_id, invocation_id, output_key, sensitivity, source_order
             ) VALUES ($1,$2,$3,$4,$5)
             ",
@@ -274,7 +274,7 @@ async fn insert_invocation_contract(
     let permissions = invocation.permissions();
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+        INSERT INTO logical_workflow_reusable_permission_snapshots (
             run_id, invocation_id, default_level, permission_digest
         ) VALUES ($1,$2,$3,$4)
         ",
@@ -289,7 +289,7 @@ async fn insert_invocation_contract(
     for (name, level) in permissions.grants() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_permission_grants (
+            INSERT INTO logical_workflow_reusable_permission_grants (
                 run_id, invocation_id, permission_name, permission_level
             ) VALUES ($1,$2,$3,$4)
             ",
@@ -313,7 +313,7 @@ async fn insert_invocation_jobs(
     for job in invocation.jobs() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+            INSERT INTO logical_workflow_reusable_expanded_jobs (
                 run_id, invocation_id, logical_job_id, logical_key,
                 source_order, execution_kind, descriptor_digest,
                 environment_requirement_kind, environment_template_digest,
@@ -350,7 +350,7 @@ async fn insert_invocation_jobs(
         for prerequisite in job.prerequisites() {
             sqlx::query(
                 r"
-                INSERT INTO workflow_plan_v2_reusable_expanded_dependencies (
+                INSERT INTO logical_workflow_reusable_expanded_dependencies (
                     run_id, invocation_id, logical_job_id, prerequisite_job_id
                 ) VALUES ($1,$2,$3,$4)
                 ",

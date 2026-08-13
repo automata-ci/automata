@@ -333,7 +333,7 @@ text never cross an observer seam.
 | `automata_ci_control_plane_state_sampler_healthy` | gauge | none |
 | `automata_ci_control_plane_state_sampler_last_success_timestamp_seconds` | gauge | none |
 | `automata_ci_control_plane_workflow_runs` | gauge | `status` |
-| `automata_ci_control_plane_workflow_plan_v2_runs` | gauge | `state` |
+| `automata_ci_control_plane_logical_workflow_runs` | gauge | `state` |
 | `automata_ci_control_plane_logical_jobs` | gauge | `state` |
 | `automata_ci_control_plane_logical_activations` | gauge | `state` |
 | `automata_ci_control_plane_logical_activation_oldest_timestamp_seconds` | gauge | `state` |
@@ -395,7 +395,7 @@ snapshot remains cached. Candidate, tenant, runner, session, job, and attempt
 identifiers exist only in the bounded in-memory evaluation and never become
 metric labels or diagnostic fields.
 
-WorkflowPlan-v2 run states are `pending`, `active`, `completed`, `cancelled`,
+logical workflow run states are `pending`, `active`, `completed`, `cancelled`,
 and `failed`. Logical-job states are `pending`, `activating`, `activated`,
 `completed`, `skipped`, `cancelled`, and `failed`. Activation observation states
 are `pending`, `activating`, and `expired`: pending age starts at logical-job
@@ -705,7 +705,7 @@ Alert on symptoms and correctness threats:
   objective misses, each with a traffic floor;
 - oldest eligible queue work above objective while compatible capacity is
   insufficient;
-- stale WorkflowPlan-v2 activation backlog or unrecovered expired claims;
+- stale logical workflow activation backlog or unrecovered expired claims;
 - lease expiration or lost attempts;
 - stale maintenance, durable-state sampling, command/cancellation delivery,
   restart-correct runner outbound delivery, or artifact-reservation progress;
@@ -739,7 +739,7 @@ The metrics gate combines independent checks:
 4. Privacy tests feed adversarial IDs, URLs, paths, image references, errors,
    payloads, and secret sentinels and assert that neither the series set nor
    exposition gains those values.
-5. The schema-v2 cardinality manifest enumerates every family, type, unit,
+5. The logical-workflow cardinality manifest enumerates every family, type, unit,
    label key/domain or exact reachable tuple, histogram bucket, and maximum.
    Fresh control-plane and runner expositions must match it exactly.
 6. `promtool check metrics --extended`, configuration and rule checks, and rule

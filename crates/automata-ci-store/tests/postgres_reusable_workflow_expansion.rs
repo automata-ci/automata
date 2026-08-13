@@ -13,9 +13,9 @@ ALTER TABLE repositories DISABLE TRIGGER USER;
 ALTER TABLE workflow_definitions DISABLE TRIGGER USER;
 ALTER TABLE workflow_snapshots DISABLE TRIGGER USER;
 ALTER TABLE workflow_runs DISABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_runs DISABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_invocations DISABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_jobs DISABLE TRIGGER USER;
+ALTER TABLE logical_workflow_runs DISABLE TRIGGER USER;
+ALTER TABLE logical_workflow_invocations DISABLE TRIGGER USER;
+ALTER TABLE logical_workflow_jobs DISABLE TRIGGER USER;
 BEGIN;
 SET CONSTRAINTS ALL DEFERRED;
 INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms)
@@ -62,7 +62,7 @@ INSERT INTO workflow_runs (
     'application/vnd.automata.workflow-plan+json', 2,
     'Root', 'refs/heads/main', 'synthetic-actor', 3
 );
-INSERT INTO workflow_plan_v2_runs (
+INSERT INTO logical_workflow_runs (
     run_id, root_invocation_id, admission_digest, state, admitted_at_ms,
     updated_at_ms, admission_graph_sealed_at_ms, runner_requirements_schema
 ) VALUES (
@@ -70,7 +70,7 @@ INSERT INTO workflow_plan_v2_runs (
     '10000000-0000-0000-0000-000000000005',
     decode(repeat('04', 32), 'hex'), 'active', 1, 1, 1, 3
 );
-INSERT INTO workflow_plan_v2_invocations (
+INSERT INTO logical_workflow_invocations (
     id, run_id, plan_digest, plan_object_key, plan_size_bytes,
     plan_media_type, plan_schema, state, created_at_ms, updated_at_ms
 ) VALUES (
@@ -79,7 +79,7 @@ INSERT INTO workflow_plan_v2_invocations (
     decode(repeat('03', 32), 'hex'), 'reusable/root-plan.json', 128,
     'application/vnd.automata.workflow-plan+json', 2, 'active', 1, 1
 );
-INSERT INTO workflow_plan_v2_jobs (
+INSERT INTO logical_workflow_jobs (
     id, run_id, invocation_id, logical_key, source_order, execution_kind,
     state, activation_fence, created_at_ms, updated_at_ms,
     runtime_policy_revision, runtime_policy_digest
@@ -95,17 +95,17 @@ ALTER TABLE repositories ENABLE TRIGGER USER;
 ALTER TABLE workflow_definitions ENABLE TRIGGER USER;
 ALTER TABLE workflow_snapshots ENABLE TRIGGER USER;
 ALTER TABLE workflow_runs ENABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_runs ENABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_invocations ENABLE TRIGGER USER;
-ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER;
+ALTER TABLE logical_workflow_runs ENABLE TRIGGER USER;
+ALTER TABLE logical_workflow_invocations ENABLE TRIGGER USER;
+ALTER TABLE logical_workflow_jobs ENABLE TRIGGER USER;
 ";
 
 // The ordinary expansion fixture has one root call job. The identity-chain
 // matrix exercises seven independent callsites, so seed the other six exact
 // durable root jobs before sealing its 0051 expansion ledger.
 const IDENTITY_ROOT_JOBS_SQL: &str = r"
-ALTER TABLE workflow_plan_v2_jobs DISABLE TRIGGER USER;
-INSERT INTO workflow_plan_v2_jobs (
+ALTER TABLE logical_workflow_jobs DISABLE TRIGGER USER;
+INSERT INTO logical_workflow_jobs (
     id, run_id, invocation_id, logical_key, source_order, execution_kind,
     state, activation_fence, created_at_ms, updated_at_ms,
     runtime_policy_revision, runtime_policy_digest
@@ -152,12 +152,12 @@ INSERT INTO workflow_plan_v2_jobs (
     'call-109', 6, 'reusable_workflow', 'pending', 0, 1, 1,
     1, decode(repeat('05', 32), 'hex')
 );
-ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER;
+ALTER TABLE logical_workflow_jobs ENABLE TRIGGER USER;
 ";
 
 const COMPLETE_EXPANSION_SQL: &str = r"
 BEGIN;
-INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+INSERT INTO logical_workflow_reusable_workflow_runs (
     tenant_id, repository_id, run_id, root_invocation_id, expansion_digest,
     catalog_entry_count, invocation_count, expanded_job_count, maximum_depth,
     planned_at_ms
@@ -167,7 +167,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_runs (
     '10000000-0000-0000-0000-000000000005', decode(repeat('10', 32), 'hex'),
     2, 2, 3, 1, 2
 );
-INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+INSERT INTO logical_workflow_reusable_workflow_catalog (
     run_id, catalog_entry_id, workflow_path, source_revision, source_digest,
     source_object_key, source_size_bytes, source_media_type, plan_digest,
     plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
@@ -192,7 +192,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
     'application/vnd.automata.workflow-plan+json', 2,
     decode(repeat('14', 32), 'hex'), decode(repeat('15', 32), 'hex'), 2, 0, 2
 );
-INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+INSERT INTO logical_workflow_reusable_invocation_expansions (
     run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
     catalog_entry_id, depth, call_path, workflow_path, source_digest, plan_digest,
     call_reference_digest, input_bindings_digest, secret_bindings_digest,
@@ -223,7 +223,7 @@ INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
     decode(repeat('28', 32), 'hex'), decode(repeat('29', 32), 'hex'),
     decode(repeat('2a', 32), 'hex'), 0, 0, 0, 0, 1, 2
 );
-INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+INSERT INTO logical_workflow_reusable_expanded_jobs (
     run_id, invocation_id, logical_job_id, logical_key, source_order,
     execution_kind, descriptor_digest
 ) VALUES
@@ -245,7 +245,7 @@ INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
     '10000000-0000-0000-0000-000000000009', 'child-final', 1,
     'steps', decode(repeat('32', 32), 'hex')
 );
-INSERT INTO workflow_plan_v2_reusable_expanded_dependencies (
+INSERT INTO logical_workflow_reusable_expanded_dependencies (
     run_id, invocation_id, logical_job_id, prerequisite_job_id
 ) VALUES (
     '10000000-0000-0000-0000-000000000004',
@@ -253,7 +253,7 @@ INSERT INTO workflow_plan_v2_reusable_expanded_dependencies (
     '10000000-0000-0000-0000-000000000009',
     '10000000-0000-0000-0000-000000000008'
 );
-INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+INSERT INTO logical_workflow_reusable_permission_snapshots (
     run_id, invocation_id, default_level, permission_digest
 ) VALUES
 (
@@ -271,7 +271,7 @@ COMMIT;
 
 const IDENTITY_CHAIN_MATRIX_SQL: &str = r"
 SET CONSTRAINTS ALL DEFERRED;
-INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+INSERT INTO logical_workflow_reusable_workflow_runs (
     tenant_id, repository_id, run_id, root_invocation_id, expansion_digest,
     catalog_entry_count, invocation_count, expanded_job_count, maximum_depth,
     planned_at_ms
@@ -281,7 +281,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_runs (
     '10000000-0000-0000-0000-000000000005', decode(repeat('50', 32), 'hex'),
     3, 15, 21, 2, 2
 );
-INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+INSERT INTO logical_workflow_reusable_workflow_catalog (
     run_id, catalog_entry_id, workflow_path, source_revision, source_digest,
     source_object_key, source_size_bytes, source_media_type, plan_digest,
     plan_object_key, plan_size_bytes, plan_media_type, plan_schema,
@@ -316,7 +316,7 @@ INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
     'application/vnd.automata.workflow-plan+json', 2,
     decode(repeat('54', 32), 'hex'), decode(repeat('55', 32), 'hex'), 1, 0, 2
 );
-INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+INSERT INTO logical_workflow_reusable_invocation_expansions (
     run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
     catalog_entry_id, depth, call_path, workflow_path, source_digest, plan_digest,
     call_reference_digest, input_bindings_digest, secret_bindings_digest,
@@ -333,7 +333,7 @@ INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
     decode(repeat('58', 32), 'hex'), decode(repeat('59', 32), 'hex'),
     decode(repeat('5a', 32), 'hex'), 0, 0, 0, 0, 0, 2
 );
-INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+INSERT INTO logical_workflow_reusable_invocation_expansions (
     run_id, invocation_id, parent_invocation_id, caller_logical_job_id,
     catalog_entry_id, depth, call_path, workflow_path, source_digest, plan_digest,
     call_reference_digest, input_bindings_digest, secret_bindings_digest,
@@ -445,7 +445,7 @@ FROM (VALUES
     invocation_id, parent_invocation_id, caller_logical_job_id, depth,
     secret_binding_count
 );
-INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+INSERT INTO logical_workflow_reusable_expanded_jobs (
     run_id, invocation_id, logical_job_id, logical_key, source_order,
     execution_kind, descriptor_digest
 )
@@ -563,7 +563,7 @@ FROM (VALUES
 ) AS fixture(
     invocation_id, logical_job_id, logical_key, source_order, execution_kind
 );
-INSERT INTO workflow_plan_v2_reusable_secret_bindings (
+INSERT INTO logical_workflow_reusable_secret_bindings (
     run_id, invocation_id, target_name, source_name, source_order
 ) VALUES
 (
@@ -628,7 +628,7 @@ INSERT INTO workflow_plan_v2_reusable_secret_bindings (
     '10000000-0000-0000-0000-000000000004',
     '10000000-0000-0000-0000-000000000114', 'TOKEN', 'TOKEN', 0
 );
-INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+INSERT INTO logical_workflow_reusable_permission_snapshots (
     run_id, invocation_id, default_level, permission_digest
 )
 SELECT
@@ -638,7 +638,7 @@ SELECT
             THEN decode(repeat('59', 32), 'hex')
         ELSE decode(repeat('5f', 32), 'hex')
     END
-FROM workflow_plan_v2_reusable_invocation_expansions
+FROM logical_workflow_reusable_invocation_expansions
 WHERE run_id = '10000000-0000-0000-0000-000000000004';
 SET CONSTRAINTS ALL IMMEDIATE;
 ";
@@ -761,9 +761,9 @@ async fn complete_expansion_commits_once_and_is_one_way_sealed() -> TestResult {
             SELECT catalog_entry_count, invocation_count, expanded_job_count,
                    maximum_depth,
                    (SELECT count(*)
-                    FROM workflow_plan_v2_reusable_expanded_dependencies
+                    FROM logical_workflow_reusable_expanded_dependencies
                     WHERE run_id = reusable.run_id)
-            FROM workflow_plan_v2_reusable_workflow_runs AS reusable
+            FROM logical_workflow_reusable_workflow_runs AS reusable
             WHERE run_id = $1::uuid
             ",
         )
@@ -774,7 +774,7 @@ async fn complete_expansion_commits_once_and_is_one_way_sealed() -> TestResult {
 
         let late_input = sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_input_bindings (
+            INSERT INTO logical_workflow_reusable_input_bindings (
                 run_id, invocation_id, input_key, input_type, binding_kind,
                 value_digest, source_order
             ) VALUES (
@@ -789,12 +789,12 @@ async fn complete_expansion_commits_once_and_is_one_way_sealed() -> TestResult {
         .expect_err("a committed receipt must reject later typed evidence");
         assert_eq!(
             constraint_name(&late_input),
-            Some("workflow_plan_v2_reusable_expansion_contract_counts_exact")
+            Some("logical_workflow_reusable_expansion_contract_counts_exact")
         );
 
         let late_dependency = sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_expanded_dependencies (
+            INSERT INTO logical_workflow_reusable_expanded_dependencies (
                 run_id, invocation_id, logical_job_id, prerequisite_job_id
             ) VALUES (
                 $1::uuid,
@@ -810,12 +810,12 @@ async fn complete_expansion_commits_once_and_is_one_way_sealed() -> TestResult {
         .expect_err("a committed receipt must reject later dependency evidence");
         assert_eq!(
             constraint_name(&late_dependency),
-            Some("workflow_plan_v2_reusable_expansion_contract_counts_exact")
+            Some("logical_workflow_reusable_expansion_contract_counts_exact")
         );
 
         let mutation = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_workflow_catalog
+            UPDATE logical_workflow_reusable_workflow_catalog
             SET descriptor_digest = decode(repeat('ff', 32), 'hex')
             WHERE run_id = $1::uuid
             ",
@@ -826,15 +826,15 @@ async fn complete_expansion_commits_once_and_is_one_way_sealed() -> TestResult {
         .expect_err("catalog evidence must be immutable");
         assert_eq!(
             constraint_name(&mutation),
-            Some("workflow_plan_v2_reusable_expansion_immutable")
+            Some("logical_workflow_reusable_expansion_immutable")
         );
 
         let leaked_rows: i64 = sqlx::query_scalar(
             r"
             SELECT
-                (SELECT count(*) FROM workflow_plan_v2_reusable_input_bindings
+                (SELECT count(*) FROM logical_workflow_reusable_input_bindings
                  WHERE run_id = $1::uuid)
-              + (SELECT count(*) FROM workflow_plan_v2_reusable_expanded_dependencies
+              + (SELECT count(*) FROM logical_workflow_reusable_expanded_dependencies
                  WHERE run_id = $1::uuid) - 1
             ",
         )

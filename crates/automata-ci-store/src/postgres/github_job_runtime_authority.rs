@@ -272,8 +272,8 @@ async fn lock_exact_execution(
         JOIN workflow_snapshots AS snapshot
           ON snapshot.id = run.snapshot_id
          AND snapshot.workflow_id = run.workflow_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-        JOIN workflow_plan_v2_runtime_policy_pins AS runtime_policy_pin
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_runtime_policy_pins AS runtime_policy_pin
           ON runtime_policy_pin.run_id = run.id
          AND runtime_policy_pin.tenant_id = repository.tenant_id
          AND runtime_policy_pin.repository_id = repository.id
@@ -283,8 +283,8 @@ async fn lock_exact_execution(
          AND runtime_policy.policy_revision = runtime_policy_pin.policy_revision
          AND runtime_policy.policy_digest = runtime_policy_pin.policy_digest
          AND runtime_policy.state = 'sealed'
-        JOIN workflow_plan_v2_concrete_jobs AS concrete ON concrete.job_id = job.id
-        JOIN workflow_plan_v2_materialization_claims AS materialization
+        JOIN logical_workflow_concrete_jobs AS concrete ON concrete.job_id = job.id
+        JOIN logical_workflow_materialization_claims AS materialization
           ON materialization.instance_id = concrete.instance_id
          AND materialization.run_id = concrete.run_id
          AND materialization.invocation_id = concrete.invocation_id
@@ -297,30 +297,30 @@ async fn lock_exact_execution(
          AND materialization.claimed_at_ms = concrete.claim_started_at_ms
          AND materialization.expires_at_ms = concrete.claim_expires_at_ms
          AND materialization.updated_at_ms = concrete.committed_at_ms
-        JOIN workflow_plan_v2_instances AS instance
+        JOIN logical_workflow_instances AS instance
           ON instance.id = concrete.instance_id
          AND instance.run_id = concrete.run_id
          AND instance.invocation_id = concrete.invocation_id
          AND instance.logical_job_id = concrete.logical_job_id
-        JOIN workflow_plan_v2_activation_publications AS publication
+        JOIN logical_workflow_activation_publications AS publication
           ON publication.run_id = instance.run_id
          AND publication.invocation_id = instance.invocation_id
          AND publication.logical_job_id = instance.logical_job_id
-        JOIN workflow_plan_v2_activation_preparations AS preparation
+        JOIN logical_workflow_activation_preparations AS preparation
           ON preparation.run_id = publication.run_id
          AND preparation.invocation_id = publication.invocation_id
          AND preparation.logical_job_id = publication.logical_job_id
          AND preparation.activation_input_digest = publication.activation_input_digest
-        JOIN workflow_plan_v2_activation_preparation_claims AS preparation_claim
+        JOIN logical_workflow_activation_preparation_claims AS preparation_claim
           ON preparation_claim.run_id = preparation.run_id
          AND preparation_claim.invocation_id = preparation.invocation_id
          AND preparation_claim.logical_job_id = preparation.logical_job_id
          AND preparation_claim.descriptor_digest = preparation.descriptor_digest
-        JOIN workflow_plan_v2_jobs AS logical_job
+        JOIN logical_workflow_jobs AS logical_job
           ON logical_job.run_id = concrete.run_id
          AND logical_job.invocation_id = concrete.invocation_id
          AND logical_job.id = concrete.logical_job_id
-        JOIN workflow_plan_v2_invocations AS invocation
+        JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = concrete.run_id
          AND invocation.id = concrete.invocation_id
         JOIN runners AS runner ON runner.id = attempt.runner_id
@@ -376,8 +376,8 @@ async fn lock_exact_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 4
-          AND job.job_ir_schema = 5
+          AND job.admission_epoch = 1
+          AND job.job_ir_schema = 1
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
           AND job.job_ir_digest = $15
@@ -385,8 +385,8 @@ async fn lock_exact_execution(
           AND ($16::TEXT IS NULL OR job.job_ir_object_key = $16)
           AND run.id = $12
           AND ($17::UUID IS NULL OR run.workflow_id = $17)
-          AND run.admission_epoch = 4
-          AND run.plan_schema = 2
+          AND run.admission_epoch = 1
+          AND run.plan_schema = 1
           AND run.status IN ('queued', 'in_progress')
           AND (
               concrete.invocation_id <> marker.root_invocation_id
@@ -407,7 +407,7 @@ async fn lock_exact_execution(
           AND marker.root_invocation_id = origin.root_invocation_id
           AND marker.admission_digest = origin.logical_admission_digest
           AND marker.admitted_at_ms = origin.admitted_at_ms
-          AND automata_workflow_plan_v2_invocation_published(
+          AND automata_logical_workflow_invocation_published(
               run.id, concrete.invocation_id
           )
           AND manifest.webhook_verifier_fingerprint_sha256 =
@@ -471,7 +471,7 @@ async fn lock_exact_execution(
           AND concrete.runtime_policy_digest = runtime_policy_pin.policy_digest
           AND marker.orchestration_schema = 1
           AND marker.state IN ('pending', 'active')
-          AND invocation.plan_schema = 2
+          AND invocation.plan_schema = 1
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
@@ -479,14 +479,14 @@ async fn lock_exact_execution(
           AND publication.condition_matched
           AND publication.activation_generation = logical_job.activation_fence
           AND publication.activation_input_digest = logical_job.activation_input_digest
-          AND publication.job_ir_version = 5
-          AND publication.runtime_context_schema = 2
-          AND instance.job_ir_version = 5
+          AND publication.job_ir_version = 1
+          AND publication.runtime_context_schema = 1
+          AND instance.job_ir_version = 1
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
           AND instance.job_ir_media_type = 'application/vnd.automata.job-ir.protobuf'
-          AND concrete.runtime_context_schema = 2
+          AND concrete.runtime_context_schema = 1
           AND concrete.requirements = job.requirements
           AND materialization.state = 'materialized'
           AND runner.id = $7
@@ -498,7 +498,7 @@ async fn lock_exact_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 5
+          AND session.job_ir_schema = 1
           AND session.disconnected_at_ms IS NULL
           AND ($24::UUID IS NULL OR origin.provider_connection_id = $24)
           AND ($25::BIGINT IS NULL OR origin.provider_installation_id = $25)
@@ -580,7 +580,7 @@ async fn lock_exact_preparation_selection_lineage(
         SELECT selection.generation = $8
            AND selection.claimed_at_ms = $9
            AND selection.expires_at_ms = $10
-        FROM workflow_plan_v2_activation_work_selections AS selection
+        FROM logical_workflow_activation_work_selections AS selection
         WHERE selection.selection_id = $1
           AND selection.outcome = 'claimed'
           AND selection.authority_kind = 'preparation'
@@ -614,7 +614,7 @@ async fn lock_exact_preparation_selection_lineage(
     let renewal_exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
-        FROM workflow_plan_v2_activation_renewal_receipts AS renewal
+        FROM logical_workflow_activation_renewal_receipts AS renewal
         WHERE renewal.selection_id = $1
           AND renewal.authority_kind = 'preparation'
           AND renewal.tenant_id = $2
@@ -666,7 +666,7 @@ async fn lock_exact_activation_selection_lineage(
         SELECT selection.generation = $8
            AND selection.claimed_at_ms = $9
            AND selection.expires_at_ms = $10
-        FROM workflow_plan_v2_activation_work_selections AS selection
+        FROM logical_workflow_activation_work_selections AS selection
         WHERE selection.selection_id = $1
           AND selection.outcome = 'claimed'
           AND selection.authority_kind = 'activation'
@@ -700,7 +700,7 @@ async fn lock_exact_activation_selection_lineage(
     let renewal_exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
-        FROM workflow_plan_v2_activation_renewal_receipts AS renewal
+        FROM logical_workflow_activation_renewal_receipts AS renewal
         WHERE renewal.selection_id = $1
           AND renewal.authority_kind = 'activation'
           AND renewal.tenant_id = $2
@@ -752,7 +752,7 @@ async fn lock_exact_materialization_selection_lineage(
         SELECT selection.generation = $9
            AND selection.claimed_at_ms = $10
            AND selection.expires_at_ms = $11
-        FROM workflow_plan_v2_materialization_work_selections AS selection
+        FROM logical_workflow_materialization_work_selections AS selection
         WHERE selection.selection_id = $1
           AND selection.outcome = 'claimed'
           AND selection.tenant_id = $2
@@ -787,7 +787,7 @@ async fn lock_exact_materialization_selection_lineage(
     let renewal_exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
-        FROM workflow_plan_v2_materialization_renewal_receipts AS renewal
+        FROM logical_workflow_materialization_renewal_receipts AS renewal
         WHERE renewal.selection_id = $1
           AND renewal.tenant_id = $2
           AND renewal.run_id = $3

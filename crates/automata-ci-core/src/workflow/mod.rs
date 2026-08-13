@@ -58,6 +58,4 @@ pub use template::{
 };
 pub use validation::{MAX_LOGICAL_PLAN_NODES, MAX_LOGICAL_PLAN_TEXT_BYTES, WorkflowPlanError};
 pub use value::{PermissionGrant, PermissionLevel, QueuePolicy, WorkflowPermissions};
-pub use version::{
-    WORKFLOW_PLAN_SCHEMA_VERSION, WORKFLOW_PLAN_V2_SCHEMA_VERSION, WorkflowPlanVersion,
-};
+pub use version::{WORKFLOW_PLAN_SCHEMA_VERSION, WorkflowPlanVersion};

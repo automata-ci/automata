@@ -580,7 +580,7 @@ async fn twentieth_attempt_retry_and_expiry_terminalize_without_sticking_runtime
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn legacy_manifest_requires_an_explicit_owner_bound_successor() -> TestResult {
+async fn owner_binding_requires_an_explicit_revised_successor() -> TestResult {
     run_with_database(|database| async move {
         let tenant = TenantScope::from_authenticated_tenant_id("schedule-owner-upgrade-test")?;
         let connection = ProviderConnectionId::from_uuid(Uuid::from_u128(0x59c1))?;
@@ -611,7 +611,7 @@ async fn legacy_manifest_requires_an_explicit_owner_bound_successor() -> TestRes
                     UnixMillis::new(2),
                 ))
                 .await,
-            Err(GithubProviderManifestStoreError::OwnerBindingUpgradeRequired)
+            Err(GithubProviderManifestStoreError::OwnerBindingRevisionRequired)
         ));
 
         let successor = fixture_private_github_manifest_revision(

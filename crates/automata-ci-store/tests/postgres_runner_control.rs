@@ -32,11 +32,10 @@ use common::{
 };
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
 const EXPIRING_LEASE_DURATION_MILLIS: i64 = 2_000;
-const OFFER_HORIZON_MIGRATION: &str =
-    include_str!("../migrations/0045_runner_offer_authority_horizon.sql");
+const OFFER_HORIZON_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn offer_receipt_migration_requires_a_complete_supported_fallback_projection() {
@@ -459,7 +458,7 @@ async fn session_close_and_open_supersession_clean_retry_state_but_retain_queue_
                 automata_ci_core::RunnerSessionId::new(),
                 first.runner_id(),
                 first.runner_generation(),
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 automata_ci_core::JobIrVersion::current(),
                 runner_capability_document(database.pool(), first.runner_id()).await?,
                 UnixMillis::new(12),
@@ -473,7 +472,7 @@ async fn session_close_and_open_supersession_clean_retry_state_but_retain_queue_
                 automata_ci_core::RunnerSessionId::new(),
                 second.runner_id(),
                 second.runner_generation(),
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 automata_ci_core::JobIrVersion::current(),
                 runner_capability_document(database.pool(), second.runner_id()).await?,
                 UnixMillis::new(14),
@@ -599,7 +598,7 @@ async fn current_session_resolution_separates_desired_and_observed_state() -> Te
                 automata_ci_core::RunnerSessionId::new(),
                 fence.runner_id(),
                 fence.runner_generation(),
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 automata_ci_core::JobIrVersion::current(),
                 runner_capability_document(database.pool(), fence.runner_id()).await?,
                 UnixMillis::new(10),
@@ -798,7 +797,7 @@ async fn lease_offer_publication_is_atomic_concurrent_and_exactly_replayed() -> 
                 automata_ci_core::RunnerSessionId::new(),
                 fence.runner_id(),
                 fence.runner_generation(),
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 automata_ci_core::JobIrVersion::current(),
                 runner_capability_document(database.pool(), fence.runner_id()).await?,
                 UnixMillis::new(20),
@@ -1903,7 +1902,7 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
         let cancellation_payload = CancelJobCommandPayload::new(
             lease.attempt_id(),
             lease.guard(),
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             cancellation_reason.as_str(),
             cancellation_requested_at,
         )?
@@ -2180,7 +2179,7 @@ fn offer(
     );
     Ok(PublishLeaseOffer::new(
         request,
-        RunnerProtocolVersion::new(5)?,
+        RunnerProtocolVersion::new(1)?,
         slot,
         lease.clone(),
         metadata.clone(),

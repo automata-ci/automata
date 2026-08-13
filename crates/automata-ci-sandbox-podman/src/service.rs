@@ -10,7 +10,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::naming::ResourceNames;
 
-const MANIFEST_SCHEMA: u64 = 4;
+const MANIFEST_SCHEMA: u64 = 1;
 const MAX_SERVICES: usize = 64;
 const MAX_PORTS_PER_SERVICE: usize = 256;
 const MAX_AGGREGATE_PIDS: u32 = 1_000_000;

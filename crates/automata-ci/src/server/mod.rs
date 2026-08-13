@@ -868,11 +868,11 @@ pub enum ManagedService {
     ReadinessMonitor,
     /// Bounded expired-lease and stale-session maintenance loop.
     ControlPlaneMaintenance,
-    /// Database-time WorkflowPlan-v2 run-finalization worker.
+    /// Database-time logical workflow run-finalization worker.
     LogicalRunFinalization,
     /// Autonomous terminal-attempt and logical-job result projection worker.
     LogicalResultProjection,
-    /// Autonomous WorkflowPlan-v2 preparation, activation, and materialization worker.
+    /// Autonomous logical workflow preparation, activation, and materialization worker.
     AutonomousWorkflow,
     /// Exact mixed Public/Private GitHub provider runtime.
     GithubProvider,
@@ -905,7 +905,7 @@ pub enum ManagedServiceError {
     /// The logical result-projection worker failed.
     #[error("logical result-projection service failed")]
     LogicalResultProjection,
-    /// The autonomous WorkflowPlan-v2 worker failed.
+    /// The autonomous logical workflow worker failed.
     #[error("autonomous workflow service failed")]
     AutonomousWorkflow,
     /// The configured GitHub provider runtime failed.

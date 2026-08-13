@@ -6,12 +6,12 @@ use automata_ci_core::JobAuthorityProfile;
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
-    GITHUB_PROVIDER_WORKFLOW_PATH, GithubCheckName, GithubCheckSubjectKey, GithubProviderGitRef,
-    GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, ProviderInstallationId, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
-    WorkflowRuntimePolicyRevision, github_provider_repository_id,
+    GithubCheckName, GithubProviderGitRef, GithubProviderManifestRevision,
+    GithubProviderWorkflowSelection, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
+    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, TenantScope, WorkflowRuntimePolicyRevision,
+    github_provider_repository_id,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use serde::Deserialize;
@@ -27,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 3;
+const CONFIG_SCHEMA: u16 = 1;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -568,25 +568,7 @@ impl GithubProviderRepositoryConfig {
         let runner_policy_bytes = raw.runner_policy.get().as_bytes();
         let runner_policy = GithubRunnerPolicy::decode_configuration(runner_policy_bytes)
             .map_err(|_| GithubProviderConfigError)?;
-        let workflow_selection = match (raw.workflow_selection, raw.workflow_path) {
-            (
-                Some(RawWorkflowSelection {
-                    mode: RawWorkflowSelectionMode::AllDirect,
-                }),
-                None,
-            ) => GithubProviderWorkflowSelection::all_direct(),
-            (None, workflow_path) => {
-                let path = GithubCheckSubjectKey::new(
-                    workflow_path.unwrap_or_else(|| GITHUB_PROVIDER_WORKFLOW_PATH.to_owned()),
-                )
-                .map_err(|_| GithubProviderConfigError)?;
-                if !valid_workflow_path(path.as_str()) {
-                    return Err(GithubProviderConfigError);
-                }
-                GithubProviderWorkflowSelection::exact(path)
-            }
-            _ => return Err(GithubProviderConfigError),
-        };
+        let workflow_selection = GithubProviderWorkflowSelection::all_direct();
         let check_name =
             GithubCheckName::new(raw.check_name).map_err(|_| GithubProviderConfigError)?;
         let RawAuthorities {
@@ -725,12 +707,6 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn workflow_selection(&self) -> &GithubProviderWorkflowSelection {
         &self.workflow_selection
-    }
-
-    /// Returns the precise legacy workflow path, if configured.
-    #[must_use]
-    pub fn exact_workflow_path(&self) -> Option<&str> {
-        self.workflow_selection.exact_path()
     }
 
     /// Returns the exact provider-facing Check Run name.
@@ -929,35 +905,8 @@ struct RawRepository {
     authority_profile: RawAuthorityProfile,
     /// Exact raw JSON retained until Store's sole typed policy codec consumes it.
     runner_policy: Box<RawValue>,
-    #[serde(default)]
-    workflow_path: Option<String>,
-    #[serde(default)]
-    workflow_selection: Option<RawWorkflowSelection>,
     check_name: String,
     authorities: RawAuthorities,
-}
-
-fn valid_workflow_path(value: &str) -> bool {
-    let Some(file) = value.strip_prefix(".ci/workflows/") else {
-        return false;
-    };
-    let supported_extension = matches!(
-        file.rsplit_once('.'),
-        Some((stem, "yml" | "yaml")) if !stem.is_empty()
-    );
-    !file.is_empty() && !file.contains('/') && supported_extension
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWorkflowSelection {
-    mode: RawWorkflowSelectionMode,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RawWorkflowSelectionMode {
-    AllDirect,
 }
 
 #[derive(Clone, Copy, Deserialize)]

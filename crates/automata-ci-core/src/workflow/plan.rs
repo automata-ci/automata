@@ -23,7 +23,7 @@ pub struct WorkflowPlan {
     span: PlanSourceSpan,
 }
 
-/// Named construction path for a schema-v2 logical workflow plan.
+/// Named construction path for a logical-workflow logical workflow plan.
 #[derive(Clone, Debug)]
 pub struct LogicalWorkflowPlanBuilder {
     source: WorkflowSourceProvenance,
@@ -68,7 +68,7 @@ impl TryFrom<UncheckedWorkflowPlan> for WorkflowPlan {
 }
 
 impl WorkflowPlan {
-    /// Starts a schema-v2 builder whose jobs remain logical templates until
+    /// Starts a logical-workflow builder whose jobs remain logical templates until
     /// their prerequisites and matrix inputs have finalized.
     #[must_use]
     pub fn logical_builder(
@@ -198,11 +198,11 @@ impl WorkflowPlan {
         if self.span.source_id() != self.source.source_id() {
             return Err(WorkflowPlanError::PlanSourceMismatch);
         }
-        self.validate_v2()
+        self.validate_logical_plan()
     }
 
-    fn validate_v2(&self) -> Result<(), WorkflowPlanError> {
-        self.validate_v2_envelope()?;
+    fn validate_logical_plan(&self) -> Result<(), WorkflowPlanError> {
+        self.validate_envelope()?;
         validate_span_source(
             self.logical.span(),
             self.source.source_id(),
@@ -211,14 +211,14 @@ impl WorkflowPlan {
         self.logical.validate(self.source.source_id())
     }
 
-    fn validate_v2_envelope(&self) -> Result<(), WorkflowPlanError> {
+    fn validate_envelope(&self) -> Result<(), WorkflowPlanError> {
         for (field, value) in [
             ("source provider", self.source.provider()),
             ("source identity", self.source.source_id()),
             ("event provider", self.event.provider()),
             ("event name", self.event.name()),
         ] {
-            validate_v2_text(field, value)?;
+            validate_logical_plan_text(field, value)?;
         }
         match self.source.origin() {
             PlanSourceOrigin::Repository {
@@ -231,11 +231,15 @@ impl WorkflowPlan {
                     ("source revision", revision.as_str()),
                     ("source workflow path", path.as_str()),
                 ] {
-                    validate_v2_text(field, value)?;
+                    validate_logical_plan_text(field, value)?;
                 }
             }
-            PlanSourceOrigin::LocalPath { path } => validate_v2_text("source local path", path)?,
-            PlanSourceOrigin::Memory { name } => validate_v2_text("source memory name", name)?,
+            PlanSourceOrigin::LocalPath { path } => {
+                validate_logical_plan_text("source local path", path)?;
+            }
+            PlanSourceOrigin::Memory { name } => {
+                validate_logical_plan_text("source memory name", name)?;
+            }
         }
         for (field, value) in [
             ("event delivery id", self.event.delivery_id()),
@@ -243,7 +247,7 @@ impl WorkflowPlan {
             ("event git ref", self.event.git_ref()),
         ] {
             if let Some(value) = value {
-                validate_v2_text(field, value)?;
+                validate_logical_plan_text(field, value)?;
             }
         }
         if let Some(trigger) = self.event.configured_trigger_span() {
@@ -251,13 +255,13 @@ impl WorkflowPlan {
         }
         if let Some(name) = &self.name {
             validate_span_source(name.span(), self.source.source_id(), "workflow name")?;
-            validate_v2_text("workflow name", name.value())?;
+            validate_logical_plan_text("workflow name", name.value())?;
         }
         Ok(())
     }
 }
 
-fn validate_v2_text(field: &'static str, value: &str) -> Result<(), WorkflowPlanError> {
+fn validate_logical_plan_text(field: &'static str, value: &str) -> Result<(), WorkflowPlanError> {
     if value.len() > MAX_LOGICAL_FIELD_BYTES {
         return Err(WorkflowPlanError::LimitExceeded {
             field,
@@ -317,7 +321,7 @@ impl LogicalWorkflowPlanBuilder {
         self
     }
 
-    /// Validates and freezes a schema-v2 logical workflow plan.
+    /// Validates and freezes a logical-workflow logical workflow plan.
     ///
     /// # Errors
     ///

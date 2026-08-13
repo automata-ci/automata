@@ -26,7 +26,7 @@ fn hello_is_owned_versioned_and_json_round_trippable() {
         UnixMillis::new(123),
     ));
     let json = serde_json::to_string(&hello).expect("serialize hello");
-    assert!(json.contains("\"message_schema_version\":3"));
+    assert!(json.contains("\"message_schema_version\":1"));
     assert_eq!(
         serde_json::from_str::<RunnerToServer>(&json).expect("deserialize hello"),
         hello,

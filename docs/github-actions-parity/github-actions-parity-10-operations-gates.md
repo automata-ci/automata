@@ -36,7 +36,7 @@ definition of done.
 
 Current `upstream/main` already ships bounded Prometheus/OpenMetrics endpoints,
 RED/USE families across the control plane, Results, storage, and runners, a
-schema-v2 cardinality manifest, checked recording/alert rules, dashboards, and
+logical-workflow cardinality manifest, checked recording/alert rules, dashboards, and
 runbooks. Latest main also records sanitized runner lease-request failure stages
 in logs. This package extends that base; it does not rebuild observability from
 zero, and the closed lease-stage signal still needs a bounded metric family.

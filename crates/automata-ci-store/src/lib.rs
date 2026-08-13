@@ -138,8 +138,8 @@ pub use github_provider_manifest::{
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_SOURCE_REVISION,
     GITHUB_PROVIDER_WEB_ORIGIN, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
     GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN,
-    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GITHUB_PROVIDER_WORKFLOW_PATH, GithubProviderGitRef,
-    GithubProviderManifest, GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
+    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubProviderGitRef, GithubProviderManifest,
+    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
@@ -197,8 +197,8 @@ pub use github_service_authority::{
     ReleaseGithubServerServiceHandoff, RetireGithubServerServiceAuthority,
 };
 pub use github_subject_evidence::{
-    AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubRepositoryDispatchResolution,
+    AcceptManifestPinnedGithubDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubRepositoryDispatchResolution,
     GithubRepositoryDispatchResolutionAuthority, GithubSubjectEvidenceRepository,
     GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
     GithubWorkflowRunSubjectEvidence, ManifestPinnedGithubDeliveryEvidence,
@@ -317,10 +317,10 @@ pub use observability::{
     ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest, ControlPlaneStateValueError,
     DatabasePoolSnapshot, JobAttemptCounts, LEASE_NEAR_EXPIRY_WINDOW, LeaseCounts, LeaseState,
     LogicalActivationCounts, LogicalActivationState, LogicalJobCounts, LogicalJobState,
-    MAX_CONTROL_PLANE_CAPACITY_CANDIDATES, MAX_CONTROL_PLANE_CAPACITY_RUNNERS,
-    MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts, RunnerDesiredState,
-    RunnerObservedState, RunnerSessionCounts, RunnerSessionState, WorkflowPlanV2RunCounts,
-    WorkflowPlanV2RunState, WorkflowRunCounts,
+    LogicalWorkflowRunCounts, LogicalWorkflowRunState, MAX_CONTROL_PLANE_CAPACITY_CANDIDATES,
+    MAX_CONTROL_PLANE_CAPACITY_RUNNERS, MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts,
+    RunnerDesiredState, RunnerObservedState, RunnerSessionCounts, RunnerSessionState,
+    WorkflowRunCounts,
 };
 pub use operation::{
     BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,

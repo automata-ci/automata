@@ -17,7 +17,7 @@
 7. Compare total and eligible queue depth, then use the bounded blocked-capacity
    reasons rather than fleet-wide idle slots. See the queue runbook for the
    exact runnable predicate and sampler limits.
-8. Check WorkflowPlan-v2 marker, logical-job, activation, publication, and
+8. Check logical workflow marker, logical-job, activation, publication, and
    materialized-instance gauges. Pending backlog and expired claims have a
    dedicated logical-orchestration runbook.
 9. Correlate with tracing and structured logs using time and stable operation

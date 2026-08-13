@@ -135,10 +135,10 @@ groups:
           and
           cluster_reason:automata_ci_control_plane_eligible_queue_blocked_jobs:max > 0
 
-      - record: cluster_state:automata_ci_control_plane_workflow_plan_v2_runs:max
+      - record: cluster_state:automata_ci_control_plane_logical_workflow_runs:max
         expr: >-
           max without (instance) (
-            automata_ci_control_plane_workflow_plan_v2_runs
+            automata_ci_control_plane_logical_workflow_runs
           )
 
       - record: cluster_state:automata_ci_control_plane_logical_jobs:max

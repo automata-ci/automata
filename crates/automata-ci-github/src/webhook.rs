@@ -17,9 +17,9 @@ pub const MAX_GITHUB_WEBHOOK_SECRET_BYTES: usize = 16 * 1024;
 pub const MAX_GITHUB_PUSH_COMMITS: usize = 2_048;
 /// Exact durable media type required for a stored authenticated GitHub push.
 pub const GITHUB_PUSH_EVENT_MEDIA_TYPE: &str = "application/vnd.automata.github-push+json";
-/// Exact durable media type for a version-one authenticated GitHub event.
-pub const GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE: &str =
-    "application/vnd.automata.github-authenticated-event.v1+json";
+/// Exact durable media type for a authenticated GitHub event.
+pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
+    "application/vnd.automata.github-authenticated-event+json";
 
 /// GitHub's SHA-256 webhook signature header.
 pub const X_HUB_SIGNATURE_256: &str = "x-hub-signature-256";
@@ -80,14 +80,14 @@ pub struct StoredAuthenticatedGithubPush {
     repository_name: Box<str>,
 }
 
-/// Version-one durable coordinates for any supported authenticated GitHub event.
+/// Durable coordinates for any supported authenticated GitHub event.
 ///
 /// This evidence is distinct from [`StoredAuthenticatedGithubPush`]. The media
-/// type and explicit event name prevent legacy push rows from being silently
-/// reinterpreted as the generic format. Construction is inert; only
-/// [`rehydrate_stored_authenticated_github_webhook_v1`] validates and consumes
+/// type and explicit event name prevent rows from being silently reinterpreted
+/// as another event kind. Construction is inert; only
+/// [`rehydrate_stored_authenticated_github_webhook`] validates and consumes
 /// the coordinates.
-pub struct StoredAuthenticatedGithubWebhookV1 {
+pub struct StoredAuthenticatedGithubWebhook {
     raw_body: Bytes,
     body_sha256: GithubWebhookBodyDigest,
     encoded_size: u64,
@@ -102,8 +102,8 @@ pub struct StoredAuthenticatedGithubWebhookV1 {
     repository_name: Box<str>,
 }
 
-impl StoredAuthenticatedGithubWebhookV1 {
-    /// Binds exact stored bytes to the complete version-one durable envelope.
+impl StoredAuthenticatedGithubWebhook {
+    /// Binds exact stored bytes to the complete canonical durable envelope.
     ///
     /// Validation is deliberately deferred to the consuming rehydration call.
     #[allow(clippy::too_many_arguments)]
@@ -139,10 +139,10 @@ impl StoredAuthenticatedGithubWebhookV1 {
     }
 }
 
-impl fmt::Debug for StoredAuthenticatedGithubWebhookV1 {
+impl fmt::Debug for StoredAuthenticatedGithubWebhook {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("StoredAuthenticatedGithubWebhookV1")
+            .debug_struct("StoredAuthenticatedGithubWebhook")
             .field("raw_body", &"[redacted]")
             .field("body_sha256", &"[redacted]")
             .field("encoded_size", &self.encoded_size)
@@ -271,7 +271,7 @@ pub fn rehydrate_stored_authenticated_github_push(
     })
 }
 
-/// Rehydrates one version-one authenticated GitHub event envelope.
+/// Rehydrates one authenticated GitHub event envelope.
 ///
 /// Media type, size, digest, event name, delivery identity, and repository
 /// coordinates are verified before normalized evidence is returned. The body
@@ -280,12 +280,12 @@ pub fn rehydrate_stored_authenticated_github_push(
 ///
 /// # Errors
 ///
-/// Rejects legacy or unknown media, invalid durable coordinates, digest drift,
+/// Rejects unknown media, invalid durable coordinates, digest drift,
 /// duplicate or malformed JSON, unsupported events, and payload identity drift.
-pub fn rehydrate_stored_authenticated_github_webhook_v1(
-    evidence: StoredAuthenticatedGithubWebhookV1,
+pub fn rehydrate_stored_authenticated_github_webhook(
+    evidence: StoredAuthenticatedGithubWebhook,
 ) -> Result<crate::VerifiedGithubWebhook, GithubStoredWebhookError> {
-    if evidence.media_type.as_ref() != GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE {
+    if evidence.media_type.as_ref() != GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE {
         return Err(GithubStoredWebhookError::UnexpectedMediaType);
     }
     let actual_size = u64::try_from(evidence.raw_body.len()).unwrap_or(u64::MAX);
@@ -984,10 +984,10 @@ pub enum GithubStoredPushError {
     InvalidPayload,
 }
 
-/// Sanitized version-one authenticated-event rehydration failures.
+/// Sanitized authenticated-event rehydration failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubStoredWebhookError {
-    /// The durable object does not use the version-one generic event media type.
+    /// The durable object does not use the canonical generic event media type.
     #[error("the stored GitHub event media type is invalid")]
     UnexpectedMediaType,
     /// The stored byte count is zero, excessive, or inconsistent.
@@ -1002,7 +1002,7 @@ pub enum GithubStoredWebhookError {
     /// The exact body is not unambiguous JSON.
     #[error("the stored GitHub event payload is malformed")]
     MalformedPayload,
-    /// The version-one envelope names an unsupported event.
+    /// The canonical envelope names an unsupported event.
     #[error("the stored GitHub event is unsupported")]
     UnsupportedEvent,
     /// Stored provider fields violate strict event invariants.

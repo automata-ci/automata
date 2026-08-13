@@ -12,15 +12,11 @@ use automata_ci_store::{
     RunnerOperationResponse, RunnerPayloadTombstoneReason, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, StaleSessionTimeoutMillis, StoreError,
 };
-use sqlx::migrate::Migrate as _;
-use uuid::Uuid;
 
 use common::{
-    TestDatabase, TestResult, run_with_database, run_with_unmigrated_database,
-    runner_capability_document, seed_control_plane, test_runner_payload_key_provider,
+    TestDatabase, TestResult, run_with_database, runner_capability_document, seed_control_plane,
+    test_runner_payload_key_provider,
 };
-
-static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, sqlx::FromRow)]
 struct PayloadState {
@@ -30,126 +26,6 @@ struct PayloadState {
     authenticated_at_ms: i64,
     digest: Vec<u8>,
     plaintext_size_bytes: i64,
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)]
-async fn migration_rejects_expired_envelopes_and_preserves_live_retry_rows() -> TestResult {
-    run_with_unmigrated_database(|database| async move {
-        apply_migrations_before_tombstones(&database).await?;
-        let tenant_id = format!("tombstone-migration-{}", Uuid::new_v4().simple());
-        let runner_id = Uuid::new_v4();
-        let session_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms) \
-             VALUES ($1, 'Tombstone migration', 1, 1)",
-        )
-        .bind(&tenant_id)
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO runners (
-                id, tenant_id, name, normalized_name, capabilities, slots,
-                status, generation, session_epoch, desired_state,
-                created_at_ms, updated_at_ms
-            ) VALUES (
-                $1, $2, 'migration-runner', 'migration-runner', '{}'::jsonb,
-                1, 'online', 1, 1, 'active', 1, 1
-            )
-            ",
-        )
-        .bind(runner_id)
-        .bind(&tenant_id)
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO runner_sessions (
-                id, runner_id, protocol_version, job_ir_schema,
-                capability_snapshot, connected_at_ms, heartbeat_at_ms,
-                runner_generation, session_epoch, last_command_sequence,
-                acknowledged_command_sequence
-            ) VALUES ($1, $2, 4, 5, '{}'::jsonb, 1, 2, 1, 1, 1, 1)
-            ",
-        )
-        .bind(session_id)
-        .bind(runner_id)
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO runner_command_outbox (
-                tenant_id, runner_session_id, command_sequence, operation_id,
-                runner_id, runner_session_epoch, runner_generation,
-                command_kind, command_schema, command_digest,
-                command_plaintext_size_bytes, envelope_schema, wrapping_key_id,
-                wrapped_data_key, nonce, ciphertext, created_at_ms
-            ) VALUES (
-                $1, $2, 1, $3, $4, 1, 1, 'automata.test.migration.v1', 1,
-                $5, 1, 1, 'runner-primary', $6, $7, $8, 3
-            )
-            ",
-        )
-        .bind(&tenant_id)
-        .bind(session_id)
-        .bind(Uuid::new_v4())
-        .bind(runner_id)
-        .bind(vec![0x11_u8; 32])
-        .bind(vec![0x22_u8])
-        .bind(vec![0x33_u8; 12])
-        .bind(vec![0x44_u8; 17])
-        .execute(database.pool())
-        .await?;
-
-        let mut connection = database.pool().acquire().await?;
-        let table_name = TEST_MIGRATOR.table_name.as_ref();
-        let migration = TEST_MIGRATOR.iter().nth(23).expect("migration 0024");
-        let error = connection
-            .apply(table_name, migration)
-            .await
-            .expect_err("0024 must reject an already-acknowledged live envelope");
-        assert_tombstone_migration_failure(error);
-        drop(connection);
-
-        let rolled_back_columns: i64 = sqlx::query_scalar(
-            r"
-            SELECT count(*)
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name IN ('runner_command_outbox', 'runner_rpc_receipts')
-              AND column_name IN ('payload_tombstone_reason', 'payload_tombstoned_at_ms')
-            ",
-        )
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(rolled_back_columns, 0);
-
-        sqlx::query("UPDATE runner_sessions SET acknowledged_command_sequence = 0 WHERE id = $1")
-            .bind(session_id)
-            .execute(database.pool())
-            .await?;
-        let mut connection = database.pool().acquire().await?;
-        connection.apply(table_name, migration).await?;
-        drop(connection);
-        let live_shape: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
-            r"
-            SELECT envelope_schema IS NOT NULL, wrapping_key_id IS NOT NULL,
-                   wrapped_data_key IS NOT NULL, nonce IS NOT NULL,
-                   ciphertext IS NOT NULL, payload_tombstone_reason IS NULL,
-                   payload_tombstoned_at_ms IS NULL
-            FROM runner_command_outbox
-            WHERE runner_session_id = $1 AND command_sequence = 1
-            ",
-        )
-        .bind(session_id)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(live_shape, (true, true, true, true, true, true, true));
-        Ok(())
-    })
-    .await
 }
 
 #[tokio::test]
@@ -322,7 +198,7 @@ async fn explicit_close_and_supersession_erase_commands_and_receipts() -> TestRe
                 RunnerSessionId::new(),
                 superseded_fence.runner_id(),
                 RunnerGeneration::new(1)?,
-                RunnerProtocolVersion::new(5)?,
+                RunnerProtocolVersion::new(1)?,
                 JobIrVersion::current(),
                 runner_capability_document(database.pool(), superseded_fence.runner_id()).await?,
                 supersession_started_at,
@@ -937,30 +813,4 @@ async fn assert_delivery_foreign_keys_remain(database: &TestDatabase) -> TestRes
         ]
     );
     Ok(())
-}
-
-async fn apply_migrations_before_tombstones(database: &TestDatabase) -> TestResult {
-    let mut connection = database.pool().acquire().await?;
-    let table_name = TEST_MIGRATOR.table_name.as_ref();
-    connection.ensure_migrations_table(table_name).await?;
-    for migration in TEST_MIGRATOR.iter().take(23) {
-        connection.apply(table_name, migration).await?;
-    }
-    Ok(())
-}
-
-fn assert_tombstone_migration_failure(error: sqlx::migrate::MigrateError) {
-    match error {
-        sqlx::migrate::MigrateError::ExecuteMigration(error, 24) => {
-            let constraint = error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::constraint);
-            assert_eq!(
-                constraint,
-                Some("runner_payload_tombstones_preexisting_expired_payloads"),
-                "unexpected database error: {error}"
-            );
-        }
-        other => panic!("unexpected migration error: {other}"),
-    }
 }

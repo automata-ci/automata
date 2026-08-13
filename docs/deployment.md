@@ -434,20 +434,9 @@ creates its scheduled Check subject with admission. At most
 than `staleness_millis` are recorded as skipped and their calendar cursor moves
 past the trusted claim time.
 
-Upgrading a repository manifest created before numeric `repository_owner_id`
-evidence was available requires an explicit successor: add the owner ID and
-increment both `manifest_revision` and `policy_revision` by exactly one. Make
-the same policy-revision change in its nested service authorities. Historical
-manifests cannot be backfilled safely because their immutable digests may
-already be referenced by delivery and run evidence; startup reports this case
-as an owner-binding upgrade requirement instead of generic configuration drift.
-
-Existing configurations can instead retain the precise `workflow_path` field.
-That legacy exact mode and `workflow_selection` are mutually exclusive;
-changing modes requires sequential manifest and policy revisions and changes
-the manifest digest. Omitting both preserves the historical exact default rather than
-silently broadening a deployment. Never put the App PEM or webhook HMAC bytes
-in this file.
+Repository manifests require numeric `repository_owner_id` evidence and use
+repository-wide direct-workflow discovery on the configured default branch.
+Never put the App PEM or webhook HMAC bytes in this file.
 
 Set every repository `tenant_id` to the server's one effective UI tenant. With
 human authentication enabled, this is the tenant in durable installation state

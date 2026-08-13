@@ -286,7 +286,7 @@ groups:
           severity: warning
         annotations:
           summary: Logical workflow activation backlog is stale
-          description: At least one current WorkflowPlan-v2 logical job has awaited activation for more than five minutes.
+          description: At least one current logical workflow logical job has awaited activation for more than five minutes.
           runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
 
       - alert: AutomataLogicalActivationBacklogCritical
@@ -299,7 +299,7 @@ groups:
           severity: page
         annotations:
           summary: Logical workflow activation backlog is critically stale
-          description: Current WorkflowPlan-v2 logical work has made no activation progress for more than fifteen minutes.
+          description: Current logical workflow logical work has made no activation progress for more than fifteen minutes.
           runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
 
       - alert: AutomataLogicalActivationClaimExpired
@@ -310,7 +310,7 @@ groups:
           severity: warning
         annotations:
           summary: A logical workflow activation claim expired
-          description: At least one fenced WorkflowPlan-v2 activation claim is past its durable expiry.
+          description: At least one fenced logical workflow activation claim is past its durable expiry.
           runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
 
       - alert: AutomataLogicalActivationClaimStuck
@@ -323,7 +323,7 @@ groups:
           severity: page
         annotations:
           summary: Expired logical activation claims are not recovering
-          description: A WorkflowPlan-v2 activation claim has remained expired for more than five minutes.
+          description: A logical workflow activation claim has remained expired for more than five minutes.
           runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
 
       - alert: AutomataRunnerCommandsPendingTooLong

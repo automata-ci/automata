@@ -34,25 +34,25 @@ const NEXT_REUSABLE_CALL_SQL: &str = r"
            catalog.plan_object_key AS child_plan_object_key,
            catalog.plan_size_bytes AS child_plan_size_bytes,
            catalog.plan_media_type AS child_plan_media_type
-    FROM workflow_plan_v2_jobs AS caller
-    JOIN workflow_plan_v2_invocations AS parent
+    FROM logical_workflow_jobs AS caller
+    JOIN logical_workflow_invocations AS parent
       ON parent.run_id = caller.run_id
      AND parent.id = caller.invocation_id
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = caller.run_id
+    JOIN logical_workflow_runs AS marker ON marker.run_id = caller.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
     JOIN repositories AS repository ON repository.id = run.repository_id
-    JOIN workflow_plan_v2_reusable_invocation_expansions AS planned
+    JOIN logical_workflow_reusable_invocation_expansions AS planned
       ON planned.run_id = caller.run_id
      AND planned.parent_invocation_id = caller.invocation_id
      AND planned.caller_logical_job_id = caller.id
      AND planned.depth > 0
-    JOIN workflow_plan_v2_reusable_workflow_catalog AS catalog
+    JOIN logical_workflow_reusable_workflow_catalog AS catalog
       ON catalog.run_id = planned.run_id
      AND catalog.catalog_entry_id = planned.catalog_entry_id
-    JOIN workflow_plan_v2_reusable_permission_snapshots AS permissions
+    JOIN logical_workflow_reusable_permission_snapshots AS permissions
       ON permissions.run_id = planned.run_id
      AND permissions.invocation_id = planned.invocation_id
-    LEFT JOIN workflow_plan_v2_reusable_call_publications AS publication
+    LEFT JOIN logical_workflow_reusable_call_publications AS publication
       ON publication.run_id = caller.run_id
      AND publication.parent_invocation_id = caller.invocation_id
      AND publication.caller_logical_job_id = caller.id
@@ -68,19 +68,19 @@ const NEXT_REUSABLE_CALL_SQL: &str = r"
       AND marker.state IN ('pending', 'active')
       AND marker.admission_graph_sealed_at_ms IS NOT NULL
       AND run.status IN ('queued', 'in_progress')
-      AND run.admission_epoch = 4 AND run.plan_schema = 2
+      AND run.admission_epoch = 1 AND run.plan_schema = 1
       AND publication.run_id IS NULL
-      AND automata_workflow_plan_v2_invocation_published(
+      AND automata_logical_workflow_invocation_published(
           caller.run_id, caller.invocation_id
       )
       AND NOT EXISTS (
           SELECT 1
-          FROM workflow_plan_v2_dependencies AS dependency
-          LEFT JOIN workflow_plan_v2_job_results AS result
+          FROM logical_workflow_dependencies AS dependency
+          LEFT JOIN logical_workflow_job_results AS result
             ON result.run_id = dependency.run_id
            AND result.invocation_id = dependency.invocation_id
            AND result.logical_job_id = dependency.prerequisite_job_id
-          LEFT JOIN workflow_plan_v2_job_result_claims AS claim
+          LEFT JOIN logical_workflow_job_result_claims AS claim
             ON claim.logical_job_id = result.logical_job_id
            AND claim.state = 'finalized'
           WHERE dependency.run_id = caller.run_id
@@ -89,7 +89,7 @@ const NEXT_REUSABLE_CALL_SQL: &str = r"
             AND (result.logical_job_id IS NULL OR claim.logical_job_id IS NULL)
       )
       AND NOT EXISTS (
-          SELECT 1 FROM workflow_plan_v2_run_result_claims AS claim
+          SELECT 1 FROM logical_workflow_run_result_claims AS claim
           WHERE claim.run_id = caller.run_id
       )
     ORDER BY caller.created_at_ms, caller.run_id, caller.source_order
@@ -126,26 +126,26 @@ const NEXT_REUSABLE_COMPLETION_SQL: &str = r"
                publication.published_at_ms,
                coalesce((
                    SELECT max(result.finalized_at_ms)
-                   FROM workflow_plan_v2_job_results AS result
-                   JOIN workflow_plan_v2_job_result_claims AS claim
+                   FROM logical_workflow_job_results AS result
+                   JOIN logical_workflow_job_result_claims AS claim
                      ON claim.logical_job_id = result.logical_job_id
                     AND claim.state = 'finalized'
                    WHERE result.run_id = publication.run_id
                      AND result.invocation_id = publication.child_invocation_id
                ), publication.published_at_ms)
            ) AS ready_at_ms
-    FROM workflow_plan_v2_reusable_call_publications AS publication
-    JOIN workflow_plan_v2_runs AS marker ON marker.run_id = publication.run_id
+    FROM logical_workflow_reusable_call_publications AS publication
+    JOIN logical_workflow_runs AS marker ON marker.run_id = publication.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
-    JOIN workflow_plan_v2_reusable_invocation_expansions AS expansion
+    JOIN logical_workflow_reusable_invocation_expansions AS expansion
       ON expansion.run_id = publication.run_id
      AND expansion.parent_invocation_id = publication.parent_invocation_id
      AND expansion.caller_logical_job_id = publication.caller_logical_job_id
      AND expansion.invocation_id = publication.child_invocation_id
-    JOIN workflow_plan_v2_reusable_workflow_catalog AS catalog
+    JOIN logical_workflow_reusable_workflow_catalog AS catalog
       ON catalog.run_id = expansion.run_id
      AND catalog.catalog_entry_id = expansion.catalog_entry_id
-    LEFT JOIN workflow_plan_v2_reusable_call_results AS completed
+    LEFT JOIN logical_workflow_reusable_call_results AS completed
       ON completed.run_id = publication.run_id
      AND completed.parent_invocation_id = publication.parent_invocation_id
      AND completed.caller_logical_job_id = publication.caller_logical_job_id
@@ -154,23 +154,23 @@ const NEXT_REUSABLE_COMPLETION_SQL: &str = r"
       AND marker.state IN ('pending', 'active')
       AND run.status IN ('queued', 'in_progress')
       AND NOT EXISTS (
-          SELECT 1 FROM workflow_plan_v2_run_result_claims AS claim
+          SELECT 1 FROM logical_workflow_run_result_claims AS claim
           WHERE claim.run_id = publication.run_id
       )
       AND (
           NOT publication.condition_matched
           OR (
-              automata_workflow_plan_v2_invocation_published(
+              automata_logical_workflow_invocation_published(
                   publication.run_id, publication.child_invocation_id
               )
               AND NOT EXISTS (
                   SELECT 1
-                  FROM workflow_plan_v2_jobs AS child_job
-                  LEFT JOIN workflow_plan_v2_job_results AS result
+                  FROM logical_workflow_jobs AS child_job
+                  LEFT JOIN logical_workflow_job_results AS result
                     ON result.run_id = child_job.run_id
                    AND result.invocation_id = child_job.invocation_id
                    AND result.logical_job_id = child_job.id
-                  LEFT JOIN workflow_plan_v2_job_result_claims AS claim
+                  LEFT JOIN logical_workflow_job_result_claims AS claim
                     ON claim.logical_job_id = result.logical_job_id
                    AND claim.state = 'finalized'
                   WHERE child_job.run_id = publication.run_id
@@ -350,11 +350,11 @@ pub(super) async fn load_published_permission_snapshot(
         r"
         SELECT permissions.default_level, permissions.permission_digest,
                expansion.permission_grant_count
-        FROM workflow_plan_v2_reusable_permission_snapshots AS permissions
-        JOIN workflow_plan_v2_reusable_invocation_expansions AS expansion
+        FROM logical_workflow_reusable_permission_snapshots AS permissions
+        JOIN logical_workflow_reusable_invocation_expansions AS expansion
           ON expansion.run_id = permissions.run_id
          AND expansion.invocation_id = permissions.invocation_id
-        JOIN workflow_plan_v2_reusable_call_publications AS publication
+        JOIN logical_workflow_reusable_call_publications AS publication
           ON publication.run_id = expansion.run_id
          AND publication.child_invocation_id = expansion.invocation_id
          AND publication.permission_digest = permissions.permission_digest
@@ -364,14 +364,14 @@ pub(super) async fn load_published_permission_snapshot(
           ON repository.id = run.repository_id
          AND repository.tenant_id = publication.tenant_id
          AND repository.id = publication.repository_id
-        JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
+        JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
         WHERE repository.tenant_id = $1
           AND run.id = $2
           AND expansion.invocation_id = $3
           AND publication.condition_matched
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND automata_workflow_plan_v2_invocation_published(run.id, $3)
+          AND automata_logical_workflow_invocation_published(run.id, $3)
         FOR SHARE OF permissions, publication, run, marker
         ",
     )
@@ -416,7 +416,7 @@ async fn load_call_inputs(
     sqlx::query(
         r"
         SELECT input_key, input_type, binding_kind, value_digest
-        FROM workflow_plan_v2_reusable_input_bindings
+        FROM logical_workflow_reusable_input_bindings
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY source_order
         ",
@@ -458,7 +458,7 @@ async fn load_call_secrets(
     sqlx::query(
         r"
         SELECT target_name, source_name
-        FROM workflow_plan_v2_reusable_secret_bindings
+        FROM logical_workflow_reusable_secret_bindings
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY source_order
         ",
@@ -489,7 +489,7 @@ async fn load_permission_snapshot(
     let rows = sqlx::query(
         r#"
         SELECT permission_name, permission_level
-        FROM workflow_plan_v2_reusable_permission_grants
+        FROM logical_workflow_reusable_permission_grants
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY permission_name COLLATE "C"
         "#,
@@ -621,7 +621,7 @@ async fn load_output_mappings(
     sqlx::query(
         r"
         SELECT parent_output_name, child_output_name, sensitivity
-        FROM workflow_plan_v2_reusable_call_output_mappings
+        FROM logical_workflow_reusable_call_output_mappings
         WHERE run_id = $1 AND child_invocation_id = $2
         ORDER BY source_order
         ",
@@ -664,15 +664,15 @@ async fn load_completion_outputs(
         r#"
         SELECT child_job.logical_key, output.output_name,
                output.sensitivity, output.public_value
-        FROM workflow_plan_v2_jobs AS child_job
-        JOIN workflow_plan_v2_job_results AS result
+        FROM logical_workflow_jobs AS child_job
+        JOIN logical_workflow_job_results AS result
           ON result.run_id = child_job.run_id
          AND result.invocation_id = child_job.invocation_id
          AND result.logical_job_id = child_job.id
-        JOIN workflow_plan_v2_job_result_claims AS claim
+        JOIN logical_workflow_job_result_claims AS claim
           ON claim.logical_job_id = result.logical_job_id
          AND claim.state = 'finalized'
-        JOIN workflow_plan_v2_job_result_outputs AS output
+        JOIN logical_workflow_job_result_outputs AS output
           ON output.logical_job_id = result.logical_job_id
         WHERE child_job.run_id = $1 AND child_job.invocation_id = $2
         ORDER BY child_job.source_order, output.output_name COLLATE "C"
@@ -795,7 +795,7 @@ async fn lock_publication_replay(
                publication_digest, runtime_policy_revision,
                runtime_policy_digest, authority_profile, published_at_ms,
                child_graph_sealed_at_ms
-        FROM workflow_plan_v2_reusable_call_publications
+        FROM logical_workflow_reusable_call_publications
         WHERE run_id = $1
           AND parent_invocation_id = $2
           AND caller_logical_job_id = $3
@@ -887,7 +887,7 @@ async fn bind_output_contract(
         .map_err(|_| corrupt("output mapping count is not representable"))?;
     let inserted = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_call_output_contracts (
+        INSERT INTO logical_workflow_reusable_call_output_contracts (
             run_id, child_invocation_id, mapping_count, mapping_digest,
             bound_at_ms
         ) VALUES ($1, $2, $3, $4, $5)
@@ -927,7 +927,7 @@ async fn insert_output_mapping(
         .map_err(|_| corrupt("output mapping order is not representable"))?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_call_output_mappings (
+        INSERT INTO logical_workflow_reusable_call_output_mappings (
             run_id, child_invocation_id, parent_output_name,
             child_output_name, sensitivity, source_order
         ) VALUES ($1, $2, $3, $4, $5, $6)
@@ -952,7 +952,7 @@ async fn output_contract_matches(
     let row = sqlx::query(
         r"
         SELECT mapping_count, mapping_digest, bound_at_ms
-        FROM workflow_plan_v2_reusable_call_output_contracts
+        FROM logical_workflow_reusable_call_output_contracts
         WHERE run_id = $1 AND child_invocation_id = $2
         ",
     )
@@ -981,7 +981,7 @@ async fn output_contract_matches(
     let rows = sqlx::query(
         r"
         SELECT parent_output_name, child_output_name, sensitivity, source_order
-        FROM workflow_plan_v2_reusable_call_output_mappings
+        FROM logical_workflow_reusable_call_output_mappings
         WHERE run_id = $1 AND child_invocation_id = $2
         ORDER BY source_order
         ",
@@ -1030,7 +1030,7 @@ async fn insert_publication(
         .map_err(|_| corrupt("output mapping count is not representable"))?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_call_publications (
+        INSERT INTO logical_workflow_reusable_call_publications (
             tenant_id, repository_id, run_id, parent_invocation_id,
             caller_logical_job_id, caller_instance_id, child_invocation_id,
             operation_id, activation_generation, activation_input_digest,
@@ -1043,7 +1043,7 @@ async fn insert_publication(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11, $12,
             $13, $14,
-            'application/vnd.automata.job-runtime-context.protobuf', 2,
+            'application/vnd.automata.job-runtime-context.protobuf', 1,
             $15, $16, $17, $18, $19, $20, 'credential_free', $21, NULL
         )
         ",
@@ -1081,7 +1081,7 @@ async fn publish_child_graph(
 ) -> Result<(), ReusableWorkflowRuntimeStoreError> {
     let invocation_rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_invocations (
+        INSERT INTO logical_workflow_invocations (
             id, run_id, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, state, revision, created_at_ms,
             updated_at_ms, invocation_kind
@@ -1090,8 +1090,8 @@ async fn publish_child_graph(
                catalog.plan_object_key, catalog.plan_size_bytes,
                catalog.plan_media_type, catalog.plan_schema, 'active', 1,
                $3, $3, 'reusable'
-        FROM workflow_plan_v2_reusable_invocation_expansions AS expansion
-        JOIN workflow_plan_v2_reusable_workflow_catalog AS catalog
+        FROM logical_workflow_reusable_invocation_expansions AS expansion
+        JOIN logical_workflow_reusable_workflow_catalog AS catalog
           ON catalog.run_id = expansion.run_id
          AND catalog.catalog_entry_id = expansion.catalog_entry_id
         WHERE expansion.run_id = $1
@@ -1112,7 +1112,7 @@ async fn publish_child_graph(
 
     let jobs = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_jobs (
+        INSERT INTO logical_workflow_jobs (
             id, run_id, invocation_id, logical_key, source_order,
             execution_kind, state, activation_fence, created_at_ms,
             updated_at_ms, runtime_policy_revision, runtime_policy_digest,
@@ -1128,7 +1128,7 @@ async fn publish_child_graph(
                planned.secret_reference_names,
                planned.variable_reference_names,
                planned.credential_requirements_schema
-        FROM workflow_plan_v2_reusable_expanded_jobs AS planned
+        FROM logical_workflow_reusable_expanded_jobs AS planned
         WHERE planned.run_id = $1 AND planned.invocation_id = $2
         ORDER BY planned.source_order
         ",
@@ -1148,11 +1148,11 @@ async fn publish_child_graph(
 
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_dependencies (
+        INSERT INTO logical_workflow_dependencies (
             run_id, invocation_id, logical_job_id, prerequisite_job_id
         )
         SELECT run_id, invocation_id, logical_job_id, prerequisite_job_id
-        FROM workflow_plan_v2_reusable_expanded_dependencies
+        FROM logical_workflow_reusable_expanded_dependencies
         WHERE run_id = $1 AND invocation_id = $2
         ",
     )
@@ -1170,7 +1170,7 @@ async fn seal_publication(
 ) -> Result<(), ReusableWorkflowRuntimeStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_reusable_call_publications
+        UPDATE logical_workflow_reusable_call_publications
         SET child_graph_sealed_at_ms = published_at_ms
         WHERE run_id = $1
           AND parent_invocation_id = $2
@@ -1207,7 +1207,7 @@ async fn activate_parent_call(
     };
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET state = $4,
             activation_fence = 1,
             activation_input_digest = $5,
@@ -1255,7 +1255,7 @@ async fn complete_call(
                publication_operation_id, completion_operation_id,
                callee_plan_digest, workflow_output_evaluation_digest,
                outputs_digest, completed_at_ms, sealed_at_ms
-        FROM workflow_plan_v2_reusable_call_results
+        FROM logical_workflow_reusable_call_results
         WHERE run_id = $1
           AND parent_invocation_id = $2
           AND caller_logical_job_id = $3
@@ -1492,22 +1492,22 @@ async fn load_completion_context(
                catalog.plan_digest AS child_plan_digest,
                expansion.output_count AS declared_output_count,
                (SELECT count(*)
-                FROM workflow_plan_v2_reusable_expanded_jobs AS planned_job
+                FROM logical_workflow_reusable_expanded_jobs AS planned_job
                 WHERE planned_job.run_id = expansion.run_id
                   AND planned_job.invocation_id = expansion.invocation_id)
                    AS planned_child_job_count
-        FROM workflow_plan_v2_reusable_call_publications AS call
-        JOIN workflow_plan_v2_jobs AS caller
+        FROM logical_workflow_reusable_call_publications AS call
+        JOIN logical_workflow_jobs AS caller
           ON caller.run_id = call.run_id
          AND caller.invocation_id = call.parent_invocation_id
          AND caller.id = call.caller_logical_job_id
-        JOIN workflow_plan_v2_invocations AS parent
+        JOIN logical_workflow_invocations AS parent
           ON parent.run_id = caller.run_id
          AND parent.id = caller.invocation_id
-        JOIN workflow_plan_v2_reusable_invocation_expansions AS expansion
+        JOIN logical_workflow_reusable_invocation_expansions AS expansion
           ON expansion.run_id = call.run_id
          AND expansion.invocation_id = call.child_invocation_id
-        JOIN workflow_plan_v2_reusable_workflow_catalog AS catalog
+        JOIN logical_workflow_reusable_workflow_catalog AS catalog
           ON catalog.run_id = expansion.run_id
          AND catalog.catalog_entry_id = expansion.catalog_entry_id
         WHERE call.run_id = $1
@@ -1586,12 +1586,12 @@ async fn load_child_results(
                child_result.closure_has_cancelled,
                child_result.closure_has_skipped,
                child_result.finalized_at_ms
-        FROM workflow_plan_v2_jobs AS child_job
-        JOIN workflow_plan_v2_job_results AS child_result
+        FROM logical_workflow_jobs AS child_job
+        JOIN logical_workflow_job_results AS child_result
           ON child_result.run_id = child_job.run_id
          AND child_result.invocation_id = child_job.invocation_id
          AND child_result.logical_job_id = child_job.id
-        JOIN workflow_plan_v2_job_result_claims AS child_claim
+        JOIN logical_workflow_job_result_claims AS child_claim
           ON child_claim.logical_job_id = child_result.logical_job_id
          AND child_claim.state = 'finalized'
         WHERE child_job.run_id = $1
@@ -1650,16 +1650,16 @@ async fn load_parent_prerequisites(
                prerequisite.closure_has_failure,
                prerequisite.closure_has_cancelled,
                prerequisite.closure_has_skipped
-        FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_jobs AS prerequisite_job
+        FROM logical_workflow_dependencies AS dependency
+        JOIN logical_workflow_jobs AS prerequisite_job
           ON prerequisite_job.run_id = dependency.run_id
          AND prerequisite_job.invocation_id = dependency.invocation_id
          AND prerequisite_job.id = dependency.prerequisite_job_id
-        JOIN workflow_plan_v2_job_results AS prerequisite
+        JOIN logical_workflow_job_results AS prerequisite
           ON prerequisite.run_id = prerequisite_job.run_id
          AND prerequisite.invocation_id = prerequisite_job.invocation_id
          AND prerequisite.logical_job_id = prerequisite_job.id
-        JOIN workflow_plan_v2_job_result_claims AS prerequisite_claim
+        JOIN logical_workflow_job_result_claims AS prerequisite_claim
           ON prerequisite_claim.logical_job_id = prerequisite.logical_job_id
          AND prerequisite_claim.state = 'finalized'
         WHERE dependency.run_id = $1
@@ -1676,7 +1676,7 @@ async fn load_parent_prerequisites(
     .map_err(operation_error)?;
     let dependency_count: i64 = sqlx::query_scalar(
         r"
-        SELECT count(*) FROM workflow_plan_v2_dependencies
+        SELECT count(*) FROM logical_workflow_dependencies
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
     )
@@ -1737,7 +1737,7 @@ async fn validate_and_map_outputs(
     let declared = sqlx::query(
         r"
         SELECT output_key, sensitivity, source_order
-        FROM workflow_plan_v2_reusable_outputs
+        FROM logical_workflow_reusable_outputs
         WHERE run_id = $1 AND invocation_id = $2
         ORDER BY source_order
         ",
@@ -1807,7 +1807,7 @@ async fn insert_call_result(
         .map_err(|_| corrupt("callee output count is not representable"))?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_call_results (
+        INSERT INTO logical_workflow_reusable_call_results (
             tenant_id, repository_id, run_id, parent_invocation_id,
             caller_logical_job_id, caller_instance_id, child_invocation_id,
             publication_operation_id, completion_operation_id,
@@ -1874,7 +1874,7 @@ async fn insert_call_result_jobs(
     for evidence in child_jobs {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_call_result_jobs (
+            INSERT INTO logical_workflow_reusable_call_result_jobs (
                 run_id, parent_invocation_id, caller_logical_job_id,
                 child_logical_job_id, source_order, descriptor_digest,
                 outputs_digest, commit_digest, effective_conclusion,
@@ -1912,7 +1912,7 @@ async fn insert_call_result_outputs(
             .map_err(|_| corrupt("callee output order is not representable"))?;
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_reusable_call_result_outputs (
+            INSERT INTO logical_workflow_reusable_call_result_outputs (
                 run_id, parent_invocation_id, caller_logical_job_id,
                 callee_output_name, sensitivity, public_value, source_order
             ) VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1939,7 +1939,7 @@ async fn seal_call_result(
     let publication = request.publication();
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_reusable_call_results
+        UPDATE logical_workflow_reusable_call_results
         SET sealed_at_ms = completed_at_ms
         WHERE run_id = $1
           AND parent_invocation_id = $2
@@ -1983,7 +1983,7 @@ async fn complete_child_invocation(
     let publication = request.publication();
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_invocations
+        UPDATE logical_workflow_invocations
         SET state = $3, revision = revision + 1, updated_at_ms = $4
         WHERE run_id = $1 AND id = $2
           AND invocation_kind = 'reusable' AND state = 'active'
@@ -2022,7 +2022,7 @@ async fn insert_parent_result(
         .ok_or_else(|| corrupt("parent result claim expiration overflow"))?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_job_result_claims (
+        INSERT INTO logical_workflow_job_result_claims (
             logical_job_id, run_id, invocation_id, descriptor_digest,
             state, owner_id, generation, claimed_at_ms, expires_at_ms,
             created_at_ms, updated_at_ms
@@ -2052,7 +2052,7 @@ async fn insert_parent_result(
         .map_err(|_| corrupt("parent output count is not representable"))?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_job_results (
+        INSERT INTO logical_workflow_job_results (
             logical_job_id, run_id, invocation_id, descriptor_digest,
             logical_key, source_order, plan_digest, plan_object_key,
             plan_size_bytes, plan_media_type, plan_schema,
@@ -2109,7 +2109,7 @@ async fn insert_parent_result(
     if context.condition_matched {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_job_result_instances (
+            INSERT INTO logical_workflow_job_result_instances (
                 logical_job_id, instance_id, matrix_index, terminal_ordinal,
                 instance_descriptor_digest, instance_outputs_digest,
                 instance_commit_digest, raw_conclusion, effective_conclusion
@@ -2132,7 +2132,7 @@ async fn insert_parent_result(
     for prerequisite in prerequisites {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_job_result_prerequisites (
+            INSERT INTO logical_workflow_job_result_prerequisites (
                 logical_job_id, prerequisite_job_id,
                 prerequisite_source_order, prerequisite_commit_digest,
                 prerequisite_outputs_digest, effective_conclusion,
@@ -2157,7 +2157,7 @@ async fn insert_parent_result(
     for output in outputs {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_job_result_outputs (
+            INSERT INTO logical_workflow_job_result_outputs (
                 logical_job_id, output_name, sensitivity, public_value
             ) VALUES ($1, $2, $3, $4)
             ",
@@ -2180,7 +2180,7 @@ async fn insert_parent_result(
     };
     let updated = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET state = $4, updated_at_ms = $5
         WHERE run_id = $1 AND invocation_id = $2 AND id = $3
           AND execution_kind = 'reusable_workflow'
@@ -2202,7 +2202,7 @@ async fn insert_parent_result(
     }
     let finalized = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_job_result_claims
+        UPDATE logical_workflow_job_result_claims
         SET state = 'finalized', updated_at_ms = $4
         WHERE logical_job_id = $1 AND owner_id = $2
           AND generation = 1 AND state = 'aggregating'
@@ -2481,9 +2481,9 @@ fn classify_publication_error(error: sqlx::Error) -> ReusableWorkflowRuntimeStor
     if matches!(
         constraint,
         Some(
-            "workflow_plan_v2_reusable_call_publication_window"
-                | "workflow_plan_v2_reusable_call_output_contract_window"
-                | "workflow_plan_v2_reusable_child_results_complete"
+            "logical_workflow_reusable_call_publication_window"
+                | "logical_workflow_reusable_call_output_contract_window"
+                | "logical_workflow_reusable_child_results_complete"
         )
     ) {
         return ReusableWorkflowRuntimeStoreError::NotReady;
@@ -2502,14 +2502,14 @@ fn classify_completion_error(error: sqlx::Error) -> ReusableWorkflowRuntimeStore
     let constraint = error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint);
-    if constraint == Some("workflow_plan_v2_reusable_child_results_complete") {
+    if constraint == Some("logical_workflow_reusable_child_results_complete") {
         return ReusableWorkflowRuntimeStoreError::ChildResultsPending;
     }
     if matches!(
         constraint,
         Some(
-            "workflow_plan_v2_reusable_call_result_window"
-                | "workflow_plan_v2_reusable_call_publication_window"
+            "logical_workflow_reusable_call_result_window"
+                | "logical_workflow_reusable_call_publication_window"
         )
     ) {
         return ReusableWorkflowRuntimeStoreError::NotReady;

@@ -675,7 +675,7 @@ impl ClaimedLogicalJobActivation {
         &self.execution
     }
 
-    /// Returns the immutable WorkflowPlan-v2 descriptor.
+    /// Returns the immutable logical workflow descriptor.
     #[must_use]
     pub const fn plan(&self) -> &AdmissionObject {
         &self.plan
@@ -859,7 +859,7 @@ pub struct LogicalActivationObject {
 }
 
 impl LogicalActivationObject {
-    /// Constructs an exact current `JobIR` v5 descriptor.
+    /// Constructs an exact current `JobIR` descriptor.
     ///
     /// # Errors
     ///
@@ -877,7 +877,7 @@ impl LogicalActivationObject {
         )
     }
 
-    /// Constructs an exact runtime-context v2 descriptor.
+    /// Constructs an exact current runtime-context descriptor.
     ///
     /// # Errors
     ///
@@ -1096,13 +1096,13 @@ impl ActivatedLogicalInstanceDescriptor {
         &self.workspace
     }
 
-    /// Returns the `JobIR` v5 object descriptor.
+    /// Returns the current `JobIR` object descriptor.
     #[must_use]
     pub const fn job_ir(&self) -> &LogicalActivationObject {
         &self.job_ir
     }
 
-    /// Returns the runtime-context v2 object descriptor.
+    /// Returns the current runtime-context object descriptor.
     #[must_use]
     pub const fn runtime_context(&self) -> &LogicalActivationObject {
         &self.runtime_context

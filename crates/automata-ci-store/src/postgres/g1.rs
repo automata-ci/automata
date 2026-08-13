@@ -48,18 +48,14 @@ use crate::{
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v3";
-const LEGACY_LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-rpc-response-metadata:v1";
 
 fn is_lease_offer_command_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        LEASE_OFFER_COMMAND_KIND | LEGACY_LEASE_OFFER_COMMAND_KIND
-    )
+    kind == LEASE_OFFER_COMMAND_KIND
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

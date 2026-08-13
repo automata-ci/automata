@@ -108,7 +108,7 @@ jobs:
     let report = compile(source, "workflow_dispatch");
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let plan = report.plan().expect("current plan");
-    assert_eq!(plan.version(), WorkflowPlanVersion::v2());
+    assert_eq!(plan.version(), WorkflowPlanVersion::v1());
     let logical = plan.logical();
     assert_eq!(logical.jobs().len(), 2);
     assert!(logical.permissions().is_some());

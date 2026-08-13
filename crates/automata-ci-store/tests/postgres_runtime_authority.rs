@@ -22,14 +22,15 @@ use automata_ci_store::{
     ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
     ClaimProviderDelivery, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, ClaimedLogicalInstanceMaterialization,
-    ClaimedLogicalJobActivation, CommandCursor, CommitGithubRuntimeAuthority, CommitLeaseHeartbeat,
-    CommitLogicalInstanceMaterialization, ConfirmGithubRuntimeAuthorityRevocation,
-    ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
-    ConsumedLogicalJobOrchestrationAuthority, DeferGithubRuntimeAuthorityRevocation,
-    DocumentSchema, EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubJobRuntimeAuthorityExecution, GithubJobRuntimeAuthorityRepository as _,
-    GithubJobRuntimeAuthorityResolution, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    ClaimedLogicalJobActivation, ClaimedProviderDelivery, CommandCursor,
+    CommitGithubRuntimeAuthority, CommitLeaseHeartbeat, CommitLogicalInstanceMaterialization,
+    ConfirmGithubRuntimeAuthorityRevocation, ConsumeSelectedLogicalInstanceMaterialization,
+    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
+    DeferGithubRuntimeAuthorityRevocation, DocumentSchema, EnsureGithubServerServiceAuthority,
+    GithubCheckHeadSha, GithubCheckName, GithubJobRuntimeAuthorityExecution,
+    GithubJobRuntimeAuthorityRepository as _, GithubJobRuntimeAuthorityResolution,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
     GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
     GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,
@@ -51,10 +52,12 @@ use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
     MarkGithubRuntimeAuthorityIndeterminate, ObjectKey, OpenRunnerSession,
     ProtectedGithubRuntimeAuthority, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, PublishLogicalJobActivation, QuarantineGithubRuntimeAuthority,
-    ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RenewLease,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    QuarantineGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
+    RegisterProviderDeliveryWorkflowInventory, RejectGithubRuntimeAuthorityMint, RenewLease,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
     ReusableSecretPermission, RoutingDocument, RunnerControlTransactionRepository as _,
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
@@ -63,6 +66,8 @@ use automata_ci_store::{
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
+
+const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
 use common::{TestDatabase, TestResult, run_with_database};
 
@@ -142,7 +147,7 @@ fn logical_fixture(namespace: u128, database_epoch: UnixMillis) -> LogicalFixtur
         )
         .expect("repository"),
         workflow_id,
-        manifest.workflow_path(),
+        WORKFLOW_PATH,
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -394,11 +399,15 @@ async fn admit_signed_workflow(
             AcceptProviderDelivery::new(
                 identity,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 delivery_observed_at,
             )?,
             ProviderRepositoryOwnerId::new(404)?,
             ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new(head_sha)?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -424,6 +433,7 @@ async fn admit_signed_workflow(
     if claimed.claim().delivery_id() != accepted.delivery_id() {
         return Err("foreign delivery claimed".into());
     }
+    register_workflow_inventory(database, fixture, &claimed).await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -440,6 +450,33 @@ async fn admit_signed_workflow(
         )
         .await
         .map_err(|error| format!("authenticated admission failed: {error:?}"))?;
+    Ok(())
+}
+
+async fn register_workflow_inventory(
+    database: &TestDatabase,
+    fixture: &LogicalFixture,
+    claimed: &ClaimedProviderDelivery,
+) -> TestResult {
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        fixture.manifest.digest(),
+        "1414141414141414141414141414141414141414",
+        digest(0x90),
+        vec![ProviderDeliveryWorkflowInventoryEntry::new(
+            WORKFLOW_PATH,
+            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
+        )?],
+    )?;
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                inventory,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     Ok(())
 }
 
@@ -660,7 +697,7 @@ fn prepare_instance(
             "github",
             "automata-ci/automata",
             "0123456789abcdef",
-            fixture.manifest.workflow_path(),
+            WORKFLOW_PATH,
             "push",
         ),
         job_execution,
@@ -760,7 +797,7 @@ async fn seed_execution(database: &TestDatabase) -> TestResult<GithubJobRuntimeA
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             runner_epoch,
@@ -1591,14 +1628,14 @@ async fn migration_installs_and_retains_the_exact_v5_gate() -> TestResult {
             r"
             SELECT pg_catalog.pg_get_constraintdef(catalog_constraint.oid)
             FROM pg_catalog.pg_constraint AS catalog_constraint
-            WHERE catalog_constraint.conname = 'github_runtime_authority_current_job_ir_v5'
+            WHERE catalog_constraint.conname = 'github_runtime_authority_current_job_ir_current'
               AND catalog_constraint.conrelid =
                     'github_runtime_authority_issuances'::REGCLASS
             ",
         )
         .fetch_one(database.pool())
         .await?;
-        assert!(constraint.contains("job_ir_schema = 5"));
+        assert!(constraint.contains("job_ir_schema = 1"));
 
         let row_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM github_runtime_authority_issuances")
@@ -1702,7 +1739,7 @@ async fn mint_begin_persists_and_db_authorizes_the_exact_provider_window() -> Te
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> TestResult {
     run_with_database(|database| async move {
         let contention_fixture = seed_authority(&database).await?;
@@ -1730,7 +1767,7 @@ async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;
@@ -1743,7 +1780,7 @@ async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> Test
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn a_pre_mint_terminal_row_never_replays_as_an_already_started_mint() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;
@@ -1799,7 +1836,7 @@ async fn a_pre_mint_terminal_row_never_replays_as_an_already_started_mint() -> T
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR-v5 schema cutover"]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn stale_commit_is_never_ready_and_cannot_be_erased_before_provider_expiry() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_authority(&database).await?;

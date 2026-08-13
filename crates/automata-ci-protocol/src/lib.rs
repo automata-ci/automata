@@ -14,7 +14,4 @@ pub use negotiation::*;
 
 /// Current schema version for the message structs in this crate.
 ///
-/// Version three adds required, protected, per-attempt runtime authorities to
-/// lease offers. Protocol v5 peers fail closed instead of silently executing a
-/// job without its server-issued authority.
-pub const MESSAGE_SCHEMA_VERSION: u16 = 3;
+pub const MESSAGE_SCHEMA_VERSION: u16 = 1;

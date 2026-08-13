@@ -269,9 +269,10 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
         let mut payload = serde_json::json!({
             "job": self.job,
             "lease": self.lease,
+            "managed_secret_bindings": ManagedSecretBindingOverlay::empty(&self.lease),
             "protocol_version": request.protocol_version().get(),
             "runtime_authorities": self.runtime_authorities,
-            "schema": 2,
+            "schema": 1,
             "slot": self.slot,
         });
         if self.extra_field {
@@ -284,8 +285,8 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
         let command = EnqueueRunnerCommand::new(
             request.request().session(),
             OperationId::new(),
-            RunnerOperationKind::new("automata.runner.lease-offer.v2").expect("command kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(2).expect("schema"), payload)
+            RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("command kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
                 .expect("command payload"),
             self.created_at,
         );
@@ -721,11 +722,11 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(request.command().operation_id(), server_operation_id);
         assert_eq!(
             request.command().kind().as_str(),
-            "automata.runner.lease-offer.v3"
+            "automata.runner.lease-offer.v1"
         );
         let body: serde_json::Value =
             serde_json::from_slice(request.command().payload().bytes()).expect("offer JSON");
-        assert_eq!(body["schema"], 3);
+        assert_eq!(body["schema"], 1);
         assert_eq!(body["protocol_version"], 1);
         assert_eq!(body["slot"], 2);
         assert_eq!(

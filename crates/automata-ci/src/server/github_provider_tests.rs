@@ -84,7 +84,6 @@ fn repository(
         "runtime_policy_revision": 1,
         "authority_profile": "standard",
         "runner_policy": runner_policy(),
-        "workflow_path": ".ci/workflows/main.yml",
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority, 7),
@@ -95,7 +94,7 @@ fn repository(
 }
 
 fn mixed_document() -> Value {
-    let mut public = repository(
+    let public = repository(
         "tenant-public",
         0x201,
         202,
@@ -107,13 +106,8 @@ fn mixed_document() -> Value {
         0x501,
         None,
     );
-    public
-        .as_object_mut()
-        .expect("repository fixture is an object")
-        .remove("workflow_path");
-    public["workflow_selection"] = json!({"mode": "all_direct"});
     json!({
-        "schema": 3,
+        "schema": 1,
         "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
@@ -177,21 +171,12 @@ fn fixed_evidence_plan(
     config: &GithubProviderConfig,
     broker_policy_byte: u8,
 ) -> GithubProviderBootstrapPlan {
-    fixed_evidence_plan_with_compatible(config, broker_policy_byte, &[])
-}
-
-fn fixed_evidence_plan_with_compatible(
-    config: &GithubProviderConfig,
-    broker_policy_byte: u8,
-    compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
-) -> GithubProviderBootstrapPlan {
     GithubProviderBootstrapPlan::from_derived_evidence(
         config,
         Sha256Digest::from_bytes([0x51; 32]),
         GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes([0x61; 32]))
             .expect("fixture verifier fingerprint"),
         Sha256Digest::from_bytes([broker_policy_byte; 32]),
-        compatible_historical_broker_policy_fingerprints,
     )
     .expect("fixed-evidence plan")
 }
@@ -303,11 +288,6 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_eq!(plan.manifests().len(), 2);
     assert_eq!(plan.authorities().len(), 3);
     assert_eq!(plan.connections().len(), 2);
-    assert_eq!(
-        plan.manifests()[0].exact_workflow_path(),
-        Some(".ci/workflows/main.yml")
-    );
-    assert_eq!(plan.manifests()[1].exact_workflow_path(), None);
     assert_eq!(plan.manifests()[1].workflow_path(), ".ci/workflows");
     assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
@@ -414,122 +394,6 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
             resolution.request(),
             &github_server_service_credential_request(identity).expect("canonical request")
         );
-    }
-}
-
-fn historical_authority(
-    current: &GithubServerServiceAuthorityIdentity,
-    authority_id: u128,
-    app_revision: u64,
-    policy_revision: u64,
-    app_key_spki_sha256: Sha256Digest,
-    configuration_fingerprint: Sha256Digest,
-) -> GithubServerServiceAuthorityIdentity {
-    GithubServerServiceAuthorityIdentity::new(
-        current.tenant().clone(),
-        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(authority_id))
-            .expect("historical authority ID"),
-        current.repository_id(),
-        current.connection_id(),
-        current.installation_id(),
-        current.github_app_id(),
-        current.github_repository_id(),
-        current.github_repository_name().clone(),
-        current.scope(),
-        current.app_client_id().clone(),
-        current.jwt_issuer(),
-        app_key_spki_sha256,
-        automata_ci_store::GithubServerServiceRevision::new(app_revision)
-            .expect("historical App revision"),
-        automata_ci_store::GithubServerServiceRevision::new(policy_revision)
-            .expect("historical policy revision"),
-        configuration_fingerprint,
-    )
-    .expect("historical authority")
-}
-
-#[tokio::test]
-async fn historical_revision_resolves_only_through_the_exact_current_live_route() {
-    let config = load_config("historical-route.json", &mixed_document()).expect("mixed config");
-    let historical_broker_fingerprint = Sha256Digest::from_bytes([0x70; 32]);
-    let plan = fixed_evidence_plan_with_compatible(
-        &config,
-        0x71,
-        std::slice::from_ref(&historical_broker_fingerprint),
-    );
-    let target = MemoryBootstrapTarget::default();
-    let ready = plan
-        .bootstrap_with_target(&target, UnixMillis::new(2_000))
-        .await
-        .expect("bootstrap");
-    let resolver = ready.credential_request_resolver();
-    for (index, current) in plan.authorities().iter().enumerate() {
-        let other_scope = match current.scope() {
-            GithubServerServiceScope::ChecksWrite => {
-                GithubServerServiceScope::PrivateRepositorySourceRead
-            }
-            GithubServerServiceScope::PrivateRepositorySourceRead => {
-                GithubServerServiceScope::ChecksWrite
-            }
-        };
-        let authority_id = 0x7a1 + u128::try_from(index).expect("authority index");
-        let historical = historical_authority(
-            current,
-            authority_id,
-            current.app_configuration_revision().get() - 1,
-            current.policy_revision().get() - 1,
-            current.app_key_spki_sha256(),
-            authority_configuration_fingerprint(historical_broker_fingerprint, current.scope()),
-        );
-
-        let historical_request = resolver
-            .resolve_github_server_service_credential_request(&historical)
-            .await
-            .expect("historical resolution")
-            .expect("same live route remains authorized");
-        assert_eq!(historical_request.identity(), &historical);
-        assert_eq!(
-            historical_request.request(),
-            &github_server_service_credential_request(&historical).expect("canonical request")
-        );
-
-        for (offset, mismatch) in [
-            historical_authority(
-                current,
-                authority_id + 0x10,
-                current.app_configuration_revision().get() - 1,
-                current.policy_revision().get() - 1,
-                Sha256Digest::from_bytes([0xa2; 32]),
-                current.configuration_fingerprint(),
-            ),
-            historical_authority(
-                current,
-                authority_id + 0x20,
-                current.app_configuration_revision().get() - 1,
-                current.policy_revision().get() - 1,
-                current.app_key_spki_sha256(),
-                Sha256Digest::from_bytes([0xa3; 32]),
-            ),
-            historical_authority(
-                current,
-                authority_id + 0x30,
-                current.app_configuration_revision().get() - 1,
-                current.policy_revision().get() - 1,
-                current.app_key_spki_sha256(),
-                authority_configuration_fingerprint(historical_broker_fingerprint, other_scope),
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(
-                resolver
-                    .resolve_github_server_service_credential_request(&mismatch)
-                    .await
-                    .unwrap_or_else(|_| panic!("closed mismatch {index}/{offset}"))
-                    .is_none()
-            );
-        }
     }
 }
 

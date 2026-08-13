@@ -45,9 +45,9 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
     GithubDeliveryConfigurationError, GithubDeliveryConnection, GithubDeliveryIngress,
-    GithubDeliveryIngressError, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_request_digest,
+    GithubDeliveryIngressError, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
 };
 
 const SECRET: &[u8] = b"delivery-test-secret";
@@ -246,35 +246,19 @@ fn fixture_manifest_receipt(
     );
     let check_subject_id =
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(200 + ordinal)).expect("check subject");
-    let evidence = match request.authenticated_event_v1() {
-        Some(event) => {
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
-                delivery_id,
-                request.repository_owner_id(),
-                manifest,
-                request.authenticated_webhook_verifier_fingerprint(),
-                request.authenticated_webhook_verifier_revision(),
-                checks_authority,
-                private_source_authority,
-                check_subject_id,
-                request.head_sha(),
-                event.clone(),
-                delivery.accepted_at(),
-            )
-        }
-        None => ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-            delivery_id,
-            request.repository_owner_id(),
-            manifest,
-            request.authenticated_webhook_verifier_fingerprint(),
-            request.authenticated_webhook_verifier_revision(),
-            checks_authority,
-            private_source_authority,
-            check_subject_id,
-            request.head_sha(),
-            delivery.accepted_at(),
-        ),
-    }
+    let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+        delivery_id,
+        request.repository_owner_id(),
+        manifest,
+        request.authenticated_webhook_verifier_fingerprint(),
+        request.authenticated_webhook_verifier_revision(),
+        checks_authority,
+        private_source_authority,
+        check_subject_id,
+        request.head_sha(),
+        request.authenticated_event().clone(),
+        delivery.accepted_at(),
+    )
     .expect("manifest evidence");
     ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence)
 }
@@ -398,8 +382,7 @@ impl GithubSubjectEvidenceRepository for RecordingDeliveryAcceptance {
                         == request.delivery().raw_event()
                     && existing.request.repository_owner_id() == request.repository_owner_id()
                     && existing.request.head_sha() == request.head_sha()
-                    && existing.request.authenticated_event_v1()
-                        == request.authenticated_event_v1()
+                    && existing.request.authenticated_event() == request.authenticated_event()
                     && existing
                         .request
                         .authenticated_webhook_verifier_fingerprint()
@@ -459,7 +442,7 @@ struct RecordedRepositoryDispatch {
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
     repository_owner_id: ProviderRepositoryOwnerId,
-    event: automata_ci_store::GithubAuthenticatedEventV1,
+    event: automata_ci_store::GithubAuthenticatedEvent,
     verifier_fingerprint: automata_ci_store::GithubProviderWebhookVerifierFingerprint,
     verifier_revision: GithubServerServiceRevision,
     receipt: PendingGithubRepositoryDispatchReceipt,
@@ -1159,7 +1142,7 @@ async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay()
     );
     assert_eq!(
         accepted.raw_event().media_type(),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
     );
     assert_eq!(
         objects
@@ -1657,23 +1640,24 @@ fn repository_visibility_is_an_independent_request_digest_field() {
         .expect("identity")
     };
 
-    let private = canonical_request_digest(
+    let event = automata_ci_github::VerifiedGithubWebhook::Push(push);
+    let private = canonical_event_request_digest(
         &headers,
-        &push,
+        &event,
         &identity(ProviderRepositoryVisibility::Private),
         ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner"),
     )
     .expect("private digest");
-    let public = canonical_request_digest(
+    let public = canonical_event_request_digest(
         &headers,
-        &push,
+        &event,
         &identity(ProviderRepositoryVisibility::Public),
         ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID).expect("owner"),
     )
     .expect("public digest");
-    let changed_owner = canonical_request_digest(
+    let changed_owner = canonical_event_request_digest(
         &headers,
-        &push,
+        &event,
         &identity(ProviderRepositoryVisibility::Private),
         ProviderRepositoryOwnerId::new(REPOSITORY_OWNER_ID + 1).expect("changed owner"),
     )
@@ -1872,29 +1856,27 @@ async fn generic_ingress_persists_typed_event_coordinates_without_legacy_aliasin
         );
         let headers = signed_event_headers(SECRET, &body, event_name, delivery_id);
         let accepted = ingress
-            .accept_authenticated_event_v1(&headers, body.clone())
+            .accept(&headers, body.clone())
             .await
             .expect("generic event is accepted");
 
         assert_eq!(
             accepted.raw_event().media_type(),
-            GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+            GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
         );
         assert!(
             accepted
                 .raw_event()
                 .object_key()
                 .as_str()
-                .starts_with("provider-deliveries/github/event-v1/sha256/")
+                .starts_with("provider-deliveries/github/event/sha256/")
         );
         assert_eq!(
             objects.bytes_at(accepted.raw_event().object_key().as_str()),
             Some(body)
         );
         let requests = deliveries.requests();
-        let event = requests[0]
-            .authenticated_event_v1()
-            .expect("explicit V1 event coordinates");
+        let event = requests[0].authenticated_event();
         assert_eq!(event.kind(), expected_kind);
         assert_eq!(event.git_ref(), expected_ref);
         assert_eq!(requests[0].delivery().identity().delivery_id(), delivery_id);

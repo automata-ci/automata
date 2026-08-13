@@ -1219,7 +1219,7 @@ async fn seed_public_completed_run(
             $1, $2, $3, $4, 2, 3, 'push', 'web/event', $5,
             'completed', 10, 21, 'CI', 'refs/heads/main', 'octocat',
             'Typed dashboard reads', 'Preserve immutable descriptors',
-            2, 'public', 'public', 'public', 'public', 'repository_policy', 1, 3
+            2, 'public', 'public', 'public', 'public', 'repository_policy', 1, 1
         )
         ",
     )
@@ -1241,7 +1241,7 @@ async fn seed_public_completed_run(
         ) VALUES (
             $1, $2, 'verify', 'Verify', $3, 'web/job-ir',
             $4::jsonb,
-            4, 5, 128, 11
+            1, 1, 128, 11
         )
         ",
     )
@@ -1375,7 +1375,7 @@ async fn seed_public_completed_run(
             secret_exposure_class, requested_visibility, effective_visibility,
             publication_safety_reason, publication_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'coverage', 7,
+            $1, $2, $3, $4, $5, $6, 1, 'coverage', 1,
             'application/octet-stream', 1000, 'finalized', $7, 3,
             'web/artifacts/manifest', $8, 1, 'application/json', 1, 2,
             'ready', 1, 1, 3, $7, 2, $9,
@@ -1509,7 +1509,7 @@ async fn insert_queued_run(
             publication_safety_reason, runner_requirements_schema
         ) VALUES (
             $1, $2, $3, $4, $5, 'push', 'web/keyset-event', $6,
-            'queued', $7, $7, $8, $8, 'repository_policy', 3
+            'queued', $7, $7, $8, $8, 'repository_policy', 1
         )
         ",
     )

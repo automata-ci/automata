@@ -18,7 +18,7 @@ pub struct LeaseRequest {
 }
 
 impl LeaseRequest {
-    /// Creates the first lease request in a slot's protocol-v5 request chain.
+    /// Creates the first lease request in a slot's request chain.
     #[must_use]
     pub const fn first(header: MessageHeader, slot: RunnerSlotOrdinal) -> Self {
         Self {
@@ -29,7 +29,7 @@ impl LeaseRequest {
     }
 
     /// Creates a successor that acknowledges the preceding request in the
-    /// same slot's protocol-v5 request chain.
+    /// same slot's request chain.
     #[must_use]
     pub const fn successor(
         header: MessageHeader,
@@ -62,7 +62,7 @@ impl LeaseRequest {
         self.acknowledges_operation_id
     }
 
-    /// Validates locally provable protocol-v5 lease-request invariants.
+    /// Validates locally provable lease-request invariants.
     ///
     /// # Errors
     ///
@@ -92,7 +92,7 @@ pub struct LeaseOffer {
 }
 
 impl LeaseOffer {
-    /// Creates a protocol-v5 offer with required, execution-bound authority.
+    /// Creates an offer with required, execution-bound authority.
     #[must_use]
     pub const fn new(
         header: ServerCommandHeader,

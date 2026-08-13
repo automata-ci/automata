@@ -15,7 +15,7 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
     GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
     GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
     GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
@@ -32,7 +32,7 @@ use automata_ci_scm::{
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, AdmitLogicalWorkflowRun,
     AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery, ClaimedProviderDelivery,
-    CompleteProviderDelivery, GithubAuthenticatedEventKind, GithubAuthenticatedEventV1,
+    CompleteProviderDelivery, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
     GithubServerServiceAction, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceConsumerClaim,
     GithubServerServiceHandoffId, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
@@ -242,15 +242,15 @@ impl FixtureSubjectEvidence {
         ))
     }
 
-    fn authenticated_event_v1(
+    fn authenticated_event(
         claimed: &ClaimedProviderDelivery,
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
         let legacy = Self::from_claimed(claimed).0;
-        let event = GithubAuthenticatedEventV1::new(kind, git_ref).expect("event coordinates");
+        let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
         Self(
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
                 legacy.delivery_id(),
                 legacy.repository_owner_id(),
                 legacy.manifest().clone(),
@@ -263,7 +263,7 @@ impl FixtureSubjectEvidence {
                 event,
                 legacy.accepted_at(),
             )
-            .expect("V1 subject evidence"),
+            .expect("authenticated event evidence"),
         )
     }
 }
@@ -577,10 +577,10 @@ async fn harness_with_visibility(
 async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = pull_request_body();
-    let raw_key = "provider-deliveries/github/event-v1/pull-request-fixture.json";
+    let raw_key = "provider-deliveries/github/event/pull-request-fixture.json";
     let raw_payload = BlobPayload::from_bytes(
         BlobKey::new(raw_key).expect("raw key"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("raw media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
         body,
     );
     let raw_descriptor = raw_payload.descriptor().clone();
@@ -592,7 +592,7 @@ async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
         raw_descriptor.digest(),
         ObjectKey::new(raw_key).expect("raw object key"),
         raw_descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let claimed = claimed(raw_event, ProviderRepositoryVisibility::Private);
@@ -611,7 +611,7 @@ async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
     );
     let deliveries = Arc::new(DeliveryOutcomes::default());
     let credentials = Arc::new(DiffCredentials::default());
-    let subject_evidence = Arc::new(FixtureSubjectEvidence::authenticated_event_v1(
+    let subject_evidence = Arc::new(FixtureSubjectEvidence::authenticated_event(
         &claimed,
         GithubAuthenticatedEventKind::PullRequest,
         "refs/pull/7/merge",

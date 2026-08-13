@@ -50,9 +50,11 @@ use automata_ci_store::{
     LogicalWorkflowInstanceId, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, OpenRunnerSession, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    PublishReusableWorkflowCall, ReusableCallOutputMapping, ReusableSecretPermission,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, PublishReusableWorkflowCall,
+    RegisterProviderDeliveryWorkflowInventory, ReusableCallOutputMapping, ReusableSecretPermission,
     ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
     ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
     RunnableAttemptRepository as _, RunnableScanLimit, RunnableScanRequest, RunnerGeneration,
@@ -156,12 +158,12 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
             )
             .await?
         );
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_permission_grants DISABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_permission_grants
+            UPDATE logical_workflow_reusable_permission_grants
             SET permission_level = 'read'
             WHERE run_id = $1
               AND invocation_id = $2
@@ -172,7 +174,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .bind(child_invocation_id.as_uuid())
         .execute(database.pool())
         .await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_permission_grants ENABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         assert!(
@@ -183,12 +185,12 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
             )
             .await?
         );
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_permission_grants DISABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_permission_grants
+            UPDATE logical_workflow_reusable_permission_grants
             SET permission_level = 'write'
             WHERE run_id = $1
               AND invocation_id = $2
@@ -199,19 +201,19 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .bind(child_invocation_id.as_uuid())
         .execute(database.pool())
         .await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_permission_grants ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_permission_grants ENABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
 
         fixture.invocation_id = child_invocation_id;
         fixture.logical_job_id = child_job_id;
 
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications DISABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_call_publications
+            UPDATE logical_workflow_reusable_call_publications
             SET child_graph_sealed_at_ms = NULL
             WHERE run_id = $1 AND child_invocation_id = $2
             ",
@@ -220,7 +222,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .bind(child_invocation_id.as_uuid())
         .execute(database.pool())
         .await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications ENABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         assert!(matches!(
@@ -237,7 +239,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         ));
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_call_publications
+            UPDATE logical_workflow_reusable_call_publications
             SET child_graph_sealed_at_ms = published_at_ms
             WHERE run_id = $1 AND child_invocation_id = $2
             ",
@@ -247,12 +249,12 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .execute(database.pool())
         .await?;
 
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications DISABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_call_publications
+            UPDATE logical_workflow_reusable_call_publications
             SET permission_digest = $3
             WHERE run_id = $1 AND child_invocation_id = $2
             ",
@@ -262,7 +264,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .bind([0x99_u8; 32].as_slice())
         .execute(database.pool())
         .await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications ENABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         assert!(matches!(
@@ -277,12 +279,12 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
                 .await?,
             LogicalJobOrchestrationSelectionOutcome::Idle
         ));
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications DISABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_reusable_call_publications
+            UPDATE logical_workflow_reusable_call_publications
             SET permission_digest = $3
             WHERE run_id = $1 AND child_invocation_id = $2
             ",
@@ -292,7 +294,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         .bind([0x2d_u8; 32].as_slice())
         .execute(database.pool())
         .await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_reusable_call_publications ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_reusable_call_publications ENABLE TRIGGER USER")
             .execute(database.pool())
             .await?;
 
@@ -343,8 +345,8 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
             r"
             SELECT EXISTS (
                 SELECT 1
-                FROM workflow_plan_v2_materialization_claims AS materialization
-                JOIN workflow_plan_v2_instances AS instance
+                FROM logical_workflow_materialization_claims AS materialization
+                JOIN logical_workflow_instances AS instance
                   ON instance.id = materialization.instance_id
                 WHERE materialization.instance_id = $1
                   AND materialization.state = 'materialized'
@@ -508,7 +510,7 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
         let parent_outputs: Vec<(String, String, Option<String>)> = sqlx::query_as(
             r"
             SELECT output_name, sensitivity, public_value
-            FROM workflow_plan_v2_job_result_outputs
+            FROM logical_workflow_job_result_outputs
             WHERE logical_job_id = $1
             ORDER BY output_name
             ",
@@ -535,10 +537,10 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
             r"
             SELECT
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_reusable_call_results
+                 FROM logical_workflow_reusable_call_results
                  WHERE run_id = $1 AND child_invocation_id = $2),
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_job_results
+                 FROM logical_workflow_job_results
                  WHERE logical_job_id = $3)
             ",
         )
@@ -577,8 +579,8 @@ async fn reusable_child_publication_rejects_credential_drift_atomically() -> Tes
                 RETURN NEW;
             END;
             $automata$;
-            CREATE TRIGGER workflow_plan_v2_jobs_00_test_credential_tamper
-            BEFORE INSERT ON workflow_plan_v2_jobs
+            CREATE TRIGGER logical_workflow_jobs_00_test_credential_tamper
+            BEFORE INSERT ON logical_workflow_jobs
             FOR EACH ROW
             EXECUTE FUNCTION automata_test_tamper_reusable_child_credentials();
             ",
@@ -598,13 +600,13 @@ async fn reusable_child_publication_rejects_credential_drift_atomically() -> Tes
             r"
             SELECT
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_reusable_call_publications
+                 FROM logical_workflow_reusable_call_publications
                  WHERE run_id = $1 AND child_invocation_id = $2),
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_invocations
+                 FROM logical_workflow_invocations
                  WHERE run_id = $1 AND id = $2),
                 (SELECT count(*)::BIGINT
-                 FROM workflow_plan_v2_jobs
+                 FROM logical_workflow_jobs
                  WHERE run_id = $1 AND invocation_id = $2 AND id = $3)
             ",
         )
@@ -618,7 +620,7 @@ async fn reusable_child_publication_rejects_credential_drift_atomically() -> Tes
         let parent: (String, i64) = sqlx::query_as(
             r"
             SELECT state, activation_fence
-            FROM workflow_plan_v2_jobs
+            FROM logical_workflow_jobs
             WHERE run_id = $1 AND id = $2
             ",
         )
@@ -642,7 +644,7 @@ async fn assert_activation_idle_reconciliation_rejected(
     let mut transaction = database.pool().begin().await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_work_selections (
+        INSERT INTO logical_workflow_activation_work_selections (
             selection_id, owner_id, requested_at_ms, duration_ms, outcome
         ) VALUES ($1, $2, $3, 60000, 'selecting')
         ",
@@ -654,7 +656,7 @@ async fn assert_activation_idle_reconciliation_rejected(
     .await?;
     let error = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_work_selections
+        UPDATE logical_workflow_activation_work_selections
         SET outcome = 'idle', claimed_at_ms = $2, expires_at_ms = $2 + duration_ms
         WHERE selection_id = $1
         ",
@@ -700,7 +702,7 @@ async fn assert_materialization_idle_reconciliation_rejected(
     let mut transaction = database.pool().begin().await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_materialization_work_selections (
+        INSERT INTO logical_workflow_materialization_work_selections (
             selection_id, owner_id, requested_at_ms, duration_ms, outcome
         ) VALUES ($1, $2, $3, 60000, 'selecting')
         ",
@@ -712,7 +714,7 @@ async fn assert_materialization_idle_reconciliation_rejected(
     .await?;
     let error = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_materialization_work_selections
+        UPDATE logical_workflow_materialization_work_selections
         SET outcome = 'idle', claimed_at_ms = $2, expires_at_ms = $2 + duration_ms
         WHERE selection_id = $1
         ",
@@ -904,7 +906,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         );
 
         let metadata = database.store().get_job_ir_metadata(left.job_id()).await?;
-        assert_eq!(metadata.version().get(), 5);
+        assert_eq!(metadata.version().get(), 1);
         assert_eq!(metadata.run_id(), fixture.command.run_id());
         assert_eq!(metadata.digest(), prepared[0].activated.job_ir().digest());
         let routing_shape: Vec<(i32, i32, i32)> = sqlx::query_as(
@@ -917,7 +919,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         .bind(fixture.command.run_id().as_uuid())
         .fetch_all(database.pool())
         .await?;
-        assert_eq!(routing_shape, vec![(4, 5, 3), (4, 5, 3)]);
+        assert_eq!(routing_shape, vec![(1, 1, 1), (1, 1, 1)]);
         let runner = open_v5_runner(&database, &fixture.tenant, 10_300).await?;
         let runnable = database
             .store()
@@ -1010,12 +1012,12 @@ async fn selector_quarantines_expired_max_materialization_generation_and_advance
 
         let expired_at = database_now_ms(&database).await? - 1;
         let mut corruption = database.pool().begin().await?;
-        sqlx::query("ALTER TABLE workflow_plan_v2_materialization_claims DISABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_materialization_claims DISABLE TRIGGER USER")
             .execute(&mut *corruption)
             .await?;
         let updated = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_materialization_claims
+            UPDATE logical_workflow_materialization_claims
             SET generation = $2, expires_at_ms = $3
             WHERE instance_id = $1 AND state = 'materializing'
             ",
@@ -1026,7 +1028,7 @@ async fn selector_quarantines_expired_max_materialization_generation_and_advance
         .execute(&mut *corruption)
         .await?;
         assert_eq!(updated.rows_affected(), 1);
-        sqlx::query("ALTER TABLE workflow_plan_v2_materialization_claims ENABLE TRIGGER USER")
+        sqlx::query("ALTER TABLE logical_workflow_materialization_claims ENABLE TRIGGER USER")
             .execute(&mut *corruption)
             .await?;
         corruption.commit().await?;
@@ -1054,7 +1056,7 @@ async fn selector_quarantines_expired_max_materialization_generation_and_advance
         let quarantine: (i64, String) = sqlx::query_as(
             r"
             SELECT authority_generation, failure_kind
-            FROM workflow_plan_v2_materialization_work_quarantines
+            FROM logical_workflow_materialization_work_quarantines
             WHERE instance_id = $1
             ",
         )
@@ -1242,18 +1244,18 @@ async fn exact_receipt_replays_after_job_and_run_finalization() -> TestResult {
         let forged_outputs_digest = [0xa5_u8; 32];
         let mut tamper = database.pool().begin().await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results DISABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_job_results DISABLE TRIGGER USER",
         )
         .execute(&mut *tamper)
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_run_result_jobs DISABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_run_result_jobs DISABLE TRIGGER USER",
         )
         .execute(&mut *tamper)
         .await?;
         assert_eq!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_job_results SET outputs_digest = $2 WHERE logical_job_id = $1",
+                "UPDATE logical_workflow_job_results SET outputs_digest = $2 WHERE logical_job_id = $1",
             )
             .bind(fixture.logical_job_id.as_uuid())
             .bind(forged_outputs_digest.as_slice())
@@ -1264,7 +1266,7 @@ async fn exact_receipt_replays_after_job_and_run_finalization() -> TestResult {
         );
         assert_eq!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_run_result_jobs SET outputs_digest = $3 WHERE run_id = $1 AND logical_job_id = $2",
+                "UPDATE logical_workflow_run_result_jobs SET outputs_digest = $3 WHERE run_id = $1 AND logical_job_id = $2",
             )
             .bind(fixture.command.run_id().as_uuid())
             .bind(fixture.logical_job_id.as_uuid())
@@ -1275,12 +1277,12 @@ async fn exact_receipt_replays_after_job_and_run_finalization() -> TestResult {
             1
         );
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_job_results ENABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_job_results ENABLE TRIGGER USER",
         )
         .execute(&mut *tamper)
         .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_run_result_jobs ENABLE TRIGGER USER",
+            "ALTER TABLE logical_workflow_run_result_jobs ENABLE TRIGGER USER",
         )
         .execute(&mut *tamper)
         .await?;
@@ -1319,9 +1321,9 @@ async fn zero_instance_activation_creates_no_claim_job_attempt_or_legacy_edge() 
             .await?;
 
         for table in [
-            "workflow_plan_v2_instances",
-            "workflow_plan_v2_materialization_claims",
-            "workflow_plan_v2_concrete_jobs",
+            "logical_workflow_instances",
+            "logical_workflow_materialization_claims",
+            "logical_workflow_concrete_jobs",
             "jobs",
             "job_dependencies",
         ] {
@@ -1370,8 +1372,8 @@ async fn logical_concurrency_preemption_fences_unmaterialized_work() -> TestResu
             r"
             SELECT run.status, marker.state, invocation.state
             FROM workflow_runs AS run
-            JOIN workflow_plan_v2_runs AS marker ON marker.run_id = run.id
-            JOIN workflow_plan_v2_invocations AS invocation
+            JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
+            JOIN logical_workflow_invocations AS invocation
               ON invocation.run_id = marker.run_id
              AND invocation.id = marker.root_invocation_id
             WHERE run.id = $1
@@ -1385,7 +1387,7 @@ async fn logical_concurrency_preemption_fences_unmaterialized_work() -> TestResu
             ("cancelled".into(), "cancelled".into(), "cancelled".into())
         );
         let cancellation_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_concurrency_cancellations WHERE run_id = $1",
+            "SELECT count(*) FROM logical_workflow_concurrency_cancellations WHERE run_id = $1",
         )
         .bind(race.fixture.command.run_id().as_uuid())
         .fetch_one(database.pool())
@@ -1498,7 +1500,7 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
         // Stop the commit after it owns the run but before it locks the
         // materialization claim. Unlike the concrete-job table, this table is
         // not read by the admission-side current-attempt liveness trigger.
-        sqlx::query("LOCK TABLE workflow_plan_v2_materialization_claims IN ACCESS EXCLUSIVE MODE")
+        sqlx::query("LOCK TABLE logical_workflow_materialization_claims IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *gate)
             .await?;
 
@@ -2077,16 +2079,16 @@ async fn planned_reusable_child(
     let child_catalog_id = Uuid::from_u128(fixture.namespace + 71);
     let planned_at = database_now_ms(database).await?;
 
-    sqlx::query("ALTER TABLE workflow_plan_v2_jobs DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE logical_workflow_jobs DISABLE TRIGGER USER")
         .execute(database.pool())
         .await?;
     sqlx::query(
-        "UPDATE workflow_plan_v2_jobs SET execution_kind = 'reusable_workflow' WHERE id = $1",
+        "UPDATE logical_workflow_jobs SET execution_kind = 'reusable_workflow' WHERE id = $1",
     )
     .bind(caller_job_id.as_uuid())
     .execute(database.pool())
     .await?;
-    sqlx::query("ALTER TABLE workflow_plan_v2_jobs ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE logical_workflow_jobs ENABLE TRIGGER USER")
         .execute(database.pool())
         .await?;
 
@@ -2096,7 +2098,7 @@ async fn planned_reusable_child(
         .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_workflow_runs (
+        INSERT INTO logical_workflow_reusable_workflow_runs (
             tenant_id, repository_id, run_id, root_invocation_id,
             expansion_digest, catalog_entry_count, invocation_count,
             expanded_job_count, maximum_depth, planned_at_ms
@@ -2113,7 +2115,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+        INSERT INTO logical_workflow_reusable_workflow_catalog (
             run_id, catalog_entry_id, workflow_path, source_revision,
             source_digest, source_object_key, source_size_bytes,
             source_media_type, plan_digest, plan_object_key, plan_size_bytes,
@@ -2140,7 +2142,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_workflow_catalog (
+        INSERT INTO logical_workflow_reusable_workflow_catalog (
             run_id, catalog_entry_id, workflow_path, source_revision,
             source_digest, source_object_key, source_size_bytes,
             source_media_type, plan_digest, plan_object_key, plan_size_bytes,
@@ -2168,7 +2170,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+        INSERT INTO logical_workflow_reusable_invocation_expansions (
             run_id, invocation_id, parent_invocation_id,
             caller_logical_job_id, catalog_entry_id, depth, call_path,
             workflow_path, source_digest, plan_digest, call_reference_digest,
@@ -2181,7 +2183,7 @@ async fn planned_reusable_child(
                ARRAY[catalog.workflow_path], catalog.workflow_path,
                catalog.source_digest, catalog.plan_digest, NULL,
                $3, $4, $5, $6, $7, 0, 0, 0, 1, 0, $8
-        FROM workflow_plan_v2_reusable_workflow_catalog AS catalog
+        FROM logical_workflow_reusable_workflow_catalog AS catalog
         WHERE catalog.run_id = $1 AND catalog.catalog_entry_id = $9
         ",
     )
@@ -2198,7 +2200,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_invocation_expansions (
+        INSERT INTO logical_workflow_reusable_invocation_expansions (
             run_id, invocation_id, parent_invocation_id,
             caller_logical_job_id, catalog_entry_id, depth, call_path,
             workflow_path, source_digest, plan_digest, call_reference_digest,
@@ -2211,7 +2213,7 @@ async fn planned_reusable_child(
                ARRAY[$5, catalog.workflow_path], catalog.workflow_path,
                catalog.source_digest, catalog.plan_digest, $6,
                $7, $8, $9, $10, $11, 0, 0, 2, 1, 0, $12
-        FROM workflow_plan_v2_reusable_workflow_catalog AS catalog
+        FROM logical_workflow_reusable_workflow_catalog AS catalog
         WHERE catalog.run_id = $1 AND catalog.catalog_entry_id = $13
         ",
     )
@@ -2232,7 +2234,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_expanded_jobs (
+        INSERT INTO logical_workflow_reusable_expanded_jobs (
             run_id, invocation_id, logical_job_id, logical_key,
             source_order, execution_kind, descriptor_digest,
             environment_requirement_kind
@@ -2252,7 +2254,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_permission_snapshots (
+        INSERT INTO logical_workflow_reusable_permission_snapshots (
             run_id, invocation_id, default_level, permission_digest
         ) VALUES ($1,$2,'read',$3), ($1,$4,'read',$5)
         ",
@@ -2266,7 +2268,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_permission_grants (
+        INSERT INTO logical_workflow_reusable_permission_grants (
             run_id, invocation_id, permission_name, permission_level
         ) VALUES
             ($1,$2,'id-token','write'),
@@ -2280,7 +2282,7 @@ async fn planned_reusable_child(
     .await?;
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_reusable_outputs (
+        INSERT INTO logical_workflow_reusable_outputs (
             run_id, invocation_id, output_key, sensitivity, source_order
         ) VALUES
             ($1,$2,'callee-public','public',0),
@@ -2412,11 +2414,15 @@ async fn admit_authenticated_fixture(
                     format!("materialization-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 accepted_at,
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([0x14; 20])?,
             manifest.webhook_verifier_fingerprint(),
             manifest.webhook_verifier_revision(),
@@ -2433,6 +2439,34 @@ async fn admit_authenticated_fixture(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![
+                        ProviderDeliveryWorkflowInventoryEntry::new(
+                            fixture.command.workflow_path(),
+                            ProviderDeliveryWorkflowSourceState::Ready(
+                                fixture.command.source().digest(),
+                            ),
+                        )?,
+                        ProviderDeliveryWorkflowInventoryEntry::new(
+                            ".github/workflows/child.yml",
+                            ProviderDeliveryWorkflowSourceState::Ready(
+                                fixture.command.source().digest(),
+                            ),
+                        )?,
+                    ],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
@@ -2565,7 +2599,7 @@ async fn open_v5_runner(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             capability_snapshot,
             UnixMillis::new(observed_at),

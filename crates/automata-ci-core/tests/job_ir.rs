@@ -146,7 +146,7 @@ fn output(name: &str) -> JobOutputDefinition {
 fn current_instance_templates_and_outputs_round_trip_without_legacy_sentinels() {
     let envelope = current_envelope(vec![output("zeta"), output("alpha")]);
     envelope.validate().expect("valid current JobIR");
-    assert_eq!(envelope.schema_version(), 5);
+    assert_eq!(envelope.schema_version(), 1);
     assert_eq!(envelope.job().instance_identity().matrix_index(), 1);
     assert!(!envelope.job().continue_on_error());
     assert_eq!(
@@ -526,7 +526,7 @@ fn noncurrent_versions_fail_closed() {
         assert_eq!(
             envelope.validate(),
             Err(JobValidationError::UnsupportedSchema {
-                supported: 5,
+                supported: 1,
                 received: version,
             })
         );

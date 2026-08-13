@@ -194,7 +194,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
             event_object_key, head_sha, status, created_at_ms, updated_at_ms,
             runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', 'test/results-event', $5, 'queued', 1, 1, 3)
+        VALUES ($1, $2, $3, $4, 1, 'push', 'test/results-event', $5, 'queued', 1, 1, 1)
         ",
     )
     .bind(run_id)
@@ -261,7 +261,7 @@ pub async fn seed_control_plane(pool: &PgPool) -> TestResult<SeedData> {
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             routing,
             observed_at,

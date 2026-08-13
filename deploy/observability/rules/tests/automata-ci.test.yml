@@ -877,7 +877,7 @@ tests:
               state: pending
             exp_annotations:
               summary: Logical workflow activation backlog is stale
-              description: At least one current WorkflowPlan-v2 logical job has awaited activation for more than five minutes.
+              description: At least one current logical workflow logical job has awaited activation for more than five minutes.
               runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
       - eval_time: 25m
         alertname: AutomataLogicalActivationBacklogCritical
@@ -892,7 +892,7 @@ tests:
               state: pending
             exp_annotations:
               summary: Logical workflow activation backlog is critically stale
-              description: Current WorkflowPlan-v2 logical work has made no activation progress for more than fifteen minutes.
+              description: Current logical workflow logical work has made no activation progress for more than fifteen minutes.
               runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
       - eval_time: 25m
         alertname: AutomataLogicalActivationClaimExpired
@@ -907,7 +907,7 @@ tests:
               state: expired
             exp_annotations:
               summary: A logical workflow activation claim expired
-              description: At least one fenced WorkflowPlan-v2 activation claim is past its durable expiry.
+              description: At least one fenced logical workflow activation claim is past its durable expiry.
               runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
       - eval_time: 25m
         alertname: AutomataLogicalActivationClaimStuck
@@ -922,7 +922,7 @@ tests:
               state: expired
             exp_annotations:
               summary: Expired logical activation claims are not recovering
-              description: A WorkflowPlan-v2 activation claim has remained expired for more than five minutes.
+              description: A logical workflow activation claim has remained expired for more than five minutes.
               runbook_url: https://github.com/automata-ci/automata/blob/main/deploy/observability/runbooks/logical-orchestration.md
 
   - name: logical activation ages are absent for empty or zero timestamp state

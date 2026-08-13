@@ -42,9 +42,11 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, OpenRunnerSession, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    QuarantineLogicalInstanceResult, RequestCancellation, ReusableSecretPermission,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, QuarantineLogicalInstanceResult,
+    RegisterProviderDeliveryWorkflowInventory, RequestCancellation, ReusableSecretPermission,
     RoutingDocument, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
     RunnerSessionRepository as _, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
@@ -77,8 +79,8 @@ struct ServerCancellationTerminal {
     conclusion: String,
     completed_at_ms: i64,
     committed_at_ms: i64,
-    workflow_plan_v2_logical_job_id: Uuid,
-    workflow_plan_v2_terminal_ordinal: i64,
+    logical_workflow_logical_job_id: Uuid,
+    logical_workflow_terminal_ordinal: i64,
     has_no_runner_evidence: bool,
     digest_matches_intent: bool,
 }
@@ -201,8 +203,8 @@ async fn assert_server_cancellation_terminal(
                terminal.conclusion,
                terminal.completed_at_ms,
                terminal.committed_at_ms,
-               terminal.workflow_plan_v2_logical_job_id,
-               terminal.workflow_plan_v2_terminal_ordinal,
+               terminal.logical_workflow_logical_job_id,
+               terminal.logical_workflow_terminal_ordinal,
                num_nonnulls(
                    terminal.runner_session_id, terminal.operation_id,
                    terminal.runner_id, terminal.runner_session_epoch,
@@ -239,10 +241,10 @@ async fn assert_server_cancellation_terminal(
         (cancelled_at, cancelled_at)
     );
     assert_eq!(
-        terminal.workflow_plan_v2_logical_job_id,
+        terminal.logical_workflow_logical_job_id,
         fixture.logical_job_id.as_uuid()
     );
-    assert_eq!(terminal.workflow_plan_v2_terminal_ordinal, 1);
+    assert_eq!(terminal.logical_workflow_terminal_ordinal, 1);
     assert!(
         terminal.has_no_runner_evidence,
         "server authority must not contain runner/blob fields"
@@ -252,7 +254,7 @@ async fn assert_server_cancellation_terminal(
         "server authority digest must bind the exact intent"
     );
     let due_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+        "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
     )
     .bind(attempt_id.as_uuid())
     .fetch_one(database.pool())
@@ -329,7 +331,7 @@ async fn project_server_cancellation(
         SELECT terminal_authority, result_digest IS NULL,
                result_object_key IS NULL, raw_conclusion,
                effective_conclusion, secret_exposure_class, output_count
-        FROM workflow_plan_v2_instance_results
+        FROM logical_workflow_instance_results
         WHERE attempt_id = $1
         ",
     )
@@ -459,7 +461,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         );
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_materialization_claims WHERE instance_id = $1",
+                "DELETE FROM logical_workflow_materialization_claims WHERE instance_id = $1",
             )
             .bind(prepared.activated.id().as_uuid())
             .execute(database.pool())
@@ -469,7 +471,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         );
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_concrete_jobs WHERE initial_attempt_id = $1",
+                "DELETE FROM logical_workflow_concrete_jobs WHERE initial_attempt_id = $1",
             )
             .bind(materialization_receipt.attempt_id().as_uuid())
             .execute(database.pool())
@@ -478,7 +480,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             "the exact logical-to-concrete mapping remains retained for projection"
         );
         let due_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+            "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
         )
         .bind(materialization_receipt.attempt_id().as_uuid())
         .fetch_one(database.pool())
@@ -486,7 +488,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         assert_eq!(due_count, 1);
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+                "DELETE FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
             )
             .bind(materialization_receipt.attempt_id().as_uuid())
             .execute(database.pool())
@@ -630,7 +632,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         ));
         assert!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_instance_result_selections SET owner_id = $2 WHERE selection_id = $1",
+                "UPDATE logical_workflow_instance_result_selections SET owner_id = $2 WHERE selection_id = $1",
             )
             .bind(Uuid::from_u128(30_399))
             .bind(Uuid::from_u128(30_499))
@@ -674,7 +676,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         assert_eq!(left.terminal_ordinal().get(), 1);
         assert_eq!(left.secret_exposure(), JobSecretExposure::ReadableSecret);
         let due_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+            "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
         )
         .bind(materialization_receipt.attempt_id().as_uuid())
         .fetch_one(database.pool())
@@ -682,7 +684,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         assert_eq!(due_count, 0, "finalization removes the bounded due row");
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_instance_result_claims WHERE attempt_id = $1",
+                "DELETE FROM logical_workflow_instance_result_claims WHERE attempt_id = $1",
             )
             .bind(materialization_receipt.attempt_id().as_uuid())
             .execute(database.pool())
@@ -707,7 +709,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         let outputs: Vec<(String, String, Option<String>)> = sqlx::query_as(
             r#"
             SELECT output_name, sensitivity, public_value
-            FROM workflow_plan_v2_instance_result_outputs
+            FROM logical_workflow_instance_result_outputs
             WHERE instance_id = $1
             ORDER BY output_name COLLATE "C"
             "#,
@@ -727,7 +729,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             ]
         );
         let result_contract: (String, String) = sqlx::query_as(
-            "SELECT secret_exposure_class, result_media_type FROM workflow_plan_v2_instance_results WHERE instance_id = $1",
+            "SELECT secret_exposure_class, result_media_type FROM logical_workflow_instance_results WHERE instance_id = $1",
         )
         .bind(prepared.activated.id().as_uuid())
         .fetch_one(database.pool())
@@ -741,7 +743,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         );
         assert!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_instance_results SET effective_conclusion = 'failure' WHERE instance_id = $1",
+                "UPDATE logical_workflow_instance_results SET effective_conclusion = 'failure' WHERE instance_id = $1",
             )
             .bind(prepared.activated.id().as_uuid())
             .execute(database.pool())
@@ -751,7 +753,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
         );
         assert!(
             sqlx::query(
-                "DELETE FROM workflow_plan_v2_instance_result_outputs WHERE instance_id = $1",
+                "DELETE FROM logical_workflow_instance_result_outputs WHERE instance_id = $1",
             )
             .bind(prepared.activated.id().as_uuid())
             .execute(database.pool())
@@ -760,7 +762,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             "instance child evidence cannot be deleted"
         );
         assert!(
-            sqlx::query("TRUNCATE workflow_plan_v2_instance_result_outputs")
+            sqlx::query("TRUNCATE logical_workflow_instance_result_outputs")
                 .execute(database.pool())
                 .await
                 .is_err(),
@@ -801,7 +803,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             LogicalInstanceResultClaimNextOutcome::Idle
         ));
         let old_idle_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_instance_result_selections WHERE selection_id = $1",
+            "SELECT count(*) FROM logical_workflow_instance_result_selections WHERE selection_id = $1",
         )
         .bind(short_idle_request.selection_id().as_uuid())
         .fetch_one(database.pool())
@@ -811,7 +813,7 @@ async fn terminal_projection_is_fenced_replayable_and_secret_safe() -> TestResul
             "expired Idle receipts are cleaned in bounded batches"
         );
         let old_claimed_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_instance_result_selections WHERE selection_id = $1",
+            "SELECT count(*) FROM logical_workflow_instance_result_selections WHERE selection_id = $1",
         )
         .bind(Uuid::from_u128(30_399))
         .fetch_one(database.pool())
@@ -967,7 +969,7 @@ async fn credential_free_attempt_accepts_and_persists_secretless_terminal_exposu
             .await?;
         assert_eq!(receipt.secret_exposure(), JobSecretExposure::Secretless);
         let persisted: String = sqlx::query_scalar(
-            "SELECT secret_exposure_class FROM workflow_plan_v2_instance_results WHERE instance_id = $1",
+            "SELECT secret_exposure_class FROM logical_workflow_instance_results WHERE instance_id = $1",
         )
         .bind(prepared.activated.id().as_uuid())
         .fetch_one(database.pool())
@@ -1001,7 +1003,7 @@ async fn live_selection_replay_does_not_reapply_new_reservation_clock_skew() -> 
         assert!(
             sqlx::query(
                 r"
-                UPDATE workflow_plan_v2_result_selection_replay_horizons
+                UPDATE logical_workflow_result_selection_replay_horizons
                 SET replay_floor_ms = $1, updated_at_ms = $1
                 WHERE queue_name = 'instance'
                 ",
@@ -1058,17 +1060,17 @@ async fn corrupt_oldest_instance_is_quarantined_and_newer_work_continues() -> Te
             seed_ready_terminal_instance(&database, &newer, 33_100).await?;
 
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances DISABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances DISABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
-        sqlx::query("UPDATE workflow_plan_v2_instances SET job_ir_digest = $2 WHERE id = $1")
+        sqlx::query("UPDATE logical_workflow_instances SET job_ir_digest = $2 WHERE id = $1")
             .bind(older_instance.activated.id().as_uuid())
             .bind(vec![0xA5_u8; 32])
             .execute(database.pool())
             .await?;
         sqlx::query(
-            "ALTER TABLE workflow_plan_v2_instances ENABLE TRIGGER workflow_plan_v2_instances_reject_update",
+            "ALTER TABLE logical_workflow_instances ENABLE TRIGGER logical_workflow_instances_reject_update",
         )
         .execute(database.pool())
         .await?;
@@ -1089,7 +1091,7 @@ async fn corrupt_oldest_instance_is_quarantined_and_newer_work_continues() -> Te
         let quarantine: (String, String, bool) = sqlx::query_as(
             r"
             SELECT tenant_id, failure_kind, claim_owner_id IS NULL
-            FROM workflow_plan_v2_instance_result_quarantines
+            FROM logical_workflow_instance_result_quarantines
             WHERE attempt_id = $1
             ",
         )
@@ -1102,7 +1104,7 @@ async fn corrupt_oldest_instance_is_quarantined_and_newer_work_continues() -> Te
         );
         assert!(
             sqlx::query(
-                "UPDATE workflow_plan_v2_instance_result_quarantines SET failure_kind = 'object_evidence' WHERE attempt_id = $1",
+                "UPDATE logical_workflow_instance_result_quarantines SET failure_kind = 'object_evidence' WHERE attempt_id = $1",
             )
             .bind(older_attempt.as_uuid())
             .execute(database.pool())
@@ -1111,7 +1113,7 @@ async fn corrupt_oldest_instance_is_quarantined_and_newer_work_continues() -> Te
             "the observable quarantine ledger is immutable"
         );
         let due_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow_plan_v2_instance_result_due WHERE attempt_id = $1",
+            "SELECT count(*) FROM logical_workflow_instance_result_due WHERE attempt_id = $1",
         )
         .bind(older_attempt.as_uuid())
         .fetch_one(database.pool())
@@ -1299,11 +1301,15 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                     format!("instance-result-{namespace}"),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 103)?)?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 103)?)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
             GithubCheckHeadSha::new([0x14; 20])?,
             fixture.manifest.webhook_verifier_fingerprint(),
             fixture.manifest.webhook_verifier_revision(),
@@ -1320,6 +1326,26 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        fixture.command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(
+                            fixture.command.source().digest(),
+                        ),
+                    )?],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -1680,7 +1706,7 @@ async fn open_runner(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             capability_snapshot,
             UnixMillis::new(database_now_ms(database).await?),
@@ -1810,9 +1836,9 @@ async fn instance_result_projection_counts(
     let counts = sqlx::query_as(
         r"
         SELECT
-            (SELECT count(*) FROM workflow_plan_v2_instance_result_due
+            (SELECT count(*) FROM logical_workflow_instance_result_due
              WHERE attempt_id = $1),
-            (SELECT count(*) FROM workflow_plan_v2_instance_result_claims
+            (SELECT count(*) FROM logical_workflow_instance_result_claims
              WHERE attempt_id = $1)
         ",
     )

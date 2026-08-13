@@ -18,7 +18,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 const REQUEST_MAGIC: &[u8; 4] = b"AMSD";
 const RESPONSE_MAGIC: &[u8; 4] = b"AMSR";
-const WIRE_VERSION: u8 = 2;
+const WIRE_VERSION: u8 = 1;
 const FETCH: u8 = 1;
 const ACKNOWLEDGE: u8 = 2;
 const MAX_BINDINGS: usize = 256;

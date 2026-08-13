@@ -235,7 +235,7 @@ impl WorkflowRunCounts {
 
 /// Closed durable state of a current `WorkflowPlan`-v2 orchestration marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkflowPlanV2RunState {
+pub enum LogicalWorkflowRunState {
     Pending,
     Active,
     Completed,
@@ -243,7 +243,7 @@ pub enum WorkflowPlanV2RunState {
     Failed,
 }
 
-impl WorkflowPlanV2RunState {
+impl LogicalWorkflowRunState {
     pub const ALL: [Self; 5] = [
         Self::Pending,
         Self::Active,
@@ -265,15 +265,15 @@ impl WorkflowPlanV2RunState {
 
 /// Counts for every closed `WorkflowPlan`-v2 orchestration-marker state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WorkflowPlanV2RunCounts([u64; 5]);
+pub struct LogicalWorkflowRunCounts([u64; 5]);
 
-impl WorkflowPlanV2RunCounts {
-    pub fn set(&mut self, state: WorkflowPlanV2RunState, count: u64) {
+impl LogicalWorkflowRunCounts {
+    pub fn set(&mut self, state: LogicalWorkflowRunState, count: u64) {
         self.0[state.index()] = count;
     }
 
     #[must_use]
-    pub const fn get(self, state: WorkflowPlanV2RunState) -> u64 {
+    pub const fn get(self, state: LogicalWorkflowRunState) -> u64 {
         self.0[state.index()]
     }
 }
@@ -797,7 +797,7 @@ impl ControlPlaneCapacitySnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneStateSnapshot {
     workflow_runs: WorkflowRunCounts,
-    workflow_plan_v2_runs: WorkflowPlanV2RunCounts,
+    logical_workflow_runs: LogicalWorkflowRunCounts,
     logical_jobs: LogicalJobCounts,
     logical_activations: LogicalActivationCounts,
     activation_publications: u64,
@@ -851,7 +851,7 @@ impl ControlPlaneStateSnapshot {
         )?;
         Ok(Self {
             workflow_runs,
-            workflow_plan_v2_runs: WorkflowPlanV2RunCounts::default(),
+            logical_workflow_runs: LogicalWorkflowRunCounts::default(),
             logical_jobs: LogicalJobCounts::default(),
             logical_activations: LogicalActivationCounts::default(),
             activation_publications: 0,
@@ -884,7 +884,7 @@ impl ControlPlaneStateSnapshot {
     #[allow(clippy::too_many_arguments)]
     pub fn with_logical_orchestration(
         mut self,
-        workflow_plan_v2_runs: WorkflowPlanV2RunCounts,
+        logical_workflow_runs: LogicalWorkflowRunCounts,
         logical_jobs: LogicalJobCounts,
         logical_activations: LogicalActivationCounts,
         activation_publications: u64,
@@ -900,7 +900,7 @@ impl ControlPlaneStateSnapshot {
             capacity_candidates,
             capacity_runners,
         )?;
-        self.workflow_plan_v2_runs = workflow_plan_v2_runs;
+        self.logical_workflow_runs = logical_workflow_runs;
         self.logical_jobs = logical_jobs;
         self.logical_activations = logical_activations;
         self.activation_publications = activation_publications;
@@ -926,7 +926,7 @@ impl ControlPlaneStateSnapshot {
     pub const fn empty() -> Self {
         Self {
             workflow_runs: WorkflowRunCounts([0; 4]),
-            workflow_plan_v2_runs: WorkflowPlanV2RunCounts([0; 5]),
+            logical_workflow_runs: LogicalWorkflowRunCounts([0; 5]),
             logical_jobs: LogicalJobCounts([0; 7]),
             logical_activations: LogicalActivationCounts {
                 counts: [0; 3],
@@ -968,8 +968,8 @@ impl ControlPlaneStateSnapshot {
     }
 
     #[must_use]
-    pub const fn workflow_plan_v2_runs(&self) -> WorkflowPlanV2RunCounts {
-        self.workflow_plan_v2_runs
+    pub const fn logical_workflow_runs(&self) -> LogicalWorkflowRunCounts {
+        self.logical_workflow_runs
     }
 
     #[must_use]

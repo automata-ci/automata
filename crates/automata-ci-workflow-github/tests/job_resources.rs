@@ -47,7 +47,7 @@ jobs:
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let plan = report.plan().expect("resource plan");
-    assert_eq!(plan.version(), WorkflowPlanVersion::v2());
+    assert_eq!(plan.version(), WorkflowPlanVersion::v1());
     let LogicalJobKind::Steps(job) = plan.jobs()[0].execution() else {
         panic!("step job")
     };

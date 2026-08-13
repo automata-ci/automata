@@ -20,8 +20,8 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_github::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubWebhookVerifier,
-    MAX_GITHUB_WEBHOOK_BODY_BYTES, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_github_delivery::{
     GithubDeliveryClock, GithubDeliveryConnection, GithubDeliveryIngress,
@@ -315,6 +315,7 @@ fn fixture_receipt(
         )
         .expect("Check subject"),
         request.head_sha(),
+        request.authenticated_event().clone(),
         request.delivery().accepted_at(),
     )
     .expect("fixture manifest evidence");
@@ -660,11 +661,14 @@ async fn product_router_preserves_legacy_push_and_opts_supported_events_into_v1(
     let requests = subjects.requests();
     assert_eq!(requests.len(), 3);
     assert_eq!(blobs.completed(), 3);
-    let legacy = &requests[0];
-    assert!(legacy.authenticated_event_v1().is_none());
+    let push = &requests[0];
     assert_eq!(
-        legacy.delivery().raw_event().media_type(),
-        GITHUB_PUSH_EVENT_MEDIA_TYPE
+        push.authenticated_event().kind(),
+        GithubAuthenticatedEventKind::Push
+    );
+    assert_eq!(
+        push.delivery().raw_event().media_type(),
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
     );
 
     for (request, expected_kind, expected_ref) in [
@@ -679,14 +683,12 @@ async fn product_router_preserves_legacy_push_and_opts_supported_events_into_v1(
             "refs/heads/merge-queue/main/group-7",
         ),
     ] {
-        let event = request
-            .authenticated_event_v1()
-            .expect("version-one routing evidence");
+        let event = request.authenticated_event();
         assert_eq!(event.kind(), expected_kind);
         assert_eq!(event.git_ref(), expected_ref);
         assert_eq!(
             request.delivery().raw_event().media_type(),
-            GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+            GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
         );
         assert!(
             request
@@ -694,7 +696,7 @@ async fn product_router_preserves_legacy_push_and_opts_supported_events_into_v1(
                 .raw_event()
                 .object_key()
                 .as_str()
-                .starts_with("provider-deliveries/github/event-v1/sha256/")
+                .starts_with("provider-deliveries/github/event/sha256/")
         );
     }
 }

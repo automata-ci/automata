@@ -1,5 +1,4 @@
-const PROVIDER_TOKEN_MIGRATION: &str =
-    include_str!("../migrations/0014_provider_token_vault_hardening.sql");
+const PROVIDER_TOKEN_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[test]
 fn provider_token_vault_schema_is_ciphertext_only_fail_closed_and_one_way() {

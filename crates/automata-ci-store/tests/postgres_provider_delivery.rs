@@ -93,7 +93,7 @@ async fn seed_workflow_run(
             event_name, event_object_key, head_sha, status,
             created_at_ms, updated_at_ms, runner_requirements_schema
         )
-        VALUES ($1, $2, $3, $4, 1, 'push', $5, $6, 'queued', 1, 1, 3)
+        VALUES ($1, $2, $3, $4, 1, 'push', $5, $6, 'queued', 1, 1, 1)
         ",
     )
     .bind(run_id)

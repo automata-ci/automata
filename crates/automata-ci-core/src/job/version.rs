@@ -28,7 +28,7 @@ impl JobIrVersion {
     /// Returns the `JobIR` schema emitted by this build.
     #[must_use]
     pub const fn current() -> Self {
-        Self::constant(5)
+        Self::constant(1)
     }
 
     /// Returns the numeric wire representation.
@@ -125,8 +125,10 @@ pub enum JobIrVersionError {
     /// Schema zero is reserved and cannot appear on the wire.
     #[error("JobIR schema versions must be positive")]
     Zero,
-    /// Current peers advertise and accept only the exact v5 contract.
-    #[error("unsupported JobIR version range {minimum:?}..={maximum:?}; expected v5 only")]
+    /// Current peers advertise and accept only the exact current contract.
+    #[error(
+        "unsupported JobIR version range {minimum:?}..={maximum:?}; expected the current version only"
+    )]
     UnsupportedRange {
         /// Oldest version offered by the peer.
         minimum: JobIrVersion,

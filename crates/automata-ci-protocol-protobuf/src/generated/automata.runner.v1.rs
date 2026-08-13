@@ -560,7 +560,7 @@ pub struct JobExecutionContext {
     pub run_attempt: ::core::option::Option<u32>,
     #[prost(message, optional, tag = "7")]
     pub event: ::core::option::Option<JobContentReference>,
-    /// Required immutable execution-time context for JobIR v5.
+    /// Required immutable execution-time context for JobIR.
     #[prost(message, optional, tag = "8")]
     pub runtime_context: ::core::option::Option<JobContentReference>,
     /// Stable positive numeric alias for the internal UUID run identity.
@@ -1102,7 +1102,7 @@ pub struct JobIr {
     pub steps: ::prost::alloc::vec::Vec<StepIr>,
     #[prost(message, repeated, tag = "13")]
     pub outputs: ::prost::alloc::vec::Vec<JobOutputDefinition>,
-    /// Required resolved provider permission request for JobIR v5.
+    /// Required resolved provider permission request for JobIR.
     #[prost(message, optional, tag = "14")]
     pub permission_request: ::core::option::Option<JobPermissionRequest>,
     /// Required immutable job-visible authority policy; omission is never defaulted.

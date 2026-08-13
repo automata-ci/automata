@@ -95,8 +95,8 @@ fn current_contract_retains_root_and_source_ordered_logical_graph() {
     ])
     .expect("valid logical admission");
 
-    assert_eq!(WORKFLOW_ADMISSION_EPOCH, 4);
-    assert_eq!(WORKFLOW_PLAN_SCHEMA, 2);
+    assert_eq!(WORKFLOW_ADMISSION_EPOCH, 1);
+    assert_eq!(WORKFLOW_PLAN_SCHEMA, 1);
     assert_eq!(LOGICAL_ORCHESTRATION_SCHEMA, 1);
     assert_eq!(admitted.run_attempt(), 1);
     assert_eq!(admitted.root_invocation_id().as_uuid(), Uuid::from_u128(5));

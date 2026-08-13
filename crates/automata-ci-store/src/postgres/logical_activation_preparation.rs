@@ -110,7 +110,7 @@ impl LogicalActivationPreparationStore for PostgresStore {
 
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims
+            UPDATE logical_workflow_activation_preparation_claims
             SET generation = $2, claimed_at_ms = $3,
                 expires_at_ms = $4, updated_at_ms = $3
             WHERE logical_job_id = $1 AND state = 'preparing'
@@ -211,7 +211,7 @@ impl LogicalActivationPreparationStore for PostgresStore {
         insert_binding(&mut transaction, &request).await?;
         let rows = sqlx::query(
             r"
-            UPDATE workflow_plan_v2_activation_preparation_claims
+            UPDATE logical_workflow_activation_preparation_claims
             SET state = 'prepared', updated_at_ms = $8
             WHERE logical_job_id = $1 AND run_id = $2 AND invocation_id = $3
               AND state = 'preparing' AND owner_id = $4
@@ -254,7 +254,7 @@ async fn load_exact_preparation_renewal_receipt(
         r"
         SELECT successor_generation, successor_claimed_at_ms,
                successor_expires_at_ms, validated_at_ms
-        FROM workflow_plan_v2_activation_renewal_receipts
+        FROM logical_workflow_activation_renewal_receipts
         WHERE logical_job_id = $1
           AND authority_kind = 'preparation'
           AND predecessor_generation = $2
@@ -316,7 +316,7 @@ async fn load_preparation_renewal_policy(
     let row = sqlx::query(
         r"
         SELECT policy_revision, policy_digest
-        FROM workflow_plan_v2_runtime_policy_pins
+        FROM logical_workflow_runtime_policy_pins
         WHERE run_id = $1 AND tenant_id = $2
         FOR SHARE
         ",
@@ -356,7 +356,7 @@ async fn verify_selected_preparation_renewal_lineage(
             r"
             SELECT successor_generation, successor_claimed_at_ms,
                    successor_expires_at_ms
-            FROM workflow_plan_v2_activation_renewal_receipts
+            FROM logical_workflow_activation_renewal_receipts
             WHERE logical_job_id = $1
               AND authority_kind = 'preparation'
               AND predecessor_generation = $2
@@ -433,7 +433,7 @@ async fn insert_preparation_renewal_receipt(
 ) -> Result<i64, LogicalActivationPreparationStoreError> {
     sqlx::query_scalar(
         r"
-        INSERT INTO workflow_plan_v2_activation_renewal_receipts (
+        INSERT INTO logical_workflow_activation_renewal_receipts (
             logical_job_id, authority_kind, selection_id, tenant_id, run_id,
             invocation_id, owner_id, runtime_policy_revision,
             runtime_policy_digest, authority_digest, predecessor_generation,
@@ -650,7 +650,7 @@ async fn resolve_durable_claim(
         .ok_or(LogicalActivationPreparationStoreError::GenerationExhausted)?;
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_activation_preparation_claims
+        UPDATE logical_workflow_activation_preparation_claims
         SET owner_id = $3, generation = $4, claimed_at_ms = $5,
             expires_at_ms = $6, updated_at_ms = $5,
             origin_selection_id = $7
@@ -729,7 +729,7 @@ async fn lock_preparation_selection_evidence(
                AND logical_job_id = $6
                AND authority_kind = 'preparation'
                AND authority_digest = $7, FALSE) AS exact
-        FROM workflow_plan_v2_activation_work_selections
+        FROM logical_workflow_activation_work_selections
         WHERE selection_id = $1
         FOR UPDATE
         ",
@@ -753,7 +753,7 @@ async fn lock_preparation_selection_evidence(
     let horizon: Option<String> = sqlx::query_scalar(
         r"
         SELECT queue_name
-        FROM workflow_plan_v2_work_selection_replay_horizons
+        FROM logical_workflow_work_selection_replay_horizons
         WHERE queue_name = 'activation'
         FOR UPDATE
         ",
@@ -776,7 +776,7 @@ async fn lock_preparation_quarantine_custody(
     let quarantine: Option<Uuid> = sqlx::query_scalar(
         r"
         SELECT logical_job_id
-        FROM workflow_plan_v2_activation_work_quarantines
+        FROM logical_workflow_activation_work_quarantines
         WHERE logical_job_id = $1
         FOR UPDATE
         ",
@@ -806,7 +806,7 @@ async fn lock_active_preparation_graph(
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 4 AND run.plan_schema = 2
+               AND run.admission_epoch = 1 AND run.plan_schema = 1
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -826,10 +826,10 @@ async fn lock_active_preparation_graph(
         SELECT marker.state IN ('pending', 'active')
                AND marker.orchestration_schema = 1
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_workflow_plan_v2_invocation_published(
+               AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
                )
-        FROM workflow_plan_v2_runs AS marker
+        FROM logical_workflow_runs AS marker
         WHERE marker.run_id = $1
         FOR SHARE OF marker
         ",
@@ -845,8 +845,8 @@ async fn lock_active_preparation_graph(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 2
-        FROM workflow_plan_v2_invocations AS invocation
+               AND invocation.plan_schema = 1
+        FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
         ",
@@ -867,7 +867,7 @@ async fn reject_quarantined_preparation(
         r"
         SELECT EXISTS (
             SELECT 1
-            FROM workflow_plan_v2_activation_work_quarantines
+            FROM logical_workflow_activation_work_quarantines
             WHERE logical_job_id = $1
         )
         ",
@@ -898,7 +898,7 @@ async fn lock_target(
         sqlx::query(
             r"
             SELECT logical_job_id
-            FROM workflow_plan_v2_activation_preparation_claims
+            FROM logical_workflow_activation_preparation_claims
             WHERE logical_job_id = $1
             FOR UPDATE
             ",
@@ -968,12 +968,12 @@ async fn load_current_descriptor(
                result.closure_has_cancelled, result.closure_has_skipped,
                result.output_count, result.finalized_at_ms,
                result.claim_state AS result_claim_state
-        FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_jobs AS prerequisite
+        FROM logical_workflow_dependencies AS dependency
+        JOIN logical_workflow_jobs AS prerequisite
           ON prerequisite.run_id = dependency.run_id
          AND prerequisite.invocation_id = dependency.invocation_id
          AND prerequisite.id = dependency.prerequisite_job_id
-        LEFT JOIN workflow_plan_v2_effective_job_results AS result
+        LEFT JOIN logical_workflow_effective_job_results AS result
           ON result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
          AND result.logical_job_id = dependency.prerequisite_job_id
@@ -1016,7 +1016,7 @@ async fn load_pinned_descriptor(
                effective_conclusion, closure_has_failure,
                closure_has_cancelled, closure_has_skipped,
                output_count, finalized_at_ms
-        FROM workflow_plan_v2_activation_preparation_prerequisites
+        FROM logical_workflow_activation_preparation_prerequisites
         WHERE logical_job_id = $1
         ORDER BY source_order, prerequisite_job_id
         ",
@@ -1028,7 +1028,7 @@ async fn load_pinned_descriptor(
     let output_rows = sqlx::query(
         r#"
         SELECT prerequisite_job_id, output_name, sensitivity, public_value
-        FROM workflow_plan_v2_activation_preparation_outputs
+        FROM logical_workflow_activation_preparation_outputs
         WHERE logical_job_id = $1
         ORDER BY prerequisite_job_id, output_name COLLATE "C"
         "#,
@@ -1052,13 +1052,13 @@ async fn load_current_outputs(
         r#"
         SELECT dependency.prerequisite_job_id, output.output_name,
                output.sensitivity, output.public_value
-        FROM workflow_plan_v2_dependencies AS dependency
-        JOIN workflow_plan_v2_effective_job_results AS result
+        FROM logical_workflow_dependencies AS dependency
+        JOIN logical_workflow_effective_job_results AS result
           ON result.run_id = dependency.run_id
          AND result.invocation_id = dependency.invocation_id
          AND result.logical_job_id = dependency.prerequisite_job_id
          AND result.claim_state = 'finalized'
-        JOIN workflow_plan_v2_effective_job_result_outputs AS output
+        JOIN logical_workflow_effective_job_result_outputs AS output
           ON output.logical_job_id = result.logical_job_id
         WHERE dependency.run_id = $1 AND dependency.invocation_id = $2
           AND dependency.logical_job_id = $3
@@ -1226,15 +1226,15 @@ fn build_descriptor(
         runtime_policy,
         plan,
         event,
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         base_context,
         prerequisites,
         ready_at,
     )
     .map_err(corrupt_value)?;
     if !prefix.is_empty() {
-        let exact = get_string(row, prefix, "base_context_kind")? == "admission_v2"
-            && get_i16(row, prefix, "base_context_schema")? == 2
+        let exact = get_string(row, prefix, "base_context_kind")? == "admission"
+            && get_i16(row, prefix, "base_context_schema")? == 1
             && usize::try_from(get_i32(row, prefix, "prerequisite_count")?).ok()
                 == Some(descriptor.prerequisites().len())
             && decode_prefixed_digest(row, prefix, "prerequisites_digest")?
@@ -1260,7 +1260,7 @@ async fn insert_claim(
 ) -> Result<bool, LogicalActivationPreparationStoreError> {
     let rows = sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_preparation_claims (
+        INSERT INTO logical_workflow_activation_preparation_claims (
             logical_job_id, run_id, invocation_id, descriptor_digest,
             logical_key, source_order, workflow_id, workflow_name, git_ref,
             authority_profile, runner_policy_digest, runner_policy_object_key,
@@ -1278,7 +1278,7 @@ async fn insert_claim(
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
             $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-            'admission_v2',$27,$28,$29,$30,2,$31,$32,$33,$34,$35,
+            'admission',$27,$28,$29,$30,1,$31,$32,$33,$34,$35,
             $36,$37,'preparing',$38,1,$39,$40,$39,$39,$41
         )
         ON CONFLICT (logical_job_id) DO NOTHING
@@ -1345,7 +1345,7 @@ async fn bind_logical_job_execution_policy(
 ) -> Result<(), LogicalActivationPreparationStoreError> {
     let rows = sqlx::query(
         r"
-        UPDATE workflow_plan_v2_jobs
+        UPDATE logical_workflow_jobs
         SET authority_profile = $2
         WHERE id = $1 AND authority_profile IS NULL
           AND runtime_policy_revision = $3
@@ -1383,7 +1383,7 @@ async fn insert_prerequisite_pins(
     for prerequisite in descriptor.prerequisites() {
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_activation_preparation_prerequisites (
+            INSERT INTO logical_workflow_activation_preparation_prerequisites (
                 logical_job_id, prerequisite_job_id, logical_key, source_order,
                 result_descriptor_digest, outputs_digest, commit_digest,
                 effective_conclusion, closure_has_failure,
@@ -1416,7 +1416,7 @@ async fn insert_prerequisite_pins(
         for output in prerequisite.outputs() {
             sqlx::query(
                 r"
-                INSERT INTO workflow_plan_v2_activation_preparation_outputs (
+                INSERT INTO logical_workflow_activation_preparation_outputs (
                     logical_job_id, prerequisite_job_id, output_name,
                     sensitivity, public_value
                 ) VALUES ($1,$2,$3,$4,$5)
@@ -1442,7 +1442,7 @@ async fn insert_binding(
     let claim_origin_selection_id = request.claim().selection_origin();
     sqlx::query(
         r"
-        INSERT INTO workflow_plan_v2_activation_preparations (
+        INSERT INTO logical_workflow_activation_preparations (
             logical_job_id, run_id, invocation_id, descriptor_digest,
             authority_profile,
             base_context_digest, base_context_object_key,
@@ -1455,7 +1455,7 @@ async fn insert_binding(
             runtime_policy_revision, runtime_policy_digest,
             claim_origin_selection_id
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,2,$10,$11,$12,$13,2,
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,$13,1,
             $14,$15,$16,$17,$18,$19,$20,$21,$22
         )
         ",
@@ -1535,7 +1535,7 @@ async fn load_receipt(
                claim_started_at_ms, claim_expires_at_ms, bound_at_ms,
                runtime_policy_revision, runtime_policy_digest,
                claim_origin_selection_id
-        FROM workflow_plan_v2_activation_preparations
+        FROM logical_workflow_activation_preparations
         WHERE logical_job_id = $1 AND run_id = $2 AND invocation_id = $3
         ",
     )

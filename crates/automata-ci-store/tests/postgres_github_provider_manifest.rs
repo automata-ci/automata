@@ -4,10 +4,9 @@ mod github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BootstrapGithubProviderRepository, GithubCheckName, GithubCheckSubjectKey,
-    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision,
-    GithubProviderManifestStoreError, GithubProviderOrigins,
+    BootstrapGithubProviderRepository, GithubCheckName, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
@@ -708,7 +707,7 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
         assert_eq!(sql_digest, desired.digest().as_bytes().as_slice());
         assert_eq!(
             desired.digest().to_string(),
-            "58070630000653b9b3e33dab973ee6975b892425e0b560ed5db65c9f06cb8835"
+            "484d15f6bdc24c74fc9c3f8791cad45e5b7c7332c599cb2ea5396993a847943e"
         );
 
         let forged_repository = sqlx::query(
@@ -903,9 +902,7 @@ fn manifest_with_visibility_and_verifier(
         check_name,
         repository_name,
         visibility,
-        GithubProviderWorkflowSelection::exact(
-            GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("workflow path"),
-        ),
+        GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
     )
 }

@@ -15,10 +15,10 @@ use automata_ci_blob::{
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::GithubPushRefKind;
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
-    GithubDeliveryEventWorkflowRequest, GithubDeliverySourceAuthority, GithubDeliveryWorker,
-    GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError,
-    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubDeliveryClock,
+    GithubDeliverySourceAuthority, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
+    GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome,
+    GithubDeliveryWorkerPrerequisite, GithubDeliveryWorkflowProcessor,
     GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
     GithubDeliveryWorkflowRequest,
 };
@@ -30,7 +30,7 @@ use automata_ci_scm::{
 use automata_ci_store::{
     AcceptManifestPinnedGithubRepositoryDispatch, AcceptProviderDelivery, AdmissionObject,
     ClaimProviderDelivery, ClaimedProviderDelivery, CompleteProviderDelivery,
-    GithubAuthenticatedEventKind, GithubAuthenticatedEventV1, GithubCheckHeadSha, GithubCheckName,
+    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
     GithubCheckSubjectId, GithubProviderGitRef, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
@@ -380,36 +380,24 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
         &self,
         request: GithubDeliveryWorkflowRequest<'_>,
     ) -> GithubDeliveryWorkflowProcessorCompletion {
-        self.observations
-            .lock()
-            .expect("processor observations lock")
-            .push(WorkflowObservation {
-                path: request.workflow_path().to_owned(),
-                ref_kind: request.push().git_ref().kind(),
-                revision: request.repository_source().revision().as_str().to_owned(),
-                source_bytes: request.workflow_source().len(),
-                manifest_revision: request.manifest_pinned_evidence().manifest_revision().get(),
-                private_source_authority_present: request
-                    .manifest_pinned_evidence()
-                    .private_source_authority()
-                    .is_some(),
-                debug: format!("{request:?}"),
-            });
-        let result = match self.next_behavior() {
-            ProcessorBehavior::Conclusion(conclusion) => Ok(conclusion),
-            ProcessorBehavior::Error(error) => Err(error),
-        };
-        request.finish(result).await
-    }
-
-    async fn process_authenticated_event_v1_workflow(
-        &self,
-        request: GithubDeliveryEventWorkflowRequest<'_>,
-    ) -> GithubDeliveryWorkflowProcessorCompletion {
-        let event = request
-            .manifest_pinned_evidence()
-            .authenticated_event_v1()
-            .expect("V1 coordinates");
+        if let automata_ci_github::VerifiedGithubWebhook::Push(push) = request.event() {
+            self.observations
+                .lock()
+                .expect("processor observations lock")
+                .push(WorkflowObservation {
+                    path: request.workflow_path().to_owned(),
+                    ref_kind: push.git_ref().kind(),
+                    revision: request.repository_source().revision().as_str().to_owned(),
+                    source_bytes: request.workflow_source().len(),
+                    manifest_revision: request.manifest_pinned_evidence().manifest_revision().get(),
+                    private_source_authority_present: request
+                        .manifest_pinned_evidence()
+                        .private_source_authority()
+                        .is_some(),
+                    debug: format!("{request:?}"),
+                });
+        }
+        let event = request.manifest_pinned_evidence().authenticated_event();
         self.event_observations
             .lock()
             .expect("event processor observations lock")
@@ -689,6 +677,8 @@ impl FixtureSubjectEvidence {
             GithubCheckSubjectId::from_uuid(Uuid::from_u128(seed + 2))
                 .expect("historical Check subject"),
             check_head_sha,
+            GithubAuthenticatedEvent::new(GithubAuthenticatedEventKind::Push, "refs/heads/main")
+                .expect("authenticated event"),
             claimed.receipt().accepted_at(),
         )
         .expect("historical subject evidence");
@@ -707,29 +697,28 @@ impl FixtureSubjectEvidence {
         ))
     }
 
-    fn authenticated_event_v1(
+    fn authenticated_event(
         claimed: &ClaimedProviderDelivery,
         check_head_sha: GithubCheckHeadSha,
         kind: GithubAuthenticatedEventKind,
         git_ref: &str,
     ) -> Self {
         let legacy = Self::from_claimed(claimed, check_head_sha).0;
-        let event = GithubAuthenticatedEventV1::new(kind, git_ref).expect("event coordinates");
-        let evidence =
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_authenticated_event_v1(
-                legacy.delivery_id(),
-                legacy.repository_owner_id(),
-                legacy.manifest().clone(),
-                legacy.authenticated_webhook_verifier_fingerprint(),
-                legacy.authenticated_webhook_verifier_revision(),
-                legacy.checks_authority().clone(),
-                legacy.private_source_authority().cloned(),
-                legacy.check_subject_id(),
-                legacy.check_head_sha(),
-                event,
-                legacy.accepted_at(),
-            )
-            .expect("V1 subject evidence");
+        let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
+        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            legacy.delivery_id(),
+            legacy.repository_owner_id(),
+            legacy.manifest().clone(),
+            legacy.authenticated_webhook_verifier_fingerprint(),
+            legacy.authenticated_webhook_verifier_revision(),
+            legacy.checks_authority().clone(),
+            legacy.private_source_authority().cloned(),
+            legacy.check_subject_id(),
+            legacy.check_head_sha(),
+            event,
+            legacy.accepted_at(),
+        )
+        .expect("authenticated event evidence");
         Self(evidence)
     }
 }
@@ -864,22 +853,23 @@ impl GithubRepositoryDispatchEvidenceRepository for RecordingRepositoryDispatchE
             .lock()
             .expect("resolutions lock")
             .push(resolution);
-        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch_v1(
-            self.pending.delivery_id(),
-            self.pending.repository_owner_id(),
-            self.pending.manifest().clone(),
-            self.pending.authenticated_webhook_verifier_fingerprint(),
-            self.pending.authenticated_webhook_verifier_revision(),
-            self.pending.checks_authority().clone(),
-            self.pending.private_source_authority().cloned(),
-            GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x9_100))
-                .expect("dispatch Check subject"),
-            resolution.source_revision(),
-            self.pending.event().clone(),
-            resolution,
-            self.pending.accepted_at(),
-        )
-        .expect("resolved dispatch evidence");
+        let evidence =
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_resolved_repository_dispatch(
+                self.pending.delivery_id(),
+                self.pending.repository_owner_id(),
+                self.pending.manifest().clone(),
+                self.pending.authenticated_webhook_verifier_fingerprint(),
+                self.pending.authenticated_webhook_verifier_revision(),
+                self.pending.checks_authority().clone(),
+                self.pending.private_source_authority().cloned(),
+                GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x9_100))
+                    .expect("dispatch Check subject"),
+                resolution.source_revision(),
+                self.pending.event().clone(),
+                resolution,
+                self.pending.accepted_at(),
+            )
+            .expect("resolved dispatch evidence");
         *self.resolved.lock().expect("resolved evidence lock") = Some(evidence.clone());
         Ok(evidence)
     }
@@ -975,18 +965,18 @@ fn pull_request_claimed_fixture() -> ClaimedFixture {
         r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event-v1/sha256/{digest}.json");
+    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
         u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
     let raw_event = AdmissionObject::new_event(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(11)).expect("delivery id");
@@ -1043,18 +1033,18 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
         r#"{{"action":"synthetic_signal","branch":"main","client_payload":{{"sequence":3}},"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility_name}","default_branch":"main","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event-v1/sha256/{digest}.json");
+    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
         u64::try_from(body.len()).expect("body length"),
-        MediaType::new(GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE).expect("media type"),
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("media type"),
     );
     let raw_event = AdmissionObject::new_event(
         digest,
         ObjectKey::new(key_text).expect("object key"),
         descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(21)).expect("delivery id");
@@ -1114,7 +1104,7 @@ fn pending_repository_dispatch_evidence(
         legacy.authenticated_webhook_verifier_revision(),
         legacy.checks_authority().clone(),
         legacy.private_source_authority().cloned(),
-        GithubAuthenticatedEventV1::new(
+        GithubAuthenticatedEvent::new(
             GithubAuthenticatedEventKind::RepositoryDispatch,
             "refs/heads/main",
         )
@@ -1473,7 +1463,7 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive)));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
-    let evidence = FixtureSubjectEvidence::authenticated_event_v1(
+    let evidence = FixtureSubjectEvidence::authenticated_event(
         &fixture.claimed,
         fixture.check_head_sha,
         GithubAuthenticatedEventKind::PullRequest,
@@ -1511,7 +1501,7 @@ async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evi
     assert_eq!(observations[0].revision, AFTER);
     assert_eq!(
         observations[0].raw_media_type,
-        GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
     );
     assert!(!observations[0].debug.contains(OWNER));
     assert!(!observations[0].debug.contains(REPOSITORY));
@@ -1592,7 +1582,7 @@ async fn private_repository_dispatch_resolves_once_then_retries_the_pinned_sha()
         observation.event_name == "repository_dispatch"
             && observation.git_ref == "refs/heads/main"
             && observation.revision == AFTER
-            && observation.raw_media_type == GITHUB_AUTHENTICATED_EVENT_V1_MEDIA_TYPE
+            && observation.raw_media_type == GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE
             && observation.raw_body == fixture.body
     }));
 }

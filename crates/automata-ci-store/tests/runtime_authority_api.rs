@@ -26,11 +26,9 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-const BASE_MIGRATION: &str =
-    include_str!("../migrations/0018_github_runtime_authority_issuances.sql");
-const MIGRATION: &str = include_str!("../migrations/0023_github_runtime_authority_lifecycle.sql");
-const DATABASE_TIME_MIGRATION: &str =
-    include_str!("../migrations/0044_github_runtime_authority_database_time.sql");
+const BASE_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+const DATABASE_TIME_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[derive(Clone, Copy)]
 struct IdentityInputs {
@@ -342,9 +340,9 @@ fn protected_with(
 }
 
 #[test]
-fn current_v5_identity_derives_the_full_conservative_horizon() {
+fn current_identity_derives_the_full_conservative_horizon() {
     let identity = identity_with(14, 15, 1, JobIrVersion::current()).expect("identity");
-    assert_eq!(identity.job_ir_version().get(), 5);
+    assert_eq!(identity.job_ir_version().get(), 1);
     assert_eq!(identity.conservative_expiry(), UnixMillis::new(3_783_000));
     assert_eq!(
         identity.provider_connection_id().as_uuid(),
@@ -520,8 +518,8 @@ fn repository_and_namespace_shapes_match_the_sql_boundary() {
 }
 
 #[test]
-fn migration_is_ciphertext_only_current_v5_and_one_way_guarded() {
-    assert!(BASE_MIGRATION.contains("job_ir_schema = 5"));
+fn schema_is_ciphertext_only_current_and_one_way_guarded() {
+    assert!(BASE_MIGRATION.contains("job_ir_schema = 1"));
     assert!(!BASE_MIGRATION.contains("job_ir_schema = 4"));
     assert!(BASE_MIGRATION.contains("wrapped_data_key BYTEA"));
     assert!(BASE_MIGRATION.contains("ciphertext BYTEA"));

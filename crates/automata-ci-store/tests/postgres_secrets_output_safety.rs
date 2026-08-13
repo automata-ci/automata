@@ -1,15 +1,11 @@
 mod common;
 
-use sqlx::{PgPool, Postgres, Transaction, migrate::Migrate as _};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use common::{
-    SeedData, TestDatabase, TestResult, run_with_database, run_with_unmigrated_database,
-    seed_control_plane,
-};
+use common::{SeedData, TestResult, run_with_database, seed_control_plane};
 
-const SECRETS_MIGRATION: &str = include_str!("../migrations/0012_secrets_output_safety.sql");
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+const SECRETS_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 #[derive(Clone, Copy)]
 struct SeededHuman {
@@ -62,200 +58,6 @@ fn secrets_migration_is_ciphertext_only_and_fail_private() {
     assert!(SECRETS_MIGRATION.contains("failure_kind IN ("));
     assert!(SECRETS_MIGRATION.contains("create_request_id TEXT NOT NULL"));
     assert!(SECRETS_MIGRATION.contains("secret_version_id UUID NOT NULL"));
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)]
-async fn secrets_upgrade_backfills_outputs_private_and_seeds_builtin_provider() -> TestResult {
-    run_with_unmigrated_database(|database| async move {
-        apply_before_secrets_migration(&database).await?;
-        let seed = seed_control_plane(database.pool(), 1).await?;
-        let attempt = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO job_attempts (
-                id, job_id, attempt_number, lifecycle, fencing_token,
-                queued_at_ms, changed_at_ms
-            ) VALUES ($1, $2, 1, 'succeeded', 7, 1, 2)
-            ",
-        )
-        .bind(attempt)
-        .bind(seed.job_id.as_uuid())
-        .execute(database.pool())
-        .await?;
-
-        let stream = Uuid::new_v4();
-        let fence = seed.session_fences[0];
-        sqlx::query(
-            r"
-            INSERT INTO attempt_log_streams (
-                id, attempt_id, runner_session_id, operation_id, runner_id,
-                runner_session_epoch, runner_generation, runner_slot, lease_id,
-                fencing_token, log_schema, opened_at_ms
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, 7, 1, 2)
-            ",
-        )
-        .bind(stream)
-        .bind(attempt)
-        .bind(fence.session_id().as_uuid())
-        .bind(Uuid::new_v4())
-        .bind(fence.runner_id().as_uuid())
-        .bind(i64::try_from(fence.session_epoch().get())?)
-        .bind(i64::try_from(fence.runner_generation().get())?)
-        .bind(Uuid::new_v4())
-        .execute(database.pool())
-        .await?;
-
-        let artifact: i64 = sqlx::query_scalar(
-            r"
-            INSERT INTO workflow_artifacts (
-                upload_id, tenant_id, repository_id, run_id, job_id, attempt_id,
-                fencing_token, name, protocol_version, mime_type, created_at_seconds
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'legacy-output', 7,
-                'application/octet-stream', 1
-            ) RETURNING id
-            ",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&seed.tenant_id)
-        .bind(seed.repository_id)
-        .bind(seed.run_id.as_uuid())
-        .bind(seed.job_id.as_uuid())
-        .bind(attempt)
-        .fetch_one(database.pool())
-        .await?;
-
-        let mut connection = database.pool().acquire().await?;
-        let table_name = MIGRATOR.table_name.as_ref();
-        let migration = MIGRATOR
-            .iter()
-            .find(|migration| migration.version == 12)
-            .expect("migration 0012");
-        connection.apply(table_name, migration).await?;
-        drop(connection);
-
-        let repository_policy: (String, String, String) = sqlx::query_as(
-            r"
-            SELECT dashboard_audience, log_audience, artifact_audience
-            FROM repository_publication_policies
-            WHERE repository_id = $1
-            ",
-        )
-        .bind(seed.repository_id)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            repository_policy,
-            ("private".into(), "private".into(), "private".into())
-        );
-
-        let run_policy: (String, String, String, String) = sqlx::query_as(
-            r"
-            SELECT requested_dashboard_visibility, effective_dashboard_visibility,
-                   requested_log_visibility, requested_artifact_visibility
-            FROM workflow_runs WHERE id = $1
-            ",
-        )
-        .bind(seed.run_id.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            run_policy,
-            (
-                "private".into(),
-                "private".into(),
-                "private".into(),
-                "private".into()
-            )
-        );
-
-        let attempt_policy: (String, String, String) = sqlx::query_as(
-            r"
-            SELECT secret_exposure_class, raw_log_disposition, effective_log_visibility
-            FROM job_attempts WHERE id = $1
-            ",
-        )
-        .bind(attempt)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            attempt_policy,
-            (
-                "readable_secret".into(),
-                "suppress_user_output".into(),
-                "private".into()
-            )
-        );
-        let stream_policy: (String, String, String) = sqlx::query_as(
-            r"
-            SELECT secret_exposure_class, raw_log_disposition, effective_visibility
-            FROM attempt_log_streams WHERE id = $1
-            ",
-        )
-        .bind(stream)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(stream_policy, attempt_policy);
-        let artifact_policy: (String, String, String) = sqlx::query_as(
-            r"
-            SELECT secret_exposure_class, requested_visibility, effective_visibility
-            FROM workflow_artifacts WHERE id = $1
-            ",
-        )
-        .bind(artifact)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            artifact_policy,
-            ("readable_secret".into(), "private".into(), "private".into())
-        );
-
-        let builtin: (String, String, bool, String) = sqlx::query_as(
-            r"
-            SELECT provider_id, adapter_kind, is_default, status
-            FROM secret_providers WHERE tenant_id = $1
-            ",
-        )
-        .bind(&seed.tenant_id)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            builtin,
-            (
-                "builtin".into(),
-                "builtin_postgres".into(),
-                true,
-                "unconfigured".into()
-            )
-        );
-
-        sqlx::query("DELETE FROM workflow_artifacts WHERE id = $1")
-            .bind(artifact)
-            .execute(database.pool())
-            .await?;
-        sqlx::query("DELETE FROM jobs WHERE id = $1")
-            .bind(seed.job_id.as_uuid())
-            .execute(database.pool())
-            .await?;
-        let completed = sqlx::query(
-            "UPDATE workflow_runs SET status = 'completed', updated_at_ms = 2 WHERE id = $1",
-        )
-        .bind(seed.run_id.as_uuid())
-        .execute(database.pool())
-        .await?;
-        assert_eq!(completed.rows_affected(), 1);
-        database.store().migrate().await?;
-        let compatibility: (i32, i32) = sqlx::query_as(
-            "SELECT minimum_admission_epoch, job_ir_schema FROM automata_cluster_compatibility WHERE singleton",
-        )
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(compatibility, (4, 5));
-        Ok(())
-    })
-    .await
 }
 
 #[tokio::test]
@@ -1002,7 +804,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'unsafe-artifact', 7,
+                $1, $2, $3, $4, $5, $6, 7, 'unsafe-artifact', 1,
                 'application/octet-stream', 1, 'readable_secret',
                 'public', 'public', 'secret_exposure'
             )
@@ -1028,7 +830,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 8, 'forged-safe-artifact', 7,
+                $1, $2, $3, $4, $5, $6, 8, 'forged-safe-artifact', 1,
                 'application/octet-stream', 1, 'secretless',
                 'public', 'public', 'repository_policy'
             )
@@ -1057,7 +859,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'public-artifact', 7,
+                $1, $2, $3, $4, $5, $6, 7, 'public-artifact', 1,
                 'application/octet-stream', 1, 'secretless',
                 'public', 'public', 'repository_policy'
             ) RETURNING id
@@ -2153,16 +1955,6 @@ async fn protected_environment_approval_rechecks_reviewer_grantor_authorization_
         Ok(())
     })
     .await
-}
-
-async fn apply_before_secrets_migration(database: &TestDatabase) -> TestResult {
-    let mut connection = database.pool().acquire().await?;
-    let table_name = MIGRATOR.table_name.as_ref();
-    connection.ensure_migrations_table(table_name).await?;
-    for migration in MIGRATOR.iter().filter(|migration| migration.version < 12) {
-        connection.apply(table_name, migration).await?;
-    }
-    Ok(())
 }
 
 async fn seed_human(

@@ -449,13 +449,13 @@ async fn inspect_job_environment_gate(
                evidence.source_kind AS gate_source_kind,
                evidence.reusable_secret_permission AS gate_reusable_permission
         FROM job_environment_gates AS gate
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.instance_id = gate.instance_id AND concrete.job_id = gate.job_id
-        JOIN workflow_plan_v2_jobs AS job
+        JOIN logical_workflow_jobs AS job
           ON job.run_id = gate.run_id AND job.invocation_id = gate.invocation_id
          AND job.id = gate.logical_job_id
         JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
-        LEFT JOIN workflow_plan_v2_job_environment_evidence AS evidence
+        LEFT JOIN logical_workflow_job_environment_evidence AS evidence
           ON evidence.instance_id = gate.instance_id
         WHERE gate.tenant_id = $1 AND gate.attempt_id = $2
           AND attempt.lifecycle = 'queued'
@@ -1211,7 +1211,7 @@ async fn resolve_job_credentials(
         SELECT gate.repository_id, gate.state, job.secret_reference_names,
                job.variable_reference_names
         FROM job_environment_gates AS gate
-        JOIN workflow_plan_v2_jobs AS job
+        JOIN logical_workflow_jobs AS job
           ON job.run_id = gate.run_id AND job.invocation_id = gate.invocation_id
          AND job.id = gate.logical_job_id
         JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
@@ -1326,7 +1326,7 @@ async fn resolve_job_credentials(
                   gate.invocation_kind = 'direct'
                   OR EXISTS (
                       SELECT 1
-                      FROM workflow_plan_v2_reusable_secret_bindings AS binding
+                      FROM logical_workflow_reusable_secret_bindings AS binding
                       WHERE binding.run_id = gate.run_id
                         AND binding.invocation_id = gate.invocation_id
                         AND upper(binding.target_name) = $2
@@ -2097,7 +2097,7 @@ async fn lock_gate_for_prepare(
                gate.source_kind, gate.reusable_secret_permission,
                gate.approval_request_id
         FROM job_environment_gates AS gate
-        JOIN workflow_plan_v2_concrete_jobs AS concrete
+        JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.instance_id = gate.instance_id AND concrete.job_id = gate.job_id
         JOIN job_attempts AS attempt ON attempt.id = gate.attempt_id
         WHERE gate.tenant_id = $1 AND gate.attempt_id = $2

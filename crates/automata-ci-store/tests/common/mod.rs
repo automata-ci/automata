@@ -11,6 +11,18 @@ use automata_ci_store::{
     OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, SessionEpoch,
 };
+
+#[allow(dead_code)]
+pub fn authenticated_github_event_object(
+    event: &automata_ci_store::AdmissionObject,
+) -> TestResult<automata_ci_store::AdmissionObject> {
+    Ok(automata_ci_store::AdmissionObject::new_event(
+        event.digest(),
+        event.object_key().clone(),
+        event.encoded_size(),
+        "application/vnd.automata.github-authenticated-event+json",
+    )?)
+}
 use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -252,22 +264,7 @@ async fn seed_control_plane_with_optional_concurrency(
     .fetch_one(pool)
     .await?;
 
-    // Upgrade fixtures intentionally seed the contract currently installed in
-    // their temporary schema.  Older schemas require requirements-v2, while
-    // this binary constructs requirements-v3 by default.  The historical
-    // row is never decoded by this binary; its declared schema is what lets
-    // the migration exercise the durable upgrade path faithfully.
-    let mut requirements = serde_json::to_value(RunnerRequirements::default())?;
-    if runner_requirements_schema != 3 {
-        let object = requirements
-            .as_object_mut()
-            .ok_or("runner requirements must serialize as an object")?;
-        object.insert(
-            "schema_version".into(),
-            serde_json::json!(runner_requirements_schema),
-        );
-        object.remove("resource_allocation");
-    }
+    let requirements = serde_json::to_value(RunnerRequirements::default())?;
 
     sqlx::query(
         r"
@@ -430,11 +427,7 @@ async fn seed_control_plane_with_optional_concurrency(
                     RunnerSessionId::new(),
                     *runner_id,
                     RunnerGeneration::new(1)?,
-                    RunnerProtocolVersion::new(if runner_requirements_schema == 3 {
-                        5
-                    } else {
-                        4
-                    })?,
+                    RunnerProtocolVersion::new(1)?,
                     job_ir_version,
                     capabilities,
                     UnixMillis::new(2),
@@ -469,11 +462,7 @@ async fn seed_control_plane_with_optional_concurrency(
             )
             .bind(session_id.as_uuid())
             .bind(runner_id.as_uuid())
-            .bind(if runner_requirements_schema == 3 {
-                5
-            } else {
-                4
-            })
+            .bind(1)
             .bind(job_ir_schema)
             .bind(capabilities.as_str())
             .bind(i64::try_from(generation.get())?)

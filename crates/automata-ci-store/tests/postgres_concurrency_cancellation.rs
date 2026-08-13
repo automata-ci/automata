@@ -547,7 +547,7 @@ async fn verify_typed_cancel_replay(
     let payload = CancelJobCommandPayload::decode_json(command.request().payload().bytes())?;
     assert_eq!(payload.attempt_id(), attempt_id);
     assert_eq!(payload.guard(), guard);
-    assert_eq!(payload.protocol_version(), 5);
+    assert_eq!(payload.protocol_version(), 1);
     assert_eq!(payload.reason(), CANCELLATION_REASON);
     let intent = database
         .store()
@@ -632,7 +632,7 @@ async fn verify_stale_fence_rejected(
             automata_ci_core::RunnerSessionId::new(),
             old_fence.runner_id(),
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             capabilities,
             opened_at,
@@ -733,8 +733,8 @@ async fn assert_server_cancellation_terminal(
                    terminal.lease_id, terminal.fencing_token,
                    terminal.result_schema, terminal.result_size_bytes,
                    terminal.result_digest, terminal.result_object_key,
-                   terminal.workflow_plan_v2_logical_job_id,
-                   terminal.workflow_plan_v2_terminal_ordinal
+                   terminal.logical_workflow_logical_job_id,
+                   terminal.logical_workflow_terminal_ordinal
                ) = 0
         FROM attempt_terminal_results AS terminal
         JOIN attempt_cancellation_intents AS cancellation

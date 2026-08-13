@@ -27,7 +27,7 @@ use crate::{
 
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
-/// Closed event kind carried by a version-one authenticated GitHub envelope.
+/// Closed event kind carried by a authenticated GitHub envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GithubAuthenticatedEventKind {
     /// A repository reference update.
@@ -63,15 +63,15 @@ impl GithubAuthenticatedEventKind {
     }
 }
 
-/// Bounded selector coordinates for a version-one authenticated GitHub event.
+/// Bounded selector coordinates for a authenticated GitHub event.
 #[derive(Clone, Eq, PartialEq)]
-pub struct GithubAuthenticatedEventV1 {
+pub struct GithubAuthenticatedEvent {
     kind: GithubAuthenticatedEventKind,
     git_ref: Box<str>,
 }
 
-impl GithubAuthenticatedEventV1 {
-    /// Constructs version-one event selector evidence.
+impl GithubAuthenticatedEvent {
+    /// Constructs canonical event selector evidence.
     ///
     /// The worker later recomputes this ref from the exact rehydrated payload;
     /// this constructor only enforces the durable bounded full-ref shape.
@@ -107,10 +107,10 @@ impl GithubAuthenticatedEventV1 {
     }
 }
 
-impl fmt::Debug for GithubAuthenticatedEventV1 {
+impl fmt::Debug for GithubAuthenticatedEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GithubAuthenticatedEventV1")
+            .debug_struct("GithubAuthenticatedEvent")
             .field("kind", &self.kind)
             .field("git_ref", &"[REDACTED]")
             .finish()
@@ -185,7 +185,7 @@ pub struct AcceptManifestPinnedGithubDelivery {
     delivery: AcceptProviderDelivery,
     repository_owner_id: ProviderRepositoryOwnerId,
     head_sha: GithubCheckHeadSha,
-    authenticated_event_v1: Option<GithubAuthenticatedEventV1>,
+    authenticated_event: GithubAuthenticatedEvent,
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
 }
@@ -205,6 +205,7 @@ impl AcceptManifestPinnedGithubDelivery {
         delivery: AcceptProviderDelivery,
         signed_repository_owner_id: ProviderRepositoryOwnerId,
         configured_repository_owner_id: ProviderRepositoryOwnerId,
+        authenticated_event: GithubAuthenticatedEvent,
         head_sha: GithubCheckHeadSha,
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
@@ -219,40 +220,10 @@ impl AcceptManifestPinnedGithubDelivery {
             delivery,
             repository_owner_id: signed_repository_owner_id,
             head_sha,
-            authenticated_event_v1: None,
+            authenticated_event,
             authenticated_webhook_verifier_fingerprint,
             authenticated_webhook_verifier_revision,
         })
-    }
-
-    /// Constructs one manifest-pinned version-one generic GitHub event request.
-    ///
-    /// Unlike [`Self::new`], this records explicit event/ref coordinates and
-    /// cannot be replayed as a legacy push row.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-GitHub identity or mismatched owner evidence.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_authenticated_event_v1(
-        delivery: AcceptProviderDelivery,
-        signed_repository_owner_id: ProviderRepositoryOwnerId,
-        configured_repository_owner_id: ProviderRepositoryOwnerId,
-        authenticated_event_v1: GithubAuthenticatedEventV1,
-        head_sha: GithubCheckHeadSha,
-        authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
-        authenticated_webhook_verifier_revision: GithubServerServiceRevision,
-    ) -> Result<Self, GithubSubjectEvidenceValueError> {
-        let mut request = Self::new(
-            delivery,
-            signed_repository_owner_id,
-            configured_repository_owner_id,
-            head_sha,
-            authenticated_webhook_verifier_fingerprint,
-            authenticated_webhook_verifier_revision,
-        )?;
-        request.authenticated_event_v1 = Some(authenticated_event_v1);
-        Ok(request)
     }
 
     /// Returns the authenticated provider delivery evidence.
@@ -273,10 +244,10 @@ impl AcceptManifestPinnedGithubDelivery {
         self.head_sha
     }
 
-    /// Returns explicit version-one event coordinates, or `None` for a legacy push.
+    /// Returns the authenticated event coordinates.
     #[must_use]
-    pub const fn authenticated_event_v1(&self) -> Option<&GithubAuthenticatedEventV1> {
-        self.authenticated_event_v1.as_ref()
+    pub const fn authenticated_event(&self) -> &GithubAuthenticatedEvent {
+        &self.authenticated_event
     }
 
     /// Returns the public fingerprint of the exact HMAC key that authenticated
@@ -314,7 +285,7 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
     private_source_authority: Option<GithubServerServiceAuthoritySelector>,
     check_subject_id: GithubCheckSubjectId,
     check_head_sha: GithubCheckHeadSha,
-    authenticated_event_v1: Option<GithubAuthenticatedEventV1>,
+    authenticated_event: GithubAuthenticatedEvent,
     repository_dispatch_resolution: Option<GithubRepositoryDispatchResolution>,
     accepted_at: UnixMillis,
 }
@@ -342,6 +313,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GithubCheckHeadSha,
+        authenticated_event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
         validate_timestamp(accepted_at)?;
@@ -371,46 +343,10 @@ impl ManifestPinnedGithubDeliveryEvidence {
             private_source_authority,
             check_subject_id,
             check_head_sha,
-            authenticated_event_v1: None,
+            authenticated_event,
             repository_dispatch_resolution: None,
             accepted_at,
         })
-    }
-
-    /// Rehydrates version-one generic authenticated-event evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same exact manifest/authority validation failures as
-    /// [`Self::from_durable_parts`].
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_durable_parts_authenticated_event_v1(
-        delivery_id: ProviderDeliveryId,
-        repository_owner_id: ProviderRepositoryOwnerId,
-        manifest: GithubProviderManifest,
-        authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
-        authenticated_webhook_verifier_revision: GithubServerServiceRevision,
-        checks_authority: GithubServerServiceAuthoritySelector,
-        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-        check_subject_id: GithubCheckSubjectId,
-        check_head_sha: GithubCheckHeadSha,
-        authenticated_event_v1: GithubAuthenticatedEventV1,
-        accepted_at: UnixMillis,
-    ) -> Result<Self, GithubSubjectEvidenceValueError> {
-        let mut evidence = Self::from_durable_parts(
-            delivery_id,
-            repository_owner_id,
-            manifest,
-            authenticated_webhook_verifier_fingerprint,
-            authenticated_webhook_verifier_revision,
-            checks_authority,
-            private_source_authority,
-            check_subject_id,
-            check_head_sha,
-            accepted_at,
-        )?;
-        evidence.authenticated_event_v1 = Some(authenticated_event_v1);
-        Ok(evidence)
     }
 
     /// Rehydrates one fully resolved custom repository-dispatch delivery.
@@ -420,7 +356,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
     /// Rejects a non-dispatch envelope, a source/Check mismatch, or a resolver
     /// authority mode inconsistent with the immutable repository visibility.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_durable_parts_resolved_repository_dispatch_v1(
+    pub fn from_durable_parts_resolved_repository_dispatch(
         delivery_id: ProviderDeliveryId,
         repository_owner_id: ProviderRepositoryOwnerId,
         manifest: GithubProviderManifest,
@@ -430,11 +366,11 @@ impl ManifestPinnedGithubDeliveryEvidence {
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
         check_head_sha: GithubCheckHeadSha,
-        authenticated_event_v1: GithubAuthenticatedEventV1,
+        authenticated_event: GithubAuthenticatedEvent,
         resolution: GithubRepositoryDispatchResolution,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
-        if authenticated_event_v1.kind() != GithubAuthenticatedEventKind::RepositoryDispatch
+        if authenticated_event.kind() != GithubAuthenticatedEventKind::RepositoryDispatch
             || resolution.source_revision() != check_head_sha
         {
             return Err(GithubSubjectEvidenceValueError::InvalidAuthenticatedEvent);
@@ -451,7 +387,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         if resolution.authority() != expected_authority {
             return Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch);
         }
-        let mut evidence = Self::from_durable_parts_authenticated_event_v1(
+        let mut evidence = Self::from_durable_parts(
             delivery_id,
             repository_owner_id,
             manifest,
@@ -461,7 +397,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
             private_source_authority,
             check_subject_id,
             check_head_sha,
-            authenticated_event_v1,
+            authenticated_event,
             accepted_at,
         )?;
         evidence.repository_dispatch_resolution = Some(resolution);
@@ -579,10 +515,10 @@ impl ManifestPinnedGithubDeliveryEvidence {
         self.check_head_sha
     }
 
-    /// Returns explicit version-one event coordinates, or `None` for legacy push evidence.
+    /// Returns the authenticated event coordinates.
     #[must_use]
-    pub const fn authenticated_event_v1(&self) -> Option<&GithubAuthenticatedEventV1> {
-        self.authenticated_event_v1.as_ref()
+    pub const fn authenticated_event(&self) -> &GithubAuthenticatedEvent {
+        &self.authenticated_event
     }
 
     /// Returns immutable default-branch resolution evidence for repository dispatches.
@@ -752,7 +688,7 @@ impl fmt::Debug for AuthenticatedGithubDeliveryClaim {
     }
 }
 
-/// Exact epoch-4 logical-admission evidence used to create one immutable
+/// Exact logical-admission evidence used to create one immutable
 /// GitHub workflow-run subject receipt.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RecordGithubWorkflowRunSubjectEvidence {
@@ -777,9 +713,9 @@ pub struct RecordGithubWorkflowRunSubjectEvidence {
 }
 
 impl RecordGithubWorkflowRunSubjectEvidence {
-    /// Constructs the exact evidence available at epoch-4 logical admission.
+    /// Constructs the exact evidence available at logical admission.
     ///
-    /// `JobIR` is intentionally absent: concrete `JobIR`-v5 evidence is created
+    /// `JobIR` is intentionally absent: concrete `JobIR` evidence is created
     /// later during materialization and must be joined independently by OIDC
     /// reservation/currentness checks.
     ///
@@ -971,12 +907,12 @@ impl RecordGithubWorkflowRunSubjectEvidence {
     pub fn git_ref(&self) -> &str {
         &self.git_ref
     }
-    /// Returns the fixed WorkflowPlan-v2 schema.
+    /// Returns the fixed logical workflow schema.
     #[must_use]
     pub const fn plan_schema(&self) -> u16 {
         WORKFLOW_PLAN_SCHEMA
     }
-    /// Returns the immutable WorkflowPlan-v2 digest.
+    /// Returns the immutable logical workflow digest.
     #[must_use]
     pub const fn plan_digest(&self) -> Sha256Digest {
         self.plan_digest
@@ -1119,7 +1055,7 @@ impl GithubWorkflowRunSubjectEvidence {
         }
     }
 
-    /// Returns all exact epoch-4 admission evidence.
+    /// Returns all exact logical-admission evidence.
     #[must_use]
     pub const fn request(&self) -> &RecordGithubWorkflowRunSubjectEvidence {
         &self.request
@@ -1181,7 +1117,7 @@ pub enum GithubSubjectEvidenceValueError {
     /// Signed and configured stable owner identities disagree.
     #[error("signed GitHub repository owner does not match configured authority")]
     RepositoryOwnerMismatch,
-    /// Version-one authenticated event/ref coordinates are not canonical.
+    /// Authenticated event/ref coordinates are not canonical.
     #[error("authenticated GitHub event evidence is invalid")]
     InvalidAuthenticatedEvent,
     /// A durable UUID uses the nil sentinel.

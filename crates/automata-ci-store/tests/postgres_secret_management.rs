@@ -2093,7 +2093,7 @@ async fn replacement_requires_update_permission_at_reserve_and_confirm() -> Test
             None,
             1,
             create.provider_create_request_id(),
-            b"permission-split-version-one",
+            b"permission-split-canonical",
         )
         .await?;
         let target_one = BuiltinRepositorySecretVersion::new(

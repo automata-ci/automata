@@ -41,7 +41,7 @@ use common::{
 };
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
 const LEASE_RESPONSE_KIND: &str = "automata.runner.lease-response.v1";
 const RUNNER_RESPONSE_KEY_PURPOSE: &str = "control-plane/runner-rpc-response:v1";
@@ -2500,7 +2500,7 @@ async fn install_short_lived_runtime_authority(
         let mut selection_transaction = database.pool().begin().await?;
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_activation_work_selections (
+            INSERT INTO logical_workflow_activation_work_selections (
                 selection_id, owner_id, requested_at_ms, duration_ms, outcome
             ) VALUES
                 ($1, $2, $3, 120000, 'selecting'),
@@ -2516,7 +2516,7 @@ async fn install_short_lived_runtime_authority(
         .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_activation_work_selections
+            UPDATE logical_workflow_activation_work_selections
             SET outcome = 'contended', claimed_at_ms = $3, expires_at_ms = $4
             WHERE selection_id IN ($1, $2)
             ",
@@ -2529,7 +2529,7 @@ async fn install_short_lived_runtime_authority(
         .await?;
         sqlx::query(
             r"
-            INSERT INTO workflow_plan_v2_materialization_work_selections (
+            INSERT INTO logical_workflow_materialization_work_selections (
                 selection_id, owner_id, requested_at_ms, duration_ms, outcome
             ) VALUES ($1, $2, $3, 120000, 'selecting')
             ",
@@ -2541,7 +2541,7 @@ async fn install_short_lived_runtime_authority(
         .await?;
         sqlx::query(
             r"
-            UPDATE workflow_plan_v2_materialization_work_selections
+            UPDATE logical_workflow_materialization_work_selections
             SET outcome = 'contended', claimed_at_ms = $2, expires_at_ms = $3
             WHERE selection_id = $1
             ",
@@ -2661,14 +2661,14 @@ async fn set_runtime_authority_fixture_guards(pool: &PgPool, enabled: bool) -> T
     let statements = if enabled {
         [
             "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_insert_guard",
-            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_00_v3_identity_guard",
-            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_01_v3_database_time_guard",
+            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_00_identity_guard",
+            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_01_database_time_guard",
         ]
     } else {
         [
             "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_insert_guard",
-            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_00_v3_identity_guard",
-            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_01_v3_database_time_guard",
+            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_00_identity_guard",
+            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_01_database_time_guard",
         ]
     };
     for statement in statements {
@@ -2703,7 +2703,7 @@ fn offer_with_horizon(
             RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
             fixture.request_digest,
         ),
-        RunnerProtocolVersion::new(5)?,
+        RunnerProtocolVersion::new(1)?,
         fixture.slot,
         fixture.lease.clone(),
         fixture.metadata.clone(),

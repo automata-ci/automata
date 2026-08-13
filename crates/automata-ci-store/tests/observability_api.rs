@@ -10,11 +10,11 @@ use automata_ci_store::{
     ControlPlaneCapacityRunner, ControlPlaneCapacitySnapshot, ControlPlaneStateSnapshot,
     ControlPlaneStateSnapshotRequest, ControlPlaneStateValueError, DatabasePoolSnapshot,
     JobAttemptCounts, LeaseCounts, LeaseState, LogicalActivationCounts, LogicalActivationState,
-    LogicalJobCounts, LogicalJobState, MAX_CONTROL_PLANE_CAPACITY_CANDIDATES,
-    MAX_CONTROL_PLANE_CAPACITY_RUNNERS, MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts,
-    RunnerDesiredState, RunnerGeneration, RunnerObservedState, RunnerSessionCounts,
-    RunnerSessionFence, RunnerSessionState, RunnerSlotCount, SessionEpoch, WorkflowPlanV2RunCounts,
-    WorkflowPlanV2RunState, WorkflowRunCounts, WorkflowRunStatus,
+    LogicalJobCounts, LogicalJobState, LogicalWorkflowRunCounts, LogicalWorkflowRunState,
+    MAX_CONTROL_PLANE_CAPACITY_CANDIDATES, MAX_CONTROL_PLANE_CAPACITY_RUNNERS,
+    MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts, RunnerDesiredState,
+    RunnerGeneration, RunnerObservedState, RunnerSessionCounts, RunnerSessionFence,
+    RunnerSessionState, RunnerSlotCount, SessionEpoch, WorkflowRunCounts, WorkflowRunStatus,
 };
 
 #[test]
@@ -38,8 +38,8 @@ fn closed_snapshot_model_preserves_every_aggregate_without_identifiers() {
     assert_eq!(snapshot.queue_oldest_at(), Some(UnixMillis::new(1_000)));
     assert_eq!(
         snapshot
-            .workflow_plan_v2_runs()
-            .get(WorkflowPlanV2RunState::Active),
+            .logical_workflow_runs()
+            .get(LogicalWorkflowRunState::Active),
         41
     );
     assert_eq!(snapshot.logical_jobs().get(LogicalJobState::Pending), 43);
@@ -148,8 +148,8 @@ fn populated_control_plane_snapshot() -> ControlPlaneStateSnapshot {
             .expect("consistent built-in secret cleanup aggregate");
     }
 
-    let mut logical_runs = WorkflowPlanV2RunCounts::default();
-    logical_runs.set(WorkflowPlanV2RunState::Active, 41);
+    let mut logical_runs = LogicalWorkflowRunCounts::default();
+    logical_runs.set(LogicalWorkflowRunState::Active, 41);
     let mut logical_jobs = LogicalJobCounts::default();
     logical_jobs.set(LogicalJobState::Pending, 43);
     let mut logical_activations = LogicalActivationCounts::default();
@@ -243,7 +243,7 @@ fn snapshot_rejects_oldest_timestamp_count_mismatches() {
     assert!(
         ControlPlaneStateSnapshot::empty()
             .with_logical_orchestration(
-                WorkflowPlanV2RunCounts::default(),
+                LogicalWorkflowRunCounts::default(),
                 LogicalJobCounts::default(),
                 LogicalActivationCounts::default(),
                 0,
@@ -258,7 +258,7 @@ fn snapshot_rejects_oldest_timestamp_count_mismatches() {
     assert!(
         ControlPlaneStateSnapshot::empty()
             .with_logical_orchestration(
-                WorkflowPlanV2RunCounts::default(),
+                LogicalWorkflowRunCounts::default(),
                 LogicalJobCounts::default(),
                 LogicalActivationCounts::default(),
                 0,

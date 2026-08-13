@@ -1,4 +1,4 @@
-//! Fenced WorkflowPlan-v2 run finalization over immutable logical-job results.
+//! Fenced logical workflow run finalization over immutable logical-job results.
 //!
 //! The repository selects one ready root invocation with `SKIP LOCKED`, returns
 //! a bounded canonical snapshot of every finalized logical-job result, and
@@ -850,7 +850,7 @@ impl LogicalRunFinalizationReceipt {
     }
 }
 
-/// Invalid WorkflowPlan-v2 run-finalization value.
+/// Invalid logical workflow run-finalization value.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum LogicalRunFinalizationValueError {
     /// A durable UUID used the nil sentinel.
@@ -868,7 +868,7 @@ pub enum LogicalRunFinalizationValueError {
     /// Current logical admission cannot produce an empty job set.
     #[error("logical run-finalization job set must not be empty")]
     EmptyJobSet,
-    /// The job set exceeded the current WorkflowPlan-v2 bound.
+    /// The job set exceeded the current logical workflow bound.
     #[error("logical run-finalization job set exceeds its bound")]
     TooManyJobs,
     /// Immutable logical-job evidence was malformed, duplicated, or noncanonical.
@@ -908,7 +908,7 @@ pub enum LogicalRunFinalizationStoreError {
     CommitConflict,
 }
 
-/// Persistence boundary for current WorkflowPlan-v2 run aggregation.
+/// Persistence boundary for current logical workflow run aggregation.
 #[async_trait]
 pub trait LogicalRunFinalizationRepository: fmt::Debug + Send + Sync {
     /// Claims at most one exact ready root invocation with `SKIP LOCKED` semantics.

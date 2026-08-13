@@ -13,8 +13,8 @@ use automata_ci_core::UnixMillis;
 use thiserror::Error;
 
 use crate::{
-    AcceptProviderDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEventKind,
-    GithubAuthenticatedEventV1, GithubProviderManifest, GithubProviderWebhookVerifierFingerprint,
+    AcceptProviderDelivery, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
+    GithubAuthenticatedEventKind, GithubProviderManifest, GithubProviderWebhookVerifierFingerprint,
     GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
     GithubServerServiceAuthoritySelector, GithubServerServiceRevision,
     GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
@@ -32,7 +32,7 @@ pub struct PendingGithubRepositoryDispatchEvidence {
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
     checks_authority: GithubServerServiceAuthoritySelector,
     private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-    event: GithubAuthenticatedEventV1,
+    event: GithubAuthenticatedEvent,
     accepted_at: UnixMillis,
 }
 
@@ -52,7 +52,7 @@ impl PendingGithubRepositoryDispatchEvidence {
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
         checks_authority: GithubServerServiceAuthoritySelector,
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
-        event: GithubAuthenticatedEventV1,
+        event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubRepositoryDispatchValueError> {
         if accepted_at.get() < 0
@@ -136,7 +136,7 @@ impl PendingGithubRepositoryDispatchEvidence {
 
     /// Returns the authenticated event kind and default-branch ref.
     #[must_use]
-    pub const fn event(&self) -> &GithubAuthenticatedEventV1 {
+    pub const fn event(&self) -> &GithubAuthenticatedEvent {
         &self.event
     }
 
@@ -189,7 +189,7 @@ impl fmt::Debug for PendingGithubRepositoryDispatchReceipt {
 pub struct AcceptManifestPinnedGithubRepositoryDispatch {
     delivery: AcceptProviderDelivery,
     repository_owner_id: ProviderRepositoryOwnerId,
-    event: GithubAuthenticatedEventV1,
+    event: GithubAuthenticatedEvent,
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
 }
@@ -204,7 +204,7 @@ impl AcceptManifestPinnedGithubRepositoryDispatch {
         delivery: AcceptProviderDelivery,
         signed_repository_owner_id: ProviderRepositoryOwnerId,
         configured_repository_owner_id: ProviderRepositoryOwnerId,
-        event: GithubAuthenticatedEventV1,
+        event: GithubAuthenticatedEvent,
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
     ) -> Result<Self, GithubRepositoryDispatchValueError> {
@@ -237,7 +237,7 @@ impl AcceptManifestPinnedGithubRepositoryDispatch {
 
     /// Returns the authenticated default-branch event coordinates.
     #[must_use]
-    pub const fn event(&self) -> &GithubAuthenticatedEventV1 {
+    pub const fn event(&self) -> &GithubAuthenticatedEvent {
         &self.event
     }
 

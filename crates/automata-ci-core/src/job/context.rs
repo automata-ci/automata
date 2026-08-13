@@ -9,7 +9,7 @@ use super::JobConclusion;
 use crate::workflow::OutputSensitivity;
 
 /// Schema emitted for independently persisted [`JobRuntimeContext`] blobs.
-pub const JOB_RUNTIME_CONTEXT_SCHEMA_VERSION: u16 = 2;
+pub const JOB_RUNTIME_CONTEXT_SCHEMA_VERSION: u16 = 1;
 /// Maximum nesting depth of a canonical runtime-context value.
 pub const MAX_CONTEXT_VALUE_DEPTH: usize = 32;
 /// Maximum aggregate value nodes in one canonical value or runtime context.

@@ -848,7 +848,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
                AND evidence.event_name = 'schedule'
                AND evidence.event_digest = $11
                AND evidence.git_ref = $12
-               AND evidence.workflow_plan_schema = 2
+               AND evidence.workflow_plan_schema = 1
                AND evidence.plan_digest = $13
                AND evidence.logical_admission_digest = $14
                AND evidence.admitted_at_ms = $15
@@ -994,7 +994,7 @@ async fn insert_scheduled_run_evidence(
             plan_digest, logical_admission_digest, admitted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            'schedule',$18,$19,2,$20,$21,$22
+            'schedule',$18,$19,1,$20,$21,$22
         )
         ",
     )

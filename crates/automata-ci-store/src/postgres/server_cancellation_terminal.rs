@@ -84,8 +84,8 @@ pub(super) async fn verify_queued_server_cancellation_terminal(
                terminal.server_cancellation_digest,
                terminal.conclusion, terminal.completed_at_ms,
                terminal.committed_at_ms,
-               terminal.workflow_plan_v2_logical_job_id,
-               terminal.workflow_plan_v2_terminal_ordinal,
+               terminal.logical_workflow_logical_job_id,
+               terminal.logical_workflow_terminal_ordinal,
                terminal.server_cancellation_digest =
                    automata_server_cancellation_terminal_digest(
                        cancellation.attempt_id, cancellation.operation_id,
@@ -98,7 +98,7 @@ pub(super) async fn verify_queued_server_cancellation_terminal(
           ON terminal.attempt_id = cancellation.attempt_id
          AND terminal.server_cancellation_operation_id =
              cancellation.operation_id
-        LEFT JOIN workflow_plan_v2_concrete_jobs AS concrete
+        LEFT JOIN logical_workflow_concrete_jobs AS concrete
           ON concrete.initial_attempt_id = terminal.attempt_id
         WHERE cancellation.attempt_id = $1
           AND cancellation.operation_id = $2
@@ -123,10 +123,10 @@ pub(super) async fn verify_queued_server_cancellation_terminal(
     })?;
 
     let logical_job_id = row
-        .try_get::<Option<uuid::Uuid>, _>("workflow_plan_v2_logical_job_id")
+        .try_get::<Option<uuid::Uuid>, _>("logical_workflow_logical_job_id")
         .map_err(StoreError::operation)?;
     let terminal_ordinal = row
-        .try_get::<Option<i64>, _>("workflow_plan_v2_terminal_ordinal")
+        .try_get::<Option<i64>, _>("logical_workflow_terminal_ordinal")
         .map_err(StoreError::operation)?;
     let concrete_logical_job_id = row
         .try_get::<Option<uuid::Uuid>, _>("concrete_logical_job_id")

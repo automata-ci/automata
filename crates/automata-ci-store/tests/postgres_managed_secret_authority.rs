@@ -54,9 +54,11 @@ use automata_ci_store::{
     ManagedSecretDeliveryProposal, ObjectKey, OpenRunnerSession, PostgresSecretCustodyRepository,
     PostgresSecretManagementRepository, PrepareJobEnvironment, ProtectedEnvironmentRepository as _,
     ProtectedEnvironmentStoreError, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, PublishLogicalJobActivation, RepositoryId, RepositorySecretId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    RegisterProviderDeliveryWorkflowInventory, RepositoryId, RepositorySecretId,
     RepositorySecretManagementRepository as _, RepositorySecretMutationId, RepositorySecretName,
     RepositorySecretProviderMutationResult, RepositorySecretVersionId, RequestCancellation,
     ReserveRepositorySecretVersionMutation, ReserveRepositorySecretVersionMutationOutcome,
@@ -365,6 +367,88 @@ async fn admit_authenticated_fixture(
     fixture: &LogicalFixture,
 ) -> TestResult {
     let manifest = &fixture.manifest;
+    bootstrap_manifest(database, manifest).await?;
+    let delivery_observed_at = database_now_ms(database).await?;
+    let accepted = database
+        .store()
+        .accept_manifest_pinned_github_delivery(AcceptManifestPinnedGithubDelivery::new(
+            AcceptProviderDelivery::new(
+                ProviderDeliveryIdentity::new(
+                    manifest.tenant().clone(),
+                    "github",
+                    manifest.connection_id(),
+                    manifest.installation_id(),
+                    ProviderRepositoryCoordinates::new(
+                        manifest.github_repository_id(),
+                        manifest.repository_visibility(),
+                        manifest.github_repository_name().as_str(),
+                    )?,
+                    fixture.delivery_key.clone(),
+                )?,
+                fixture.command.request_digest(),
+                common::authenticated_github_event_object(fixture.command.event())?,
+                UnixMillis::new(delivery_observed_at),
+            )?,
+            ProviderRepositoryOwnerId::new(404)?,
+            ProviderRepositoryOwnerId::new(404)?,
+            automata_ci_store::GithubAuthenticatedEvent::new(
+                automata_ci_store::GithubAuthenticatedEventKind::Push,
+                "refs/heads/main",
+            )?,
+            GithubCheckHeadSha::new([0x14; 20])?,
+            manifest.webhook_verifier_fingerprint(),
+            manifest.webhook_verifier_revision(),
+        )?)
+        .await?;
+    let claim_observed_at = database_now_ms(database).await?;
+    let claimed = database
+        .store()
+        .claim_provider_delivery(ClaimProviderDelivery::new(
+            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())?,
+            UnixMillis::new(claim_observed_at),
+            UnixMillis::new(claim_observed_at + 60_000),
+        )?)
+        .await?
+        .ok_or("accepted GitHub delivery was not claimable")?;
+    assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    digest(0x90),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        fixture.command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(
+                            fixture.command.source().digest(),
+                        ),
+                    )?],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
+    let command = logical_command_at(&fixture.command, claimed.claimed_at())?;
+    let authenticated = AuthenticatedGithubDeliveryClaim::new(
+        claimed.claim(),
+        claimed.attempt(),
+        claimed.claimed_at(),
+        claimed.expires_at(),
+    )?;
+    database
+        .store()
+        .admit_authenticated_github_delivery(command.clone(), authenticated, command.admitted_at())
+        .await?;
+    Ok(())
+}
+
+async fn bootstrap_manifest(
+    database: &TestDatabase,
+    manifest: &GithubProviderManifest,
+) -> TestResult {
     let configured_at = database_now_ms(database).await?;
     database
         .store()
@@ -397,56 +481,6 @@ async fn admit_authenticated_fixture(
             )?,
             UnixMillis::new(configured_at),
         )?)
-        .await?;
-    let delivery_observed_at = database_now_ms(database).await?;
-    let accepted = database
-        .store()
-        .accept_manifest_pinned_github_delivery(AcceptManifestPinnedGithubDelivery::new(
-            AcceptProviderDelivery::new(
-                ProviderDeliveryIdentity::new(
-                    manifest.tenant().clone(),
-                    "github",
-                    manifest.connection_id(),
-                    manifest.installation_id(),
-                    ProviderRepositoryCoordinates::new(
-                        manifest.github_repository_id(),
-                        manifest.repository_visibility(),
-                        manifest.github_repository_name().as_str(),
-                    )?,
-                    fixture.delivery_key.clone(),
-                )?,
-                fixture.command.request_digest(),
-                fixture.command.event().clone(),
-                UnixMillis::new(delivery_observed_at),
-            )?,
-            ProviderRepositoryOwnerId::new(404)?,
-            ProviderRepositoryOwnerId::new(404)?,
-            GithubCheckHeadSha::new([0x14; 20])?,
-            manifest.webhook_verifier_fingerprint(),
-            manifest.webhook_verifier_revision(),
-        )?)
-        .await?;
-    let claim_observed_at = database_now_ms(database).await?;
-    let claimed = database
-        .store()
-        .claim_provider_delivery(ClaimProviderDelivery::new(
-            ProviderDeliveryClaimOwnerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(claim_observed_at),
-            UnixMillis::new(claim_observed_at + 60_000),
-        )?)
-        .await?
-        .ok_or("accepted GitHub delivery was not claimable")?;
-    assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
-    let command = logical_command_at(&fixture.command, claimed.claimed_at())?;
-    let authenticated = AuthenticatedGithubDeliveryClaim::new(
-        claimed.claim(),
-        claimed.attempt(),
-        claimed.claimed_at(),
-        claimed.expires_at(),
-    )?;
-    database
-        .store()
-        .admit_authenticated_github_delivery(command.clone(), authenticated, command.admitted_at())
         .await?;
     Ok(())
 }
@@ -636,7 +670,7 @@ fn activation_reference(object: &LogicalActivationObject) -> JobContentReference
     )
 }
 
-#[allow(clippy::too_many_lines)] // Current WorkflowPlan-v2 fixture retains every exact descriptor.
+#[allow(clippy::too_many_lines)] // Current logical workflow fixture retains every exact descriptor.
 fn prepare_instance(
     fixture: &LogicalFixture,
     claimed: &ClaimedLogicalJobActivation,
@@ -854,7 +888,7 @@ async fn lease_execution(
             RunnerSessionId::new(),
             runner_id,
             RunnerGeneration::new(1)?,
-            RunnerProtocolVersion::new(5)?,
+            RunnerProtocolVersion::new(1)?,
             JobIrVersion::current(),
             RoutingDocument::new(serde_json::to_string(&capabilities)?)?,
             UnixMillis::new(database_now_ms(database).await? - 10_000),

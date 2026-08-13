@@ -687,7 +687,7 @@ impl LogicalInstanceResultDescriptor {
         }
     }
 
-    /// Returns the immutable JobIR-v5 object descriptor.
+    /// Returns the immutable `JobIR` object descriptor.
     #[must_use]
     pub const fn job_ir(&self) -> &LogicalActivationObject {
         &self.job_ir
@@ -1040,7 +1040,7 @@ pub struct CommitLogicalInstanceResult {
 }
 
 impl CommitLogicalInstanceResult {
-    /// Validates exact decoded current `JobResult` and JobIR-v5 evidence.
+    /// Validates exact decoded current `JobResult` and `JobIR` evidence.
     ///
     /// Result output names must be declared by `JobIR`. A statically
     /// secret-derived definition must remain secret-derived; a public
@@ -1482,8 +1482,8 @@ pub enum LogicalInstanceResultValueError {
     /// Loaded `JobIR` bytes differed from the immutable descriptor.
     #[error("loaded JobIR bytes disagree with the durable descriptor")]
     JobIrBlobMismatch,
-    /// The decoded envelope was not valid current JobIR-v5.
-    #[error("decoded JobIR is invalid or not schema v5")]
+    /// The decoded envelope was not valid current `JobIR`.
+    #[error("decoded JobIR is invalid or not current schema")]
     InvalidJobIr,
     /// The decoded envelope disagreed with the durable concrete instance.
     #[error("decoded JobIR disagrees with the durable concrete instance")]

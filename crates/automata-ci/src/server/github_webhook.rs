@@ -105,13 +105,9 @@ async fn accept_github_webhook(
     let raw_body = collect_raw_body(body).await?;
     ensure_before_deadline(deadline)?;
     match ingress_route {
-        GithubWebhookIngressRoute::Legacy => {
+        GithubWebhookIngressRoute::AuthenticatedEvent => {
             registry.accept(&parts.headers, raw_body).await.map(|_| ())
         }
-        GithubWebhookIngressRoute::AuthenticatedEventV1 => registry
-            .accept_authenticated_event_v1(&parts.headers, raw_body)
-            .await
-            .map(|_| ()),
         GithubWebhookIngressRoute::RepositoryDispatch => registry
             .accept_repository_dispatch(&parts.headers, raw_body)
             .await
@@ -189,16 +185,14 @@ fn require_github_header_shapes(
         return Err(GithubWebhookHttpOutcome::AuthenticationFailed);
     }
     Ok(match event {
-        b"pull_request" | b"merge_group" => GithubWebhookIngressRoute::AuthenticatedEventV1,
         b"repository_dispatch" => GithubWebhookIngressRoute::RepositoryDispatch,
-        _ => GithubWebhookIngressRoute::Legacy,
+        _ => GithubWebhookIngressRoute::AuthenticatedEvent,
     })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GithubWebhookIngressRoute {
-    Legacy,
-    AuthenticatedEventV1,
+    AuthenticatedEvent,
     RepositoryDispatch,
 }
 
@@ -350,11 +344,11 @@ mod tests {
         );
         assert_eq!(
             require_github_header_shapes(&shaped_headers("pull_request")),
-            Ok(GithubWebhookIngressRoute::AuthenticatedEventV1)
+            Ok(GithubWebhookIngressRoute::AuthenticatedEvent)
         );
         assert_eq!(
             require_github_header_shapes(&shaped_headers("push")),
-            Ok(GithubWebhookIngressRoute::Legacy)
+            Ok(GithubWebhookIngressRoute::AuthenticatedEvent)
         );
     }
 }

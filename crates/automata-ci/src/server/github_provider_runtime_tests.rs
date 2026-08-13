@@ -27,7 +27,6 @@ use automata_ci_store::{
 use serde_json::{Value, json};
 use url::Url;
 
-use super::super::github_provider::authority_configuration_fingerprint;
 use super::*;
 
 static CONFIG_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -114,7 +113,7 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 3,
+        "schema": 1,
         "transport": {"mode": "github_dot_com"},
         "app": {
             "id": 42,
@@ -215,40 +214,6 @@ fn live_test_broker(
         GithubAppCredentialBroker::new(broker_config, &private_key)
             .expect("published RSA fixture constructs a live broker"),
     )
-}
-
-#[test]
-fn production_broker_v1_compatibility_fingerprints_match_migration_0053() {
-    let config = load_config(&document(&[repository(
-        "tenant-compatible-fingerprint",
-        0x201,
-        202,
-        302,
-        402,
-        "octo/compatible-fingerprint",
-        "private",
-        0x801,
-        Some(0x802),
-    )]));
-    let broker = live_test_broker(&config, 202);
-    let [historical_broker_fingerprint] = broker.compatible_historical_broker_policy_fingerprints();
-
-    assert_eq!(
-        authority_configuration_fingerprint(
-            historical_broker_fingerprint,
-            GithubServerServiceScope::ChecksWrite,
-        )
-        .to_string(),
-        "86db54f098adc51219d176555d5f7b5461a4c45ddd0625393846b1b3a5ae6543"
-    );
-    assert_eq!(
-        authority_configuration_fingerprint(
-            historical_broker_fingerprint,
-            GithubServerServiceScope::PrivateRepositorySourceRead,
-        )
-        .to_string(),
-        "878f4bd01bfe4b04e84d9b9eee32667d31d55feebe78a7b2f59ed715b1145b32"
-    );
 }
 
 fn checks_authority(
@@ -366,7 +331,6 @@ fn changed_digest(digest: Sha256Digest) -> Sha256Digest {
 struct RevisionRoutingFixture {
     broker: Arc<GithubAppCredentialBroker>,
     pin: JobAuthorityBrokerPin,
-    historical: GithubServerServiceAuthorityIdentity,
     current: GithubServerServiceAuthorityIdentity,
     current_peer: GithubServerServiceAuthorityIdentity,
 }
@@ -415,28 +379,9 @@ fn revision_routing_fixture() -> RevisionRoutingFixture {
         .cloned()
         .expect("one same-installation route");
 
-    let mut historical_repository = repository(
-        "tenant-current",
-        0x211,
-        INSTALLATION_ID,
-        REPOSITORY_ID,
-        402,
-        "octo/current-repository",
-        "public",
-        0x711,
-        None,
-    );
-    set_repository_revisions(&mut historical_repository, 1, 7);
-    let mut historical_document = document(&[historical_repository]);
-    historical_document["app"]["configuration_revision"] = json!(5);
-    let historical_config = load_config(&historical_document);
-    let historical_plan = GithubProviderBootstrapPlan::new(&historical_config, &broker, &verifier)
-        .expect("historical revision builds against the same live broker");
-
     RevisionRoutingFixture {
         broker,
         pin,
-        historical: checks_authority(&historical_plan, REPOSITORY_ID),
         current: checks_authority(&current_plan, REPOSITORY_ID),
         current_peer: checks_authority(&current_plan, 303),
     }
@@ -468,44 +413,12 @@ fn same_installation_current_policy_revisions_share_one_configuration_pin() {
     );
 }
 
-fn assert_historical_and_current_revision_route(fixture: &RevisionRoutingFixture) {
-    assert_eq!(fixture.historical.app_configuration_revision().get(), 5);
-    assert_eq!(fixture.current.app_configuration_revision().get(), 8);
-    assert_eq!(fixture.historical.policy_revision().get(), 7);
-    assert_eq!(fixture.current.policy_revision().get(), 8);
-    assert_ne!(
-        fixture.historical.identity_digest(),
-        fixture.current.identity_digest()
-    );
-    assert_eq!(
-        fixture.historical.installation_id(),
-        fixture.current.installation_id()
-    );
-    assert_eq!(
-        fixture.historical.app_key_spki_sha256(),
-        fixture.current.app_key_spki_sha256()
-    );
-    assert_eq!(
-        fixture.historical.jwt_issuer(),
-        fixture.current.jwt_issuer()
-    );
-    assert_eq!(
-        fixture.historical.configuration_fingerprint(),
-        fixture.current.configuration_fingerprint()
-    );
-}
-
 #[tokio::test]
-async fn historical_and_current_identities_share_exact_live_route_and_mismatches_close() {
+async fn current_identity_uses_the_exact_live_route_and_mismatches_close() {
     let fixture = revision_routing_fixture();
-    assert_historical_and_current_revision_route(&fixture);
-    let historical_route = RuntimeRouteEvidence::from_authority(&fixture.historical);
     let current_route = RuntimeRouteEvidence::from_authority(&fixture.current);
-    assert_eq!(historical_route, current_route);
 
-    let historical = runtime_identity(&fixture.historical, &historical_route, 0x1_000, 0x71);
     let current = runtime_identity(&fixture.current, &current_route, 0x2_000, 0x81);
-    assert_ne!(historical.policy_digest(), current.policy_digest());
 
     // Runtime construction feeds this one pin into both provider-operation paths.
     let mint_route = PinnedGithubRuntimeAuthorityMintBroker::new(
@@ -524,37 +437,35 @@ async fn historical_and_current_identities_share_exact_live_route_and_mismatches
         fixture.pin.configuration_fingerprint,
     )])
     .expect("the live lifecycle route consumes the same converged pin");
-    for identity in [&historical, &current] {
-        assert_eq!(
-            mint_route.installation_id(),
-            identity.provider_installation_id().get()
-        );
-        assert_eq!(mint_route.github_app_id(), identity.github_app_id());
-        assert_eq!(
-            mint_route.github_app_client_id(),
-            identity.github_app_client_id()
-        );
-        assert_eq!(
-            mint_route.github_app_jwt_issuer_kind(),
-            identity.github_app_jwt_issuer_kind()
-        );
-        assert_eq!(
-            mint_route.github_app_jwt_issuer_value(),
-            identity.github_app_jwt_issuer_value()
-        );
-        assert_eq!(
-            mint_route.app_key_spki_sha256(),
-            identity.app_key_spki_sha256()
-        );
-        assert_eq!(
-            mint_route.configuration_fingerprint(),
-            identity.configuration_fingerprint()
-        );
-        assert_eq!(
-            lifecycle_route.maximum_request_duration(identity),
-            Some(mint_route.maximum_mint_duration())
-        );
-    }
+    assert_eq!(
+        mint_route.installation_id(),
+        current.provider_installation_id().get()
+    );
+    assert_eq!(mint_route.github_app_id(), current.github_app_id());
+    assert_eq!(
+        mint_route.github_app_client_id(),
+        current.github_app_client_id()
+    );
+    assert_eq!(
+        mint_route.github_app_jwt_issuer_kind(),
+        current.github_app_jwt_issuer_kind()
+    );
+    assert_eq!(
+        mint_route.github_app_jwt_issuer_value(),
+        current.github_app_jwt_issuer_value()
+    );
+    assert_eq!(
+        mint_route.app_key_spki_sha256(),
+        current.app_key_spki_sha256()
+    );
+    assert_eq!(
+        mint_route.configuration_fingerprint(),
+        current.configuration_fingerprint()
+    );
+    assert_eq!(
+        lifecycle_route.maximum_request_duration(&current),
+        Some(mint_route.maximum_mint_duration())
+    );
 
     let mut wrong_key = current_route.clone();
     wrong_key.app_key_spki_sha256 = changed_digest(wrong_key.app_key_spki_sha256);

@@ -1068,7 +1068,7 @@
           "type": "gauge"
         },
         {
-          "help": "Durable current WorkflowPlan-v2 logical jobs by closed state.",
+          "help": "Durable current logical workflow logical jobs by closed state.",
           "label_sets": {
             "mode": "cartesian"
           },
@@ -2481,7 +2481,7 @@
           "type": "counter"
         },
         {
-          "help": "Durable current WorkflowPlan-v2 orchestration markers by closed state.",
+          "help": "Durable current logical workflow orchestration markers by closed state.",
           "label_sets": {
             "mode": "cartesian"
           },
@@ -2498,7 +2498,7 @@
             }
           ],
           "maximum_series": 5,
-          "name": "automata_ci_control_plane_workflow_plan_v2_runs",
+          "name": "automata_ci_control_plane_logical_workflow_runs",
           "type": "gauge"
         },
         {

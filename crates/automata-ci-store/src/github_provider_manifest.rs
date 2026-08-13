@@ -52,8 +52,6 @@ pub const GITHUB_PROVIDER_PRIVATE_SOURCE_AUTHENTICATION: &str = "github_app_inst
 pub const GITHUB_PROVIDER_SOURCE_REVISION: &str = "exact_sha";
 /// Repository discovery consumes a gzip-compressed tar archive.
 pub const GITHUB_PROVIDER_ARCHIVE_FORMAT: &str = "tar_gzip";
-/// Default workflow path used by backward-compatible provider configuration.
-pub const GITHUB_PROVIDER_WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 /// Durable aggregate selector used by repository-wide direct-workflow discovery.
 ///
 /// This is a server-owned policy key, not a workflow filename. Individual
@@ -61,7 +59,7 @@ pub const GITHUB_PROVIDER_WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 pub const GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY: &str = ".ci/workflows";
 /// The only provider event admitted by the initial dogfood manifest.
 pub const GITHUB_PROVIDER_EVENT: &str = "push";
-/// Backward-compatible main-branch ref used by legacy manifest constructors.
+/// Default branch ref used by manifest constructors.
 pub const GITHUB_PROVIDER_GIT_REF: &str = "refs/heads/main";
 /// GitHub's documented maximum webhook payload size.
 pub const GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES: u64 = 25 * 1_024 * 1_024;
@@ -87,15 +85,7 @@ pub const GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES: u64 = 4 * 1_024;
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS: u64 = 256;
 /// Exact per-workflow source ceiling supported by discovery.
 pub const GITHUB_PROVIDER_WORKFLOW_MAX_BYTES: u64 = 1_024 * 1_024;
-const MANIFEST_DIGEST_DOMAIN: &[u8] = b"automata.store.github-provider-manifest.v3\0";
-const ALL_DIRECT_MANIFEST_DIGEST_DOMAIN: &[u8] =
-    b"automata.store.github-provider-manifest.v4.all-direct\0";
-const GIT_REF_MANIFEST_DIGEST_DOMAIN: &[u8] =
-    b"automata.store.github-provider-manifest.v5.git-ref\0";
-const ALL_DIRECT_GIT_REF_MANIFEST_DIGEST_DOMAIN: &[u8] =
-    b"automata.store.github-provider-manifest.v5.all-direct.git-ref\0";
-const OWNER_BOUND_MANIFEST_DIGEST_DOMAIN: &[u8] =
-    b"automata.store.github-provider-manifest.v6.owner-bound\0";
+const MANIFEST_DIGEST_DOMAIN: &[u8] = b"automata.store.github-provider-manifest\0";
 const REPOSITORY_ID_DOMAIN: &[u8] = b"automata.admission.repository.v1\0";
 
 /// Domain required when secret custody derives the public webhook verifier fingerprint.
@@ -282,57 +272,27 @@ pub struct GithubProviderManifestLimits {
     workflow_max_bytes: u64,
 }
 
-/// Immutable workflow discovery policy pinned by one provider manifest.
-///
-/// `Exact` preserves the original one-path contract. `AllDirect` selects every
-/// canonical direct `.yml` or `.yaml` file discovered under
-/// `.ci/workflows/`; nested files are never selected.
+/// Immutable direct-workflow discovery policy pinned by one provider manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GithubProviderWorkflowSelection {
-    /// Select exactly one canonical direct workflow path.
-    Exact(GithubCheckSubjectKey),
-    /// Select every canonical direct workflow path within the manifest limits.
-    AllDirect,
-}
+pub struct GithubProviderWorkflowSelection;
 
 impl GithubProviderWorkflowSelection {
     /// Constructs the repository-wide direct-workflow policy.
     #[must_use]
     pub const fn all_direct() -> Self {
-        Self::AllDirect
-    }
-
-    /// Constructs the precise-path policy.
-    #[must_use]
-    pub const fn exact(path: GithubCheckSubjectKey) -> Self {
-        Self::Exact(path)
+        Self
     }
 
     /// Returns the stable durable policy kind.
     #[must_use]
     pub const fn as_durable_str(&self) -> &'static str {
-        match self {
-            Self::Exact(_) => "exact",
-            Self::AllDirect => "all_direct",
-        }
-    }
-
-    /// Returns the configured path only for the precise legacy policy.
-    #[must_use]
-    pub fn exact_path(&self) -> Option<&str> {
-        match self {
-            Self::Exact(path) => Some(path.as_str()),
-            Self::AllDirect => None,
-        }
+        "all_direct"
     }
 
     /// Reports whether one canonical discovered path is selected.
     #[must_use]
     pub fn selects(&self, path: &str) -> bool {
-        match self {
-            Self::Exact(expected) => expected.as_str() == path,
-            Self::AllDirect => canonical_direct_workflow_path(path),
-        }
+        canonical_direct_workflow_path(path)
     }
 }
 
@@ -513,9 +473,7 @@ impl GithubProviderManifest {
     ///
     /// The internal repository ID and Check subject key are server-derived.
     /// Visibility, event, ref, and origins are closed current policy. The
-    /// workflow path defaults to the original dogfood path; product
-    /// configuration that selects another canonical workflow must use
-    /// [`Self::new_with_workflow_path`].
+    /// every canonical direct workflow is selected.
     ///
     /// # Panics
     ///
@@ -547,66 +505,6 @@ impl GithubProviderManifest {
         limits: GithubProviderManifestLimits,
         revision: GithubProviderManifestRevision,
     ) -> Self {
-        let workflow_path = GithubCheckSubjectKey::new(GITHUB_PROVIDER_WORKFLOW_PATH)
-            .expect("fixed workflow path is a canonical Check subject key");
-        Self::new_with_workflow_path(
-            tenant,
-            connection_id,
-            installation_id,
-            github_repository_id,
-            github_repository_name,
-            repository_visibility,
-            github_app_id,
-            app_client_id,
-            jwt_issuer,
-            app_key_spki_sha256,
-            app_configuration_revision,
-            webhook_verifier_fingerprint,
-            webhook_verifier_revision,
-            policy_revision,
-            authority_profile,
-            runner_policy,
-            runtime_policy_revision,
-            runtime_policy_digest,
-            workflow_path,
-            check_name,
-            origins,
-            limits,
-            revision,
-        )
-    }
-
-    /// Constructs one exact provider policy for a configured workflow path.
-    ///
-    /// The validated workflow path is also the delivery-local Check subject
-    /// key, preserving the one-workflow-per-delivery authority invariant.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn new_with_workflow_path(
-        tenant: TenantScope,
-        connection_id: ProviderConnectionId,
-        installation_id: ProviderInstallationId,
-        github_repository_id: ProviderRepositoryId,
-        github_repository_name: GithubRepositoryName,
-        repository_visibility: ProviderRepositoryVisibility,
-        github_app_id: GithubServerServiceAppId,
-        app_client_id: GithubServerServiceAppClientId,
-        jwt_issuer: GithubServerServiceJwtIssuer,
-        app_key_spki_sha256: Sha256Digest,
-        app_configuration_revision: GithubServerServiceRevision,
-        webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
-        webhook_verifier_revision: GithubServerServiceRevision,
-        policy_revision: GithubServerServiceRevision,
-        authority_profile: JobAuthorityProfile,
-        runner_policy: GithubProviderRunnerPolicyObject,
-        runtime_policy_revision: WorkflowRuntimePolicyRevision,
-        runtime_policy_digest: Sha256Digest,
-        workflow_path: GithubCheckSubjectKey,
-        check_name: GithubCheckName,
-        origins: GithubProviderOrigins,
-        limits: GithubProviderManifestLimits,
-        revision: GithubProviderManifestRevision,
-    ) -> Self {
         Self::new_with_workflow_selection(
             tenant,
             connection_id,
@@ -626,7 +524,7 @@ impl GithubProviderManifest {
             runner_policy,
             runtime_policy_revision,
             runtime_policy_digest,
-            GithubProviderWorkflowSelection::exact(workflow_path),
+            GithubProviderWorkflowSelection::all_direct(),
             check_name,
             origins,
             limits,
@@ -730,13 +628,9 @@ impl GithubProviderManifest {
         revision: GithubProviderManifestRevision,
     ) -> Self {
         let repository_id = github_provider_repository_id(&tenant, github_repository_id);
-        let check_subject_key = match &workflow_selection {
-            GithubProviderWorkflowSelection::Exact(path) => path.clone(),
-            GithubProviderWorkflowSelection::AllDirect => {
-                GithubCheckSubjectKey::new(GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY)
-                    .expect("fixed all-direct selector is a canonical Check subject key")
-            }
-        };
+        let check_subject_key =
+            GithubCheckSubjectKey::new(GITHUB_PROVIDER_ALL_DIRECT_WORKFLOWS_KEY)
+                .expect("fixed all-direct selector is a canonical Check subject key");
         let mut manifest = Self {
             tenant,
             repository_id,
@@ -773,8 +667,7 @@ impl GithubProviderManifest {
 
     /// Constructs a provider policy whose numeric repository owner is immutable evidence.
     ///
-    /// Legacy constructors intentionally retain their historical digest domains and
-    /// produce owner-unbound manifests. Schedule discovery requires this constructor.
+    /// Schedule discovery requires numeric repository-owner evidence.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new_owner_bound_with_workflow_selection_and_git_ref(
@@ -959,11 +852,6 @@ impl GithubProviderManifest {
     pub const fn workflow_selection(&self) -> &GithubProviderWorkflowSelection {
         &self.workflow_selection
     }
-    /// Returns the precise selected workflow path, if this is legacy exact mode.
-    #[must_use]
-    pub fn exact_workflow_path(&self) -> Option<&str> {
-        self.workflow_selection.exact_path()
-    }
     /// Reports whether a canonical discovered path is selected by this revision.
     #[must_use]
     pub fn selects_workflow_path(&self, path: &str) -> bool {
@@ -1144,27 +1032,9 @@ impl GithubProviderManifest {
             && expected_runtime_policy_revision == Some(self.runtime_policy_revision.get())
     }
 
-    fn digest_domain(&self) -> &'static [u8] {
-        if self.github_repository_owner_id.is_some() {
-            return OWNER_BOUND_MANIFEST_DIGEST_DOMAIN;
-        }
-        match (&self.workflow_selection, self.git_ref.as_str()) {
-            (GithubProviderWorkflowSelection::Exact(_), GITHUB_PROVIDER_GIT_REF) => {
-                MANIFEST_DIGEST_DOMAIN
-            }
-            (GithubProviderWorkflowSelection::AllDirect, GITHUB_PROVIDER_GIT_REF) => {
-                ALL_DIRECT_MANIFEST_DIGEST_DOMAIN
-            }
-            (GithubProviderWorkflowSelection::Exact(_), _) => GIT_REF_MANIFEST_DIGEST_DOMAIN,
-            (GithubProviderWorkflowSelection::AllDirect, _) => {
-                ALL_DIRECT_GIT_REF_MANIFEST_DIGEST_DOMAIN
-            }
-        }
-    }
-
     fn compute_digest(&self) -> Sha256Digest {
         let mut digest = Sha256::new();
-        digest.update(self.digest_domain());
+        digest.update(MANIFEST_DIGEST_DOMAIN);
         update_part(&mut digest, self.tenant.as_str().as_bytes());
         update_part(&mut digest, self.repository_id.as_uuid().as_bytes());
         update_part(&mut digest, self.connection_id.as_uuid().as_bytes());
@@ -1222,15 +1092,10 @@ impl GithubProviderManifest {
         update_part(&mut digest, self.runtime_policy_digest.as_bytes());
         update_part(&mut digest, &self.revision.get().to_be_bytes());
         update_part(&mut digest, self.workflow_path().as_bytes());
-        if matches!(
-            &self.workflow_selection,
-            GithubProviderWorkflowSelection::AllDirect
-        ) {
-            update_part(
-                &mut digest,
-                self.workflow_selection.as_durable_str().as_bytes(),
-            );
-        }
+        update_part(
+            &mut digest,
+            self.workflow_selection.as_durable_str().as_bytes(),
+        );
         update_part(&mut digest, self.event_name().as_bytes());
         update_part(&mut digest, self.git_ref().as_bytes());
         update_part(&mut digest, self.check_subject_key.as_str().as_bytes());
@@ -1489,9 +1354,9 @@ pub enum GithubProviderManifestStoreError {
     /// Existing durable state disagrees with the exact desired configuration.
     #[error("GitHub provider manifest conflicts with durable configuration")]
     ConfigurationDrift,
-    /// A legacy manifest must be advanced before numeric owner evidence is enabled.
+    /// A manifest revision must advance before numeric owner evidence changes.
     #[error("GitHub provider owner binding requires the next manifest and policy revisions")]
-    OwnerBindingUpgradeRequired,
+    OwnerBindingRevisionRequired,
     /// Durable data violates the current-only manifest contract.
     #[error("durable GitHub provider manifest data is corrupt")]
     CorruptData,

@@ -125,8 +125,8 @@ impl LogicalActivationPreparationWorkspace {
 /// Current base-context authority supported by this preparation phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalActivationBaseContextKind {
-    /// Canonical `JobRuntimeContext` v2 object admitted with the root invocation.
-    AdmissionV2,
+    /// Canonical `JobRuntimeContext` object admitted with the root invocation.
+    Admission,
 }
 
 /// Full transitive prerequisite status bound to activation functions.
@@ -1482,7 +1482,7 @@ const fn status_code(value: LogicalActivationAggregateStatus) -> u8 {
 
 const fn base_context_kind_code(value: LogicalActivationBaseContextKind) -> u8 {
     match value {
-        LogicalActivationBaseContextKind::AdmissionV2 => 2,
+        LogicalActivationBaseContextKind::Admission => 1,
     }
 }
 

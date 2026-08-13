@@ -49,7 +49,7 @@ fn decoded_v5_commit_binds_exact_blob_identity_and_execution_references() {
     );
     assert_eq!(commit.requirements(), fixture.envelope.job().requirements());
     assert_eq!(commit.authority_profile(), JobAuthorityProfile::Standard);
-    assert_eq!(fixture.envelope.schema_version(), 5);
+    assert_eq!(fixture.envelope.schema_version(), 1);
 
     let mut changed = fixture.encoded.clone();
     changed[0] ^= 0x01;

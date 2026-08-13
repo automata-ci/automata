@@ -1,7 +1,7 @@
 use automata_ci_core::{RunnerSessionId, UnixMillis};
 use automata_ci_store::{RunnerPayloadTombstone, RunnerPayloadTombstoneReason, StoreError};
 
-const MIGRATION: &str = include_str!("../migrations/0024_runner_payload_tombstones.sql");
+const MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 const OBSERVABILITY: &str = include_str!("../src/postgres/observability.rs");
 
 #[test]

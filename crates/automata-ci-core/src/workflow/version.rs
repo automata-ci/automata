@@ -9,9 +9,6 @@ use super::WorkflowPlanError;
 /// Workflow-plan schema emitted by this build.
 pub const WORKFLOW_PLAN_SCHEMA_VERSION: u16 = WorkflowPlanVersion::current().get();
 
-/// Logical-template plan schema used by deferred job activation.
-pub const WORKFLOW_PLAN_V2_SCHEMA_VERSION: u16 = 2;
-
 /// The exact workflow-plan schema accepted by this build.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -40,15 +37,13 @@ impl WorkflowPlanVersion {
     /// Returns the version emitted by this build.
     #[must_use]
     pub const fn current() -> Self {
-        Self::v2()
+        Self::v1()
     }
 
     /// Returns the logical-template plan schema version.
     #[must_use]
-    pub const fn v2() -> Self {
-        // SAFETY: two is non-zero. `NonZeroU16::new` is not yet const on the
-        // minimum supported compiler, so use the adjacent const value.
-        Self(NonZeroU16::MIN.saturating_add(1))
+    pub const fn v1() -> Self {
+        Self(NonZeroU16::MIN)
     }
 
     /// Returns the numeric wire representation.

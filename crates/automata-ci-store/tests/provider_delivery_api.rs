@@ -16,8 +16,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-const PROVIDER_DELIVERY_MIGRATION: &str =
-    include_str!("../migrations/0017_provider_delivery_inbox.sql");
+const PROVIDER_DELIVERY_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
 
 fn identity() -> ProviderDeliveryIdentity {
     ProviderDeliveryIdentity::new(

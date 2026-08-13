@@ -443,7 +443,7 @@ async fn encrypted_create_stays_unresolvable_until_management_confirmation() -> 
         let secret_id = Uuid::new_v4();
         let noncanonical_id = Uuid::new_v4();
         for invalid_request_id in [
-            "create-version-one".to_owned(),
+            "create-canonical".to_owned(),
             "secret-version:00000000-0000-0000-0000-000000000000".to_owned(),
             format!("secret-version:{}", noncanonical_id.simple()),
             format!(
