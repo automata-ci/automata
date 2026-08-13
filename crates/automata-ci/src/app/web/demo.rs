@@ -1,12 +1,30 @@
 use std::{
+    convert::Infallible,
     fmt,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use automata_ci_auth::human::TenantId;
 use automata_ci_core::{JobId, RunId, UnixMillis, WorkflowId};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{
+        HeaderValue,
+        header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERRER_POLICY},
+    },
+    middleware::{self, Next},
+    response::{
+        Html, IntoResponse as _, Response, Sse,
+        sse::{Event, KeepAlive},
+    },
+    routing::get,
+};
+use futures::stream;
+use serde::Serialize;
+use tokio::sync::broadcast;
 
 use super::data::{
     ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest,
@@ -18,6 +36,9 @@ use super::data::{
 
 const OWNER: &str = "local";
 const REPOSITORY: &str = "evaluation";
+const DASHBOARD_HTML: &str = include_str!("../../demo_assets/dashboard.html");
+const DASHBOARD_CSS: &str = include_str!("../../demo_assets/dashboard.css");
+const DASHBOARD_JS: &str = include_str!("../../demo_assets/dashboard.js");
 
 #[derive(Debug)]
 struct DemoState {
@@ -27,6 +48,41 @@ struct DemoState {
     finished_at: Option<UnixMillis>,
     lines: Vec<LogLine>,
     next_sequence: u64,
+    steps: Vec<DemoStepState>,
+}
+
+#[derive(Clone, Debug)]
+struct DemoStepState {
+    number: usize,
+    name: String,
+    shell: String,
+    status: Status,
+    started_at: Option<UnixMillis>,
+    finished_at: Option<UnixMillis>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoSnapshot {
+    status: &'static str,
+    status_tone: &'static str,
+    run_href: String,
+    log_href: String,
+    elapsed: String,
+    steps: Vec<DemoStepSnapshot>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoStepSnapshot {
+    number: usize,
+    name: String,
+    shell: String,
+    status: &'static str,
+    tone: &'static str,
+    duration: String,
+    exit_code: Option<i32>,
 }
 
 /// Mutable, process-local projection of one native demo run into the ordinary UI.
@@ -37,6 +93,7 @@ pub(crate) struct DemoWebData {
     workflow_name: String,
     workflow_path: String,
     state: Mutex<DemoState>,
+    changes: broadcast::Sender<()>,
 }
 
 impl fmt::Debug for DemoWebData {
@@ -49,6 +106,7 @@ impl fmt::Debug for DemoWebData {
 
 impl DemoWebData {
     pub(crate) fn new(workflow_name: String, workflow_path: String) -> Self {
+        let (changes, _) = broadcast::channel(32);
         Self {
             workflow_id: WorkflowId::new(),
             run_id: RunId::new(),
@@ -62,7 +120,9 @@ impl DemoWebData {
                 finished_at: None,
                 lines: Vec::new(),
                 next_sequence: 1,
+                steps: Vec::new(),
             }),
+            changes,
         }
     }
 
@@ -74,26 +134,71 @@ impl DemoWebData {
         format!("/{OWNER}/{REPOSITORY}/actions/runs/{}", self.run_id)
     }
 
+    pub(crate) const fn dashboard_url() -> &'static str {
+        "/__demo"
+    }
+
+    pub(crate) fn set_steps(&self, steps: &[(usize, String, String)]) {
+        let mut state = self.state.lock().expect("demo state mutex");
+        state.steps = steps
+            .iter()
+            .map(|(number, name, shell)| DemoStepState {
+                number: *number,
+                name: name.clone(),
+                shell: shell.clone(),
+                status: Status::Queued,
+                started_at: None,
+                finished_at: None,
+                exit_code: None,
+            })
+            .collect();
+        drop(state);
+        self.changed();
+    }
+
     pub(crate) fn start(&self) {
         let mut state = self.state.lock().expect("demo state mutex");
-        let now = now();
+        let observed = now();
         state.run_status = Status::InProgress;
         state.job_status = Status::InProgress;
-        state.started_at = Some(now);
+        state.started_at = Some(observed);
         push_line(
             &mut state,
             LogChannel::System,
             "Native Windows demo started",
         );
+        drop(state);
+        self.changed();
     }
 
     pub(crate) fn step_started(&self, number: usize, name: &str) {
         let mut state = self.state.lock().expect("demo state mutex");
+        if let Some(step) = state.steps.iter_mut().find(|step| step.number == number) {
+            step.status = Status::InProgress;
+            step.started_at = Some(now());
+        }
         push_line(
             &mut state,
             LogChannel::System,
             &format!("Starting step {number}: {name}"),
         );
+        drop(state);
+        self.changed();
+    }
+
+    pub(crate) fn step_finished(&self, number: usize, exit_code: i32) {
+        let mut state = self.state.lock().expect("demo state mutex");
+        if let Some(step) = state.steps.iter_mut().find(|step| step.number == number) {
+            step.status = if exit_code == 0 {
+                Status::Succeeded
+            } else {
+                Status::Failed
+            };
+            step.finished_at = Some(now());
+            step.exit_code = Some(exit_code);
+        }
+        drop(state);
+        self.changed();
     }
 
     pub(crate) fn stdout(&self, bytes: &[u8]) {
@@ -110,6 +215,8 @@ impl DemoWebData {
         for line in text.lines() {
             push_line(&mut state, channel, line);
         }
+        drop(state);
+        self.changed();
     }
 
     pub(crate) fn finish(&self, succeeded: bool, message: &str) {
@@ -121,7 +228,48 @@ impl DemoWebData {
         };
         state.job_status = state.run_status;
         state.finished_at = Some(now());
+        if !succeeded {
+            let finished_at = state.finished_at;
+            if let Some(step) = state
+                .steps
+                .iter_mut()
+                .find(|step| step.status == Status::InProgress)
+            {
+                step.status = Status::Failed;
+                step.finished_at = finished_at;
+            }
+        }
         push_line(&mut state, LogChannel::System, message);
+        drop(state);
+        self.changed();
+    }
+
+    fn changed(&self) {
+        let _ = self.changes.send(());
+    }
+
+    fn dashboard_snapshot(&self) -> DemoSnapshot {
+        let state = self.state.lock().expect("demo state mutex");
+        DemoSnapshot {
+            status: status_label(state.run_status),
+            status_tone: status_tone(state.run_status),
+            run_href: self.run_url(),
+            log_href: format!("{}/jobs/{}", self.run_url(), self.job_id),
+            elapsed: elapsed(state.started_at, state.finished_at),
+            steps: state
+                .steps
+                .iter()
+                .map(|step| DemoStepSnapshot {
+                    number: step.number,
+                    name: step.name.clone(),
+                    shell: step.shell.clone(),
+                    status: status_label(step.status),
+                    tone: status_tone(step.status),
+                    duration: elapsed(step.started_at, step.finished_at),
+                    exit_code: step.exit_code,
+                })
+                .collect(),
+        }
     }
 
     fn repository() -> Repository {
@@ -176,12 +324,126 @@ impl DemoWebData {
     }
 }
 
+pub(crate) fn demo_router(data: Arc<DemoWebData>) -> Router {
+    Router::new()
+        .route("/__demo", get(dashboard))
+        .route("/__demo/state", get(dashboard_state))
+        .route("/__demo/events", get(dashboard_events))
+        .route("/__demo/client.js", get(dashboard_script))
+        .route("/__demo/styles.css", get(dashboard_styles))
+        .layer(middleware::from_fn(dashboard_security_headers))
+        .with_state(data)
+}
+
+async fn dashboard_security_headers(request: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'self'",
+        ),
+    );
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn dashboard() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
+}
+
+async fn dashboard_state(State(data): State<Arc<DemoWebData>>) -> Json<DemoSnapshot> {
+    Json(data.dashboard_snapshot())
+}
+
+async fn dashboard_events(
+    State(data): State<Arc<DemoWebData>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let receiver = data.changes.subscribe();
+    let events = stream::unfold(receiver, |mut receiver| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(()) => {
+                    return Some((
+                        Ok(Event::default().event("update").data("changed")),
+                        receiver,
+                    ));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(events).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    )
+}
+
+async fn dashboard_script() -> Response {
+    asset_response("text/javascript; charset=utf-8", DASHBOARD_JS)
+}
+
+async fn dashboard_styles() -> Response {
+    asset_response("text/css; charset=utf-8", DASHBOARD_CSS)
+}
+
+fn asset_response(content_type: &'static str, body: &'static str) -> Response {
+    let mut response = body.into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
 fn now() -> UnixMillis {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     UnixMillis::new(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+fn elapsed(started: Option<UnixMillis>, finished: Option<UnixMillis>) -> String {
+    let Some(started) = started else {
+        return "Not started".to_owned();
+    };
+    let end = finished.unwrap_or_else(now);
+    let millis = end.get().saturating_sub(started.get()).max(0);
+    let seconds = millis / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+const fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Queued => "Queued",
+        Status::InProgress => "In progress",
+        Status::Succeeded => "Succeeded",
+        Status::Failed => "Failed",
+        Status::Cancelled => "Cancelled",
+        Status::TimedOut => "Timed out",
+        Status::Skipped => "Skipped",
+        Status::Lost => "Lost",
+    }
+}
+
+const fn status_tone(status: Status) -> &'static str {
+    match status {
+        Status::Queued | Status::Cancelled | Status::Skipped => "queued",
+        Status::InProgress => "running",
+        Status::Succeeded => "success",
+        Status::Failed | Status::TimedOut | Status::Lost => "failure",
+    }
 }
 
 fn push_line(state: &mut DemoState, channel: LogChannel, text: &str) {
@@ -233,7 +495,7 @@ impl WebData for DemoWebData {
         };
         Ok(Some(RunListPage {
             repository: Self::repository(),
-            workflows: vec![workflow.clone()],
+            workflows: vec![workflow],
             selected_workflow: None,
             workflow_previous_cursor: None,
             workflow_next_cursor: None,
@@ -316,5 +578,66 @@ impl WebData for DemoWebData {
         _artifact_id: i64,
     ) -> Result<Option<ArtifactDownload>, WebDataError> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_tracks_exact_step_transitions_and_exit_codes() {
+        let data = DemoWebData::new("Local demo".to_owned(), ".ci/workflows/demo.yml".to_owned());
+        data.set_steps(&[
+            (1, "Build".to_owned(), "powershell".to_owned()),
+            (2, "Test".to_owned(), "cmd".to_owned()),
+        ]);
+        data.start();
+        data.step_started(1, "Build");
+
+        let running = data.dashboard_snapshot();
+        assert_eq!(running.status, "In progress");
+        assert_eq!(running.steps[0].status, "In progress");
+        assert_eq!(running.steps[1].status, "Queued");
+
+        data.step_finished(1, 0);
+        data.step_started(2, "Test");
+        data.step_finished(2, 7);
+        data.finish(false, "test failed");
+
+        let failed = data.dashboard_snapshot();
+        assert_eq!(failed.status, "Failed");
+        assert_eq!(failed.steps[0].status, "Succeeded");
+        assert_eq!(failed.steps[0].exit_code, Some(0));
+        assert_eq!(failed.steps[1].status, "Failed");
+        assert_eq!(failed.steps[1].exit_code, Some(7));
+    }
+
+    #[tokio::test]
+    async fn dashboard_router_serves_state_and_locked_down_assets() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt as _;
+
+        let data = Arc::new(DemoWebData::new(
+            "Local demo".to_owned(),
+            "demo.yml".to_owned(),
+        ));
+        let response = demo_router(data)
+            .oneshot(
+                Request::builder()
+                    .uri("/__demo/state")
+                    .body(Body::empty())
+                    .expect("state request"),
+            )
+            .await
+            .expect("state response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert!(
+            response.headers()[CONTENT_SECURITY_POLICY]
+                .to_str()
+                .expect("CSP text")
+                .contains("connect-src 'self'")
+        );
     }
 }

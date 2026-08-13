@@ -15,7 +15,10 @@ use automata_ci_workflow_github::{
 };
 
 use crate::{
-    app::{http, web::DemoWebData},
+    app::{
+        http,
+        web::{DemoWebData, demo_router},
+    },
     cli::DemoArgs,
     server::Readiness,
 };
@@ -54,8 +57,8 @@ pub(crate) async fn run(args: &DemoArgs) -> Result<()> {
                 DemoWebData::context(),
             )
             .context("failed to initialize demo visualization")?
-            .layer(axum::middleware::from_fn(demo_auto_refresh));
-            let url = format!("http://{address}{}", data.run_url());
+            .merge(demo_router(data.clone()));
+            let url = format!("http://{address}{}", DemoWebData::dashboard_url());
             eprintln!("Visual run page: {url}");
             Some(tokio::spawn(
                 async move { axum::serve(listener, router).await },
@@ -85,24 +88,6 @@ pub(crate) async fn run(args: &DemoArgs) -> Result<()> {
         let _ = args;
         bail!("the native local demo is currently available only on Windows")
     }
-}
-
-async fn demo_auto_refresh(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let mut response = next.run(request).await;
-    if response
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("text/html"))
-    {
-        response
-            .headers_mut()
-            .insert("refresh", axum::http::HeaderValue::from_static("1"));
-    }
-    response
 }
 
 #[allow(
@@ -290,6 +275,10 @@ mod windows {
     const MAX_REPOSITORY_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_STEP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native demo setup keeps lifecycle and cleanup ownership visible in one boundary"
+    )]
     pub(super) fn run(args: &DemoArgs, visualization: &DemoWebData) -> Result<()> {
         let repository = args
             .repo
@@ -317,6 +306,12 @@ mod windows {
             .strip_prefix(&repository)
             .context("workflow containment changed")?;
         let steps = compile_single_job(relative_workflow, &source)?;
+        visualization.set_steps(
+            &steps
+                .iter()
+                .map(|step| (step.number, step.name.clone(), step.shell.clone()))
+                .collect::<Vec<_>>(),
+        );
 
         eprintln!("EVALUATION MODE: trusted workflow processes inherit your Windows user token");
         let root = DemoRoot::new()?;
@@ -429,6 +424,13 @@ mod windows {
             io::stderr().write_all(output.stderr())?;
             visualization.stdout(output.stdout());
             visualization.stderr(output.stderr());
+            let exit_code = match output.termination() {
+                ExecutionTermination::Exited(code) => code,
+                ExecutionTermination::Signalled => -1,
+                ExecutionTermination::TimedOut => -2,
+                ExecutionTermination::Cancelled => -3,
+            };
+            visualization.step_finished(step.number, exit_code);
             ensure!(
                 !output.was_truncated(),
                 "demo step output exceeded the 4 MiB limit"

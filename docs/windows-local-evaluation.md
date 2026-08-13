@@ -55,13 +55,15 @@ cargo run --locked --bin automata -- demo `
 The acknowledgement flag is mandatory. The command prints a URL such as:
 
 ```text
-Visual run page: http://127.0.0.1:8080/local/evaluation/actions/runs/...
+Visual run page: http://127.0.0.1:8080/__demo
 ```
 
-Open it in a browser. The ordinary Automata run and job-log pages refresh once
-per second while showing queued, in-progress, and completed state plus captured
-standard output, standard error, and step lifecycle messages. A successful run
-ends with `demo workflow completed successfully`.
+Open it in a browser. A dedicated evaluation dashboard displays every step as
+queued, running, succeeded, or failed with its shell, elapsed time, and exit
+code. Server-sent events update the dashboard immediately without full-page
+refreshes. Links open the ordinary Automata run and searchable job-log pages,
+which retain captured standard output, standard error, and lifecycle messages.
+A successful run ends with `demo workflow completed successfully`.
 
 The visual server remains available after execution so the result can be
 inspected. Press `Ctrl-C` to stop it. Use `--no-visual` for automation that must
@@ -143,9 +145,8 @@ belong in the local durable composition.
    layering, conditions, and supported expressions use the production path.
 2. Add a native end-to-end test that invokes the shipped `automata` process and
    verifies the visual routes plus cleanup after success, failure, and interruption.
-3. Replace one-second page refreshes with a bounded live-update transport.
-4. Add bounded cancellation on Ctrl-C rather than waiting for the current step
+3. Add bounded cancellation on Ctrl-C rather than waiting for the current step
    timeout.
-5. Add selected multi-step semantics without enabling `uses:` actions.
-6. Design the separate loopback durable composition after the native demo is a
+4. Add selected multi-step semantics without enabling `uses:` actions.
+5. Design the separate loopback durable composition after the native demo is a
    reliable onboarding path.
