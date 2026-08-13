@@ -527,10 +527,11 @@ fn token_digest(token: &[u8]) -> Result<[u8; 32], ApiError> {
     if encoded.len() != TOKEN_ENCODED_BYTES {
         return Err(ApiError::EnrollmentRejected);
     }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(encoded)
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    let decoded_length = URL_SAFE_NO_PAD
+        .decode_slice(encoded, &mut *decoded)
         .map_err(|_| ApiError::EnrollmentRejected)?;
-    if decoded.len() != TOKEN_BYTES {
+    if decoded_length != TOKEN_BYTES {
         return Err(ApiError::EnrollmentRejected);
     }
     let mut digest = Sha256::new();

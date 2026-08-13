@@ -38,8 +38,8 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         .context("runner enrollment could not load the product configuration")?;
     let destinations = CredentialDestinations::from_config(&config)?;
     let origin = enrollment_origin(&args.server)?;
-    let validation_time_seconds = current_unix_time_seconds()?;
-    if destinations.finish_interrupted_cleanup(&config, validation_time_seconds)? {
+    let cleanup_validation_time_seconds = current_unix_time_seconds()?;
+    if destinations.finish_interrupted_cleanup(&config, cleanup_validation_time_seconds)? {
         println!("runner enrollment was already completed");
         return Ok(());
     }
@@ -47,56 +47,57 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         Some(stage) => stage,
         None => destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?,
     };
-    let bytes = if let Some(bytes) = destinations.load_response()? {
-        bytes
-    } else {
-        let endpoint = origin
-            .join(REDEEM_PATH)
-            .context("runner enrollment endpoint is invalid")?;
-        let body = RedeemRequest {
-            operation_id: stage.operation_id,
-            token: stage.token.as_str(),
-            runner_name: &stage.runner_name,
-            capabilities: &stage.capabilities,
-            csr_pem: &stage.csr_pem,
-        };
-        let client = Client::builder()
-            .https_only(origin.scheme() == "https")
-            .redirect(Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .retry(reqwest::retry::never())
-            .no_proxy()
-            .build()
-            .context("runner enrollment HTTP client could not be configured")?;
-        let request_body = Zeroizing::new(
-            serde_json::to_vec(&body).context("runner enrollment request could not be encoded")?,
-        );
-        let response = client
-            .post(endpoint)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Bytes::from_owner(request_body))
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .context("runner enrollment request failed")?;
-        if response.status() != StatusCode::CREATED {
-            let status = response.status();
-            bail!("runner enrollment was rejected with HTTP {status}");
-        }
-        if !response.headers().get_all(header::CONTENT_TYPE).iter().eq([
-            &header::HeaderValue::from_static("application/json; charset=utf-8"),
-        ]) {
-            bail!("runner enrollment response has an invalid content type");
-        }
-        let bytes = read_bounded_response(response).await?;
-        destinations.persist_response(&bytes)?;
-        bytes
+    let staged_response = destinations.load_response()?;
+    let endpoint = origin
+        .join(REDEEM_PATH)
+        .context("runner enrollment endpoint is invalid")?;
+    let body = RedeemRequest {
+        operation_id: stage.operation_id,
+        token: stage.token.as_str(),
+        runner_name: &stage.runner_name,
+        capabilities: &stage.capabilities,
+        csr_pem: &stage.csr_pem,
     };
+    let client = Client::builder()
+        .https_only(origin.scheme() == "https")
+        .redirect(Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .build()
+        .context("runner enrollment HTTP client could not be configured")?;
+    let request_body = Zeroizing::new(
+        serde_json::to_vec(&body).context("runner enrollment request could not be encoded")?,
+    );
+    let response = client
+        .post(endpoint)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Bytes::from_owner(request_body))
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("runner enrollment request failed")?;
+    if response.status() != StatusCode::CREATED {
+        let status = response.status();
+        bail!("runner enrollment was rejected with HTTP {status}");
+    }
+    if !response.headers().get_all(header::CONTENT_TYPE).iter().eq([
+        &header::HeaderValue::from_static("application/json; charset=utf-8"),
+    ]) {
+        bail!("runner enrollment response has an invalid content type");
+    }
+    let bytes = read_bounded_response(response).await?;
+    if let Some(staged_response) = staged_response {
+        validate_staged_response(&staged_response, &bytes)?;
+    } else {
+        destinations.persist_response(&bytes)?;
+    }
+    let response_validation_time_seconds = current_unix_time_seconds()?;
     let enrolled: RedeemResponse =
         serde_json::from_slice(&bytes).context("runner enrollment returned an invalid response")?;
-    validate_response(&config, &enrolled, validation_time_seconds)?;
-    stage.validate_certificate(&config, &enrolled, validation_time_seconds)?;
+    validate_response(&config, &enrolled, response_validation_time_seconds)?;
+    stage.validate_certificate(&config, &enrolled, response_validation_time_seconds)?;
     destinations.persist_exact(
         enrolled.server_ca_pem.as_bytes(),
         enrolled.certificate_chain_pem.as_bytes(),
@@ -107,6 +108,13 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         "enrolled runner {} in group {} (certificate expires at {})",
         enrolled.runner_id, enrolled.runner_group, enrolled.certificate_expires_at_seconds
     );
+    Ok(())
+}
+
+fn validate_staged_response(staged: &[u8], replayed: &[u8]) -> Result<()> {
+    if staged != replayed {
+        bail!("runner enrollment replay did not match its durable response receipt");
+    }
     Ok(())
 }
 
@@ -202,11 +210,17 @@ fn current_unix_time_seconds() -> Result<i64> {
 }
 
 fn validate_token(value: &str) -> Result<()> {
-    let decoded = value
+    let Some(encoded) = value
         .strip_prefix(TOKEN_PREFIX)
         .filter(|encoded| encoded.len() == TOKEN_ENCODED_BYTES)
-        .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok());
-    if decoded.is_none_or(|decoded| decoded.len() != TOKEN_BYTES) {
+    else {
+        bail!("runner enrollment token is invalid");
+    };
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    if !matches!(
+        URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
+        Ok(TOKEN_BYTES)
+    ) {
         bail!("runner enrollment token is invalid");
     }
     Ok(())
@@ -236,7 +250,7 @@ struct RedeemResponse {
 mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    use super::{TOKEN_PREFIX, enrollment_origin, validate_token};
+    use super::{TOKEN_PREFIX, enrollment_origin, validate_staged_response, validate_token};
 
     #[test]
     fn enrollment_origin_requires_tls_except_for_literal_loopback() {
@@ -255,5 +269,11 @@ mod tests {
         assert!(validate_token("plain-secret").is_err());
         assert!(validate_token(&format!("{token}A")).is_err());
         assert!(validate_token(&format!("{token}\n")).is_err());
+    }
+
+    #[test]
+    fn staged_response_requires_a_byte_exact_replay() {
+        validate_staged_response(b"exact", b"exact").expect("exact replay");
+        assert!(validate_staged_response(b"staged", b"different").is_err());
     }
 }

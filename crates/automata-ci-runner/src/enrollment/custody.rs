@@ -865,6 +865,33 @@ mod tests {
         validate_certificate_response, validate_destination_set,
     };
     use crate::enrollment::RedeemResponse;
+    #[cfg(target_os = "linux")]
+    use crate::product::RunnerProductConfig;
+
+    #[cfg(target_os = "linux")]
+    fn product_config(root: &std::path::Path, runner_id: Uuid) -> RunnerProductConfig {
+        let mut document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../config/runner.local-1.example.json"
+        ))
+        .expect("example runner configuration");
+        document["runner_id"] = serde_json::json!(runner_id);
+        for (field, filename) in [
+            ("server_roots", "server-roots.pem"),
+            ("certificate_chain", "runner-chain.pem"),
+            ("private_key", "runner-key.pem"),
+        ] {
+            let path = root.join(filename);
+            document["tls"][field]["path"] = serde_json::Value::String(
+                path.to_str()
+                    .expect("test credential path is UTF-8")
+                    .to_owned(),
+            );
+        }
+        RunnerProductConfig::from_json(
+            &serde_json::to_vec(&document).expect("runner configuration JSON"),
+        )
+        .expect("runner product configuration")
+    }
 
     #[test]
     fn partial_credential_publication_is_reconciled_exactly_without_overwrite() {
@@ -900,6 +927,77 @@ mod tests {
         assert!(error.to_string().contains("does not match"));
         assert_eq!(fs::read(&destinations.server_roots).unwrap(), b"roots");
         fs::remove_dir_all(&root).expect("remove exact test root");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn persisted_completion_response_is_rejected_at_expiry_and_recovers_before_it() {
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(".automata-enroll-expiry-test-{}", Uuid::new_v4()));
+        fs::create_dir(&root).expect("test root");
+        let runner_id = Uuid::new_v4();
+        let config = product_config(&root, runner_id);
+        let destinations =
+            CredentialDestinations::from_config(&config).expect("credential destinations");
+
+        let not_before = 1_800_000_000;
+        let expires_at = 1_900_000_000;
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
+        let mut ca_params = CertificateParams::default();
+        ca_params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before)
+            .expect("CA not-before");
+        ca_params.not_after = time::OffsetDateTime::from_unix_timestamp(expires_at + 60)
+            .expect("CA not-after");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("CA");
+
+        let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
+        let mut leaf_params = CertificateParams::default();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, runner_id.hyphenated().to_string());
+        leaf_params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before)
+            .expect("leaf not-before");
+        leaf_params.not_after = time::OffsetDateTime::from_unix_timestamp(expires_at)
+            .expect("leaf not-after");
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let leaf = leaf_params
+            .signed_by(&runner_key, &issuer)
+            .expect("runner leaf");
+        let runner_private_key_pem = zeroize::Zeroizing::new(runner_key.serialize_pem());
+        let response = RedeemResponse {
+            runner_id,
+            runner_group: "default".to_owned(),
+            control_endpoint: config.control_endpoint().to_string(),
+            certificate_chain_pem: format!("{}{}", leaf.pem(), issuer.pem()),
+            server_ca_pem: issuer.pem(),
+            certificate_expires_at_seconds: expires_at,
+        };
+        destinations
+            .persist_response(&serde_json::to_vec(&response).expect("response JSON"))
+            .expect("persist response");
+        destinations
+            .persist_exact(
+                response.server_ca_pem.as_bytes(),
+                response.certificate_chain_pem.as_bytes(),
+                runner_private_key_pem.as_bytes(),
+            )
+            .expect("persist credentials");
+
+        destinations
+            .finish_interrupted_cleanup(&config, expires_at)
+            .expect_err("expired completion response must remain fail-closed");
+        assert!(destinations.response_stage.exists());
+        assert!(
+            destinations
+                .finish_interrupted_cleanup(&config, expires_at - 1)
+                .expect("fresh completion recovery")
+        );
+        assert!(!destinations.response_stage.exists());
+        fs::remove_dir_all(&root).expect("remove expiry test root");
     }
 
     #[test]
@@ -1103,7 +1201,7 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at,
         )
-        .expect_err("an expired persisted response must not install credentials");
+        .expect_err("an expired leaf must not install credentials");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(true, false, false).pem(), issuer.pem());
