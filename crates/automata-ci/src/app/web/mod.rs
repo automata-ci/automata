@@ -1,5 +1,6 @@
 mod codec;
 mod data;
+mod demo;
 mod encoding;
 mod live;
 mod model;
@@ -16,6 +17,7 @@ pub(crate) use data::{ManagementRbacWebData, RbacWebData, RequestContext, Viewer
 pub(crate) use data::{
     SetupPageAvailability, SetupPageAvailabilityError, SetupPageAvailabilityState,
 };
+pub(crate) use demo::DemoWebData;
 pub(crate) use live::LiveWebData;
 pub use routes::router;
 pub(crate) use routes::router_with_data_and_setup_availability;

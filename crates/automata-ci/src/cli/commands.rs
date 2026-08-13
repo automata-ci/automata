@@ -196,7 +196,7 @@ pub struct PreviewArgs {
     pub listen: SocketAddr,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 /// Arguments for the disposable, trusted local Windows execution path.
 pub struct DemoArgs {
     /// Repository tree copied into the disposable native workspace.
@@ -205,6 +205,12 @@ pub struct DemoArgs {
     /// Workflow file beneath the selected repository.
     #[arg(long, value_name = "PATH")]
     pub workflow: PathBuf,
+    /// Browser visualization listener, always restricted to literal loopback.
+    #[arg(long, default_value = "127.0.0.1:8080", value_name = "LOOPBACK_ADDR")]
+    pub listen: SocketAddr,
+    /// Execute without serving the visual run page; intended for tests and automation.
+    #[arg(long)]
+    pub no_visual: bool,
     /// Acknowledge that workflow processes inherit the current Windows user token.
     #[arg(long)]
     pub allow_host_execution: bool,

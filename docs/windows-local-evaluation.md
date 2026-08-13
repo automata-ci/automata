@@ -5,8 +5,9 @@ Status: **Experimental on the feature branch tracked by
 
 The local demo parses and compiles one workflow, copies its repository into a
 disposable workspace, and executes literal `run:` steps with the trusted native
-Windows provider. It does not start PostgreSQL, object storage, a control plane,
-or a runner service.
+Windows provider. It also serves the existing Automata browser interface on
+loopback with the live run status, job, and captured logs. It does not start
+PostgreSQL, object storage, a control plane, or a runner service.
 
 The separate [durable Windows control-plane proposal](windows-control-plane-design-proposal.md)
 and [release roadmap](windows-release-roadmap.md) retain the production service,
@@ -51,12 +52,21 @@ cargo run --locked --bin automata -- demo `
   --allow-host-execution
 ```
 
-The acknowledgement flag is mandatory. A successful run prints each step's
-bounded standard output and ends with:
+The acknowledgement flag is mandatory. The command prints a URL such as:
 
 ```text
-demo workflow completed successfully
+Visual run page: http://127.0.0.1:8080/local/evaluation/actions/runs/...
 ```
+
+Open it in a browser. The ordinary Automata run and job-log pages refresh once
+per second while showing queued, in-progress, and completed state plus captured
+standard output, standard error, and step lifecycle messages. A successful run
+ends with `demo workflow completed successfully`.
+
+The visual server remains available after execution so the result can be
+inspected. Press `Ctrl-C` to stop it. Use `--no-visual` for automation that must
+exit immediately; this does not weaken execution validation. `--listen` may
+select another literal-loopback address but rejects non-loopback binds.
 
 The command deletes its temporary workspace after success or failure. It does
 not modify the selected repository.
@@ -102,6 +112,7 @@ workflow YAML
   -> validated logical plan
   -> trusted Windows Job Object provider
   -> bounded native process execution
+  -> in-memory projection into the existing SSR run and job-log pages
 ```
 
 It does not claim to prove durable scheduling, runner transport, authentication,
@@ -131,9 +142,10 @@ belong in the local durable composition.
 1. Execute through the full GitHub job executor so command files, environment
    layering, conditions, and supported expressions use the production path.
 2. Add a native end-to-end test that invokes the shipped `automata` process and
-   verifies cleanup after success, failure, and interruption.
-3. Add bounded cancellation on Ctrl-C rather than waiting for the current step
+   verifies the visual routes plus cleanup after success, failure, and interruption.
+3. Replace one-second page refreshes with a bounded live-update transport.
+4. Add bounded cancellation on Ctrl-C rather than waiting for the current step
    timeout.
-4. Add selected multi-step semantics without enabling `uses:` actions.
-5. Design the separate loopback durable composition after the native demo is a
+5. Add selected multi-step semantics without enabling `uses:` actions.
+6. Design the separate loopback durable composition after the native demo is a
    reliable onboarding path.

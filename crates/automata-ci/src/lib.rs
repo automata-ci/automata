@@ -58,7 +58,7 @@ async fn execute(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Server(args) => Box::pin(server::serve(args)).await,
         Command::Preview(args) => preview::serve(args).await,
-        Command::Demo(args) => local_demo::run(args),
+        Command::Demo(args) => local_demo::run(args).await,
         command => {
             let operator = command
                 .operator()

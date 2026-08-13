@@ -14,24 +14,95 @@ use automata_ci_workflow_github::{
     SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 
-use crate::cli::DemoArgs;
+use crate::{
+    app::{http, web::DemoWebData},
+    cli::DemoArgs,
+    server::Readiness,
+};
 
 const MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
 
-pub(crate) fn run(args: &DemoArgs) -> Result<()> {
+pub(crate) async fn run(args: &DemoArgs) -> Result<()> {
     ensure!(
         args.allow_host_execution,
         "demo workflows inherit the current Windows user token; rerun with --allow-host-execution only for a trusted workflow"
     );
+    ensure!(
+        args.listen.ip().is_loopback(),
+        "demo visualization must bind a literal loopback address"
+    );
     #[cfg(windows)]
     {
-        windows::run(args)
+        let data = Arc::new(DemoWebData::new(
+            "Native Windows local evaluation".to_owned(),
+            args.workflow.to_string_lossy().replace('\\', "/"),
+        ));
+        let server = if args.no_visual {
+            None
+        } else {
+            let listener = tokio::net::TcpListener::bind(args.listen)
+                .await
+                .context("failed to bind demo visualization listener")?;
+            let address = listener
+                .local_addr()
+                .context("failed to inspect demo listener")?;
+            let router = http::router_with_readiness_web_data(
+                Readiness::all_ready(),
+                data.clone(),
+                None,
+                None,
+                DemoWebData::context(),
+            )
+            .context("failed to initialize demo visualization")?
+            .layer(axum::middleware::from_fn(demo_auto_refresh));
+            let url = format!("http://{address}{}", data.run_url());
+            eprintln!("Visual run page: {url}");
+            Some(tokio::spawn(
+                async move { axum::serve(listener, router).await },
+            ))
+        };
+        data.start();
+        let owned_args = args.clone();
+        let execution_data = data.clone();
+        let execution =
+            tokio::task::spawn_blocking(move || windows::run(&owned_args, &execution_data))
+                .await
+                .context("native demo execution task failed")?;
+        if let Err(error) = &execution {
+            data.finish(false, &format!("Demo setup or execution failed: {error}"));
+        }
+        if server.is_some() {
+            eprintln!("Demo finished; inspect the visual run page, then press Ctrl-C to stop it");
+            crate::shutdown::wait().await;
+        }
+        if let Some(server) = server {
+            server.abort();
+        }
+        execution
     }
     #[cfg(not(windows))]
     {
         let _ = args;
         bail!("the native local demo is currently available only on Windows")
     }
+}
+
+async fn demo_auto_refresh(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    if response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"))
+    {
+        response
+            .headers_mut()
+            .insert("refresh", axum::http::HeaderValue::from_static("1"));
+    }
+    response
 }
 
 #[allow(
@@ -219,7 +290,7 @@ mod windows {
     const MAX_REPOSITORY_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_STEP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
-    pub(super) fn run(args: &DemoArgs) -> Result<()> {
+    pub(super) fn run(args: &DemoArgs, visualization: &DemoWebData) -> Result<()> {
         let repository = args
             .repo
             .canonicalize()
@@ -291,7 +362,13 @@ mod windows {
             fs::create_dir_all(scratch.join("home"))
                 .context("could not create demo process home")?;
             copy_repository(&repository, &workspace)?;
-            execute_steps(endpoint.as_ref(), &workspace, &scratch, &steps)
+            execute_steps(
+                endpoint.as_ref(),
+                &workspace,
+                &scratch,
+                &steps,
+                visualization,
+            )
         })();
         drop(endpoint);
         let cleanup = provider.destroy(
@@ -303,7 +380,12 @@ mod windows {
             &NeverCancelled,
         );
         if let Err(error) = cleanup {
+            visualization.finish(false, "Workspace cleanup failed");
             return Err(error).context("demo execution ended but workspace cleanup failed");
+        }
+        match &execution {
+            Ok(()) => visualization.finish(true, "Demo workflow completed successfully"),
+            Err(error) => visualization.finish(false, &format!("Demo workflow failed: {error}")),
         }
         execution
     }
@@ -313,9 +395,11 @@ mod windows {
         workspace: &Path,
         scratch: &Path,
         steps: &[DemoStep],
+        visualization: &DemoWebData,
     ) -> Result<()> {
         for step in steps {
             eprintln!("==> step {}: {}", step.number, step.name);
+            visualization.step_started(step.number, &step.name);
             let extension = match step.shell.to_ascii_lowercase().as_str() {
                 "powershell" | "pwsh" => "ps1",
                 "cmd" => "cmd",
@@ -343,6 +427,8 @@ mod windows {
                 .context("native demo step failed to execute")?;
             io::stdout().write_all(output.stdout())?;
             io::stderr().write_all(output.stderr())?;
+            visualization.stdout(output.stdout());
+            visualization.stderr(output.stderr());
             ensure!(
                 !output.was_truncated(),
                 "demo step output exceeded the 4 MiB limit"
@@ -591,7 +677,7 @@ jobs:
 
         use automata_ci_execution::OperationId;
 
-        use crate::cli::DemoArgs;
+        use crate::{app::web::DemoWebData, cli::DemoArgs};
 
         let repository =
             std::env::temp_dir().join(format!("automata-demo-test-{}", OperationId::new()));
@@ -617,11 +703,19 @@ jobs:
         )
         .expect("write demo test workflow");
 
-        let result = super::run(&DemoArgs {
-            repo: repository.clone(),
-            workflow: Path::new(".ci/workflows/demo.yml").to_path_buf(),
-            allow_host_execution: true,
-        });
+        let visualization =
+            DemoWebData::new("Local demo".to_owned(), ".ci/workflows/demo.yml".to_owned());
+        visualization.start();
+        let result = super::windows::run(
+            &DemoArgs {
+                repo: repository.clone(),
+                workflow: Path::new(".ci/workflows/demo.yml").to_path_buf(),
+                listen: "127.0.0.1:8080".parse().expect("loopback listen"),
+                no_visual: true,
+                allow_host_execution: true,
+            },
+            &visualization,
+        );
         let _ = fs::remove_dir_all(&repository);
         result.expect("native demo workflow executes");
     }
