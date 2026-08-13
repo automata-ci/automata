@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package automata.management.v1;
 
-import "google/api/annotations.proto";
-import "google/api/field_behavior.proto";
 import "google/protobuf/timestamp.proto";
 
 // Administers one Automata Core shard on behalf of an authorized external
@@ -15,50 +13,46 @@ service ShardManagementService {
   // stable response without repeating effects.
   rpc ProvisionWorkspace(ProvisionWorkspaceRequest) returns (ProvisionWorkspaceResponse) {
     option idempotency_level = IDEMPOTENT;
-    option (google.api.http) = {
-      post: "/internal/v1/workspaces"
-      body: "*"
-    };
   }
 }
 
 // Identifies the workspace that Core must create.
 message WorkspaceProvisioningTarget {
-  // Cloud-generated, non-nil canonical lower-case UUID. Core persists this
-  // exact value as the tenant identity.
-  string workspace_id = 1 [(google.api.field_behavior) = REQUIRED];
+  // External-control-plane-generated, non-nil canonical lower-case UUID. Core
+  // persists this exact value as the tenant identity.
+  string workspace_id = 1;
 
   // Non-authoritative, trimmed display label.
-  string display_name = 2 [(google.api.field_behavior) = REQUIRED];
+  string display_name = 2;
 }
 
 // Identifies the external human who receives the initial owner membership.
 message InitialWorkspaceOwner {
   // Exact configured HTTPS issuer origin for delegated actor assertions.
-  string issuer = 1 [(google.api.field_behavior) = REQUIRED];
+  string issuer = 1;
 
   // Stable external account subject as a non-nil canonical lower-case UUID.
-  string subject = 2 [(google.api.field_behavior) = REQUIRED];
+  string subject = 2;
 
   // Non-authoritative, trimmed display label.
-  string display_name = 3 [(google.api.field_behavior) = REQUIRED];
+  string display_name = 3;
 }
 
 // Durable, idempotent request to provision one workspace.
 message ProvisionWorkspaceRequest {
   // Stable non-nil canonical lower-case UUID generated before the first
   // network attempt and reused across every retry.
-  string operation_id = 1 [(google.api.field_behavior) = REQUIRED];
+  string operation_id = 1;
 
   // Expected immutable shard identity, already verified through capability
   // discovery.
-  string shard_id = 2 [(google.api.field_behavior) = REQUIRED];
+  string shard_id = 2;
 
   // Workspace identity and initial label.
-  WorkspaceProvisioningTarget workspace = 3 [(google.api.field_behavior) = REQUIRED];
+  WorkspaceProvisioningTarget workspace = 3;
 
   // External identity that receives Core's fixed initial-owner role.
-  InitialWorkspaceOwner initial_owner = 4 [(google.api.field_behavior) = REQUIRED];
+  InitialWorkspaceOwner initial_owner = 4;
 }
 
 // Stable result stored by Core in the provisioning transaction.

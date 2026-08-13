@@ -28,6 +28,8 @@ members = [
     "crates/automata-ci-postgres-test-support",
     "crates/automata-ci-protocol",
     "crates/automata-ci-protocol-protobuf",
+    "crates/automata-ci-provisioning",
+    "crates/automata-ci-provisioning-grpc",
     "crates/automata-ci-results-github",
     "crates/automata-ci-runner",
     "crates/automata-ci-runner-auth",
@@ -101,6 +103,8 @@ automata-ci-output-policy = { path = "crates/automata-ci-output-policy", version
 automata-ci-postgres-test-support = { path = "crates/automata-ci-postgres-test-support" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
+automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }
+automata-ci-provisioning-grpc = { path = "crates/automata-ci-provisioning-grpc", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
 automata-ci-runner-auth = { path = "crates/automata-ci-runner-auth", version = "0.1.0" }
 automata-ci-runner-auth-postgres = { path = "crates/automata-ci-runner-auth-postgres", version = "0.1.0" }
@@ -159,7 +163,11 @@ time = { version = "0.3.55", default-features = false, features = ["parsing", "s
 tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tokio-stream = { version = "0.1.17", default-features = false }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+tonic = { version = "=0.14.6", default-features = false }
+tonic-prost = { version = "=0.14.6", default-features = false }
+tonic-types = { version = "=0.14.6", default-features = false }
 tower = { version = "0.5.2", features = ["timeout", "util"] }
 tower-service = "=0.3.3"
 tracing = "0.1.41"
