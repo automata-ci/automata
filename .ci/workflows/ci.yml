@@ -66,7 +66,7 @@ jobs:
       - name: Lint workflows and shell scripts
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
-          target/ci-tools/actionlint .ci/workflows/*.yml
+          target/ci-tools/actionlint .ci/workflows/*.yml .github/workflows/*.yml
           shellcheck -x \
             scripts/install.sh \
             scripts/ci/*.sh \
@@ -86,6 +86,8 @@ jobs:
           ./scripts/dev/git-bridge-firewall.test.sh
           ./scripts/dev/results-firewall.test.sh
           ./scripts/dev/git-http-server.test.sh
+          ./scripts/ci/tests/benchmark-postgres-tests.test.sh
+          python3 scripts/ci/tests/psql-test-database.test.py
           ./scripts/ci/tests/container-context.test.sh
           ./scripts/ci/tests/install.test.sh
           python3 scripts/ci/tests/release-handoff.test.py
@@ -129,75 +131,9 @@ jobs:
           crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
 
   rust_coverage:
-    name: Rust ordinary coverage
+    name: Rust coverage and PostgreSQL invariants
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Install pinned Rust coverage tooling
-        run: |
-          rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --version 0.8.7 --locked
-
-      - name: Test Rust workspace and enforce ordinary coverage
-        run: |
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary
-
-      - name: Upload service-aware Rust coverage report
-        if: ${{ always() && hashFiles('target/coverage/rust/manifest.json') != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-ordinary
-          path: |
-            target/coverage/rust/coverage.lcov
-            target/coverage/rust/manifest.json
-            target/coverage/rust/summary.json
-          if-no-files-found: error
-          retention-days: 14
-
-  renderer_tests:
-    name: Rust renderer tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Test Rust renderer
-        run: |
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked
-          cargo test -p automata-ci-ui-renderer --doc --all-features --locked
-
-  postgres:
-    name: PostgreSQL invariants
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     services:
       postgres:
         image: docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
@@ -225,21 +161,78 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Install PostgreSQL client
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends postgresql-client
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Verify PostgreSQL 18.4
         env:
           PGPASSWORD: automata-ci-local-only
         run: ./scripts/ci/verify-postgres-version.sh
 
-      - name: Test PostgreSQL suites
-        run: ./scripts/ci/run-postgres-tests.sh
+      - name: Install pinned Rust coverage tooling
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.8.7 --locked
+
+      - name: Test Rust workspace and PostgreSQL invariants
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary postgres
+
+      - name: Upload service-aware Rust coverage report
+        if: ${{ always() && hashFiles('target/coverage/rust/manifest.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-ordinary
+          path: |
+            target/coverage/rust/coverage.lcov
+            target/coverage/rust/manifest.json
+            target/coverage/rust/summary.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload combined Rust and PostgreSQL coverage report
+        if: ${{ always() && hashFiles('target/coverage/rust/combined-manifest.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-ordinary-postgres
+          path: |
+            target/coverage/rust/combined-coverage.lcov
+            target/coverage/rust/combined-manifest.json
+            target/coverage/rust/combined-summary.json
+          if-no-files-found: error
+          retention-days: 14
+
+  renderer_tests:
+    name: Rust renderer tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Test Rust renderer
+        run: |
+          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
+          df -h -- "$GITHUB_WORKSPACE"
+          cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked
+          cargo test -p automata-ci-ui-renderer --doc --all-features --locked
 
   frontend:
     name: React SSR frontend
@@ -435,7 +428,6 @@ jobs:
       - verify
       - rust_coverage
       - renderer_tests
-      - postgres
       - frontend
       - renderer
     runs-on: ubuntu-24.04
@@ -447,7 +439,6 @@ jobs:
           VERIFY_RESULT: ${{ needs.verify.result }}
           RUST_COVERAGE_RESULT: ${{ needs.rust_coverage.result }}
           RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
-          POSTGRES_RESULT: ${{ needs.postgres.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           RENDERER_RESULT: ${{ needs.renderer.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -456,7 +447,6 @@ jobs:
           [[ "$VERIFY_RESULT" == success ]]
           [[ "$RUST_COVERAGE_RESULT" == success ]]
           [[ "$RENDERER_TESTS_RESULT" == success ]]
-          [[ "$POSTGRES_RESULT" == success ]]
           [[ "$FRONTEND_RESULT" == success ]]
           if [[ "$EVENT_NAME" == pull_request ]]; then
             [[ "$RENDERER_RESULT" == success || "$RENDERER_RESULT" == skipped ]]

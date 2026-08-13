@@ -1,5 +1,3 @@
-mod support;
-
 use std::{sync::Arc, time::Duration};
 
 use automata_ci_auth::{
@@ -28,7 +26,7 @@ use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 const CERTIFICATE_LIFETIME_SECONDS: i64 = 86_400;
 
@@ -322,18 +320,16 @@ async fn database_expiry_dominates_a_slow_process_clock_after_query_lock_wait() 
         insert_certificate(database.pool(), runner, digest, expires_at).await?;
 
         let mut table_lock = database.pool().begin().await?;
+        let table_lock_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *table_lock)
+            .await?;
         sqlx::query("LOCK TABLE runner_machine_certificates IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *table_lock)
             .await?;
         let blocked_directory = PostgresRunnerMachineDirectory::new(database.pool().clone());
-        let mut blocked_lookup =
+        let blocked_lookup =
             tokio::spawn(async move { blocked_directory.find_by_leaf_sha256(digest).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut blocked_lookup)
-                .await
-                .is_err(),
-            "the fresh lookup must wait for its table read lock"
-        );
+        wait_for_certificate_table_blocker(database.pool(), table_lock_pid).await?;
 
         clock
             .set(expires_at.checked_mul(1_000).expect("expiry milliseconds"))
@@ -519,6 +515,34 @@ async fn database_now_millis(pool: &PgPool) -> TestResult<i64> {
             .fetch_one(pool)
             .await?,
     )
+}
+
+async fn wait_for_certificate_table_blocker(pool: &PgPool, blocking_pid: i32) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query LIKE '%runner_machine_certificates%'
+                )
+                ",
+            )
+            .bind(blocking_pid)
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "runner directory lookup did not reach its table lock")??;
+    Ok(())
 }
 
 async fn insert_tenant(pool: &PgPool, prefix: &str) -> TestResult<String> {

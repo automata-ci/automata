@@ -1,5 +1,3 @@
-mod support;
-
 use std::sync::Arc;
 
 use automata_ci_auth::{
@@ -35,7 +33,7 @@ use automata_ci_store::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 const FIRST_SENTINEL: &[u8] = b"first-plaintext-db-sentinel-3be018c4d4024e02";
 const RETRY_SENTINEL: &[u8] = b"retry-plaintext-db-sentinel-79501d2437624b62";

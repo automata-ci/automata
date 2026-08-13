@@ -1,5 +1,3 @@
-mod support;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -31,7 +29,7 @@ use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 const PRINCIPAL_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SESSION_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

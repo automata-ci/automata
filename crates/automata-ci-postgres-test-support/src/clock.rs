@@ -2,7 +2,7 @@ use sqlx::{PgPool, Row as _};
 
 use crate::{TestResult, message_error};
 
-/// A schema-local replacement for PostgreSQL's wall clock.
+/// A schema-local replacement for `PostgreSQL`'s wall clock.
 ///
 /// Pools created by this crate search `automata_test` before `pg_catalog`, so
 /// unqualified calls to `clock_timestamp()` resolve this fixture on every
@@ -13,10 +13,10 @@ pub struct TestClock {
 }
 
 impl TestClock {
-    /// Samples PostgreSQL's built-in wall clock and immediately freezes the
+    /// Samples `PostgreSQL`'s built-in wall clock and immediately freezes the
     /// test database at that millisecond.
     ///
-    /// The sampling call is schema-qualified deliberately. PostgreSQL does not
+    /// The sampling call is schema-qualified deliberately. `PostgreSQL` does not
     /// re-resolve an already prepared unqualified function call when a new
     /// same-named function appears earlier on `search_path`, so callers should
     /// use this constructor before executing application SQL that refers to
@@ -24,7 +24,7 @@ impl TestClock {
     ///
     /// # Errors
     ///
-    /// Returns an error if PostgreSQL cannot sample its wall clock or install
+    /// Returns an error if `PostgreSQL` cannot sample its wall clock or install
     /// the schema-local test clock.
     pub async fn freeze_at_database_now(pool: &PgPool) -> TestResult<Self> {
         let now_ms: i64 = sqlx::query_scalar(
@@ -43,7 +43,7 @@ impl TestClock {
     ///
     /// # Errors
     ///
-    /// Returns an error if the fixture objects already exist, PostgreSQL
+    /// Returns an error if the fixture objects already exist, `PostgreSQL`
     /// rejects their installation, or the installed clock is not observable.
     pub async fn freeze(pool: &PgPool, now_ms: i64) -> TestResult<Self> {
         let mut transaction = pool.begin().await?;
@@ -97,7 +97,7 @@ impl TestClock {
     ///
     /// # Errors
     ///
-    /// Returns an error if PostgreSQL rejects the update or the singleton clock
+    /// Returns an error if `PostgreSQL` rejects the update or the singleton clock
     /// row is missing.
     pub async fn set(&self, now_ms: i64) -> TestResult {
         let result = sqlx::query(
@@ -124,7 +124,7 @@ impl TestClock {
     /// # Errors
     ///
     /// Returns an error for a negative delta, a missing clock row, arithmetic
-    /// overflow, or another PostgreSQL failure.
+    /// overflow, or another `PostgreSQL` failure.
     pub async fn advance(&self, delta_ms: i64) -> TestResult<i64> {
         if delta_ms < 0 {
             return Err(message_error(format!(
@@ -150,7 +150,7 @@ impl TestClock {
     ///
     /// # Errors
     ///
-    /// Returns an error if PostgreSQL cannot evaluate or return the clock.
+    /// Returns an error if `PostgreSQL` cannot evaluate or return the clock.
     pub async fn now(&self) -> TestResult<i64> {
         Ok(sqlx::query_scalar(
             r"
@@ -163,7 +163,7 @@ impl TestClock {
         .await?)
     }
 
-    /// Removes the schema-local clock and restores PostgreSQL's wall clock.
+    /// Removes the schema-local clock and restores `PostgreSQL`'s wall clock.
     ///
     /// # Errors
     ///

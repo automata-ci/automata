@@ -65,11 +65,44 @@ use automata_ci_store::{
     github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
-
-const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 use uuid::Uuid;
 
 use common::{TestClock, TestDatabase, TestResult, run_with_database};
+
+const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+
+async fn wait_for_direct_blocker(
+    database: &TestDatabase,
+    blocking_pid: i32,
+    query_fragment: &str,
+) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query LIKE ('%' || $2 || '%')
+                )
+                ",
+            )
+            .bind(blocking_pid)
+            .bind(query_fragment)
+            .fetch_one(database.pool())
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "OIDC operation did not reach its expected database lock")??;
+    Ok(())
+}
 
 fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])
@@ -1939,6 +1972,9 @@ async fn authority_key_contention_crossing_lease_expiry_rolls_back_every_write()
             )?)
             .await?;
         let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query(
             "SELECT 1 FROM github_oidc_key_deadlines WHERE key_use = 'request_bearer' AND key_id = $1 FOR UPDATE",
         )
@@ -1955,15 +1991,10 @@ async fn authority_key_contention_crossing_lease_expiry_rolls_back_every_write()
             fixture.proposal.clone(),
             UnixMillis::new(fixture.millis(500)),
         )?;
-        let mut reserve = tokio::spawn(async move {
+        let reserve = tokio::spawn(async move {
             repository.reserve_github_oidc_authority(request).await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut reserve)
-                .await
-                .is_err(),
-            "authority reservation did not block on the held key row"
-        );
+        wait_for_direct_blocker(&database, blocker_pid, "github_oidc_key_deadlines").await?;
         fixture.clock.set(fixture.millis(33_500));
         blocker.commit().await?;
         assert_eq!(reserve.await?, Err(GithubOidcStoreError::Unauthorized));
@@ -2024,6 +2055,9 @@ async fn mint_key_contention_crossing_lease_expiry_rolls_back_slot_and_extension
         .fetch_one(database.pool())
         .await?;
         let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query(
             "SELECT 1 FROM github_oidc_key_deadlines WHERE key_use = 'id_token_signing' AND key_id = $1 FOR UPDATE",
         )
@@ -2034,13 +2068,8 @@ async fn mint_key_contention_crossing_lease_expiry_rolls_back_slot_and_extension
         let service = Arc::new(oidc_service(&database, &fixture, fixture.current_policy)?);
         let bearer = fixture.bearer.expose_secret().to_owned();
         let mint_at = fixture.seconds(1);
-        let mut mint = tokio::spawn(async move { service.mint(&bearer, None, mint_at).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut mint)
-                .await
-                .is_err(),
-            "mint did not block on the held signing-key row"
-        );
+        let mint = tokio::spawn(async move { service.mint(&bearer, None, mint_at).await });
+        wait_for_direct_blocker(&database, blocker_pid, "github_oidc_key_deadlines").await?;
         fixture.clock.set(fixture.millis(33_500));
         blocker.commit().await?;
         let error = mint.await?.expect_err("expired mint must roll back");
@@ -2094,6 +2123,9 @@ async fn mint_slot_contention_crossing_lease_expiry_preserves_immutable_replay()
         assert_eq!(original_slot.2, i64::try_from(fixture.seconds(31))?);
 
         let mut blocker = database.pool().begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
         sqlx::query(
             "SELECT 1 FROM github_oidc_issuance_slots WHERE authority_id = $1 AND requested_audience IS NULL FOR UPDATE",
         )
@@ -2103,15 +2135,10 @@ async fn mint_slot_contention_crossing_lease_expiry_preserves_immutable_replay()
         fixture.clock.set(fixture.millis(32_000));
         let bearer = fixture.bearer.expose_secret().to_owned();
         let replacement_at = fixture.seconds(32);
-        let mut replacement = tokio::spawn(async move {
+        let replacement = tokio::spawn(async move {
             service.mint(&bearer, None, replacement_at).await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut replacement)
-                .await
-                .is_err(),
-            "replacement mint did not block on the held slot"
-        );
+        wait_for_direct_blocker(&database, blocker_pid, "github_oidc_issuance_slots").await?;
         fixture.clock.set(fixture.millis(33_500));
         blocker.commit().await?;
         let error = replacement

@@ -37,6 +37,15 @@ for lane in "${lanes[@]}"; do
   selected[$lane]=1
 done
 
+ordinary_checkpoint=false
+if (( ${#lanes[@]} > 1 )) && [[ -n "${selected[ordinary]+present}" ]]; then
+  if [[ "${lanes[0]}" != ordinary ]]; then
+    printf 'error: ordinary must be the first lane when collecting combined coverage\n' >&2
+    exit 2
+  fi
+  ordinary_checkpoint=true
+fi
+
 repository_root="$(git rev-parse --show-toplevel)"
 cd "$repository_root"
 # shellcheck source=scripts/ci/postgres-test-environment.sh
@@ -265,6 +274,9 @@ unset AUTOMATA_COVERAGE_LOCK_HELD
 install -d -m 0755 -- "$output_directory"
 rm -f -- \
   "$output_directory/coverage.lcov" \
+  "$output_directory/combined-coverage.lcov" \
+  "$output_directory/combined-manifest.json" \
+  "$output_directory/combined-summary.json" \
   "$output_directory/manifest.json" \
   "$output_directory/summary.json"
 coverage_stage="$(mktemp -d "$output_directory/.rust-coverage-stage.XXXXXX")"
@@ -296,6 +308,9 @@ cleanup_stage() {
   if [[ "${publish_complete-}" != true ]]; then
     rm -f -- \
       "$output_directory/coverage.lcov" \
+      "$output_directory/combined-coverage.lcov" \
+      "$output_directory/combined-manifest.json" \
+      "$output_directory/combined-summary.json" \
       "$output_directory/manifest.json" \
       "$output_directory/summary.json"
   fi
@@ -333,6 +348,10 @@ if [[ -z "$source_head" || -z "$source_content_digest" || -z "$source_state_toke
   printf 'error: workspace fingerprint returned an invalid record\n' >&2
   exit 2
 fi
+if [[ -n "${selected[postgres]+present}" || -n "${selected[s3]+present}" ]]; then
+  # Bind a reused job template to the exact source contents that initialized it.
+  export AUTOMATA_TEST_TEMPLATE_FINGERPRINT="$source_content_digest"
+fi
 
 export CARGO_TARGET_DIR="$repository_root/target/llvm-cov-target"
 coverage_environment="$(
@@ -347,59 +366,110 @@ eval "$coverage_environment"
 # the same target directory that the raw cargo commands below will reuse.
 cargo llvm-cov clean --workspace
 
+generate_coverage_report() {
+  local summary_path="$1"
+  local lcov_path="$2"
+  cargo llvm-cov report \
+    --remap-path-prefix \
+    --ignore-filename-regex="$ignore_regex" \
+    --json \
+    --summary-only \
+    --output-path "$summary_path"
+  cargo llvm-cov report \
+    --remap-path-prefix \
+    --ignore-filename-regex="$ignore_regex" \
+    --lcov \
+    --output-path "$lcov_path"
+}
+
+last_checker_status=0
+check_coverage_report() {
+  local summary_path="$1"
+  local lcov_path="$2"
+  local manifest_path="$3"
+  shift 3
+  local -a report_lanes=("$@")
+  local -a report_arguments=()
+  local report_lane
+  for report_lane in "${report_lanes[@]}"; do
+    report_arguments+=(--lane "$report_lane")
+  done
+  set +e
+  python3 scripts/ci/check-rust-coverage.py \
+    --policy "$policy" \
+    --summary "$summary_path" \
+    --lcov "$lcov_path" \
+    --manifest "$manifest_path" \
+    --source-head "$source_head" \
+    --source-content-digest "$source_content_digest" \
+    --source-state-token "$source_state_token" \
+    --source-entry-count "$source_entry_count" \
+    "${report_arguments[@]}"
+  last_checker_status=$?
+  set -e
+  if (( last_checker_status > 1 )); then
+    exit "$last_checker_status"
+  fi
+  if (( last_checker_status == 1 )); then
+    if ! python3 scripts/ci/validate-rust-coverage-failure.py \
+      --manifest "$manifest_path" \
+      --summary "$summary_path" \
+      --lcov "$lcov_path" \
+      --source-head "$source_head" \
+      --source-content-digest "$source_content_digest" \
+      --source-state-token "$source_state_token" \
+      --source-entry-count "$source_entry_count" \
+      "${report_arguments[@]}"
+    then
+      printf 'error: coverage checker exited 1 without a complete failed-guard manifest\n' >&2
+      exit 2
+    fi
+  fi
+}
+
+checker_status=0
 for lane in "${lanes[@]}"; do
   "run_${lane//-/_}"
+  if [[ "$ordinary_checkpoint" == true && "$lane" == ordinary ]]; then
+    generate_coverage_report \
+      "$coverage_stage/summary.json" \
+      "$coverage_stage/coverage.lcov"
+    check_coverage_report \
+      "$coverage_stage/summary.json" \
+      "$coverage_stage/coverage.lcov" \
+      "$coverage_stage/manifest.json" \
+      ordinary
+    checker_status=$last_checker_status
+    if (( checker_status != 0 )); then
+      break
+    fi
+  fi
 done
 if [[ "$postgres_cleanup_required" == true ]]; then
   cleanup_postgres_namespace_once
 fi
 
-cargo llvm-cov report \
-  --remap-path-prefix \
-  --ignore-filename-regex="$ignore_regex" \
-  --json \
-  --summary-only \
-  --output-path "$coverage_stage/summary.json"
-cargo llvm-cov report \
-  --remap-path-prefix \
-  --ignore-filename-regex="$ignore_regex" \
-  --lcov \
-  --output-path "$coverage_stage/coverage.lcov"
-
-guard_arguments=()
-for lane in "${lanes[@]}"; do
-  guard_arguments+=(--lane "$lane")
-done
-set +e
-python3 scripts/ci/check-rust-coverage.py \
-  --policy "$policy" \
-  --summary "$coverage_stage/summary.json" \
-  --lcov "$coverage_stage/coverage.lcov" \
-  --manifest "$coverage_stage/manifest.json" \
-  --source-head "$source_head" \
-  --source-content-digest "$source_content_digest" \
-  --source-state-token "$source_state_token" \
-  --source-entry-count "$source_entry_count" \
-  "${guard_arguments[@]}"
-checker_status=$?
-set -e
-if (( checker_status > 1 )); then
-  exit "$checker_status"
-fi
-if (( checker_status == 1 )); then
-  if ! python3 scripts/ci/validate-rust-coverage-failure.py \
-    --manifest "$coverage_stage/manifest.json" \
-    --summary "$coverage_stage/summary.json" \
-    --lcov "$coverage_stage/coverage.lcov" \
-    --source-head "$source_head" \
-    --source-content-digest "$source_content_digest" \
-    --source-state-token "$source_state_token" \
-    --source-entry-count "$source_entry_count" \
-    "${guard_arguments[@]}"
-  then
-    printf 'error: coverage checker exited 1 without a complete failed-guard manifest\n' >&2
-    exit 2
+if (( checker_status == 0 )); then
+  if [[ "$ordinary_checkpoint" == true ]]; then
+    generate_coverage_report \
+      "$coverage_stage/combined-summary.json" \
+      "$coverage_stage/combined-coverage.lcov"
+    check_coverage_report \
+      "$coverage_stage/combined-summary.json" \
+      "$coverage_stage/combined-coverage.lcov" \
+      "$coverage_stage/combined-manifest.json" \
+      "${lanes[@]}"
+  else
+    generate_coverage_report \
+      "$coverage_stage/summary.json" \
+      "$coverage_stage/coverage.lcov"
+    check_coverage_report \
+      "$coverage_stage/summary.json" \
+      "$coverage_stage/coverage.lcov" \
+      "$coverage_stage/manifest.json" \
+      "${lanes[@]}"
   fi
+  checker_status=$last_checker_status
 fi
 
 final_source_snapshot="$(
@@ -414,6 +484,17 @@ fi
 # last makes it the completion marker consumed by CI artifact upload.
 mv -- "$coverage_stage/summary.json" "$output_directory/summary.json"
 mv -- "$coverage_stage/coverage.lcov" "$output_directory/coverage.lcov"
+if [[ "$ordinary_checkpoint" == true && -f "$coverage_stage/combined-manifest.json" ]]; then
+  mv -- \
+    "$coverage_stage/combined-summary.json" \
+    "$output_directory/combined-summary.json"
+  mv -- \
+    "$coverage_stage/combined-coverage.lcov" \
+    "$output_directory/combined-coverage.lcov"
+  mv -- \
+    "$coverage_stage/combined-manifest.json" \
+    "$output_directory/combined-manifest.json"
+fi
 mv -- "$coverage_stage/manifest.json" "$output_directory/manifest.json"
 rmdir -- "$coverage_stage"
 coverage_stage=""

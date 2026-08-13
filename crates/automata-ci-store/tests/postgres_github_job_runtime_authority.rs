@@ -1974,7 +1974,7 @@ async fn wait_for_direct_database_blocker(pool: &sqlx::PgPool, blocker_pid: i32)
         }
     })
     .await
-    .map_err(|_| "runtime-authority revalidation did not reach its issuance-row lock")??;
+    .map_err(|_| "runtime-authority operation did not reach its expected database lock")??;
     Ok(())
 }
 
@@ -2297,6 +2297,9 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
     locked_id: Uuid,
 ) -> TestResult {
     let mut blocker = database.pool().begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
     let locked = sqlx::query(lock_sql)
         .bind(locked_id)
         .fetch_all(&mut *blocker)
@@ -2310,14 +2313,9 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
         identity.clone(),
         UnixMillis::new(identity.requested_at().get() + 1),
     )?;
-    let mut inspection =
+    let inspection =
         tokio::spawn(async move { store.inspect_github_runtime_authority(request).await });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(75), &mut inspection)
-            .await
-            .is_err(),
-        "inspection must wait for every exact graph row lock"
-    );
+    wait_for_direct_database_blocker(database.pool(), blocker_pid).await?;
     blocker.rollback().await?;
     assert!(inspection.await??.is_some());
     Ok(())

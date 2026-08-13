@@ -3,7 +3,7 @@ use std::{
     future::Future,
     str::FromStr as _,
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
 };
@@ -14,7 +14,11 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::{DATABASE_NAMESPACE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, TestResult, message_error};
+use crate::{
+    DATABASE_NAMESPACE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, INITIALIZER_FINGERPRINT_ENVIRONMENT,
+    TestResult, message_error,
+    timing::{TimingDetail, TimingOperation, TimingOutcome, TimingSpan},
+};
 
 const DATABASE_PREFIX: &str = "at_";
 const TEMPLATE_SUFFIX: &str = "_template";
@@ -23,6 +27,7 @@ const DEFAULT_POOL_CONNECTIONS: u32 = 16;
 const MINIMUM_POSTGRES_VERSION: i32 = 180_000;
 const TEMPLATE_MARKER_VERSION: &str = "automata-ci-postgres-test-support:v1";
 const TEMPLATE_LOCK_SALT: i64 = 6_482_851_405_936_141_723;
+const INITIALIZER_FINGERPRINT_LENGTH: usize = 64;
 
 const CLEANUP_LIVE: u8 = 0;
 const CLEANUP_RUNNING: u8 = 1;
@@ -30,6 +35,35 @@ const CLEANUP_COMPLETE: u8 = 2;
 const CLEANUP_FAILED: u8 = 3;
 
 static PROCESS_NAMESPACE: OnceLock<TestNamespace> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InitializerFingerprint(String);
+
+impl InitializerFingerprint {
+    fn new(value: impl Into<String>) -> TestResult<Self> {
+        let value = value.into();
+        if value.len() != INITIALIZER_FINGERPRINT_LENGTH
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(message_error(format!(
+                "PostgreSQL template initializer fingerprint must be exactly {INITIALIZER_FINGERPRINT_LENGTH} lowercase hexadecimal characters"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TemplatePreparation {
+    Prepared,
+    Reused,
+}
 
 /// Databases removed by one exact namespace-cleanup operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -43,7 +77,7 @@ pub struct NamespaceCleanup {
 /// A validated namespace that scopes a prepared template to one test job.
 ///
 /// Values contain only lowercase ASCII letters, digits, and underscores, and
-/// are capped so generated PostgreSQL identifiers remain within 63 bytes.
+/// are capped so generated `PostgreSQL` identifiers remain within 63 bytes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TestNamespace(String);
 
@@ -154,6 +188,7 @@ impl DatabaseIdentifier {
 pub struct PostgresTestHarness {
     admin_options: PgConnectOptions,
     namespace: TestNamespace,
+    initializer_fingerprint: Option<InitializerFingerprint>,
 }
 
 impl PostgresTestHarness {
@@ -162,7 +197,7 @@ impl PostgresTestHarness {
     /// If [`DATABASE_NAMESPACE_ENVIRONMENT`](crate::DATABASE_NAMESPACE_ENVIRONMENT)
     /// is unset, a stable process-local namespace is generated. Set an explicit
     /// job namespace when multiple test processes must share one template. CI
-    /// and every reused PostgreSQL server must supply a namespace unique to the
+    /// and every reused `PostgreSQL` server must supply a namespace unique to the
     /// complete run; the fallback is only a single-process convenience.
     ///
     /// # Errors
@@ -213,14 +248,21 @@ impl PostgresTestHarness {
                 "set {DATABASE_URL_ENVIRONMENT} to an isolated PostgreSQL 18 test server URL: {error}"
             ))
         })?;
-        Self::new(&database_url, namespace)
+        let harness = Self::new(&database_url, namespace)?;
+        match env::var(INITIALIZER_FINGERPRINT_ENVIRONMENT) {
+            Ok(fingerprint) => harness.with_initializer_fingerprint(fingerprint),
+            Err(env::VarError::NotPresent) => Ok(harness),
+            Err(error) => Err(message_error(format!(
+                "could not read {INITIALIZER_FINGERPRINT_ENVIRONMENT}: {error}"
+            ))),
+        }
     }
 
     /// Parses an explicit database URL and uses a validated job namespace.
     ///
     /// # Errors
     ///
-    /// Returns an error if `database_url` is not a valid PostgreSQL URL.
+    /// Returns an error if `database_url` is not a valid `PostgreSQL` URL.
     pub fn new(database_url: &str, namespace: impl Into<TestNamespace>) -> TestResult<Self> {
         let admin_options = PgConnectOptions::from_str(database_url).map_err(|error| {
             message_error(format!(
@@ -230,7 +272,28 @@ impl PostgresTestHarness {
         Ok(Self {
             admin_options,
             namespace: namespace.into(),
+            initializer_fingerprint: None,
         })
+    }
+
+    /// Adds an exact SHA-256 identity for the template initializer.
+    ///
+    /// The fingerprint becomes part of the template ownership marker. Reusing
+    /// the same namespace with a different fingerprint therefore fails closed
+    /// instead of silently cloning stale or incompatible fixture contents.
+    /// Prefer a digest of every migration and fixture input; a human-maintained
+    /// version label does not provide the same protection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `fingerprint` is exactly 64 lowercase
+    /// hexadecimal characters.
+    pub fn with_initializer_fingerprint(
+        mut self,
+        fingerprint: impl Into<String>,
+    ) -> TestResult<Self> {
+        self.initializer_fingerprint = Some(InitializerFingerprint::new(fingerprint)?);
+        Ok(self)
     }
 
     /// Returns the job namespace used for template and database names.
@@ -242,13 +305,15 @@ impl PostgresTestHarness {
     ///
     /// The initializer executes at most once for a namespace across cooperating
     /// processes. Its pool searches `automata_test, pg_catalog`. Callers must
-    /// supply a namespace unique to the complete CI run and change it whenever
-    /// initializer contents or migrations change; initializer identity is not
-    /// inferred or fingerprinted by this crate.
+    /// supply a namespace unique to the complete CI run. Set
+    /// [`INITIALIZER_FINGERPRINT_ENVIRONMENT`](crate::INITIALIZER_FINGERPRINT_ENVIRONMENT)
+    /// or call [`Self::with_initializer_fingerprint`] so incompatible
+    /// initializers fail closed. Without a fingerprint, callers must change the
+    /// namespace whenever initializer contents or migrations change.
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot be reached, the namespace is
+    /// Returns an error when `PostgreSQL` 18 cannot be reached, the namespace is
     /// owned by a different fixture, initialization fails, or exact recovery
     /// and advisory-lock release cannot be completed.
     pub async fn prepare_template<Initializer, InitializerFuture>(
@@ -259,33 +324,64 @@ impl PostgresTestHarness {
         Initializer: FnOnce(PgPool) -> InitializerFuture,
         InitializerFuture: Future<Output = TestResult>,
     {
-        let template_name = DatabaseIdentifier::template(&self.namespace)?;
-        let mut admin = self.admin_connection().await?;
-        require_postgres_18(&mut admin).await?;
-        acquire_template_lock(&mut admin, &template_name).await?;
+        let timing = TimingSpan::start(
+            TimingOperation::TemplatePrepare,
+            TimingDetail::PreparedTemplate,
+        );
+        let preparation = async {
+            let template_name = DatabaseIdentifier::template(&self.namespace)?;
+            let mut admin = self.admin_connection().await?;
+            require_postgres_18(&mut admin).await?;
+            acquire_template_lock(&mut admin, &template_name).await?;
 
-        let preparation = self
-            .prepare_template_while_locked(&mut admin, &template_name, initializer)
-            .await;
-        let unlock = release_template_lock(&mut admin, &template_name).await;
-        combine_operation_and_unlock(preparation, unlock)?;
+            let preparation = self
+                .prepare_template_while_locked(&mut admin, &template_name, initializer)
+                .await;
+            let unlock = release_template_lock(&mut admin, &template_name).await;
+            let disposition = combine_operation_and_unlock(preparation, unlock)?;
 
-        Ok(PreparedTemplate {
-            harness: self.clone(),
-            database_name: template_name,
-        })
+            Ok((
+                PreparedTemplate {
+                    harness: self.clone(),
+                    database_name: template_name,
+                },
+                disposition,
+            ))
+        }
+        .await;
+        match &preparation {
+            Ok((_template, TemplatePreparation::Prepared)) => {
+                timing.finish(TimingOutcome::Success);
+            }
+            Ok((_template, TemplatePreparation::Reused)) => {
+                timing.finish_as(TimingOperation::TemplateReuse, TimingOutcome::Success);
+            }
+            Err(_) => timing.finish(TimingOutcome::Error),
+        }
+        preparation.map(|(template, _disposition)| template)
     }
 
-    /// Creates an application-empty test database from PostgreSQL `template0`.
+    /// Creates an application-empty test database from `PostgreSQL` `template0`.
     ///
     /// Only the `automata_test` schema is bootstrapped, so migration tests start
     /// without any current application objects or migration ledger.
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot create, bootstrap, connect to,
+    /// Returns an error when `PostgreSQL` 18 cannot create, bootstrap, connect to,
     /// or clean up the isolated database.
     pub async fn create_empty_database(&self) -> TestResult<TestDatabase> {
+        let timing = TimingSpan::start(TimingOperation::Clone, TimingDetail::EmptyTemplateZero);
+        let database = self.create_empty_database_inner().await;
+        timing.finish(if database.is_ok() {
+            TimingOutcome::Success
+        } else {
+            TimingOutcome::Error
+        });
+        database
+    }
+
+    async fn create_empty_database_inner(&self) -> TestResult<TestDatabase> {
         let mut admin = self.admin_connection().await?;
         require_postgres_18(&mut admin).await?;
         let database_name = DatabaseIdentifier::test(&self.namespace)?;
@@ -355,15 +451,28 @@ impl PostgresTestHarness {
     /// # Errors
     ///
     /// Returns an error for an ownership mismatch, a malformed reserved name,
-    /// an administrative PostgreSQL failure, or an advisory-lock release error.
+    /// an administrative `PostgreSQL` failure, or an advisory-lock release error.
     pub async fn cleanup_namespace(&self) -> TestResult<NamespaceCleanup> {
-        let template_name = DatabaseIdentifier::template(&self.namespace)?;
-        let mut admin = self.admin_connection().await?;
-        require_postgres_18(&mut admin).await?;
-        acquire_template_lock(&mut admin, &template_name).await?;
-        let cleanup = self.cleanup_namespace_while_locked(&mut admin).await;
-        let unlock = release_template_lock(&mut admin, &template_name).await;
-        combine_operation_and_unlock(cleanup, unlock)
+        let timing = TimingSpan::start(
+            TimingOperation::NamespaceCleanup,
+            TimingDetail::CompleteNamespace,
+        );
+        let cleanup = async {
+            let template_name = DatabaseIdentifier::template(&self.namespace)?;
+            let mut admin = self.admin_connection().await?;
+            require_postgres_18(&mut admin).await?;
+            acquire_template_lock(&mut admin, &template_name).await?;
+            let cleanup = self.cleanup_namespace_while_locked(&mut admin).await;
+            let unlock = release_template_lock(&mut admin, &template_name).await;
+            combine_operation_and_unlock(cleanup, unlock)
+        }
+        .await;
+        timing.finish(if cleanup.is_ok() {
+            TimingOutcome::Success
+        } else {
+            TimingOutcome::Error
+        });
+        cleanup
     }
 
     async fn prepare_template_while_locked<Initializer, InitializerFuture>(
@@ -371,7 +480,7 @@ impl PostgresTestHarness {
         admin: &mut PgConnection,
         template_name: &DatabaseIdentifier,
         initializer: Initializer,
-    ) -> TestResult
+    ) -> TestResult<TemplatePreparation>
     where
         Initializer: FnOnce(PgPool) -> InitializerFuture,
         InitializerFuture: Future<Output = TestResult>,
@@ -395,7 +504,7 @@ impl PostgresTestHarness {
                 drop_database(admin, template_name).await?;
             } else if !allows_connections {
                 disconnect_database(admin, template_name).await?;
-                return Ok(());
+                return Ok(TemplatePreparation::Reused);
             } else {
                 // A marked database that still permits connections is an
                 // incomplete preparation left by an interrupted owner.
@@ -450,7 +559,7 @@ impl PostgresTestHarness {
             cleanup_failed_database_creation(admin, template_name, error).await?;
             unreachable!("failed template finalization cleanup always returns an error");
         }
-        Ok(())
+        Ok(TemplatePreparation::Prepared)
     }
 
     async fn admin_connection(&self) -> TestResult<PgConnection> {
@@ -458,7 +567,14 @@ impl PostgresTestHarness {
     }
 
     fn template_marker(&self) -> String {
-        format!("{TEMPLATE_MARKER_VERSION}:template:{}", self.namespace)
+        match &self.initializer_fingerprint {
+            Some(fingerprint) => format!(
+                "{TEMPLATE_MARKER_VERSION}:template:{}:initializer_sha256:{}",
+                self.namespace,
+                fingerprint.as_str()
+            ),
+            None => format!("{TEMPLATE_MARKER_VERSION}:template:{}", self.namespace),
+        }
     }
 
     fn database_marker(&self) -> String {
@@ -556,7 +672,7 @@ pub struct PreparedTemplate {
 }
 
 impl PreparedTemplate {
-    /// Returns the PostgreSQL template database identifier.
+    /// Returns the `PostgreSQL` template database identifier.
     pub fn database_name(&self) -> &str {
         self.database_name.as_str()
     }
@@ -565,12 +681,25 @@ impl PreparedTemplate {
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot clone, connect to, or recover
+    /// Returns an error when `PostgreSQL` 18 cannot clone, connect to, or recover
     /// from a failed connection to the database.
     pub async fn create_database(&self) -> TestResult<TestDatabase> {
+        let timing = TimingSpan::start(TimingOperation::Clone, TimingDetail::PreparedTemplate);
+        let database = self.create_database_inner().await;
+        timing.finish(if database.is_ok() {
+            TimingOutcome::Success
+        } else {
+            TimingOutcome::Error
+        });
+        database
+    }
+
+    async fn create_database_inner(&self) -> TestResult<TestDatabase> {
         let database_name = DatabaseIdentifier::test(self.harness.namespace())?;
         let mut admin = self.harness.admin_connection().await?;
-        require_postgres_18(&mut admin).await?;
+        // PreparedTemplate is only constructed after prepare_template has
+        // validated PostgreSQL 18 and CREATEDB authority. Avoid repeating both
+        // catalog queries for every isolated clone on this prepared server.
         // PostgreSQL 18's default WAL_LOG strategy permits fast concurrent
         // template clones without requesting the blocking FILE_COPY strategy.
         create_database_from_template(&mut admin, &database_name, &self.database_name).await?;
@@ -620,41 +749,52 @@ impl PreparedTemplate {
     /// # Errors
     ///
     /// Returns an error when the template is absent, its ownership marker does
-    /// not match, PostgreSQL cannot drop it, or the advisory lock cannot release.
+    /// not match, `PostgreSQL` cannot drop it, or the advisory lock cannot release.
     pub async fn cleanup(self) -> TestResult {
-        let mut admin = self.harness.admin_connection().await?;
-        require_postgres_18(&mut admin).await?;
-        acquire_template_lock(&mut admin, &self.database_name).await?;
+        let timing = TimingSpan::start(TimingOperation::Cleanup, TimingDetail::ExactTemplate);
         let cleanup = async {
-            let state = database_state(&mut admin, &self.database_name).await?;
-            let Some((_allows_connections, marker)) = state else {
-                return Err(message_error(format!(
-                    "PostgreSQL template {} was already absent during exact cleanup",
-                    self.database_name.as_str()
-                )));
-            };
-            let expected_marker = self.harness.template_marker();
-            if marker.as_deref() != Some(expected_marker.as_str()) {
-                return Err(message_error(format!(
-                    "refusing to drop PostgreSQL template {} because its ownership marker is {:?}, expected {expected_marker:?}",
-                    self.database_name.as_str(),
-                    marker
-                )));
+            let mut admin = self.harness.admin_connection().await?;
+            require_postgres_18(&mut admin).await?;
+            acquire_template_lock(&mut admin, &self.database_name).await?;
+            let cleanup = async {
+                let state = database_state(&mut admin, &self.database_name).await?;
+                let Some((_allows_connections, marker)) = state else {
+                    return Err(message_error(format!(
+                        "PostgreSQL template {} was already absent during exact cleanup",
+                        self.database_name.as_str()
+                    )));
+                };
+                let expected_marker = self.harness.template_marker();
+                if marker.as_deref() != Some(expected_marker.as_str()) {
+                    return Err(message_error(format!(
+                        "refusing to drop PostgreSQL template {} because its ownership marker is {:?}, expected {expected_marker:?}",
+                        self.database_name.as_str(),
+                        marker
+                    )));
+                }
+                drop_database(&mut admin, &self.database_name).await
             }
-            drop_database(&mut admin, &self.database_name).await
+            .await;
+            let unlock = release_template_lock(&mut admin, &self.database_name).await;
+            combine_operation_and_unlock(cleanup, unlock)
         }
         .await;
-        let unlock = release_template_lock(&mut admin, &self.database_name).await;
-        combine_operation_and_unlock(cleanup, unlock)
+        timing.finish(if cleanup.is_ok() {
+            TimingOutcome::Success
+        } else {
+            TimingOutcome::Error
+        });
+        cleanup
     }
 }
 
-/// One isolated PostgreSQL database and its primary connection pool.
+/// One isolated `PostgreSQL` database and its primary connection pool.
 pub struct TestDatabase {
     admin_options: PgConnectOptions,
     database_name: DatabaseIdentifier,
     expected_marker: String,
     pool: PgPool,
+    test_body_timing: Mutex<Option<TimingSpan>>,
     cleanup_state: AtomicU8,
 }
 
@@ -670,6 +810,10 @@ impl TestDatabase {
             database_name,
             expected_marker,
             pool,
+            test_body_timing: Mutex::new(Some(TimingSpan::start(
+                TimingOperation::TestBody,
+                TimingDetail::TestDatabase,
+            ))),
             cleanup_state: AtomicU8::new(CLEANUP_LIVE),
         }
     }
@@ -679,7 +823,7 @@ impl TestDatabase {
         &self.pool
     }
 
-    /// Returns the exact generated PostgreSQL database identifier.
+    /// Returns the exact generated `PostgreSQL` database identifier.
     pub fn database_name(&self) -> &str {
         self.database_name.as_str()
     }
@@ -688,7 +832,7 @@ impl TestDatabase {
     ///
     /// # Errors
     ///
-    /// Returns an error if `max_connections` is zero or PostgreSQL cannot open
+    /// Returns an error if `max_connections` is zero or `PostgreSQL` cannot open
     /// the pool.
     pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
         connect_database_pool(&self.admin_options, &self.database_name, max_connections).await
@@ -701,6 +845,17 @@ impl TestDatabase {
     /// Returns an error for repeated or concurrent cleanup, an administrative
     /// connection failure, or an inexact database drop.
     pub async fn cleanup(&self) -> TestResult {
+        let timing = TimingSpan::start(TimingOperation::Cleanup, TimingDetail::TestDatabase);
+        let cleanup = self.cleanup_inner().await;
+        timing.finish(if cleanup.is_ok() {
+            TimingOutcome::Success
+        } else {
+            TimingOutcome::Error
+        });
+        cleanup
+    }
+
+    async fn cleanup_inner(&self) -> TestResult {
         self.cleanup_state
             .compare_exchange(
                 CLEANUP_LIVE,
@@ -715,6 +870,12 @@ impl TestDatabase {
                     cleanup_state_name(state)
                 ))
             })?;
+
+        // Direct fixture consumers own the test future, so cleanup cannot know
+        // whether assertions succeeded. Record the checked-out database
+        // lifetime neutrally; run_test_database replaces this with an exact
+        // success, error, panic, or cancellation outcome when it owns the task.
+        self.finish_test_body_timing(TimingOutcome::Completed);
 
         self.pool.close().await;
         let cleanup = async {
@@ -736,6 +897,15 @@ impl TestDatabase {
                 );
                 Err(error)
             }
+        }
+    }
+
+    fn finish_test_body_timing(&self, outcome: TimingOutcome) {
+        let Ok(mut timing) = self.test_body_timing.lock() else {
+            return;
+        };
+        if let Some(timing) = timing.take() {
+            timing.finish(outcome);
         }
     }
 }
@@ -784,6 +954,12 @@ where
 {
     let database = Arc::new(database);
     let outcome = tokio::spawn(test(Arc::clone(&database))).await;
+    database.finish_test_body_timing(match &outcome {
+        Ok(Ok(())) => TimingOutcome::Success,
+        Ok(Err(_)) => TimingOutcome::Error,
+        Err(join_error) if join_error.is_panic() => TimingOutcome::Panic,
+        Err(_) => TimingOutcome::Cancelled,
+    });
     let cleanup = database.cleanup().await;
 
     match outcome {
@@ -1065,7 +1241,10 @@ const fn cleanup_state_name(state: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseIdentifier, MAX_NAMESPACE_LENGTH, TestNamespace};
+    use super::{
+        DatabaseIdentifier, INITIALIZER_FINGERPRINT_LENGTH, InitializerFingerprint,
+        MAX_NAMESPACE_LENGTH, TEMPLATE_MARKER_VERSION, TestNamespace,
+    };
 
     #[test]
     fn namespace_validation_accepts_canonical_job_scope() {
@@ -1094,5 +1273,47 @@ mod tests {
         let database = DatabaseIdentifier::test(&namespace).expect("database name");
         assert!(template.as_str().len() <= 63);
         assert_eq!(database.as_str().len(), 63);
+    }
+
+    #[test]
+    fn initializer_fingerprint_accepts_exact_lowercase_sha256() {
+        let fingerprint = "9".repeat(INITIALIZER_FINGERPRINT_LENGTH);
+        assert_eq!(
+            InitializerFingerprint::new(&fingerprint)
+                .expect("canonical SHA-256 fingerprint")
+                .as_str(),
+            fingerprint
+        );
+    }
+
+    #[test]
+    fn initializer_fingerprint_rejects_ambiguous_values() {
+        for invalid in [
+            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH - 1),
+            "a".repeat(INITIALIZER_FINGERPRINT_LENGTH + 1),
+            "A".repeat(INITIALIZER_FINGERPRINT_LENGTH),
+            "g".repeat(INITIALIZER_FINGERPRINT_LENGTH),
+        ] {
+            assert!(InitializerFingerprint::new(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn initializer_fingerprint_is_part_of_template_ownership_marker() {
+        let namespace = TestNamespace::new("fingerprint_contract").expect("valid namespace");
+        let fingerprint = "b".repeat(INITIALIZER_FINGERPRINT_LENGTH);
+        let harness = super::PostgresTestHarness::new(
+            "postgres://postgres@localhost/postgres",
+            namespace.clone(),
+        )
+        .expect("syntactically valid PostgreSQL URL")
+        .with_initializer_fingerprint(fingerprint.clone())
+        .expect("canonical fingerprint");
+        assert_eq!(
+            harness.template_marker(),
+            format!(
+                "{TEMPLATE_MARKER_VERSION}:template:{namespace}:initializer_sha256:{fingerprint}"
+            )
+        );
     }
 }

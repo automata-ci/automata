@@ -95,7 +95,7 @@ function checkReleaseOrder(
 }
 
 function releaseJobs() {
-  const release = source(".ci/workflows/release.yml");
+  const release = source(".github/workflows/release.yml");
   return {
     crates: section(release, "\n  publish_crates:", "\n  finalize_release:"),
     finalize: release.slice(release.indexOf("\n  finalize_release:")),
@@ -107,7 +107,7 @@ function releaseJobs() {
 }
 
 function serviceProxyJobs() {
-  const workflow = source(".ci/workflows/service-proxy-image.yml");
+  const workflow = source(".github/workflows/service-proxy-image.yml");
   return {
     candidate: section(workflow, "\n  candidate:", "\n  promotion_verify:"),
     candidateBuild: section(
@@ -153,120 +153,162 @@ function assertRegistryAttestationsUsePrivateHome(
   assert.match(job, /rm -f --[\s\S]*"\$DOCKER_CONFIG\/config\.json"/);
 }
 
-test("CI pins one PostgreSQL 18 service and covers every database-only ignored suite", () => {
-  const ci = source(".ci/workflows/ci.yml");
-  const postgres = workflowJob(ci, "postgres");
-  const runner = source("scripts/ci/run-postgres-tests.sh");
-  const versionGate = source("scripts/ci/verify-postgres-version.sh");
-  const plan = spawnSync(
-    path.join(repositoryRoot, "scripts/ci/run-postgres-tests.sh"),
-    ["--plan"],
-    { cwd: repositoryRoot, encoding: "utf8" },
-  );
-
-  assert.equal(plan.status, 0, plan.stderr);
-  const commands = plan.stdout.trim().split("\n");
-  assert.equal(commands.length, 4, plan.stdout);
-  assert.equal((ci.match(/^  postgres:[ \t]*$/gm) ?? []).length, 1);
-  assert.match(
-    postgres,
-    /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/,
-  );
-  assert.match(postgres, /AUTOMATA_TEST_DATABASE_URL:/);
-  assert.match(
-    postgres,
-    /AUTOMATA_TEST_DATABASE_NAMESPACE: ci_\$\{\{ github\.run_id \}\}_\$\{\{ github\.run_attempt \}\}/,
-  );
-  assert.match(postgres, /postgresql-client/);
-  assert.equal(
-    (postgres.match(/\.\/scripts\/ci\/verify-postgres-version\.sh/g) ?? [])
-      .length,
-    1,
-  );
-  assert.equal(
-    (postgres.match(/\.\/scripts\/ci\/run-postgres-tests\.sh/g) ?? []).length,
-    1,
-  );
-  assert.doesNotMatch(postgres, /^\s+cargo test /m);
-  assert.doesNotMatch(postgres, /matrix:|run-postgres-store-shard/);
-  assert.doesNotMatch(ci, /^  postgres_(?:store|integrations):[ \t]*$/m);
-  assert.equal(
-    existsSync(path.join(repositoryRoot, "scripts/ci/run-postgres-store-shard.sh")),
-    false,
-  );
-
-  assert.match(versionGate, /AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004/);
-  assert.match(versionGate, /--command='SHOW server_version_num'/);
-  assert.match(versionGate, /rolcreatedb OR rolsuper/);
-  assert.match(versionGate, /--set=ON_ERROR_STOP=1/);
-
-  assert.match(
-    commands[0],
-    /-p automata-ci-store --test store_postgres_execution --test store_postgres_orchestration --test store_postgres_provider --test store_postgres_security .*--ignored --test-threads=4$/,
-  );
-  assert.match(
-    commands[1],
-    /-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --tests .*--ignored --test-threads=4$/,
-  );
-  assert.match(
-    commands[2],
-    /-p automata-ci-results-github --test postgres_artifacts --test postgres_cache .*--ignored --test-threads=4$/,
-  );
-  assert.match(
-    commands[3],
-    /-p automata-ci --test github_provider_end_to_end_matrix .*--ignored --test-threads=1$/,
-  );
-  assert.equal((runner.match(/-p automata-ci-store/g) ?? []).length, 1);
-  assert.doesNotMatch(
-    runner,
-    /--test store_(?:contracts|migration_contracts|migrations)|--workspace|--all-targets/,
-  );
-  assert.match(runner, /trap cleanup_postgres_tests EXIT/);
-  assert.match(runner, /automata_cleanup_postgres_test_namespace/);
-  assert.doesNotMatch(runner, /--list|check-ignored-test-list\.py/);
-
-  const broadDatabasePackages = new Set([
-    "automata-ci-auth-postgres",
-    "automata-ci-postgres-test-support",
-    "automata-ci-runner-auth-postgres",
-    "automata-ci-secret-postgres",
-    "automata-ci-store",
-  ]);
-  const explicitDatabaseTargets = new Map([
-    ["automata-ci", new Set(["github_provider_end_to_end_matrix"])],
-    ["automata-ci-results-github", new Set(["postgres_artifacts", "postgres_cache"])],
-  ]);
-
-  const ignored = ignoredRustSuites();
-  const broadExternalSuites = ignored.filter(({ reason, relativePath }) => {
-    const packageName = relativePath.split("/")[1];
-    return broadDatabasePackages.has(packageName) && !requiresOnlyTestDatabase(reason);
-  });
-  assert.deepEqual(
-    broadExternalSuites,
-    [],
-    "a broad database package gained an ignored suite with another prerequisite",
-  );
-
-  const databaseOnlySuites = new Set();
-  for (const { reason, relativePath } of ignored) {
-    if (!requiresOnlyTestDatabase(reason)) continue;
-    const parts = relativePath.split("/");
-    assert.equal(parts[0], "crates");
-    assert.equal(parts[2], "tests", `${relativePath} is not an integration-test target`);
-    assert.equal(parts.length, 4, `${relativePath} needs an explicit CI target mapping`);
-    const packageName = parts[1];
-    const testTarget = path.basename(parts[3], ".rs");
-    const suite = `${packageName}/${testTarget}`;
-    databaseOnlySuites.add(suite);
-    assert.ok(
-      broadDatabasePackages.has(packageName) ||
-        explicitDatabaseTargets.get(packageName)?.has(testTarget),
-      `${suite} requires only the test database but is not covered by CI`,
+test(
+  "Rust coverage shares one PostgreSQL 18 service and covers every database-only ignored suite",
+  () => {
+    const ci = source(".ci/workflows/ci.yml");
+    const coverage = workflowJob(ci, "rust_coverage");
+    const runner = source("scripts/ci/run-postgres-tests.sh");
+    const versionGate = source("scripts/ci/verify-postgres-version.sh");
+    const psqlLauncher = source("scripts/ci/psql-test-database.py");
+    const plan = spawnSync(
+      path.join(repositoryRoot, "scripts/ci/run-postgres-tests.sh"),
+      ["--plan"],
+      { cwd: repositoryRoot, encoding: "utf8" },
     );
-  }
-  assert.ok(databaseOnlySuites.size > broadDatabasePackages.size);
-});
+
+    assert.equal(plan.status, 0, plan.stderr);
+    const commands = plan.stdout.trim().split("\n");
+    assert.equal(commands.length, 4, plan.stdout);
+    assert.equal((ci.match(/^  postgres:[ \t]*$/gm) ?? []).length, 0);
+    assert.equal(
+      (
+        ci.match(
+          /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/g,
+        ) ?? []
+      ).length,
+      1,
+    );
+    assert.match(
+      coverage,
+      /image: docker\.io\/library\/postgres:18\.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568/,
+    );
+    assert.match(coverage, /AUTOMATA_TEST_DATABASE_URL:/);
+    assert.match(
+      coverage,
+      /AUTOMATA_TEST_DATABASE_NAMESPACE: ci_\$\{\{ github\.run_id \}\}_\$\{\{ github\.run_attempt \}\}/,
+    );
+    assert.match(coverage, /postgresql-client/);
+    assert.equal(
+      (coverage.match(/\.\/scripts\/ci\/verify-postgres-version\.sh/g) ?? [])
+        .length,
+      1,
+    );
+    assert.equal(
+      (
+        coverage.match(
+          /\.\/scripts\/ci\/run-rust-coverage\.sh target\/coverage\/rust ordinary postgres/g,
+        ) ?? []
+      ).length,
+      1,
+    );
+    assert.doesNotMatch(coverage, /\.\/scripts\/ci\/run-postgres-tests\.sh/);
+    assert.doesNotMatch(coverage, /^\s+cargo test /m);
+    assert.doesNotMatch(coverage, /matrix:|run-postgres-store-shard/);
+    assert.doesNotMatch(ci, /^  postgres_(?:store|integrations):[ \t]*$/m);
+    assert.equal(
+      existsSync(
+        path.join(repositoryRoot, "scripts/ci/run-postgres-store-shard.sh"),
+      ),
+      false,
+    );
+
+    assert.match(versionGate, /AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004/);
+    assert.equal(
+      (versionGate.match(/\.\/scripts\/ci\/psql-test-database\.py/g) ?? [])
+        .length,
+      2,
+    );
+    assert.doesNotMatch(versionGate, /PGDATABASE=|^\s+psql\s+\\/m);
+    assert.match(psqlLauncher, /environment\["PGPASSWORD"\] = password/);
+    assert.match(psqlLauncher, /f"--dbname=\{connection\}"/);
+    assert.doesNotMatch(psqlLauncher, /f"--dbname=\{raw\}"/);
+    assert.match(versionGate, /--command='SHOW server_version_num'/);
+    assert.match(versionGate, /rolcreatedb OR rolsuper/);
+    assert.match(versionGate, /--set=ON_ERROR_STOP=1/);
+
+    assert.match(
+      commands[0],
+      /-p automata-ci-store --test store_postgres_execution --test store_postgres_orchestration --test store_postgres_provider --test store_postgres_security .*--ignored --test-threads=4$/,
+    );
+    assert.match(
+      commands[1],
+      /-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test postgres_18 --test auth_postgres --test runner_auth_postgres --test secret_postgres .*--ignored --test-threads=4$/,
+    );
+    assert.match(
+      commands[2],
+      /-p automata-ci-results-github --test postgres_artifacts --test postgres_cache .*--ignored --test-threads=4$/,
+    );
+    assert.match(
+      commands[3],
+      /-p automata-ci --test github_provider_end_to_end_matrix .*--ignored --test-threads=1$/,
+    );
+    assert.equal((runner.match(/-p automata-ci-store/g) ?? []).length, 1);
+    assert.doesNotMatch(
+      runner,
+      /--test (?:contracts|store_(?:contracts|migration_contracts|migrations))|--tests|--workspace|--all-targets/,
+    );
+    assert.match(runner, /trap cleanup_postgres_tests EXIT/);
+    assert.match(runner, /automata_cleanup_postgres_test_namespace/);
+    assert.doesNotMatch(runner, /--list|check-ignored-test-list\.py/);
+
+    const broadDatabasePackages = new Set([
+      "automata-ci-auth-postgres",
+      "automata-ci-postgres-test-support",
+      "automata-ci-runner-auth-postgres",
+      "automata-ci-secret-postgres",
+      "automata-ci-store",
+    ]);
+    const explicitDatabaseTargets = new Map([
+      ["automata-ci", new Set(["github_provider_end_to_end_matrix"])],
+      [
+        "automata-ci-results-github",
+        new Set(["postgres_artifacts", "postgres_cache"]),
+      ],
+    ]);
+
+    const ignored = ignoredRustSuites();
+    const broadExternalSuites = ignored.filter(({ reason, relativePath }) => {
+      const packageName = relativePath.split("/")[1];
+      return (
+        broadDatabasePackages.has(packageName) &&
+        !requiresOnlyTestDatabase(reason)
+      );
+    });
+    assert.deepEqual(
+      broadExternalSuites,
+      [],
+      "a broad database package gained an ignored suite with another prerequisite",
+    );
+
+    const databaseOnlySuites = new Set();
+    for (const { reason, relativePath } of ignored) {
+      if (!requiresOnlyTestDatabase(reason)) continue;
+      const parts = relativePath.split("/");
+      assert.equal(parts[0], "crates");
+      assert.equal(
+        parts[2],
+        "tests",
+        `${relativePath} is not an integration-test target`,
+      );
+      assert.equal(
+        parts.length,
+        4,
+        `${relativePath} needs an explicit CI target mapping`,
+      );
+      const packageName = parts[1];
+      const testTarget = path.basename(parts[3], ".rs");
+      const suite = `${packageName}/${testTarget}`;
+      databaseOnlySuites.add(suite);
+      assert.ok(
+        broadDatabasePackages.has(packageName) ||
+          explicitDatabaseTargets.get(packageName)?.has(testTarget),
+        `${suite} requires only the test database but is not covered by CI`,
+      );
+    }
+    assert.ok(databaseOnlySuites.size > broadDatabasePackages.size);
+  },
+);
 
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".ci/workflows/ci.yml");
@@ -279,7 +321,7 @@ test("CI executes documentation and committed script contract suites", () => {
   const rendererTests = section(
     ci,
     "\n  renderer_tests:",
-    "\n  postgres:",
+    "\n  frontend:",
   );
   const shellContracts = section(
     verify,
@@ -322,11 +364,25 @@ test("CI executes documentation and committed script contract suites", () => {
   assert.match(shellContracts, /renderer-provenance\.test\.sh/);
   assert.match(shellContracts, /regenerate-renderer-atomicity\.test\.sh/);
   assert.match(shellContracts, /actionlint \.ci\/workflows\/\*\.yml/);
-  assert.doesNotMatch(shellContracts, /actionlint \.github\/workflows/);
+  assert.match(shellContracts, /\.github\/workflows\/\*\.yml/);
   assert.match(shellContracts, /deploy\/observability\/inventory\/\*\.sh/);
   assert.match(shellContracts, /inventory-scratch\.test\.sh/);
   assert.match(shellContracts, /release-handoff\.test\.py/);
   assert.match(shellContracts, /rust-coverage\.test\.py/);
+  assert.match(shellContracts, /benchmark-postgres-tests\.test\.sh/);
+  assert.equal(
+    (shellContracts.match(/\.\/scripts\/ci\/tests\/benchmark-postgres-tests\.test\.sh/g) ?? [])
+      .length,
+    1,
+  );
+  const compilerFixture = source(
+    "crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml",
+  );
+  assert.equal(
+    (compilerFixture.match(/\.\/scripts\/ci\/tests\/benchmark-postgres-tests\.test\.sh/g) ?? [])
+      .length,
+    1,
+  );
   assert.match(
     dependencyContracts,
     /scripts\/ui\/tests\/rquickjs-macro-diagnostics\.test\.sh/,
@@ -346,6 +402,77 @@ test("CI executes documentation and committed script contract suites", () => {
   );
 });
 
+test("native workflows bridge exact Automata Checks without duplicating portable CI", () => {
+  const bridge = source(".github/workflows/ci.yml");
+  const release = source(".github/workflows/release.yml");
+  const movedWorkflows = [
+    "pages.yml",
+    "profile-image.yml",
+    "release.yml",
+    "service-proxy-image.yml",
+  ];
+
+  for (const workflow of movedWorkflows) {
+    assert.equal(
+      existsSync(path.join(repositoryRoot, ".ci/workflows", workflow)),
+      false,
+      `${workflow} must not be admitted as portable Automata CI`,
+    );
+    assert.equal(
+      existsSync(path.join(repositoryRoot, ".github/workflows", workflow)),
+      true,
+      `${workflow} must remain a provider-native GitHub workflow`,
+    );
+  }
+
+  assert.match(bridge, /on:\n  push:\n    branches:\n      - main\n/);
+  assert.doesNotMatch(bridge, /\n  pull_request:/);
+  assert.doesNotMatch(bridge, /workflow_dispatch/);
+  assert.match(bridge, /group: native-ci-\$\{\{ github\.ref \}\}/);
+  assert.match(bridge, /permissions:\n  checks: read\n/);
+  assert.doesNotMatch(bridge, /contents:|packages:|id-token:|attestations:/);
+  assert.match(
+    bridge,
+    /AUTOMATA_CHECK_APP_ID: \$\{\{ vars\.AUTOMATA_CHECK_APP_ID \}\}/,
+  );
+  assert.match(bridge, /AUTOMATA_CHECK_NAME: Automata CI/);
+  assert.match(bridge, /EXPECTED_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(
+    bridge,
+    /repos\/\$\{GITHUB_REPOSITORY\}\/commits\/\$\{EXPECTED_SHA\}\/check-runs/,
+  );
+  assert.match(bridge, /-f app_id="\$AUTOMATA_CHECK_APP_ID"/);
+  assert.match(bridge, /-f check_name="\$AUTOMATA_CHECK_NAME"/);
+  assert.match(bridge, /-f filter=latest/);
+  assert.match(bridge, /run\.get\("head_sha"\) == expected_sha/);
+  assert.match(bridge, /run\.get\("name"\) == expected_name/);
+  assert.match(bridge, /app\.get\("id"\) == expected_app_id/);
+  assert.match(bridge, /automata-check:\[0-9a-f\]/);
+  assert.match(
+    bridge,
+    /status == "completed" and conclusion == "success"/,
+  );
+  assert.match(bridge, /timed out waiting for exact Automata Check Run/);
+  assert.match(bridge, /timeout-minutes: 90/);
+  assert.match(bridge, /deadline="\$\(\( \$\(date \+%s\) \+ 4500 \)\)"/);
+  assert.doesNotMatch(
+    bridge,
+    /actions\/checkout@|\bcargo\b|\brustc\b|run-rust-coverage|\bnpm\b/,
+  );
+
+  assert.match(release, /permissions:\n      actions: read\n      contents: read/);
+  assert.match(
+    release,
+    /actions\/workflows\/ci\.yml\/runs/,
+  );
+  assert.match(release, /-f branch=main/);
+  assert.match(release, /-f event=push/);
+  assert.match(release, /-f head_sha="\$RELEASE_COMMIT"/);
+  assert.match(release, /-f per_page=1/);
+  assert.match(release, /\.workflow_runs\[:1\]/);
+  assert.doesNotMatch(release, /commits\/\$\{RELEASE_COMMIT\}\/check-runs/);
+});
+
 test("repository workflows omit hosted Windows jobs and CI retains fixture parity", () => {
   const ci = source(".ci/workflows/ci.yml");
   const fixture = source(
@@ -362,13 +489,15 @@ test("repository workflows omit hosted Windows jobs and CI retains fixture parit
     /^  windows:[ \t]*\r?$/m,
     "the hosted Windows CI job is temporarily disabled",
   );
-  for (const workflowPath of filesRecursively(
-    path.join(repositoryRoot, ".ci/workflows"),
-  )) {
-    if (!workflowPath.endsWith(".yml")) continue;
-    const workflow = readFileSync(workflowPath, "utf8");
-    assert.doesNotMatch(workflow, /^  windows:[ \t]*\r?$/m, workflowPath);
-    assert.doesNotMatch(workflow, /^[ \t]+runs-on: windows-/m, workflowPath);
+  for (const directory of [".ci/workflows", ".github/workflows"]) {
+    for (const workflowPath of filesRecursively(
+      path.join(repositoryRoot, directory),
+    )) {
+      if (!workflowPath.endsWith(".yml")) continue;
+      const workflow = readFileSync(workflowPath, "utf8");
+      assert.doesNotMatch(workflow, /^  windows:[ \t]*\r?$/m, workflowPath);
+      assert.doesNotMatch(workflow, /^[ \t]+runs-on: windows-/m, workflowPath);
+    }
   }
 });
 
@@ -399,21 +528,23 @@ test("Rust CI publishes an ordinary-lane report with a service-aware guard", () 
   );
   assert.match(
     rustCoverage,
-    /^[ \t]*\.\/scripts\/ci\/run-rust-coverage\.sh target\/coverage\/rust ordinary[ \t]*$/m,
+    /^[ \t]*\.\/scripts\/ci\/run-rust-coverage\.sh target\/coverage\/rust ordinary postgres[ \t]*$/m,
   );
   assert.deepEqual(
     rustCoverage
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.includes("run-rust-coverage.sh")),
-    ["./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary"],
+    ["./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary postgres"],
   );
   assert.match(rustCoverage, /name: rust-coverage-ordinary/);
+  assert.match(rustCoverage, /name: rust-coverage-ordinary-postgres/);
   assert.match(
     rustCoverage,
     /- name: Upload service-aware Rust coverage report\n        if: \$\{\{ always\(\) && hashFiles\('target\/coverage\/rust\/manifest\.json'\) != '' \}\}/,
   );
   assert.match(rustCoverage, /target\/coverage\/rust\/manifest\.json/);
+  assert.match(rustCoverage, /target\/coverage\/rust\/combined-manifest\.json/);
   assert.doesNotMatch(rustCoverage, /fail-under-(?:lines|regions|functions)/);
   const expectedLanes = [
     "ordinary",
@@ -441,7 +572,7 @@ test("Rust CI publishes an ordinary-lane report with a service-aware guard", () 
   );
   assert.match(runner, /--remap-path-prefix/);
   assert.equal(
-    [...runner.matchAll(/cargo llvm-cov report \\\n  --remap-path-prefix/g)].length,
+    [...runner.matchAll(/cargo llvm-cov report \\\n\s+--remap-path-prefix/g)].length,
     2,
     "both report formats must preserve production-source filtering under remapping",
   );
@@ -452,13 +583,14 @@ test("Rust CI publishes an ordinary-lane report with a service-aware guard", () 
     2,
     "coverage must fingerprint the complete workspace before and after collection",
   );
-  assert.match(runner, /--lcov "\$coverage_stage\/coverage\.lcov"/);
+  assert.match(runner, /ordinary must be the first lane when collecting combined coverage/);
+  assert.match(runner, /"\$coverage_stage\/combined-manifest\.json"/);
   assert.ok(
     runner.indexOf("cargo llvm-cov show-env") <
       runner.indexOf("cargo llvm-cov clean --workspace"),
     "coverage environment must select the instrumented target before cleaning it",
   );
-  assert.match(runner, /--lane "\$lane"/);
+  assert.match(runner, /report_arguments\+=\(--lane "\$report_lane"\)/);
 });
 
 test("frontend CI retains the production-source coverage gate", () => {
@@ -506,7 +638,7 @@ test("distribution build overlaps validation while the final gate retains every 
   );
   assert.match(
     dist,
-    /needs:\n      - dist_build\n      - verify\n      - rust_coverage\n      - renderer_tests\n      - postgres\n      - frontend\n      - renderer/,
+    /needs:\n      - dist_build\n      - verify\n      - rust_coverage\n      - renderer_tests\n      - frontend\n      - renderer/,
   );
   assert.match(dist, /if: \$\{\{ !cancelled\(\) \}\}/);
   for (const result of [
@@ -514,7 +646,6 @@ test("distribution build overlaps validation while the final gate retains every 
     "VERIFY_RESULT",
     "RUST_COVERAGE_RESULT",
     "RENDERER_TESTS_RESULT",
-    "POSTGRES_RESULT",
     "FRONTEND_RESULT",
   ]) {
     assert.match(dist, new RegExp(`\\[\\[ "\\$${result}" == success \\]\\]`));
@@ -527,8 +658,8 @@ test("distribution build overlaps validation while the final gate retains every 
 });
 
 test("Pages and profile publication isolate concurrency and environments", () => {
-  const pages = source(".ci/workflows/pages.yml");
-  const profile = source(".ci/workflows/profile-image.yml");
+  const pages = source(".github/workflows/pages.yml");
+  const profile = source(".github/workflows/profile-image.yml");
   const promote = profile.slice(profile.indexOf("\n  promote:"));
 
   assert.match(pages, /npm ci --no-audit/);
@@ -542,11 +673,17 @@ test("Pages and profile publication isolate concurrency and environments", () =>
     /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/,
   );
   assert.equal(
-    (pages.match(/- "\.ci\/workflows\/pages\.yml"/g) ?? []).length,
+    (pages.match(/- "\.github\/workflows\/pages\.yml"/g) ?? []).length,
     2,
     "Pages must run when its current workflow source changes",
   );
-  assert.doesNotMatch(pages, /\.github\/workflows\/pages\.yml/);
+  assert.doesNotMatch(pages, /\.ci\/workflows\/pages\.yml/);
+  assert.equal(
+    (pages.match(/- "crates\/automata-ci-ui-renderer\/contract\.json"/g) ?? [])
+      .length,
+    2,
+    "Pages must review changes to the shared renderer contract",
+  );
   assert.match(
     pages,
     /- name: Upload screenshot review artifact\n        if: \$\{\{ always\(\) && hashFiles\('ui\/dist\/preview\/screenshots\/\*\.png'\) != '' \}\}/,
@@ -559,11 +696,10 @@ test("Pages and profile publication isolate concurrency and environments", () =>
 });
 
 test("hosted publication verification retains GitHub signer identities", () => {
-  const profile = source(".ci/workflows/profile-image.yml");
-  const serviceProxy = source(".ci/workflows/service-proxy-image.yml");
+  const profile = source(".github/workflows/profile-image.yml");
+  const serviceProxy = source(".github/workflows/service-proxy-image.yml");
 
-  // These values identify the hosted GitHub publisher recorded in attestations;
-  // they are deliberately not Automata's current `.ci` source paths.
+  // These values identify the native GitHub publisher recorded in attestations.
   assert.match(
     profile,
     /SIGNER_WORKFLOW: \$\{\{ github\.repository \}\}\/\.github\/workflows\/profile-image\.yml/,
@@ -575,7 +711,7 @@ test("hosted publication verification retains GitHub signer identities", () => {
 });
 
 test("registry attestations use the isolated Docker credential home", () => {
-  const profile = source(".ci/workflows/profile-image.yml");
+  const profile = source(".github/workflows/profile-image.yml");
   const profileCandidate = section(profile, "\n  candidate:", "\n  promote:");
   const { candidate: serviceProxyCandidate } = serviceProxyJobs();
   const { stage } = releaseJobs();
@@ -1077,7 +1213,7 @@ test("final publication reconciles the exact immutable GitHub state", () => {
 });
 
 test("profile promotion rechecks the reviewed default-branch head", () => {
-  const profile = source(".ci/workflows/profile-image.yml");
+  const profile = source(".github/workflows/profile-image.yml");
   const freshness = section(
     profile,
     "      - name: Scrub checkout credentials and require current default-branch head",
@@ -1091,7 +1227,7 @@ test("profile promotion rechecks the reviewed default-branch head", () => {
 
 test("release documentation requires all publication controls", () => {
   const guide = source("docs/releasing.md");
-  const release = source(".ci/workflows/release.yml");
+  const release = source(".github/workflows/release.yml");
   const productPolicy = source("scripts/ci/verify-product-targets.sh");
   assert.match(guide, /`release`,\n`crates-io`, and `profile-promotion`/);
   assert.match(guide, /`release` as the\nunattended staging boundary/);
@@ -1105,6 +1241,11 @@ test("release documentation requires all publication controls", () => {
   );
   assert.match(guide, /CRATES_IO_EXPECTED_OWNER_LOGINS/);
   assert.match(guide, /CRATES_IO_INITIAL_BURST_OVERRIDE_APPROVED=true/);
+  assert.match(guide, /`AUTOMATA_CHECK_APP_ID`/);
+  assert.match(guide, /exact App ID/);
+  assert.match(guide, /latest exact-SHA native bridge run/);
+  assert.match(guide, /\.github\/workflows\/profile-image\.yml/);
+  assert.match(guide, /\.github\/workflows\/release\.yml/);
   assert.match(guide, /crates\.io\/docs\/rate-limits/);
   assert.match(guide, /rechecks?[^.]+default\s+branch/i);
   assert.match(guide, /ordinary CI permits a truthful pre-tag changelog/);

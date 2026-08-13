@@ -1,4 +1,4 @@
-//! Current-schema PostgreSQL logical-orchestration and read-model tests.
+//! Current-schema `PostgreSQL` logical-orchestration and read-model tests.
 
 mod common;
 

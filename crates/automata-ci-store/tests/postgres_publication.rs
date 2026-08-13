@@ -440,6 +440,9 @@ async fn mapped_role_permission_revocation_serializes_before_publication_authori
         let actor = seed_session(database.pool(), &seed.tenant_id, principal_id, "604").await?;
 
         let mut revoking = database.pool().begin().await?;
+        let revoking_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *revoking)
+            .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
             .bind(&seed.tenant_id)
             .bind(TENANT_MANAGEMENT_LOCK_NAMESPACE)
@@ -469,14 +472,9 @@ async fn mapped_role_permission_revocation_serializes_before_publication_authori
                 OutputVisibility::Public,
             ),
         );
-        let mut update =
+        let update =
             tokio::spawn(async move { store.update_repository_publication(request).await });
-        assert!(
-            timeout(Duration::from_millis(250), &mut update)
-                .await
-                .is_err(),
-            "publication authorization did not wait for the RBAC mutation mutex"
-        );
+        wait_for_direct_blocker(database.pool(), revoking_pid).await?;
         revoking.commit().await?;
 
         let outcome = update.await??;
@@ -613,6 +611,9 @@ async fn concurrent_principal_disable_is_locked_and_observed_before_authorizatio
         let seed = seed_repository(&database).await?;
         let actor = seed_actor(&database, &seed.tenant_id, DirectGrant::Tenant).await?;
         let mut disabling = database.pool().begin().await?;
+        let disabling_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *disabling)
+            .await?;
         sqlx::query(
             r"
             UPDATE human_principals
@@ -637,14 +638,9 @@ async fn concurrent_principal_disable_is_locked_and_observed_before_authorizatio
                 OutputVisibility::Public,
             ),
         );
-        let mut update =
+        let update =
             tokio::spawn(async move { store.update_repository_publication(request).await });
-        assert!(
-            timeout(Duration::from_millis(250), &mut update)
-                .await
-                .is_err(),
-            "publication authorization did not wait for the principal row lock"
-        );
+        wait_for_direct_blocker(database.pool(), disabling_pid).await?;
         disabling.commit().await?;
 
         let outcome = update.await??;
@@ -1004,6 +1000,33 @@ async fn policy_revision(pool: &PgPool, tenant_id: &str, repository_id: Uuid) ->
     .bind(repository_id)
     .fetch_one(pool)
     .await?)
+}
+
+async fn wait_for_direct_blocker(pool: &PgPool, blocking_pid: i32) -> TestResult {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                r"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                )
+                ",
+            )
+            .bind(blocking_pid)
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "publication update did not reach its expected database lock")??;
+    Ok(())
 }
 
 async fn seed_session(
