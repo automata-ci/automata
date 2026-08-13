@@ -503,7 +503,7 @@ verify_canonical_prometheus_inventory_job() {
   current_job == "control-plane" && $1 == "sample_limit:" {
     control_raw_sample_limits += 1
   }
-  current_job == "control-plane" && $0 == "    sample_limit: 5250" {
+  current_job == "control-plane" && $0 == "    sample_limit: 5400" {
     control_sample_limits += 1
   }
   current_job == "runner" && $1 == "sample_limit:" {
@@ -958,15 +958,15 @@ jq --exit-status '
   )
   and (
   .profiles as $profiles
-  | ($profiles.control_plane.series_budget == 5250)
+  | ($profiles.control_plane.series_budget == 5400)
     and ($profiles.runner.series_budget == 1000)
     and (($profiles.common.families | map(.maximum_series) | add) == 49)
-    and (($profiles.control_plane.families | map(.maximum_series) | add) == 4975)
+    and (($profiles.control_plane.families | map(.maximum_series) | add) == 5103)
     and (($profiles.runner.families | map(.maximum_series) | add) == 890)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add))
-      == 5024
+      == 5152
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)
@@ -974,14 +974,14 @@ jq --exit-status '
       == 939
     )
     and (($profiles.common | native_label_sets) == 2)
-    and (($profiles.control_plane | native_label_sets) == 143)
+    and (($profiles.control_plane | native_label_sets) == 145)
     and (($profiles.runner | native_label_sets) == 28)
     and (
       (($profiles.common.families | map(.maximum_series) | add)
        + ($profiles.control_plane.families | map(.maximum_series) | add)
        + ($profiles.common | native_label_sets)
        + ($profiles.control_plane | native_label_sets))
-      == 5169
+      == 5299
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)
@@ -1003,7 +1003,7 @@ jq --exit-status '
          + ($profiles.control_plane.families | map(.maximum_series) | add)
          + ($profiles.common | native_label_sets)
          + ($profiles.control_plane | native_label_sets))
-      == 81
+      == 101
     )
     and (
       (($profiles.common.families | map(.maximum_series) | add)

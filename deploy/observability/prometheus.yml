@@ -19,7 +19,7 @@ scrape_configs:
     native_histogram_bucket_limit: 160
     native_histogram_min_bucket_factor: 1.09
     body_size_limit: 2MB
-    sample_limit: 5250
+    sample_limit: 5400
     label_limit: 24
     label_name_length_limit: 128
     label_value_length_limit: 256
