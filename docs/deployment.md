@@ -278,6 +278,13 @@ applies the same bounded protocol clients and never falls back to GitHub.com.
 It is an E2E protocol-emulation lane, not evidence that GitHub.com networking
 or installation configuration works.
 
+The required top-level `dashboard_url` is the canonical public Automata origin
+used for every Check Run `details_url`. Production requires a credential-free
+HTTPS root URL. An isolated emulator may additionally use an HTTP root URL on a
+literal loopback address. Workflow Checks link to the repository activity page,
+workflow-run Checks link to the exact run, and job Checks link to the exact
+concrete job.
+
 The optional top-level `schedule` object controls the separate periodic
 workflow scheduler; omitting it uses the documented example defaults. It
 enumerates only current manifests in stable order, resolves the configured

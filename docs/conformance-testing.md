@@ -10,11 +10,12 @@ Each configured repository discovers every direct `.ci/workflows/*.yml` and
 `.ci/workflows/*.yaml` file on its configured default branch.
 Rename `.github` to `.ci` (or move only `.github/workflows` to
 `.ci/workflows` when the repository keeps other GitHub metadata). Workflow YAML
-does not change. After `actions/checkout`, Automata exposes the checked-out
-workflow files at `.github/workflows` as well, so unchanged steps that read the
-GitHub path continue to work. Only direct `.ci/workflows/*.yml` and
-`.ci/workflows/*.yaml` files are accepted. Every selected workflow is retained
-as a separate delivery subject and Check Run.
+does not otherwise change, except local reusable-workflow references use the
+native `./.ci/workflows/<file>.yml` path. Automata never creates a shadow
+`.github/workflows` tree. Only direct `.ci/workflows/*.yml` and
+`.ci/workflows/*.yaml` files are accepted; the presence of a GitHub Actions
+workflow tree rejects the repository archive. Every concrete job is retained as
+its own Check Run and links to the exact Automata dashboard job.
 
 ## Delivery export
 

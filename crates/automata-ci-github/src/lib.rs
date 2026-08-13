@@ -21,10 +21,11 @@ pub use changed_files::{
 };
 pub use checks::{
     GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminate,
-    GithubCheckCreateIndeterminateKind, GithubCheckExternalId, GithubCheckModelError,
-    GithubCheckName, GithubCheckRetryEvidence, GithubCheckRun, GithubCheckRunCreateOutcome,
-    GithubCheckRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
-    GithubCheckSuite, GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubChecksError,
+    GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
+    GithubCheckModelError, GithubCheckName, GithubCheckRetryEvidence, GithubCheckRun,
+    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubChecksError,
     GithubObservedCheckConclusion,
 };
 pub use config::{

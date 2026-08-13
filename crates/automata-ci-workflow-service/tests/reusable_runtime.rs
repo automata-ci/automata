@@ -53,7 +53,7 @@ jobs:
   invoke:
     permissions:
       contents: read
-    uses: ./.github/workflows/child.yml
+    uses: ./.ci/workflows/child.yml
     with:
       enabled: true
     secrets:
@@ -100,7 +100,7 @@ const INHERITED_ROOT: &str = r"name: Root
 on: workflow_dispatch
 jobs:
   invoke:
-    uses: ./.github/workflows/child.yml
+    uses: ./.ci/workflows/child.yml
     secrets: inherit
 ";
 

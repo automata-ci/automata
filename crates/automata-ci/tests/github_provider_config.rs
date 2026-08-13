@@ -143,6 +143,7 @@ fn manifest(repositories: Vec<Value>) -> Value {
     json!({
         "schema": 1,
         "transport": {"mode": "github_dot_com"},
+        "dashboard_url": "https://ci.automata.example/",
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",
@@ -352,6 +353,57 @@ fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() 
             Err(GithubProviderConfigError)
         );
     }
+}
+
+#[test]
+fn dashboard_url_is_a_canonical_public_automata_origin() {
+    let production = load_value(
+        "dashboard-production.json",
+        &manifest(vec![public_repository()]),
+    )
+    .expect("production dashboard");
+    assert_eq!(
+        production.dashboard_url().as_str(),
+        "https://ci.automata.example/"
+    );
+
+    for (name, dashboard_url) in [
+        ("missing-host", "https:/dashboard"),
+        ("http-production", "http://ci.automata.example/"),
+        ("path", "https://ci.automata.example/actions"),
+        ("credentials", "https://user@ci.automata.example/"),
+        ("query", "https://ci.automata.example/?token=value"),
+        ("fragment", "https://ci.automata.example/#fragment"),
+    ] {
+        let mut invalid = manifest(vec![public_repository()]);
+        invalid["dashboard_url"] = json!(dashboard_url);
+        assert_eq!(
+            load_value(&format!("dashboard-{name}.json"), &invalid),
+            Err(GithubProviderConfigError)
+        );
+    }
+
+    let mut loopback = manifest(vec![public_repository()]);
+    loopback["transport"] = json!({
+        "mode": "loopback_emulator",
+        "api_base": "http://127.0.0.1:18088/api/v3/",
+        "job_runtime_origin": "http://automata-git.invalid:18088/"
+    });
+    loopback["dashboard_url"] = json!("http://127.0.0.1:18089/");
+    let loopback = load_value("dashboard-loopback.json", &loopback).expect("loopback dashboard");
+    assert_eq!(loopback.dashboard_url().as_str(), "http://127.0.0.1:18089/");
+
+    let mut non_loopback_http = manifest(vec![public_repository()]);
+    non_loopback_http["transport"] = json!({
+        "mode": "loopback_emulator",
+        "api_base": "http://127.0.0.1:18088/api/v3/",
+        "job_runtime_origin": "http://automata-git.invalid:18088/"
+    });
+    non_loopback_http["dashboard_url"] = json!("http://ci.automata.example/");
+    assert_eq!(
+        load_value("dashboard-non-loopback-http.json", &non_loopback_http),
+        Err(GithubProviderConfigError)
+    );
 }
 
 #[test]

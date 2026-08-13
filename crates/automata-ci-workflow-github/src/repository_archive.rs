@@ -209,7 +209,8 @@ impl RepositoryWorkflowDiscoveryOutcome {
 ///
 /// Returns a fail-closed error for a non-tar.gz or malformed archive, unsafe or
 /// duplicate paths, unsupported archive metadata, non-regular workflow
-/// entries, or any archive-wide configured resource-limit exhaustion.
+/// entries, any repository-owned GitHub Actions workflow directory, or any
+/// archive-wide configured resource-limit exhaustion.
 pub fn discover_repository_workflows(
     archive_bytes: &[u8],
     limits: RepositoryWorkflowDiscoveryLimits,
@@ -335,6 +336,10 @@ impl ArchiveInspection {
         let relative_path = relative_components.join("/");
         if !self.seen_paths.insert(relative_path.clone()) {
             return Err(RepositoryWorkflowDiscoveryError::DuplicatePath);
+        }
+
+        if is_github_actions_workflow_path(relative_components) {
+            return Err(RepositoryWorkflowDiscoveryError::UnsupportedWorkflowLocation);
         }
 
         let is_workflow = is_direct_workflow(relative_components);
@@ -516,6 +521,12 @@ fn is_direct_workflow(relative_components: &[&str]) -> bool {
         && relative_components[2]
             .rsplit_once('.')
             .is_some_and(|(_, extension)| matches!(extension, "yml" | "yaml"))
+}
+
+fn is_github_actions_workflow_path(relative_components: &[&str]) -> bool {
+    relative_components.len() >= 2
+        && relative_components[0] == ".github"
+        && relative_components[1] == "workflows"
 }
 
 fn consume_entry<R: io::Read>(
@@ -807,6 +818,8 @@ pub enum RepositoryWorkflowDiscoveryError {
     UnsupportedArchiveEntry,
     /// A direct workflow path is not represented by a regular file.
     UnsupportedWorkflowEntry,
+    /// The repository contains the GitHub Actions workflow authority.
+    UnsupportedWorkflowLocation,
     /// The archive did not begin with the required single explicit root directory.
     MissingArchiveRoot,
 }
@@ -822,6 +835,9 @@ impl fmt::Display for RepositoryWorkflowDiscoveryError {
                 "repository archive contains unsupported metadata or an entry type"
             }
             Self::UnsupportedWorkflowEntry => "repository workflow path is not a regular file",
+            Self::UnsupportedWorkflowLocation => {
+                "repository workflows must use the .ci/workflows directory"
+            }
             Self::MissingArchiveRoot => "repository archive root is missing",
         })
     }

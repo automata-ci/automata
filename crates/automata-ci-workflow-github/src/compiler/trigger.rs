@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use automata_ci_core::{ContextValue, PlanSourceSpan, WorkflowEventProvenance, WorkflowInputKey};
 
@@ -1465,24 +1462,14 @@ fn path_filter_matches(
         return PathFilterSelection::Matched(
             files
                 .iter()
-                .any(|path| ordered_patterns_match(&github_changed_path(path), filter.paths())),
+                .any(|path| ordered_patterns_match(path, filter.paths())),
         );
     }
     PathFilterSelection::Matched(files.iter().any(|path| {
-        let path = github_changed_path(path);
         !filter.paths_ignore().iter().any(|pattern| {
-            GithubGlob::parse(pattern.value()).is_ok_and(|pattern| pattern.matches(&path))
+            GithubGlob::parse(pattern.value()).is_ok_and(|pattern| pattern.matches(path))
         })
     }))
-}
-
-fn github_changed_path(path: &str) -> Cow<'_, str> {
-    path.strip_prefix(".ci/workflows/")
-        .and_then(|file| (!file.is_empty() && !file.contains('/')).then_some(file))
-        .map_or_else(
-            || Cow::Borrowed(path),
-            |file| Cow::Owned(format!(".github/workflows/{file}")),
-        )
 }
 
 enum PathFilterSelection {

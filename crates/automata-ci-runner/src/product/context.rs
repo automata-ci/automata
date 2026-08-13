@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_core::{
     Architecture, ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, OperatingSystem,
@@ -274,7 +274,7 @@ impl StandardGithubContext {
         let workflow_ref = format!(
             "{}/{}@{}",
             source.repository(),
-            github_workflow_path(source.workflow_path()),
+            source.workflow_path(),
             execution.git_ref()
         );
         let mut values = vec![
@@ -433,7 +433,7 @@ fn github_value(
     let workflow_ref = format!(
         "{}/{}@{}",
         source.repository(),
-        github_workflow_path(source.workflow_path()),
+        source.workflow_path(),
         execution.git_ref()
     );
     let mut values = vec![
@@ -489,15 +489,6 @@ fn github_value(
         values.push(string_entry("run_attempt", run_attempt.to_string()));
     }
     object(values)
-}
-
-fn github_workflow_path(path: &str) -> Cow<'_, str> {
-    path.strip_prefix(".ci/workflows/")
-        .and_then(|file| (!file.is_empty() && !file.contains('/')).then_some(file))
-        .map_or_else(
-            || Cow::Borrowed(path),
-            |file| Cow::Owned(format!(".github/workflows/{file}")),
-        )
 }
 
 fn github_ref_parts(git_ref: &str) -> Option<(&'static str, &str)> {

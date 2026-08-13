@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
@@ -23,16 +23,17 @@ use automata_ci_store::{
     BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
-    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckHeadSha,
-    GithubCheckName, GithubCheckProjectionAction, GithubCheckProjectionClaimFence,
-    GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
-    GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectId,
-    GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectReceipt,
-    GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName, GithubServerServiceAction,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceHandoffId, GithubServerServiceRevision, GithubServerServiceWorkerId,
-    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
+    GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
+    GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
+    GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
+    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
+    GithubServerServiceAction, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, ProviderConnectionId,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
     RetryGithubCheckProjection, TenantScope,
 };
@@ -41,6 +42,7 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
+use url::Url;
 use uuid::Uuid;
 
 const TOKEN: &str = "github_pat_checks_publisher_secret";
@@ -73,6 +75,7 @@ impl automata_ci_github_delivery::GithubDeliveryClock for StepClock {
 struct ClaimTemplate {
     action: GithubCheckProjectionAction,
     attempts: u16,
+    details_target: GithubCheckDetailsTarget,
     desired: GithubCheckDesiredProjection,
     revision: u64,
     suite_id: Option<GithubCheckSuiteId>,
@@ -177,6 +180,7 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             template.action,
             template.attempts,
             self.identity.clone(),
+            template.details_target,
             checks_authority(),
             external_id(),
             template.desired,
@@ -696,8 +700,10 @@ impl Harness {
             outbox.clone(),
             credentials.clone(),
             clock,
+            Url::parse("https://ci.automata.example/").expect("dashboard URL"),
             config,
-        );
+        )
+        .expect("publisher");
         Self {
             publisher,
             outbox,
@@ -973,6 +979,11 @@ async fn create_cutoff_and_state_publication_follow_exact_durable_actions() {
         methods(&requests),
         ["POST", "POST", "GET", "PATCH", "GET", "PATCH"]
     );
+    assert!(
+        requests[1].raw.contains(
+            r#""details_url":"https://ci.automata.example/automata-ci/automata/actions""#
+        )
+    );
     assert!(requests[3].raw.contains(r#""status":"in_progress""#));
     assert!(requests[5].raw.contains(r#""status":"completed""#));
     assert!(requests[5].raw.contains(r#""conclusion":"success""#));
@@ -986,6 +997,45 @@ async fn create_cutoff_and_state_publication_follow_exact_durable_actions() {
     );
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 4);
     assert!(Arc::strong_count(&harness.outbox) >= 2);
+}
+
+#[tokio::test]
+async fn job_check_links_to_the_exact_automata_dashboard_job() {
+    let dashboard_run_id =
+        RunId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000201));
+    let dashboard_job_id =
+        JobId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000202));
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let harness = Harness::new(
+        [claim_for_target(
+            GithubCheckProjectionAction::PrepareRunCreate,
+            queued(),
+            1,
+            Some(suite_id()),
+            None,
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![ResponseSpec::json(
+            201,
+            run_json_with_details(41, "queued", None, &details_url),
+        )],
+        CredentialMode::Exact,
+    )
+    .await;
+
+    assert!(matches!(
+        harness.run().await.expect("job Check advances"),
+        GithubChecksPublisherOutcome::Advanced(_)
+    ));
+    let requests = harness.server.requests();
+    assert_eq!(methods(&requests), ["POST"]);
+    let expected = format!(r#""details_url":"{details_url}""#);
+    assert!(requests[0].raw.contains(&expected));
 }
 
 #[tokio::test]
@@ -1747,6 +1797,7 @@ fn claim(
     ClaimTemplate {
         action,
         attempts: 1,
+        details_target: GithubCheckDetailsTarget::Repository,
         desired,
         revision,
         suite_id,
@@ -1765,10 +1816,25 @@ fn claim_at_attempt(
     ClaimTemplate {
         action,
         attempts,
+        details_target: GithubCheckDetailsTarget::Repository,
         desired,
         revision,
         suite_id,
         run_id,
+    }
+}
+
+fn claim_for_target(
+    action: GithubCheckProjectionAction,
+    desired: GithubCheckDesiredProjection,
+    revision: u64,
+    suite_id: Option<GithubCheckSuiteId>,
+    run_id: Option<GithubCheckRunId>,
+    details_target: GithubCheckDetailsTarget,
+) -> ClaimTemplate {
+    ClaimTemplate {
+        details_target,
+        ..claim(action, desired, revision, suite_id, run_id)
     }
 }
 
@@ -1876,10 +1942,24 @@ fn suite_json() -> String {
 }
 
 fn run_json(id: u64, status: &str, conclusion: Option<&str>) -> String {
+    run_json_with_details(
+        id,
+        status,
+        conclusion,
+        "https://ci.automata.example/automata-ci/automata/actions",
+    )
+}
+
+fn run_json_with_details(
+    id: u64,
+    status: &str,
+    conclusion: Option<&str>,
+    details_url: &str,
+) -> String {
     let conclusion = conclusion.map_or_else(|| "null".to_owned(), |value| format!(r#""{value}""#));
     format!(
-        r#"{{"id":{id},"head_sha":"{SHA}","external_id":"{}","status":"{status}","conclusion":{conclusion},"name":"{NAME}","check_suite":{{"id":23}},"app":{{"id":17}}}}"#,
-        external_id()
+        r#"{{"id":{id},"head_sha":"{SHA}","external_id":"{}","details_url":"{details_url}","status":"{status}","conclusion":{conclusion},"name":"{NAME}","check_suite":{{"id":23}},"app":{{"id":17}}}}"#,
+        external_id(),
     )
 }
 

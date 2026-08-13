@@ -531,7 +531,7 @@ jobs:
         id: candidate_identity
         env:
           GH_TOKEN: ${{ github.token }}
-          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/profile-image.yml
+          SIGNER_WORKFLOW: ${{ github.repository }}/.ci/workflows/profile-image.yml
         run: |
           gh attestation verify "oci://${LOCKED_IMAGE}" \
             --repo "$GITHUB_REPOSITORY" \

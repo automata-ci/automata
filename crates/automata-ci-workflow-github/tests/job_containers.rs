@@ -418,7 +418,7 @@ fn reusable_workflow_calls_reject_step_job_container_fields() {
     let source = r"on: push
 jobs:
   delegated:
-    uses: ./.github/workflows/delegated.yml
+    uses: ./.ci/workflows/delegated.yml
     container: build:latest
     services:
       cache: cache:latest

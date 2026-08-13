@@ -5,10 +5,11 @@ use std::time::Duration;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
     GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminateKind,
-    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckRunCreateOutcome,
-    GithubCheckRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
-    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubChecksError, GithubHttpEndpoint,
-    GithubHttpLimits, GithubObservedCheckConclusion,
+    GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
+    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
+    GithubCheckSuiteId, GithubChecksError, GithubHttpEndpoint, GithubHttpLimits,
+    GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -25,6 +26,7 @@ const OTHER_SHA: &str = "1123456789abcdef0123456789abcdef01234567";
 const TOKEN: &str = "github_pat_top_secret_checks_token";
 const NAME: &str = "Automata CI / verify";
 const EXTERNAL_ID: &str = "run:00000000-0000-4000-8000-000000000001";
+const DETAILS_URL: &str = "https://ci.automata.example/acme/widget/actions/runs/run/jobs/job";
 
 fn repository() -> RepositoryId {
     RepositoryId::new("acme/widget").expect("repository")
@@ -45,6 +47,8 @@ fn identity() -> GithubCheckRunIdentity {
         revision(),
         GithubCheckName::new(NAME).expect("check name"),
         GithubCheckExternalId::new(EXTERNAL_ID).expect("external id"),
+        GithubCheckDetailsUrl::new(Url::parse(DETAILS_URL).expect("details URL"))
+            .expect("valid details URL"),
     )
 }
 
@@ -66,6 +70,7 @@ fn run_value(
         "id": id,
         "head_sha": sha,
         "external_id": external_id,
+        "details_url": DETAILS_URL,
         "status": status,
         "conclusion": conclusion,
         "name": name,
@@ -255,7 +260,8 @@ async fn check_run_creation_sends_only_bounded_identity_and_accepts_exact_201() 
             "name": NAME,
             "head_sha": SHA,
             "status": "queued",
-            "external_id": EXTERNAL_ID
+            "external_id": EXTERNAL_ID,
+            "details_url": DETAILS_URL
         })
     );
     for forbidden in [
@@ -263,7 +269,6 @@ async fn check_run_creation_sends_only_bounded_identity_and_accepts_exact_201() 
         "annotations",
         "actions",
         "images",
-        "details_url",
         "logs",
         "artifacts",
     ] {
@@ -460,6 +465,13 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
         .as_object_mut()
         .expect("run object")
         .remove("external_id");
+    let mut missing_details_url = exact_run_value(41, "queued", None);
+    missing_details_url
+        .as_object_mut()
+        .expect("run object")
+        .remove("details_url");
+    let mut wrong_details_url = exact_run_value(41, "queued", None);
+    wrong_details_url["details_url"] = json!("https://attacker.invalid/run");
     let mut missing_conclusion = exact_run_value(41, "queued", None);
     missing_conclusion
         .as_object_mut()
@@ -492,6 +504,8 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
         exact_run_value(41, "completed", None),
         exact_run_value(41, "completed", Some("startup_failure")),
         missing_external_id,
+        missing_details_url,
+        wrong_details_url,
         missing_conclusion,
     ];
     for body in wrong_responses {
@@ -505,7 +519,7 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
         exact_run_value(41, "completed", Some("stale")).to_string(),
     ));
     let endpoint = server.endpoint();
-    for _ in 0..11 {
+    for _ in 0..13 {
         let error = endpoint
             .get_check_run(
                 &repository(),
@@ -1036,6 +1050,7 @@ fn bounded_models_and_diagnostics_are_redacted() {
     let identity_debug = format!("{:?}", identity());
     assert!(!identity_debug.contains(NAME));
     assert!(!identity_debug.contains(EXTERNAL_ID));
+    assert!(!identity_debug.contains(DETAILS_URL));
     assert!(!format!("{:?}", token()).contains(TOKEN));
 }
 

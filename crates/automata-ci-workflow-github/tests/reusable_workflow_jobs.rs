@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         target: [debug, release]
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     with:
       artifact-name: package-${{ github.sha }}
       retry-count: 2
@@ -52,13 +52,13 @@ jobs:
         .expect("local reusable-workflow call");
     assert_eq!(
         local_call.reference().expect("call reference").value(),
-        "./.github/workflows/reusable.yml"
+        "./.ci/workflows/reusable.yml"
     );
     assert_eq!(
         plan.source()
             .slice(local_call.reference().expect("call reference").span())
             .expect("reference source"),
-        "./.github/workflows/reusable.yml"
+        "./.ci/workflows/reusable.yml"
     );
 
     let inputs = local_call.inputs().expect("caller inputs");
@@ -119,7 +119,7 @@ fn reusable_workflow_call_rejects_every_step_job_only_field() {
     let source = r"on: push
 jobs:
   mixed:
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     strategy:
       fail-fast: false
       matrix:
@@ -254,7 +254,7 @@ jobs:
     uses: null
     with: {}
   invalid_secrets:
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     secrets: everything
 ";
 
@@ -294,7 +294,7 @@ fn unknown_call_job_fields_remain_extensions() {
     let source = r"on: push
 jobs:
   call:
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     future-call-policy: guarded
 ";
 
@@ -316,7 +316,7 @@ fn current_lowering_retains_durable_reusable_workflow_invocation() {
     let source = r"on: push
 jobs:
   call:
-    uses: ./.github/workflows/reusable.yml
+    uses: ./.ci/workflows/reusable.yml
     with:
       channel: stable
     secrets: inherit
@@ -343,7 +343,7 @@ jobs:
     };
     assert_eq!(
         invocation.reference().value(),
-        "./.github/workflows/reusable.yml"
+        "./.ci/workflows/reusable.yml"
     );
     assert_eq!(invocation.inputs().len(), 1);
     assert!(matches!(

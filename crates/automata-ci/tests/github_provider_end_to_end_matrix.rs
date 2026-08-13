@@ -1160,6 +1160,7 @@ fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
         "schema": 1,
         "transport": {"mode": "github_dot_com"},
+        "dashboard_url": "https://ci.automata.example/",
         "app": {
             "id": 42,
             "client_id": "Iv1.automata-provider",

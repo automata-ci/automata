@@ -36,7 +36,7 @@ IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 PROVENANCE_TYPE = "https://slsa.dev/provenance/v1"
 GITHUB_WORKFLOW_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
 REPOSITORY_URI = "https://github.com/automata-ci/automata"
-WORKFLOW_PATH = ".github/workflows/service-proxy-image.yml"
+WORKFLOW_PATH = ".ci/workflows/service-proxy-image.yml"
 SBOM_TYPE = "https://cyclonedx.org/bom"
 SOURCE_IDENTITY_TYPE = (
     "https://github.com/automata-ci/automata/attestations/"

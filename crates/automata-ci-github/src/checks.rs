@@ -20,6 +20,7 @@ use crate::{
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const MAX_CHECK_NAME_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
+const MAX_DETAILS_URL_BYTES: usize = 2_048;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = i64::MAX as u64;
@@ -108,7 +109,7 @@ impl GithubCheckRunId {
 pub struct GithubCheckName(String);
 
 impl GithubCheckName {
-    /// Creates a printable ASCII name with no leading or trailing whitespace.
+    /// Creates a printable UTF-8 name with no leading or trailing whitespace.
     ///
     /// # Errors
     ///
@@ -117,8 +118,8 @@ impl GithubCheckName {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_CHECK_NAME_BYTES
-            || value.trim_ascii() != value
-            || !value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+            || value.trim() != value
+            || value.chars().any(char::is_control)
         {
             return Err(GithubCheckModelError::InvalidCheckName);
         }
@@ -174,6 +175,44 @@ impl fmt::Debug for GithubCheckExternalId {
     }
 }
 
+/// Exact Automata dashboard URL attached to one Check Run.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GithubCheckDetailsUrl(Url);
+
+impl GithubCheckDetailsUrl {
+    /// Creates a bounded absolute HTTP(S) dashboard URL without credentials or fragments.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-HTTP(S), non-hierarchical, credential-bearing, fragmented,
+    /// or oversized URLs.
+    pub fn new(value: Url) -> Result<Self, GithubCheckModelError> {
+        if value.as_str().len() > MAX_DETAILS_URL_BYTES
+            || value.cannot_be_a_base()
+            || value.host_str().is_none()
+            || !value.username().is_empty()
+            || value.password().is_some()
+            || value.fragment().is_some()
+            || !matches!(value.scheme(), "http" | "https")
+        {
+            return Err(GithubCheckModelError::InvalidDetailsUrl);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the exact URL encoded at the provider boundary.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for GithubCheckDetailsUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubCheckDetailsUrl([configured])")
+    }
+}
+
 /// Immutable identity expected on every response for one Automata Check Run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubCheckRunIdentity {
@@ -182,6 +221,7 @@ pub struct GithubCheckRunIdentity {
     head_sha: ExactRevision,
     name: GithubCheckName,
     external_id: GithubCheckExternalId,
+    details_url: GithubCheckDetailsUrl,
 }
 
 impl GithubCheckRunIdentity {
@@ -193,6 +233,7 @@ impl GithubCheckRunIdentity {
         head_sha: ExactRevision,
         name: GithubCheckName,
         external_id: GithubCheckExternalId,
+        details_url: GithubCheckDetailsUrl,
     ) -> Self {
         Self {
             app_id,
@@ -200,6 +241,7 @@ impl GithubCheckRunIdentity {
             head_sha,
             name,
             external_id,
+            details_url,
         }
     }
 
@@ -231,6 +273,12 @@ impl GithubCheckRunIdentity {
     #[must_use]
     pub const fn external_id(&self) -> &GithubCheckExternalId {
         &self.external_id
+    }
+
+    /// Returns the exact Automata dashboard URL.
+    #[must_use]
+    pub const fn details_url(&self) -> &GithubCheckDetailsUrl {
+        &self.details_url
     }
 }
 
@@ -472,6 +520,9 @@ pub enum GithubCheckModelError {
     /// An external Check Run identity violates the bounded graphic-value policy.
     #[error("the GitHub Check Run external identity is invalid")]
     InvalidExternalId,
+    /// A Check Run details URL violates the bounded absolute-URL policy.
+    #[error("the GitHub Check Run details URL is invalid")]
+    InvalidDetailsUrl,
 }
 
 /// Sanitized failure at the GitHub Checks HTTP boundary.
@@ -530,6 +581,7 @@ struct CreateRunBody<'a> {
     head_sha: &'a str,
     status: &'static str,
     external_id: &'a str,
+    details_url: &'a str,
 }
 
 #[derive(Serialize)]
@@ -555,6 +607,8 @@ struct RunResponse {
     head_sha: String,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     external_id: Present<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    details_url: Present<Option<String>>,
     status: String,
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     conclusion: Present<Option<String>>,
@@ -604,6 +658,7 @@ struct ValidatedRun {
     head_sha: ExactRevision,
     name: GithubCheckName,
     external_id: Option<GithubCheckExternalId>,
+    details_url: Option<GithubCheckDetailsUrl>,
     state: GithubCheckRunState,
 }
 
@@ -729,6 +784,7 @@ impl GithubHttpEndpoint {
             head_sha: identity.head_sha.as_str(),
             status: "queued",
             external_id: identity.external_id.as_str(),
+            details_url: identity.details_url.as_str(),
         };
         let Ok(response) =
             authenticated_checks_request(self.client.post(endpoint), server_service_token)?
@@ -1073,6 +1129,18 @@ fn validate_run(wire: RunResponse) -> Result<ValidatedRun, GithubChecksError> {
         .map(GithubCheckExternalId::new)
         .transpose()
         .map_err(|_| GithubChecksError::InvalidResponse)?;
+    let details_url = wire
+        .details_url
+        .into_value()
+        .ok_or(GithubChecksError::InvalidResponse)?
+        .map(|value| {
+            Url::parse(&value)
+                .map_err(|_| GithubChecksError::InvalidResponse)
+                .and_then(|url| {
+                    GithubCheckDetailsUrl::new(url).map_err(|_| GithubChecksError::InvalidResponse)
+                })
+        })
+        .transpose()?;
     let conclusion = wire
         .conclusion
         .into_value()
@@ -1085,6 +1153,7 @@ fn validate_run(wire: RunResponse) -> Result<ValidatedRun, GithubChecksError> {
         head_sha,
         name,
         external_id,
+        details_url,
         state,
     })
 }
@@ -1127,7 +1196,9 @@ fn run_matches_query(run: &ValidatedRun, identity: &GithubCheckRunIdentity) -> b
 }
 
 fn run_matches_identity(run: &ValidatedRun, identity: &GithubCheckRunIdentity) -> bool {
-    run_matches_query(run, identity) && run.external_id.as_ref() == Some(&identity.external_id)
+    run_matches_query(run, identity)
+        && run.external_id.as_ref() == Some(&identity.external_id)
+        && run.details_url.as_ref() == Some(&identity.details_url)
 }
 
 fn into_public_run(run: &ValidatedRun, identity: &GithubCheckRunIdentity) -> GithubCheckRun {

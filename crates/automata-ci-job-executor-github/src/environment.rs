@@ -31,12 +31,6 @@ impl ResolvedActionInputs {
         &self.values
     }
 
-    pub(crate) fn value(&self, name: &str) -> Option<&ResolvedEnvironmentValue> {
-        self.values
-            .iter()
-            .find_map(|(candidate, value)| candidate.eq_ignore_ascii_case(name).then_some(value))
-    }
-
     pub(crate) fn environment(
         &self,
     ) -> Result<Vec<(String, ResolvedEnvironmentValue)>, ExecutorAdapterError> {

@@ -1,7 +1,7 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use async_trait::async_trait;
-use automata_ci_core::{RunId, UnixMillis};
+use automata_ci_core::{JobId, RunId, UnixMillis};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -147,21 +147,39 @@ impl std::fmt::Debug for GithubCheckHeadSha {
 pub struct GithubCheckName(String);
 
 impl GithubCheckName {
-    /// Constructs a printable ASCII Check Run name.
+    /// Constructs a printable UTF-8 Check Run name.
     ///
     /// # Errors
     ///
-    /// Rejects empty, oversized, edge-whitespace, control, or non-ASCII names.
+    /// Rejects empty, oversized, edge-whitespace, or control-bearing names.
     pub fn new(value: impl Into<String>) -> Result<Self, GithubCheckValueError> {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_CHECK_NAME_BYTES
-            || value.trim_ascii() != value
-            || !value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+            || value.trim() != value
+            || value.chars().any(char::is_control)
         {
             return Err(GithubCheckValueError::InvalidCheckName);
         }
         Ok(Self(value))
+    }
+
+    /// Derives GitHub's bounded Check name from an evaluated Automata job name.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, edge-whitespace, or control-bearing job names. Names over
+    /// the provider byte ceiling are truncated at a UTF-8 scalar boundary.
+    pub fn from_job_display_name(value: &str) -> Result<Self, GithubCheckValueError> {
+        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+            return Err(GithubCheckValueError::InvalidCheckName);
+        }
+        let mut end = value.len().min(MAX_CHECK_NAME_BYTES);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let bounded = value[..end].trim_end();
+        Self::new(bounded.to_owned())
     }
 
     /// Returns the validated provider-facing name.
@@ -871,6 +889,17 @@ pub enum GithubCheckProjectionAction {
     Publish,
 }
 
+/// Exact Automata dashboard resource represented by a Check Run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GithubCheckDetailsTarget {
+    /// Repository workflow activity, used by pre-admission diagnostics.
+    Repository,
+    /// One admitted workflow run.
+    WorkflowRun(RunId),
+    /// One concrete job inside an admitted workflow run.
+    Job { run_id: RunId, job_id: JobId },
+}
+
 /// Exact exclusive fence for one claimed outbox attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubCheckProjectionClaimFence {
@@ -928,6 +957,7 @@ pub struct ClaimedGithubCheckProjection {
     action: GithubCheckProjectionAction,
     attempts: NonZeroU16,
     identity: GithubCheckSubjectIdentity,
+    details_target: GithubCheckDetailsTarget,
     checks_authority: GithubServerServiceAuthoritySelector,
     external_id: String,
     desired: GithubCheckDesiredProjection,
@@ -954,6 +984,7 @@ impl ClaimedGithubCheckProjection {
         action: GithubCheckProjectionAction,
         attempts: u16,
         identity: GithubCheckSubjectIdentity,
+        details_target: GithubCheckDetailsTarget,
         checks_authority: GithubServerServiceAuthoritySelector,
         external_id: String,
         desired: GithubCheckDesiredProjection,
@@ -986,6 +1017,23 @@ impl ClaimedGithubCheckProjection {
         if checks_authority.tenant() != identity.tenant() {
             return Err(GithubCheckValueError::AuthoritySelectorMismatch);
         }
+        match details_target {
+            GithubCheckDetailsTarget::Repository => {}
+            GithubCheckDetailsTarget::WorkflowRun(run_id) => {
+                if run_id.as_uuid().is_nil() {
+                    return Err(GithubCheckValueError::NilUuid(
+                        "GitHub Check details workflow run ID",
+                    ));
+                }
+            }
+            GithubCheckDetailsTarget::Job { run_id, job_id } => {
+                if run_id.as_uuid().is_nil() || job_id.as_uuid().is_nil() {
+                    return Err(GithubCheckValueError::NilUuid(
+                        "GitHub Check details job target",
+                    ));
+                }
+            }
+        }
         if !binding_is_valid {
             return Err(GithubCheckValueError::InvalidProjectionBinding);
         }
@@ -995,6 +1043,7 @@ impl ClaimedGithubCheckProjection {
             action,
             attempts,
             identity,
+            details_target,
             checks_authority,
             external_id,
             desired,
@@ -1025,6 +1074,11 @@ impl ClaimedGithubCheckProjection {
     #[must_use]
     pub const fn identity(&self) -> &GithubCheckSubjectIdentity {
         &self.identity
+    }
+    /// Returns the exact Automata dashboard resource for `details_url`.
+    #[must_use]
+    pub const fn details_target(&self) -> GithubCheckDetailsTarget {
+        self.details_target
     }
     /// Returns the immutable manifest-pinned `checks_write` authority selector.
     #[must_use]

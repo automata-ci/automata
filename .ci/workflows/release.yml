@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     permissions:
-      actions: read
+      checks: read
       contents: read
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
@@ -184,6 +184,7 @@ jobs:
 
       - name: Require successful main CI for the tagged commit
         env:
+          AUTOMATA_GITHUB_APP_ID: ${{ vars.AUTOMATA_GITHUB_APP_ID }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
         run: |
@@ -198,28 +199,41 @@ jobs:
             exit 1
           }
 
-          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"
-          # CI's distribution job runs after its verification fan-out, so a
-          # tag pushed with the main commit can legitimately take about 75
-          # minutes to reach a terminal workflow conclusion.
+          [[ "$AUTOMATA_GITHUB_APP_ID" =~ ^[1-9][0-9]*$ ]] || {
+            printf 'error: AUTOMATA_GITHUB_APP_ID must be a positive integer\n' >&2
+            exit 1
+          }
+          check_name="Static Linux distribution"
+          endpoint="repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs"
+          # The final distribution job runs after its verification fan-out, so
+          # a tag pushed with the main commit can legitimately take about 75
+          # minutes to reach a terminal Automata Check conclusion.
           deadline="$(( $(date +%s) + 5400 ))"
           api_failures=0
           while (( $(date +%s) < deadline )); do
-            if ! runs="$(
+            if ! checks="$(
               gh api --method GET "$endpoint" \
-                -f branch=main \
-                -f event=push \
-                -f head_sha="$RELEASE_COMMIT" \
+                -f app_id="$AUTOMATA_GITHUB_APP_ID" \
+                -f check_name="$check_name" \
+                -f filter=latest \
                 -f per_page=100 \
-                --jq '.workflow_runs[] | [.id, .status, (.conclusion // ""), .html_url] | @tsv'
+                --jq '.check_runs[] | [
+                  .id,
+                  .head_sha,
+                  .status,
+                  (.conclusion // "-"),
+                  (.details_url // ""),
+                  (.external_id // ""),
+                  (.app.id | tostring)
+                ] | @tsv'
             )"; then
               api_failures="$((api_failures + 1))"
               if (( api_failures >= 3 )); then
-                printf 'error: unable to query CI runs for %s\n' \
+                printf 'error: unable to query Automata Checks for %s\n' \
                   "$RELEASE_COMMIT" >&2
                 exit 1
               fi
-              printf 'warning: CI query failed; retrying (%s/3)\n' \
+              printf 'warning: Automata Check query failed; retrying (%s/3)\n' \
                 "$api_failures" >&2
               sleep 15
               continue
@@ -229,33 +243,49 @@ jobs:
             success_url=""
             failed_url=""
             pending=false
-            while IFS=$'\t' read -r run_id status conclusion run_url; do
-              [[ -n "$run_id" ]] || continue
+            observed=0
+            while IFS=$'\t' read -r check_id head_sha status conclusion details_url external_id app_id; do
+              [[ -n "$check_id" ]] || continue
+              observed="$((observed + 1))"
+              [[ "$head_sha" == "$RELEASE_COMMIT" \
+                && "$app_id" == "$AUTOMATA_GITHUB_APP_ID" \
+                && "$external_id" == automata-check:* \
+                && "$details_url" == https://* ]] || {
+                printf 'error: Check %s is not exact Automata evidence for %s\n' \
+                  "$check_id" "$RELEASE_COMMIT" >&2
+                exit 1
+              }
               if [[ "$status" == completed && "$conclusion" == success ]]; then
-                success_url="$run_url"
-                break
+                success_url="$details_url"
+                continue
               fi
               if [[ "$status" == completed ]]; then
-                failed_url="$run_url"
+                failed_url="$details_url"
               else
                 pending=true
               fi
-            done <<< "$runs"
+            done <<< "$checks"
+
+            (( observed <= 1 )) || {
+              printf 'error: ambiguous latest Automata Check evidence for %s\n' \
+                "$RELEASE_COMMIT" >&2
+              exit 1
+            }
 
             if [[ -n "$success_url" ]]; then
-              printf 'Release gate accepted CI run: %s\n' "$success_url"
+              printf 'Release gate accepted Automata Check: %s\n' "$success_url"
               break
             fi
             if [[ -n "$failed_url" && "$pending" == false ]]; then
-              printf 'error: CI did not pass for release commit %s: %s\n' \
+              printf 'error: Automata CI did not pass for release commit %s: %s\n' \
                 "$RELEASE_COMMIT" "$failed_url" >&2
               exit 1
             fi
-            printf 'Waiting for main CI on %s...\n' "$RELEASE_COMMIT"
+            printf 'Waiting for Automata CI on %s...\n' "$RELEASE_COMMIT"
             sleep 15
           done
           [[ -n "${success_url:-}" ]] || {
-            printf 'error: timed out waiting for main CI on %s\n' \
+            printf 'error: timed out waiting for Automata CI on %s\n' \
               "$RELEASE_COMMIT" >&2
             exit 1
           }

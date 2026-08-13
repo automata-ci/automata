@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "transport": { "mode": "github_dot_com" },
+  "dashboard_url": "https://ci.automata.example/",
   "app": {
     "id": 123456,
     "client_id": "Iv1.example-automata-app",
