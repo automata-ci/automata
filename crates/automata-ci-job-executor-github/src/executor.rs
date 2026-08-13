@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::BTreeMap,
     fmt,
     future::Future,
@@ -15,9 +14,9 @@ use automata_ci_core::{
     JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
     MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
     MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity, RuntimeBoolean,
-    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, ShellTemplate,
-    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis,
-    ValueSource, ValueTemplate,
+    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, StepAnnotation,
+    StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis, ValueSource,
+    ValueTemplate,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -66,6 +65,7 @@ use crate::{
     environment::{EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue},
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
+    shell::{composite_shell, resolve_shell_template, shell_argv},
 };
 use automata_ci_workflow_github::GithubConditionCompiler;
 
@@ -175,55 +175,6 @@ pub struct GithubJobExecutor {
 struct HydratedExecutionRequest<'a> {
     request: &'a ExecutionRequest,
     runtime_context: &'a JobRuntimeContext,
-}
-
-enum ResolvedShell {
-    Default,
-    Named(String),
-    CommandTemplate(String),
-}
-
-impl ResolvedShell {
-    fn script_extension(&self, platform: TargetPlatform) -> &'static str {
-        match self {
-            Self::Named(name) if name.eq_ignore_ascii_case("python") => ".py",
-            Self::Named(name)
-                if name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell") =>
-            {
-                ".ps1"
-            }
-            Self::Named(name) if name.eq_ignore_ascii_case("cmd") => ".cmd",
-            Self::Default if platform == TargetPlatform::Windows => ".ps1",
-            Self::Default | Self::Named(_) | Self::CommandTemplate(_) => ".sh",
-        }
-    }
-
-    fn fix_up_script<'command>(
-        &self,
-        platform: TargetPlatform,
-        command: &'command str,
-    ) -> Cow<'command, str> {
-        let is_powershell = matches!(self, Self::Named(name) if name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell"))
-            || matches!(self, Self::Default if platform == TargetPlatform::Windows);
-        if is_powershell {
-            Cow::Owned(format!(
-                "$ErrorActionPreference = 'stop'\n{command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}"
-            ))
-        } else if platform == TargetPlatform::Windows
-            && matches!(self, Self::Named(name) if name.eq_ignore_ascii_case("cmd"))
-        {
-            let mut normalized = command
-                .replace("\r\n", "\n")
-                .replace('\r', "\n")
-                .replace('\n', "\r\n");
-            if !normalized.ends_with("\r\n") {
-                normalized.push_str("\r\n");
-            }
-            Cow::Owned(normalized)
-        } else {
-            Cow::Borrowed(command)
-        }
-    }
 }
 
 impl<'a> HydratedExecutionRequest<'a> {
@@ -855,12 +806,14 @@ impl GithubJobExecutor {
                             &cancellation,
                         )?;
                         let shell = cancellation_dominant(
-                            Self::resolve_shell_template(
-                                &value_builder,
-                                values.shell(),
-                                context.expression(),
-                                &mut masker,
-                            ),
+                            resolve_shell_template(values.shell(), |value| {
+                                Self::resolve_value_template(
+                                    &value_builder,
+                                    value,
+                                    context.expression(),
+                                    &mut masker,
+                                )
+                            }),
                             &cancellation,
                         )?;
                         let working_directory = cancellation_dominant(
@@ -901,8 +854,10 @@ impl GithubJobExecutor {
                             paths.script(index, shell.script_extension(workspace.platform())),
                             &cancellation,
                         )?;
-                        let (program, arguments) =
-                            cancellation_dominant(self.shell_argv(&shell, &script), &cancellation)?;
+                        let (program, arguments) = cancellation_dominant(
+                            shell_argv(self.ports.toolchain.as_ref(), &shell, &script),
+                            &cancellation,
+                        )?;
                         let script_contents =
                             shell.fix_up_script(workspace.platform(), command.expose());
                         cancellation_dominant(
@@ -3159,8 +3114,10 @@ impl GithubJobExecutor {
                         ),
                         cancellation,
                     )?;
-                    let (program, arguments) =
-                        cancellation_dominant(self.shell_argv(&shell, &script), cancellation)?;
+                    let (program, arguments) = cancellation_dominant(
+                        shell_argv(self.ports.toolchain.as_ref(), &shell, &script),
+                        cancellation,
+                    )?;
                     let script_contents = shell.fix_up_script(paths.workspace.platform(), &command);
                     cancellation_dominant(
                         budget.charge_derived(script_contents.len().saturating_sub(command.len())),
@@ -4132,29 +4089,6 @@ impl GithubJobExecutor {
         builder.resolve_source_value(&ValueSource::Template(value.clone()), context, masker)
     }
 
-    fn resolve_shell_template(
-        builder: &EnvironmentBuilder<'_>,
-        shell: &ShellTemplate,
-        context: &dyn GithubEvaluationContext,
-        masker: &mut SecretMasker,
-    ) -> Result<ResolvedShell, ExecutorAdapterError> {
-        match shell {
-            ShellTemplate::Default => Ok(ResolvedShell::Default),
-            ShellTemplate::Named { value } => {
-                Self::resolve_value_template(builder, value, context, masker)
-                    .map(|value| ResolvedShell::Named(value.into_value()))
-            }
-            ShellTemplate::CommandTemplate { value } => {
-                Self::resolve_value_template(builder, value, context, masker)
-                    .map(|value| ResolvedShell::CommandTemplate(value.into_value()))
-            }
-            ShellTemplate::Dynamic { value } => {
-                let value = Self::resolve_value_template(builder, value, context, masker)?;
-                composite_shell(value.expose())
-            }
-        }
-    }
-
     fn evaluate_job_outputs(
         definitions: &[automata_ci_core::JobOutputDefinition],
         builder: &EnvironmentBuilder<'_>,
@@ -4525,132 +4459,6 @@ impl GithubJobExecutor {
         endpoint
             .copy_to(&request, &CancellationBridge(cancellation))
             .map_err(map_execution_error)
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn shell_argv(
-        &self,
-        shell: &ResolvedShell,
-        script: &TargetPath,
-    ) -> Result<(TargetPath, Vec<String>), ExecutorAdapterError> {
-        let script_path = script;
-        let script = script.as_str().to_owned();
-        match (self.ports.toolchain.platform(), shell) {
-            (TargetPlatform::Posix, ResolvedShell::Default) => Ok((
-                required_tool(self.ports.toolchain.bash())?,
-                vec!["-e".into(), script],
-            )),
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("bash") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec![
-                        "--noprofile".into(),
-                        "--norc".into(),
-                        "-e".into(),
-                        "-o".into(),
-                        "pipefail".into(),
-                        script,
-                    ],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("sh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.sh())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("python") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.python())?,
-                    windows_script_arguments(WindowsScriptShell::Python, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("python") =>
-            {
-                Ok((required_tool(self.ports.toolchain.python())?, vec![script]))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("pwsh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.pwsh())?,
-                    powershell_arguments(&script),
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Default) => Ok((
-                required_tool(self.ports.toolchain.pwsh())?,
-                windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                    .ok_or_else(invalid_job)?,
-            )),
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("pwsh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.pwsh())?,
-                    windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("powershell") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.powershell())?,
-                    windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("cmd") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.cmd())?,
-                    windows_script_arguments(WindowsScriptShell::Cmd, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "bash -e {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "bash --noprofile --norc -eo pipefail {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec![
-                        "--noprofile".into(),
-                        "--norc".into(),
-                        "-eo".into(),
-                        "pipefail".into(),
-                        script,
-                    ],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "sh -e {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.sh())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (_, ResolvedShell::Named(_) | ResolvedShell::CommandTemplate(_)) => Err(
-                ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported),
-            ),
-        }
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -6642,24 +6450,6 @@ fn path_contained_by(path: &TargetPath, root: &TargetPath) -> bool {
     }
 }
 
-fn composite_shell(value: &str) -> Result<ResolvedShell, ExecutorAdapterError> {
-    let value = value.trim();
-    if ["bash", "sh", "python", "pwsh", "powershell", "cmd"]
-        .into_iter()
-        .any(|name| value.eq_ignore_ascii_case(name))
-    {
-        return Ok(ResolvedShell::Named(value.to_ascii_lowercase()));
-    }
-    match value {
-        "bash -e {0}" | "bash --noprofile --norc -eo pipefail {0}" | "sh -e {0}" => {
-            Ok(ResolvedShell::CommandTemplate(value.to_owned()))
-        }
-        _ => Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Unsupported,
-        )),
-    }
-}
-
 fn composite_runtime_step_id(call_path: &ActionCallPath) -> String {
     let suffix = call_path
         .0
@@ -7125,55 +6915,6 @@ fn windows_artifact_hash_invocation(
     Ok((argv, environment))
 }
 
-fn powershell_arguments(script: &str) -> Vec<String> {
-    let script = script.replace('\'', "''");
-    vec!["-command".into(), format!(". '{script}'")]
-}
-
-/// Supported Windows script-interpreter argument contracts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowsScriptShell {
-    /// PowerShell Core or Windows PowerShell dot-sourcing a `.ps1` file.
-    PowerShell,
-    /// `cmd.exe` executing a `.cmd` file with expansion policy fixed explicitly.
-    Cmd,
-    /// Python executing a `.py` file by its exact absolute target path.
-    Python,
-}
-
-/// Builds the exact argument vector used to execute one Windows script file.
-///
-/// Returns `None` for a non-Windows target or when a `cmd.exe` script path
-/// contains quote, percent-expansion, or active command-metacharacter syntax
-/// that the command interpreter could reinterpret before opening the intended
-/// file. `!` remains literal because the argument contract forces `/V:OFF`.
-#[must_use]
-pub fn windows_script_arguments(
-    shell: WindowsScriptShell,
-    script: &TargetPath,
-) -> Option<Vec<String>> {
-    if script.platform() != TargetPlatform::Windows {
-        return None;
-    }
-    let script = script.as_str();
-    match shell {
-        WindowsScriptShell::PowerShell => Some(powershell_arguments(script)),
-        WindowsScriptShell::Cmd
-            if !script.contains(['"', '%', '&', '|', '<', '>', '^', '(', ')']) =>
-        {
-            Some(vec![
-                "/D".into(),
-                "/E:ON".into(),
-                "/V:OFF".into(),
-                "/C".into(),
-                script.to_owned(),
-            ])
-        }
-        WindowsScriptShell::Cmd => None,
-        WindowsScriptShell::Python => Some(vec![script.to_owned()]),
-    }
-}
-
 fn windows_directory_creation_script<'path>(
     paths: impl IntoIterator<Item = &'path TargetPath>,
 ) -> String {
@@ -7590,7 +7331,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream, TargetPath};
+    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
     use automata_ci_expression_github::GithubValue;
     use automata_ci_github_runtime::{
         CommandFileDecoder, CommandFileKind, CommandFilePlatform, GithubCommandFileDecoder,
@@ -7601,89 +7342,10 @@ mod tests {
     use super::{
         ActionExecutionBudget, CleanupCancellation, ExecutorAdapterErrorKind, GithubStatus,
         JobConclusion, MAX_ACTION_INVOCATIONS, MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS,
-        MAX_COMPOSITE_DERIVED_BYTES, ResolvedShell, SecretMasker, WindowsScriptShell,
-        composite_shell, encode_action_outputs, github_value_from_json,
+        MAX_COMPOSITE_DERIVED_BYTES, SecretMasker, encode_action_outputs, github_value_from_json,
         parse_output_with_cancellation, reconcile_cancelled_operation, reconcile_post_operation,
-        resource_exhausted, windows_script_arguments,
+        resource_exhausted,
     };
-
-    #[test]
-    fn windows_script_arguments_preserve_exact_production_quoting_and_cmd_flags() {
-        let powershell_script =
-            TargetPath::windows(r"C:\runner root\it's probe.ps1").expect("PowerShell script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::PowerShell, &powershell_script),
-            Some(vec![
-                "-command".to_owned(),
-                ". 'C:\\runner root\\it''s probe.ps1'".to_owned(),
-            ])
-        );
-
-        let cmd_script =
-            TargetPath::windows(r"C:\runner root\probe script.cmd").expect("cmd script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Cmd, &cmd_script),
-            Some(vec![
-                "/D".to_owned(),
-                "/E:ON".to_owned(),
-                "/V:OFF".to_owned(),
-                "/C".to_owned(),
-                r"C:\runner root\probe script.cmd".to_owned(),
-            ])
-        );
-        let python_script =
-            TargetPath::windows(r"C:\runner root\probe script.py").expect("Python script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Python, &python_script),
-            Some(vec![r"C:\runner root\probe script.py".to_owned()])
-        );
-
-        for metacharacter in ['%', '&', '^', '(', ')'] {
-            let unsafe_script = TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd"))
-                .expect("filesystem-valid Windows path");
-            assert_eq!(
-                windows_script_arguments(WindowsScriptShell::Cmd, &unsafe_script),
-                None,
-                "cmd metacharacter {metacharacter:?} must fail closed"
-            );
-        }
-        for metacharacter in ['"', '|', '<', '>'] {
-            assert!(
-                TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd")).is_err(),
-                "filesystem-invalid Windows metacharacter {metacharacter:?} must fail closed"
-            );
-        }
-        let literal_bang =
-            TargetPath::windows(r"C:\runner!literal\probe.cmd").expect("literal bang path");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Cmd, &literal_bang),
-            Some(vec![
-                "/D".to_owned(),
-                "/E:ON".to_owned(),
-                "/V:OFF".to_owned(),
-                "/C".to_owned(),
-                r"C:\runner!literal\probe.cmd".to_owned(),
-            ])
-        );
-        let posix = TargetPath::posix("/runner/probe.ps1").expect("POSIX path");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::PowerShell, &posix),
-            None
-        );
-    }
-
-    #[test]
-    fn composite_shell_accepts_only_configured_builtin_names_and_existing_templates() {
-        assert!(matches!(
-            composite_shell("python").expect("Python built-in"),
-            ResolvedShell::Named(name) if name == "python"
-        ));
-        assert!(matches!(
-            composite_shell("pwsh").expect("PowerShell Core built-in"),
-            ResolvedShell::Named(name) if name == "pwsh"
-        ));
-        assert!(composite_shell("perl {0}").is_err());
-    }
 
     #[test]
     fn event_json_conversion_preserves_nested_types() {

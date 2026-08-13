@@ -27,6 +27,32 @@ assert_obj_safe!(ExecutionOperationIds);
 assert_obj_safe!(ExecutionClock);
 
 #[test]
+fn shell_seam_has_no_executor_side_effect_or_secret_dependencies() {
+    let source = include_str!("../src/shell.rs");
+    let production = source
+        .split_once("#[cfg(test)]")
+        .map_or(source, |(production, _)| production);
+
+    for forbidden in [
+        "SecretPort",
+        "EnvironmentBuilder",
+        "ExecutionEndpoint",
+        "CopyToRequest",
+        "ExecutionOperationIds",
+        "OperationPurpose",
+        "ExecutionCancellation",
+        "Cancellation",
+        "ActionExecutionBudget",
+        ".exec(",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "shell seam must not depend on {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn artifact_hash_operation_ids_preserve_full_composite_phase_coordinates() {
     const COMPOSITE_PHASE_BASE: u32 = 1 << 24;
 
