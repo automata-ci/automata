@@ -870,10 +870,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn product_config(root: &std::path::Path, runner_id: Uuid) -> RunnerProductConfig {
-        let mut document: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../config/runner.local-1.example.json"
-        ))
-        .expect("example runner configuration");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../config/runner.local-1.example.json"))
+                .expect("example runner configuration");
         document["runner_id"] = serde_json::json!(runner_id);
         for (field, filename) in [
             ("server_roots", "server-roots.pem"),
@@ -945,10 +944,10 @@ mod tests {
         let expires_at = 1_900_000_000;
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
         let mut ca_params = CertificateParams::default();
-        ca_params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before)
-            .expect("CA not-before");
-        ca_params.not_after = time::OffsetDateTime::from_unix_timestamp(expires_at + 60)
-            .expect("CA not-after");
+        ca_params.not_before =
+            time::OffsetDateTime::from_unix_timestamp(not_before).expect("CA not-before");
+        ca_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(expires_at + 60).expect("CA not-after");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("CA");
@@ -958,10 +957,10 @@ mod tests {
         leaf_params
             .distinguished_name
             .push(DnType::CommonName, runner_id.hyphenated().to_string());
-        leaf_params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before)
-            .expect("leaf not-before");
-        leaf_params.not_after = time::OffsetDateTime::from_unix_timestamp(expires_at)
-            .expect("leaf not-after");
+        leaf_params.not_before =
+            time::OffsetDateTime::from_unix_timestamp(not_before).expect("leaf not-before");
+        leaf_params.not_after =
+            time::OffsetDateTime::from_unix_timestamp(expires_at).expect("leaf not-after");
         leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let leaf = leaf_params
