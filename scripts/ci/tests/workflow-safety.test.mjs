@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -169,7 +177,7 @@ test(
 
     assert.equal(plan.status, 0, plan.stderr);
     const commands = plan.stdout.trim().split("\n");
-    assert.equal(commands.length, 4, plan.stdout);
+    assert.equal(commands.length, 5, plan.stdout);
     assert.equal((ci.match(/^  postgres:[ \t]*$/gm) ?? []).length, 0);
     assert.equal(
       (
@@ -233,14 +241,18 @@ test(
     );
     assert.match(
       commands[1],
-      /-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test postgres_18 --test auth_postgres --test runner_auth_postgres --test secret_postgres .*--ignored --test-threads=4$/,
+      /-p automata-ci-postgres-test-support --test postgres_18 .*--ignored --test-threads=1$/,
     );
     assert.match(
       commands[2],
-      /-p automata-ci-results-github --test postgres_artifacts --test postgres_cache .*--ignored --test-threads=4$/,
+      /-p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test auth_postgres --test runner_auth_postgres --test secret_postgres .*--ignored --test-threads=4$/,
     );
     assert.match(
       commands[3],
+      /-p automata-ci-results-github --test postgres_artifacts --test postgres_cache .*--ignored --test-threads=4$/,
+    );
+    assert.match(
+      commands[4],
       /-p automata-ci --test github_provider_end_to_end_matrix .*--ignored --test-threads=1$/,
     );
     assert.equal((runner.match(/-p automata-ci-store/g) ?? []).length, 1);
@@ -309,6 +321,81 @@ test(
     assert.ok(databaseOnlySuites.size > broadDatabasePackages.size);
   },
 );
+
+test("PostgreSQL runner cleans its owned namespace after an interrupted child status", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "automata-postgres-interruption-"));
+  try {
+    const cargoLog = path.join(directory, "cargo.log");
+    const fakeCargo = path.join(directory, "cargo");
+    writeFileSync(
+      fakeCargo,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$*\" >> \"$AUTOMATA_FAKE_CARGO_LOG\"",
+        "case \" $* \" in",
+        "  *' --example postgres-test-cleanup '*) exit 0 ;;",
+        "  *) exit 143 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+    const interrupted = spawnSync(
+      path.join(repositoryRoot, "scripts/ci/run-postgres-tests.sh"),
+      [],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          AUTOMATA_FAKE_CARGO_LOG: cargoLog,
+          AUTOMATA_TEST_DATABASE_NAMESPACE: "interrupted_contract",
+          AUTOMATA_TEST_DATABASE_URL:
+            "postgresql://unused.invalid/unused?sslmode=disable",
+          PATH: directory + ":" + process.env.PATH,
+        },
+      },
+    );
+
+    assert.equal(interrupted.status, 143, interrupted.stderr);
+    const invocations = readFileSync(cargoLog, "utf8").trim().split("\n");
+    assert.equal(invocations.length, 2, invocations.join("\n"));
+    assert.match(invocations[0], /^test -p automata-ci-store /);
+    assert.match(
+      invocations[1],
+      /^run -p automata-ci-postgres-test-support --example postgres-test-cleanup /,
+    );
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("portable workflows merge beside native workflow files without overwrite", () => {
+  const executor = source(
+    "crates/automata-ci-job-executor-github/src/executor.rs",
+  );
+  assert.equal(existsSync(path.join(repositoryRoot, ".github/workflows/ci.yml")), false);
+  assert.equal(
+    existsSync(
+      path.join(
+        repositoryRoot,
+        ".github/workflows/automata-check-bridge.yml",
+      ),
+    ),
+    true,
+  );
+  assert.match(executor, /for source in \.ci\/workflows\/\*/);
+  assert.match(
+    executor,
+    /\[ ! -e \\"\$destination\\" \] && \[ ! -L \\"\$destination\\" \]/,
+  );
+  assert.match(executor, /Get-ChildItem -LiteralPath '\.ci\/workflows' -File/);
+  assert.match(
+    executor,
+    /Get-Item -LiteralPath \$destination -Force -ErrorAction SilentlyContinue/,
+  );
+  assert.doesNotMatch(executor, /cp -R -- \.ci\/workflows \.github\/workflows/);
+});
 
 test("CI executes documentation and committed script contract suites", () => {
   const ci = source(".ci/workflows/ci.yml");
@@ -403,7 +490,7 @@ test("CI executes documentation and committed script contract suites", () => {
 });
 
 test("native workflows bridge exact Automata Checks without duplicating portable CI", () => {
-  const bridge = source(".github/workflows/ci.yml");
+  const bridge = source(".github/workflows/automata-check-bridge.yml");
   const release = source(".github/workflows/release.yml");
   const movedWorkflows = [
     "pages.yml",
@@ -463,7 +550,7 @@ test("native workflows bridge exact Automata Checks without duplicating portable
   assert.match(release, /permissions:\n      actions: read\n      contents: read/);
   assert.match(
     release,
-    /actions\/workflows\/ci\.yml\/runs/,
+    /actions\/workflows\/automata-check-bridge\.yml\/runs/,
   );
   assert.match(release, /-f branch=main/);
   assert.match(release, /-f event=push/);

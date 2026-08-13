@@ -198,7 +198,7 @@ jobs:
             exit 1
           }
 
-          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs"
+          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/automata-check-bridge.yml/runs"
           # CI's distribution job runs after its verification fan-out, so a
           # tag pushed with the main commit can legitimately take about 75
           # minutes to reach a terminal workflow conclusion.

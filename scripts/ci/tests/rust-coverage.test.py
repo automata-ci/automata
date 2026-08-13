@@ -1412,11 +1412,12 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 16, planned.stdout
+        assert len(commands) == 17, planned.stdout
         expected_inventory = [
             "cargo test --workspace",
             "-p automata-ci-store --test store_postgres_execution",
-            "-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test postgres_18 --test auth_postgres --test runner_auth_postgres --test secret_postgres",
+            "-p automata-ci-postgres-test-support --test postgres_18",
+            "-p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test auth_postgres --test runner_auth_postgres --test secret_postgres",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test rustfs_contract",
@@ -1435,6 +1436,7 @@ exit 99
             assert expected in command, command
         assert all("--ignored" in command for command in commands[1:])
         assert "--test-threads=4" in commands[1]
+        assert "--test-threads=1" in commands[2]
         assert "--tests" not in commands[1]
         assert sum(
             command.count("-p automata-ci-postgres-test-support")

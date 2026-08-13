@@ -2601,7 +2601,7 @@ impl GithubJobExecutor {
                 required_tool(self.ports.toolchain.sh())?,
                 vec![
                     "-c".to_owned(),
-                    "if [ -d .ci/workflows ] && [ ! -e .github/workflows ]; then mkdir -p .github && cp -R -- .ci/workflows .github/workflows; fi"
+                    "if [ -d .ci/workflows ]; then mkdir -p .github/workflows; for source in .ci/workflows/*; do if [ ! -f \"$source\" ] || [ -L \"$source\" ]; then continue; fi; destination=\".github/workflows/${source##*/}\"; if [ ! -e \"$destination\" ] && [ ! -L \"$destination\" ]; then cp -- \"$source\" \"$destination\"; fi; done; fi"
                         .to_owned(),
                 ],
             ),
@@ -2612,7 +2612,7 @@ impl GithubJobExecutor {
                     "-NoProfile".to_owned(),
                     "-NonInteractive".to_owned(),
                     "-Command".to_owned(),
-                    "if ((Test-Path -LiteralPath '.ci/workflows' -PathType Container) -and -not (Test-Path -LiteralPath '.github/workflows')) { New-Item -ItemType Directory -Force -Path '.github' | Out-Null; Copy-Item -LiteralPath '.ci/workflows' -Destination '.github/workflows' -Recurse }"
+                    "if (Test-Path -LiteralPath '.ci/workflows' -PathType Container) { New-Item -ItemType Directory -Force -Path '.github/workflows' | Out-Null; Get-ChildItem -LiteralPath '.ci/workflows' -File | Where-Object { -not (($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) } | ForEach-Object { $destination = Join-Path '.github/workflows' $_.Name; if ($null -eq (Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue)) { Copy-Item -LiteralPath $_.FullName -Destination $destination } } }"
                         .to_owned(),
                 ],
             ),

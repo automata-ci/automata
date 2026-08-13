@@ -165,16 +165,19 @@ publisher, and service-proxy publisher all require native GitHub permissions,
 environments, OIDC, attestations, or artifact identity and are not portable
 Automata jobs.
 
-The native `.github/workflows/ci.yml` is deliberately only a main-push bridge.
-It checks out no source and reruns no Rust or frontend work. With only
-`checks: read`, it waits for the latest Check Run whose head SHA is exactly
-`github.sha`, whose name is exactly the repository's configured `Automata CI`
-Check name, and whose numeric App identity equals the positive
-`AUTOMATA_CHECK_APP_ID` repository variable. A missing variable, API ambiguity
-or truncation, unexpected Check identity, non-success terminal conclusion,
-repeated API failure, or timeout fails the native workflow closed. The App ID
-is deployment-specific and must match the App configured in Automata's
-provider manifest; it is not inferred from an untrusted Check name.
+The native `.github/workflows/automata-check-bridge.yml` is deliberately only
+a main-push bridge. Its distinct filename prevents the portable
+`.ci/workflows/ci.yml` from colliding with a native file when the runner stages
+portable workflows for action lookup. It checks out no source and reruns no
+Rust or frontend work. With only `checks: read`, it waits for the latest Check
+Run whose head SHA is exactly `github.sha`, whose name is exactly the
+repository's configured `Automata CI` Check name, and whose numeric App
+identity equals the positive `AUTOMATA_CHECK_APP_ID` repository variable. A
+missing variable, API ambiguity or truncation, unexpected Check identity,
+non-success terminal conclusion, repeated API failure, or timeout fails the
+native workflow closed. The App ID is deployment-specific and must match the
+App configured in Automata's provider manifest; it is not inferred from an
+untrusted Check name.
 
 The portable Automata workflow retains its `pull_request` trigger. Requiring
 its external App-owned Check on pull requests is deferred until the installed

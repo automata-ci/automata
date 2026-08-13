@@ -18,18 +18,16 @@ use uuid::Uuid;
 
 type NamespaceCleanupOutcome = Result<TestResult<NamespaceCleanup>, JoinError>;
 
-fn unique_harness() -> TestResult<PostgresTestHarness> {
-    let random = Uuid::new_v4().simple().to_string();
-    let namespace = TestNamespace::new(format!("r{random:.26}"))?;
-    PostgresTestHarness::from_environment_with_namespace(namespace)
+fn configured_harness() -> TestResult<PostgresTestHarness> {
+    PostgresTestHarness::from_environment()
 }
 
-async fn run_with_unique_harness<Test, TestFuture>(test: Test) -> TestResult
+async fn run_with_configured_harness<Test, TestFuture>(test: Test) -> TestResult
 where
     Test: FnOnce(PostgresTestHarness) -> TestFuture,
     TestFuture: Future<Output = TestResult> + Send + 'static,
 {
-    let harness = unique_harness()?;
+    let harness = configured_harness()?;
     run_with_harness(harness, test).await
 }
 
@@ -137,7 +135,7 @@ async fn observed_clock(pool: &PgPool) -> TestResult<i64> {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn parallel_template_clones_are_isolated() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = harness
             .prepare_template(|pool| async move {
                 sqlx::query("CREATE TABLE automata_test.isolation_probe (value TEXT NOT NULL)")
@@ -179,7 +177,7 @@ async fn parallel_template_clones_are_isolated() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn template_clone_contains_initialized_migration_marker() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -197,7 +195,7 @@ async fn template_clone_contains_initialized_migration_marker() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn template0_database_is_application_empty() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let _template = marker_template(&harness).await?;
         harness
             .run_with_empty_database(|database| async move {
@@ -229,7 +227,7 @@ async fn template0_database_is_application_empty() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn replacement_connections_observe_schema_local_test_clock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -258,7 +256,7 @@ async fn replacement_connections_observe_schema_local_test_clock() -> TestResult
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn freeze_at_database_now_samples_the_qualified_builtin_clock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -302,7 +300,7 @@ async fn freeze_at_database_now_samples_the_qualified_builtin_clock() -> TestRes
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn advancing_test_clock_does_not_wait_for_wall_time() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -326,7 +324,7 @@ async fn advancing_test_clock_does_not_wait_for_wall_time() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn cleanup_drops_the_exact_test_database() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         let (database_name_sender, database_name_receiver) = tokio::sync::oneshot::channel();
         let run_result = template
@@ -350,7 +348,7 @@ async fn cleanup_drops_the_exact_test_database() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn panicking_test_still_drops_its_exact_database() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         let run_template = template.clone();
         let (database_name_sender, database_name_receiver) = tokio::sync::oneshot::channel();
@@ -382,8 +380,10 @@ async fn panicking_test_still_drops_its_exact_database() -> TestResult {
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn incompatible_initializer_fingerprint_cannot_reuse_template() -> TestResult {
     let database_url = std::env::var(DATABASE_URL_ENVIRONMENT)?;
-    let random = Uuid::new_v4().simple().to_string();
-    let namespace = TestNamespace::new(format!("f{random:.26}"))?;
+    let namespace = TestNamespace::new(
+        std::env::var("AUTOMATA_TEST_DATABASE_NAMESPACE")
+            .map_err(|_| "AUTOMATA_TEST_DATABASE_NAMESPACE is required")?,
+    )?;
     let template_name = format!("at_{namespace}_template");
     let first_fingerprint = "a".repeat(64);
     let second_fingerprint = "b".repeat(64);
@@ -447,7 +447,7 @@ async fn incompatible_initializer_fingerprint_cannot_reuse_template() -> TestRes
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn unmarked_canonical_crash_leftovers_are_recovered_under_namespace_lock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template_name = format!("at_{}_template", harness.namespace());
         create_unmarked_database(&template_name).await?;
 
