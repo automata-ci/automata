@@ -119,6 +119,12 @@ workflow YAML
   -> in-memory projection into the existing SSR run and job-log pages
 ```
 
+A native shipped-process acceptance test exercises success, a nonzero step exit,
+fail-closed `uses:` rejection, the standard live UI route, explanatory lifecycle
+logs, refresh completion, and temporary-workspace cleanup. It launches the same
+`automata.exe` produced for users rather than calling the demo implementation in
+process.
+
 It does not claim to prove durable scheduling, runner transport, authentication,
 results publication, PostgreSQL transactions, S3 object behavior, service
 lifecycle, or reboot recovery.
@@ -145,8 +151,8 @@ belong in the local durable composition.
 
 1. Execute through the full GitHub job executor so command files, environment
    layering, conditions, and supported expressions use the production path.
-2. Add a native end-to-end test that invokes the shipped `automata` process and
-   verifies the visual routes plus cleanup after success, failure, and interruption.
+2. Extend shipped-process acceptance to interruption after bounded Ctrl-C
+   cancellation is implemented.
 3. Add bounded cancellation on Ctrl-C rather than waiting for the current step
    timeout.
 4. Add selected multi-step semantics without enabling `uses:` actions.
