@@ -1,0 +1,57 @@
+mod support;
+
+use automata_ci_core::WorkflowEventProvenance;
+use automata_ci_workflow_github::{CompileWorkflowRequest, DiagnosticKind, GithubWorkflowCompiler};
+
+fn assert_rejected_before_plan(source: &str, code: &str, exact_span: &str) {
+    let parsed = support::parse(source);
+    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let source_plan = parsed.plan().expect("source plan");
+    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        source_plan,
+        WorkflowEventProvenance::new("github", "workflow_dispatch"),
+    ));
+
+    assert!(
+        report.plan().is_none(),
+        "a run-capable plan must not be emitted"
+    );
+    let diagnostics = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == code)
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{:#?}", report.diagnostics());
+    assert_eq!(diagnostics[0].kind(), DiagnosticKind::Unsupported);
+    assert_eq!(
+        source_plan.source().slice(diagnostics[0].primary_span()),
+        Some(exact_span)
+    );
+}
+
+#[test]
+fn job_concurrency_is_rejected_during_compilation_with_its_value_span() {
+    assert_rejected_before_plan(
+        "on: workflow_dispatch\njobs:\n  test:\n    concurrency: queued-${{ github.ref }}\n    runs-on: linux\n    steps: [{run: echo test}]\n",
+        "github.compile.job_concurrency_unavailable",
+        "queued-${{ github.ref }}",
+    );
+}
+
+#[test]
+fn deployment_environment_is_rejected_during_compilation_with_its_value_span() {
+    assert_rejected_before_plan(
+        "on: workflow_dispatch\njobs:\n  deploy:\n    runs-on: linux\n    environment:\n      name: production\n    steps: [{run: echo deploy}]\n",
+        "github.compile.deployment_environment_unavailable",
+        "production",
+    );
+}
+
+#[test]
+fn direct_container_action_is_rejected_during_compilation_with_its_reference_span() {
+    assert_rejected_before_plan(
+        "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - uses: docker://alpine:3.23\n",
+        "github.compile.container_action_unavailable",
+        "docker://alpine:3.23",
+    );
+}

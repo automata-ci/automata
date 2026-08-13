@@ -58,12 +58,14 @@ jobs:
           python3 scripts/ci/tests/publish-crates.test.py
           python3 scripts/ci/tests/foundation-governance.test.py
           python3 scripts/ci/verify-foundation-governance.py
+          python3 scripts/ci/tests/github-actions-capabilities.test.py
+          python3 scripts/ci/verify-github-actions-capabilities.py
           ./scripts/dev/create-integration-snapshot.test.sh
 
       - name: Lint workflows and shell scripts
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
-          target/ci-tools/actionlint .ci/workflows/*.yml
+          target/ci-tools/actionlint .ci/workflows/*.yml .github/workflows/*.yml
           shellcheck -x \
             scripts/install.sh \
             scripts/ci/*.sh \

@@ -866,54 +866,37 @@ jobs:
 }
 
 #[test]
-fn unsupported_deployment_and_reusable_semantics_are_not_dropped() {
-    let cases = [
-        (
-            r"on: workflow_dispatch
-jobs:
-  build:
-    environment: preview
-    runs-on: linux
-    steps: [{run: echo ok}]
-",
-            UnsupportedLogicalJobSemantics::Deployment,
-        ),
-        (
-            r"on: workflow_dispatch
+fn reusable_workflow_semantics_are_not_dropped_by_job_projection() {
+    let source = r"on: workflow_dispatch
 jobs:
   build:
     uses: synthetic/reusable/.github/workflows/build.yml@main
-",
-            UnsupportedLogicalJobSemantics::ReusableWorkflowJob,
-        ),
-    ];
-    for (source, expected) in cases {
-        let plan = plan(source);
-        let activation = activate(&plan);
-        let instance = &activation.instances()[0];
-        let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
-        let job = validated
-            .job(&WorkflowJobKey::new("build").expect("job key"))
-            .expect("validated job");
-        let error = GithubLogicalJobProjector::new()
-            .project(ProjectGithubLogicalJobRequest::new(
-                job,
-                instance,
-                fixed_id(21, WorkflowId::from_uuid),
-                fixed_id(22, automata_ci_core::RunId::from_uuid),
-                fixed_id(23, JobId::from_uuid),
-                execution(instance),
-                &profiles(),
-                JobAuthorityProfile::Standard,
-                &permission_policy(),
-                resource_policy(),
-            ))
-            .expect_err("unsupported semantics");
-        assert!(matches!(
-            error,
-            LogicalJobProjectionError::Unsupported(actual) if actual == expected
-        ));
-    }
+";
+    let plan = plan(source);
+    let activation = activate(&plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let error = GithubLogicalJobProjector::new()
+        .project(ProjectGithubLogicalJobRequest::new(
+            job,
+            instance,
+            fixed_id(21, WorkflowId::from_uuid),
+            fixed_id(22, automata_ci_core::RunId::from_uuid),
+            fixed_id(23, JobId::from_uuid),
+            execution(instance),
+            &profiles(),
+            JobAuthorityProfile::Standard,
+            &permission_policy(),
+            resource_policy(),
+        ))
+        .expect_err("unsupported semantics");
+    assert!(matches!(
+        error,
+        LogicalJobProjectionError::Unsupported(UnsupportedLogicalJobSemantics::ReusableWorkflowJob)
+    ));
 }
 
 #[test]

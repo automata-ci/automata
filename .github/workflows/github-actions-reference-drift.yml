@@ -1,0 +1,68 @@
+name: GitHub Actions reference drift
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: github-actions-reference-drift
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Compare reviewed reference catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify reviewed capability and source contracts
+        run: python3 scripts/ci/verify-github-actions-capabilities.py
+
+      - id: detect
+        name: Compare pinned references with current upstream sources
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/ci/check-github-actions-reference-drift.py \
+            --output reference-drift.json \
+            --markdown reference-drift.md
+          result=$?
+          set -e
+          if [[ "$result" -eq 2 ]]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$result" -ne 0 ]]; then
+            exit "$result"
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update bounded review issue
+        if: steps.detect.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          issue="$(gh issue list \
+            --state open \
+            --search 'GitHub Actions reference drift in:title' \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" \
+              --title "GitHub Actions reference drift" \
+              --body-file reference-drift.md
+          else
+            gh issue create \
+              --title "GitHub Actions reference drift" \
+              --body-file reference-drift.md
+          fi

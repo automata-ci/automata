@@ -1,0 +1,108 @@
+{
+  "catalog_version": "github-actions-reference-v1",
+  "parser_version": "raw-bytes-sha256-v1",
+  "reference_groups": [
+    {
+      "bytes": 50486,
+      "categories": [
+        "contexts"
+      ],
+      "id": "github-docs-contexts",
+      "sha256": "7dd35d881dc2502922b2911b8f620542cb9fe174236a414bc02481089f3d2aac",
+      "url": "https://raw.githubusercontent.com/github/docs/18a2a21176f910cec8cace6a9027158303161929/content/actions/reference/workflows-and-actions/contexts.md"
+    },
+    {
+      "bytes": 67443,
+      "categories": [
+        "events"
+      ],
+      "id": "github-docs-events",
+      "sha256": "b37e685c1bfc1302bea89b4df20046bb201c379b16a14924becf72ac04d03b33",
+      "url": "https://raw.githubusercontent.com/github/docs/18a2a21176f910cec8cace6a9027158303161929/content/actions/reference/workflows-and-actions/events-that-trigger-workflows.md"
+    },
+    {
+      "bytes": 11327,
+      "categories": [
+        "limits"
+      ],
+      "id": "github-docs-limits",
+      "sha256": "e63b158624a67baa920a804c55aa952a11adb783593f0e8a217363fd83599d43",
+      "url": "https://raw.githubusercontent.com/github/docs/18a2a21176f910cec8cace6a9027158303161929/content/actions/reference/limits.md"
+    },
+    {
+      "bytes": 15360,
+      "categories": [
+        "default_variables",
+        "variables"
+      ],
+      "id": "github-docs-variables",
+      "sha256": "e55c3b25569d40adf93b0e6c3e5d403030c105284dcb56c487dbdfe91c89c9c5",
+      "url": "https://raw.githubusercontent.com/github/docs/18a2a21176f910cec8cace6a9027158303161929/content/actions/reference/workflows-and-actions/variables.md"
+    },
+    {
+      "bytes": 72444,
+      "categories": [
+        "permissions",
+        "syntax"
+      ],
+      "id": "github-docs-workflow-syntax",
+      "sha256": "8c70a3739211406cdd9e0d8beb9e45227d057fce6a996650c10242931d462015",
+      "url": "https://raw.githubusercontent.com/github/docs/18a2a21176f910cec8cace6a9027158303161929/content/actions/reference/workflows-and-actions/workflow-syntax.md"
+    },
+    {
+      "bytes": 19288,
+      "categories": [
+        "default_variables",
+        "limits"
+      ],
+      "id": "runner-constants",
+      "sha256": "b127b6eea1c53b7d31cc8bcd75f11da7c72e26b8708392c10ff3deaac8d70a63",
+      "url": "https://raw.githubusercontent.com/actions/runner/98aabcd429c4e8402406c56ce2d26387fed3b9ce/src/Runner.Common/Constants.cs"
+    },
+    {
+      "bytes": 9722,
+      "categories": [
+        "action_runtimes"
+      ],
+      "id": "runner-node-action-handler",
+      "sha256": "eefddd78888f2b359ea4bd6a69d788ac0a72817c13bb05860c64e52baec5142e",
+      "url": "https://raw.githubusercontent.com/actions/runner/98aabcd429c4e8402406c56ce2d26387fed3b9ce/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs"
+    },
+    {
+      "bytes": 12106,
+      "categories": [
+        "contexts",
+        "permissions",
+        "syntax"
+      ],
+      "id": "runner-pipeline-workflow-schema",
+      "sha256": "04e398bc0d1b4bb6768df0e3e78406eb5489b0ec7763cfb302863460e07f3215",
+      "url": "https://raw.githubusercontent.com/actions/runner/98aabcd429c4e8402406c56ce2d26387fed3b9ce/src/Sdk/DTPipelines/workflow-v1.0.json"
+    },
+    {
+      "bytes": 101439,
+      "categories": [
+        "contexts",
+        "permissions",
+        "syntax"
+      ],
+      "id": "runner-workflow-parser-schema",
+      "sha256": "37599daaf45dd1f53743f708f9b8427f90f06e3f889567ff988a09f5ef24bfb8",
+      "url": "https://raw.githubusercontent.com/actions/runner/98aabcd429c4e8402406c56ce2d26387fed3b9ce/src/Sdk/WorkflowParser/workflow-v1.0.json"
+    }
+  ],
+  "replacement_policy": {
+    "approval_registry": "docs/governance/github-actions-reviewed-deltas-v1.json",
+    "minimum_human_reviewers": 2,
+    "procedure": "Open a compatibility issue from the bounded drift report, classify every changed category, update affected capability entries and fixtures, record the reviewed delta, then replace this lock in a separately reviewed pull request."
+  },
+  "retrieved_at": "2026-08-13",
+  "runner": {
+    "baseline_commit": "98aabcd429c4e8402406c56ce2d26387fed3b9ce",
+    "baseline_release": "v2.336.0",
+    "javascript_runtime": "node24-24.18.0",
+    "release_url": "https://github.com/actions/runner/releases/tag/v2.336.0",
+    "repository": "actions/runner"
+  },
+  "schema_version": 1
+}

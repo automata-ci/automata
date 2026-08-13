@@ -1,5 +1,10 @@
 # Foundation governance registry
 
+GitHub Actions decoder and upstream-reference governance is maintained in the
+[capability and reference governance contract](github-actions-capabilities.md).
+It is intentionally separate from the internal format, migration, and limit
+registry described below.
+
 [`foundation-governance-v1.json`](foundation-governance-v1.json) is the
 machine-readable coordination boundary for the GitHub Actions parity
 foundations. It records the current internal format versions and owners, the
