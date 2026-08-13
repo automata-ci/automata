@@ -235,7 +235,7 @@
       ]
     },
     "control_plane": {
-      "series_budget": 5250,
+      "series_budget": 5400,
       "families": [
         {
           "help": "Unix timestamp of the oldest outstanding artifact reservation by kind, or zero when empty.",
