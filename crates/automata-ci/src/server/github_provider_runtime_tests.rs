@@ -134,8 +134,11 @@ fn document(repositories: &[Value]) -> Value {
 fn loopback_transport_builds_one_exact_emulator_origin() {
     let api_base =
         Url::parse("http://automata-git.localhost:18088/api/v3/").expect("emulator API base");
+    let job_runtime_origin =
+        Url::parse("http://automata-git.invalid:18088/").expect("job runtime origin");
     let transport = GithubProviderTransport::LoopbackEmulator {
         api_base: api_base.clone(),
+        job_runtime_origin: job_runtime_origin.clone(),
     };
 
     let endpoint = provider_http_endpoint(&transport).expect("provider HTTP endpoint");
@@ -152,10 +155,10 @@ fn loopback_transport_builds_one_exact_emulator_origin() {
     assert!(credential.is_ok());
     let authority =
         provider_runtime_authority_endpoint(&transport).expect("provider authority endpoint");
-    assert_eq!(authority.as_str(), "http://automata-git.localhost:18088/");
+    assert_eq!(authority.as_url(), &job_runtime_origin);
     assert_eq!(
         authority.security(),
-        automata_ci_protocol::RuntimeAuthorityEndpointSecurity::LoopbackDevelopment
+        automata_ci_protocol::RuntimeAuthorityEndpointSecurity::TrustedPrivateDevelopment
     );
 }
 

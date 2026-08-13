@@ -263,20 +263,36 @@ impl fmt::Debug for GithubProviderConfig {
 pub enum GithubProviderTransport {
     /// Fixed public GitHub.com transport.
     GithubDotCom,
-    /// Exact loopback HTTP endpoint owned by an isolated protocol emulator.
-    LoopbackEmulator { api_base: Url },
+    /// Exact loopback control endpoint and mapped job origin owned by one
+    /// isolated protocol emulator.
+    LoopbackEmulator {
+        api_base: Url,
+        job_runtime_origin: Url,
+    },
 }
 
 impl GithubProviderTransport {
     fn validate(raw: RawTransport) -> Result<Self, GithubProviderConfigError> {
         match raw {
             RawTransport::GithubDotCom => Ok(Self::GithubDotCom),
-            RawTransport::LoopbackEmulator { api_base } => {
+            RawTransport::LoopbackEmulator {
+                api_base,
+                job_runtime_origin,
+            } => {
                 let api_base = Url::parse(&api_base).map_err(|_| GithubProviderConfigError)?;
-                if !valid_loopback_api_base(&api_base) {
+                let job_runtime_origin =
+                    Url::parse(&job_runtime_origin).map_err(|_| GithubProviderConfigError)?;
+                if !valid_loopback_api_base(&api_base)
+                    || !valid_mapped_job_runtime_origin(&job_runtime_origin)
+                    || api_base.port_or_known_default()
+                        != job_runtime_origin.port_or_known_default()
+                {
                     return Err(GithubProviderConfigError);
                 }
-                Ok(Self::LoopbackEmulator { api_base })
+                Ok(Self::LoopbackEmulator {
+                    api_base,
+                    job_runtime_origin,
+                })
             }
         }
     }
@@ -286,7 +302,19 @@ impl GithubProviderTransport {
     pub const fn loopback_api_base(&self) -> Option<&Url> {
         match self {
             Self::GithubDotCom => None,
-            Self::LoopbackEmulator { api_base } => Some(api_base),
+            Self::LoopbackEmulator { api_base, .. } => Some(api_base),
+        }
+    }
+
+    /// Returns the exact container-mapped origin carried by repository job
+    /// authorities for isolated emulation.
+    #[must_use]
+    pub const fn job_runtime_origin(&self) -> Option<&Url> {
+        match self {
+            Self::GithubDotCom => None,
+            Self::LoopbackEmulator {
+                job_runtime_origin, ..
+            } => Some(job_runtime_origin),
         }
     }
 }
@@ -319,6 +347,20 @@ fn valid_loopback_api_base(url: &Url) -> bool {
         && url.password().is_none()
         && url.path().ends_with('/')
         && !url.cannot_be_a_base()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn valid_mapped_job_runtime_origin(url: &Url) -> bool {
+    url.scheme() == "http"
+        && url.host_str().is_some_and(|host| {
+            host.to_ascii_lowercase()
+                .strip_suffix(".invalid")
+                .is_some_and(|prefix| !prefix.is_empty())
+        })
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
         && url.query().is_none()
         && url.fragment().is_none()
 }
@@ -849,7 +891,10 @@ struct RawConfig {
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum RawTransport {
     GithubDotCom,
-    LoopbackEmulator { api_base: String },
+    LoopbackEmulator {
+        api_base: String,
+        job_runtime_origin: String,
+    },
 }
 
 #[derive(Default, Deserialize)]

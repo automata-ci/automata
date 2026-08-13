@@ -295,7 +295,8 @@ fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() 
     let mut isolated = manifest(vec![public_repository()]);
     isolated["transport"] = json!({
         "mode": "loopback_emulator",
-        "api_base": "http://automata-git.localhost:18088/api/v3/"
+        "api_base": "http://automata-git.localhost:18088/api/v3/",
+        "job_runtime_origin": "http://automata-git.invalid:18088/"
     });
     let isolated = load_value("transport-isolated.json", &isolated).expect("isolated transport");
     assert_eq!(
@@ -305,6 +306,14 @@ fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() 
             .expect("loopback base")
             .as_str(),
         "http://automata-git.localhost:18088/api/v3/"
+    );
+    assert_eq!(
+        isolated
+            .transport()
+            .job_runtime_origin()
+            .expect("job runtime origin")
+            .as_str(),
+        "http://automata-git.invalid:18088/"
     );
 
     for (name, api_base) in [
@@ -316,7 +325,27 @@ fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() 
         let mut invalid = manifest(vec![public_repository()]);
         invalid["transport"] = json!({
             "mode": "loopback_emulator",
-            "api_base": api_base
+            "api_base": api_base,
+            "job_runtime_origin": "http://automata-git.invalid:18088/"
+        });
+        assert_eq!(
+            load_value(&format!("transport-{name}.json"), &invalid),
+            Err(GithubProviderConfigError)
+        );
+    }
+
+    for (name, job_runtime_origin) in [
+        ("runtime-loopback", "http://127.0.0.1:18088/"),
+        ("runtime-localhost", "http://automata-git.localhost:18088/"),
+        ("runtime-https", "https://automata-git.invalid:18088/"),
+        ("runtime-port", "http://automata-git.invalid:18089/"),
+        ("runtime-path", "http://automata-git.invalid:18088/api/v3/"),
+    ] {
+        let mut invalid = manifest(vec![public_repository()]);
+        invalid["transport"] = json!({
+            "mode": "loopback_emulator",
+            "api_base": "http://automata-git.localhost:18088/api/v3/",
+            "job_runtime_origin": job_runtime_origin
         });
         assert_eq!(
             load_value(&format!("transport-{name}.json"), &invalid),

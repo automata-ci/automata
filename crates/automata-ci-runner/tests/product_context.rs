@@ -406,21 +406,21 @@ fn repository_authority_with_the_wrong_endpoint_fails_closed() {
 }
 
 #[test]
-fn loopback_repository_authority_requires_the_exact_emulator_origin_and_trust_class() {
+fn mapped_repository_authority_requires_the_exact_emulator_origin_and_trust_class() {
     let config = fixture_runner_config_with_github(
-        "http://automata-git.localhost:18088/",
-        "http://automata-git.localhost:18088/api/v3/",
-        "http://automata-git.localhost:18088/api/graphql",
+        "http://automata-git.invalid:18088/",
+        "http://automata-git.invalid:18088/api/v3/",
+        "http://automata-git.invalid:18088/api/graphql",
         true,
     );
     let mut fixture = ContextFixture::with_config(&config);
     fixture.add_repository_authority_endpoint(
-        RuntimeAuthorityEndpoint::loopback_development("http://automata-git.localhost:18088/")
-            .expect("loopback repository endpoint"),
+        RuntimeAuthorityEndpoint::trusted_private_development("http://automata-git.invalid:18088/")
+            .expect("mapped repository endpoint"),
         REPOSITORY_TOKEN,
     );
 
-    let snapshot = fixture.snapshot().expect("loopback context snapshot");
+    let snapshot = fixture.snapshot().expect("mapped context snapshot");
     let GithubValue::Object(github) = snapshot
         .expression()
         .named_value("github")
@@ -431,6 +431,20 @@ fn loopback_repository_authority_requires_the_exact_emulator_origin_and_trust_cl
     assert_eq!(
         github.get("token").and_then(GithubValue::as_str),
         Some(REPOSITORY_TOKEN)
+    );
+
+    let mut wrong_trust = ContextFixture::with_config(&config);
+    wrong_trust.add_repository_authority_endpoint(
+        RuntimeAuthorityEndpoint::loopback_development("http://automata-git.localhost:18088/")
+            .expect("loopback endpoint"),
+        REPOSITORY_TOKEN,
+    );
+    assert_eq!(
+        wrong_trust
+            .snapshot()
+            .expect_err("wrong trust class must fail closed")
+            .kind(),
+        PortErrorKind::InvalidData
     );
 }
 
@@ -781,6 +795,8 @@ fn fixture_runner_config_with_github(
     document["github"]["api_url"] = serde_json::json!(api_url);
     document["github"]["graphql_url"] = serde_json::json!(graphql_url);
     document["github"]["allow_insecure_http"] = serde_json::json!(allow_insecure_http);
+    document["podman"]["map_github_server_to_host_gateway"] =
+        serde_json::json!(server_url.contains(".invalid"));
     let encoded = serde_json::to_vec(&document).expect("runner config encoding");
     RunnerProductConfig::from_json(&encoded).expect("valid runner config fixture")
 }

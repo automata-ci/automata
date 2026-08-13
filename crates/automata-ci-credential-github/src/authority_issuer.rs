@@ -209,6 +209,41 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
         )
     }
 
+    /// Constructs an issuer for one exact container-mapped protocol emulator.
+    ///
+    /// The provider itself remains on loopback, while this endpoint is the
+    /// explicit `.invalid` origin mapped into job sandboxes. The runner must
+    /// independently match the same origin before exposing the credential.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every endpoint outside the trusted-private development class.
+    pub fn new_for_mapped_emulator(
+        identities: Arc<dyn GithubRuntimeAuthorityIdentityResolver>,
+        coordinator: Arc<GithubRuntimeAuthorityMintCoordinator>,
+        repository: Arc<dyn GithubRuntimeAuthorityRepository>,
+        envelopes: Arc<EnvelopeCodec>,
+        clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock>,
+        endpoint: RuntimeAuthorityEndpoint,
+    ) -> Result<Self, GithubRuntimeAuthorityIssuerConfigurationError> {
+        if endpoint.as_url().host_str().is_none_or(|host| {
+            host.to_ascii_lowercase()
+                .strip_suffix(".invalid")
+                .is_none_or(str::is_empty)
+        }) {
+            return Err(GithubRuntimeAuthorityIssuerConfigurationError::InvalidEndpointSecurity);
+        }
+        Self::new_with_security(
+            identities,
+            coordinator,
+            repository,
+            envelopes,
+            clock,
+            endpoint,
+            RuntimeAuthorityEndpointSecurity::TrustedPrivateDevelopment,
+        )
+    }
+
     fn new_with_security(
         identities: Arc<dyn GithubRuntimeAuthorityIdentityResolver>,
         coordinator: Arc<GithubRuntimeAuthorityMintCoordinator>,

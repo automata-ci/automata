@@ -216,16 +216,16 @@ fn checked_in_linux_host_is_exactly_three_isolated_single_slot_processes() {
     assert_eq!(profile_images.len(), 1);
     assert_eq!(
         github_server_urls,
-        std::collections::BTreeSet::from(["http://automata-git.localhost:8088/".to_owned()])
+        std::collections::BTreeSet::from(["http://automata-git.invalid:8088/".to_owned()])
     );
     assert_eq!(
         github_api_urls,
-        std::collections::BTreeSet::from(["http://automata-git.localhost:8088/api/v3/".to_owned()])
+        std::collections::BTreeSet::from(["http://automata-git.invalid:8088/api/v3/".to_owned()])
     );
     assert_eq!(
         github_graphql_urls,
         std::collections::BTreeSet::from([
-            "http://automata-git.localhost:8088/api/graphql".to_owned()
+            "http://automata-git.invalid:8088/api/graphql".to_owned()
         ])
     );
     assert_eq!(aggregate_cpu_millis, 12_000);

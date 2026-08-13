@@ -514,7 +514,7 @@ impl GithubProviderRuntimeBuilder {
                         )
                     }
                     GithubProviderTransport::LoopbackEmulator { .. } => {
-                        GithubRepositoryRuntimeAuthorityIssuer::new_for_loopback_emulator(
+                        GithubRepositoryRuntimeAuthorityIssuer::new_for_mapped_emulator(
                             identity_resolver.clone(),
                             coordinator,
                             job_authority_repository.clone(),
@@ -777,7 +777,7 @@ fn provider_credential_config(
         GithubProviderTransport::GithubDotCom => {
             GithubAppCredentialConfig::github_dot_com(issuer, installation, GITHUB_HTTP_USER_AGENT)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
+        GithubProviderTransport::LoopbackEmulator { api_base, .. } => {
             GithubAppCredentialConfig::new_for_loopback_emulator(
                 api_base.clone(),
                 issuer,
@@ -797,7 +797,7 @@ fn provider_http_endpoint(
         GithubProviderTransport::GithubDotCom => {
             GithubHttpEndpoint::github_dot_com(GITHUB_HTTP_USER_AGENT)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
+        GithubProviderTransport::LoopbackEmulator { api_base, .. } => {
             let mut server_origin = api_base.clone();
             server_origin.set_path("/");
             server_origin.set_query(None);
@@ -820,13 +820,9 @@ fn provider_runtime_authority_endpoint(
         GithubProviderTransport::GithubDotCom => {
             RuntimeAuthorityEndpoint::new(GITHUB_PROVIDER_WEB_ORIGIN)
         }
-        GithubProviderTransport::LoopbackEmulator { api_base } => {
-            let mut server_origin = api_base.clone();
-            server_origin.set_path("/");
-            server_origin.set_query(None);
-            server_origin.set_fragment(None);
-            RuntimeAuthorityEndpoint::loopback_development(server_origin.as_str())
-        }
+        GithubProviderTransport::LoopbackEmulator {
+            job_runtime_origin, ..
+        } => RuntimeAuthorityEndpoint::trusted_private_development(job_runtime_origin.as_str()),
     }
     .map_err(|_| GithubProviderRuntimeBuildError::InvalidJobRuntimeAuthority)
 }
