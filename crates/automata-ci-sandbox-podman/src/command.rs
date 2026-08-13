@@ -407,6 +407,7 @@ impl fmt::Debug for PodmanProcessEnvironment {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // The renderer binds every validated private Podman path.
 fn containers_conf_document(
     approved_helper_directory: &Path,
     conmon_path: &Path,

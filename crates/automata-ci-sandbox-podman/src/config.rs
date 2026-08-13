@@ -335,7 +335,11 @@ impl PodmanOptions {
 
     /// Maps one explicitly validated hostname to Podman's host gateway and
     /// forwards only its exact port. No mapping is installed by default.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the derived private Podman network configuration
+    /// cannot be rendered from the validated process paths and port.
     pub fn with_host_gateway_alias(
         mut self,
         alias: PodmanHostGatewayAlias,
