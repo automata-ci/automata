@@ -1,5 +1,3 @@
-mod support;
-
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -32,7 +30,7 @@ use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 fn now() -> UnixTimestamp {
     UnixTimestamp::from_seconds(

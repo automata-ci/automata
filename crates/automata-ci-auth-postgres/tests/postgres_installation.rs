@@ -1,11 +1,10 @@
-mod support;
-
 use std::{
     collections::BTreeSet,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use super::support::{TestResult, run_with_database};
 use automata_ci_auth::{
     github::{
         GithubMembershipObservation, GithubMembershipSnapshot, GithubMembershipSnapshotId,
@@ -46,7 +45,6 @@ use automata_ci_key_management::{
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres_test_support::TestClock;
-use support::{TestResult, run_with_database};
 use uuid::Uuid;
 
 const LOGIN_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

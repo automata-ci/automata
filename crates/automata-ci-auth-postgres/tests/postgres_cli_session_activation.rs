@@ -1,5 +1,3 @@
-mod support;
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use automata_ci_auth::{
@@ -23,7 +21,7 @@ use automata_ci_postgres_test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 const TENANT: &str = "activation-tenant";
 const SUBJECT: &str = "424242";

@@ -661,11 +661,16 @@ mod outside_filter {
         runner_fake_cargo.write_text(
             """#!/usr/bin/env python3
 import os
+import json
 import shutil
 import sys
 from pathlib import Path
 
 arguments = sys.argv[1:]
+log_path = os.environ.get("AUTOMATA_COVERAGE_CARGO_LOG")
+if log_path:
+    with Path(log_path).open("a", encoding="utf-8") as log:
+        log.write(json.dumps(arguments) + "\\n")
 if arguments == ["llvm-cov", "--version"]:
     print("cargo-llvm-cov 0.8.7")
 elif arguments[:2] == ["llvm-cov", "show-env"]:
@@ -679,6 +684,18 @@ elif arguments and arguments[0] == "test":
     mutation = os.environ.get("AUTOMATA_COVERAGE_MUTATION")
     if mutation:
         Path(mutation).write_text("changed during coverage\\n", encoding="utf-8")
+    postgres_mutation = os.environ.get("AUTOMATA_COVERAGE_POSTGRES_MUTATION")
+    if postgres_mutation and "automata-ci-store" in arguments:
+        Path(postgres_mutation).write_text(
+            "changed during PostgreSQL coverage\\n", encoding="utf-8"
+        )
+    if (
+        os.environ.get("AUTOMATA_COVERAGE_FAIL_POSTGRES") == "1"
+        and "automata-ci-store" in arguments
+    ):
+        raise SystemExit(88)
+elif arguments and arguments[0] == "run":
+    pass
 elif arguments[:2] == ["llvm-cov", "report"]:
     output = Path(arguments[arguments.index("--output-path") + 1])
     fixture = (
@@ -707,7 +724,8 @@ if counter_path:
     counter = Path(counter_path)
     invocation = int(counter.read_text(encoding="utf-8")) + 1 if counter.exists() else 1
     counter.write_text(str(invocation), encoding="utf-8")
-    if invocation == 2:
+    fail_at = int(os.environ.get("AUTOMATA_COVERAGE_MV_FAIL_AT", "2"))
+    if invocation == fail_at:
         raise SystemExit(74)
 os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
 """,
@@ -759,6 +777,287 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             )
         assert not list(successful_output.glob(".rust-coverage-stage.*"))
 
+        failed_summary = scratch / "synthetic-failed-summary.json"
+        failed_lcov = scratch / "synthetic-failed-coverage.lcov"
+        synthetic_workspace_reports(
+            runner_ci / "rust-coverage-policy.json",
+            failed_summary,
+            failed_lcov,
+            140_000,
+        )
+        combined_environment = dict(runner_environment)
+        combined_environment["AUTOMATA_TEST_DATABASE_URL"] = (
+            "postgresql://unused.invalid/coverage"
+        )
+        combined_log = scratch / "combined-cargo.jsonl"
+        combined_environment["AUTOMATA_COVERAGE_CARGO_LOG"] = str(combined_log)
+        combined_output = runner_repository / "target" / "coverage-combined"
+        combined_runner = subprocess.run(
+            [
+                str(runner_under_test),
+                str(combined_output),
+                "ordinary",
+                "postgres",
+            ],
+            cwd=runner_repository,
+            env=combined_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert combined_runner.returncode == 0, combined_runner.stderr
+        ordinary_manifest = json.loads(
+            (combined_output / "manifest.json").read_text(encoding="utf-8")
+        )
+        combined_manifest = json.loads(
+            (combined_output / "combined-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert ordinary_manifest["test_bundles"]["requested"] == ["ordinary"]
+        assert ordinary_manifest["guard"]["status"] == "passed"
+        assert combined_manifest["test_bundles"]["requested"] == [
+            "ordinary",
+            "postgres",
+        ]
+        assert combined_manifest["guard"]["status"] == "report-only"
+        assert all(
+            (combined_output / name).is_file()
+            for name in [
+                "summary.json",
+                "coverage.lcov",
+                "manifest.json",
+                "combined-summary.json",
+                "combined-coverage.lcov",
+                "combined-manifest.json",
+            ]
+        )
+        combined_commands = [
+            json.loads(line)
+            for line in combined_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert any(
+            command[:2] == ["test", "--workspace"]
+            for command in combined_commands
+        )
+        assert any(
+            command and command[0] == "test" and "automata-ci-store" in command
+            for command in combined_commands
+        )
+        workspace_index = next(
+            index
+            for index, command in enumerate(combined_commands)
+            if command[:2] == ["test", "--workspace"]
+        )
+        report_indices = [
+            index
+            for index, command in enumerate(combined_commands)
+            if command[:2] == ["llvm-cov", "report"]
+        ]
+        postgres_index = next(
+            index
+            for index, command in enumerate(combined_commands)
+            if command and command[0] == "test" and "automata-ci-store" in command
+        )
+        cleanup_index = next(
+            index
+            for index, command in enumerate(combined_commands)
+            if command and command[0] == "run"
+        )
+        assert len(report_indices) == 4
+        assert (
+            workspace_index
+            < report_indices[0]
+            < report_indices[1]
+            < postgres_index
+            < cleanup_index
+            < report_indices[2]
+            < report_indices[3]
+        )
+
+        failed_combined_environment = dict(combined_environment)
+        failed_combined_environment["AUTOMATA_COVERAGE_JSON_FIXTURE"] = str(
+            failed_summary
+        )
+        failed_combined_environment["AUTOMATA_COVERAGE_LCOV_FIXTURE"] = str(
+            failed_lcov
+        )
+        failed_combined_log = scratch / "failed-combined-cargo.jsonl"
+        failed_combined_environment["AUTOMATA_COVERAGE_CARGO_LOG"] = str(
+            failed_combined_log
+        )
+        failed_combined_output = (
+            runner_repository / "target" / "coverage-combined-guard-failed"
+        )
+        failed_combined_runner = subprocess.run(
+            [
+                str(runner_under_test),
+                str(failed_combined_output),
+                "ordinary",
+                "postgres",
+            ],
+            cwd=runner_repository,
+            env=failed_combined_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert failed_combined_runner.returncode == 1
+        failed_combined_manifest = json.loads(
+            (failed_combined_output / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert failed_combined_manifest["test_bundles"]["requested"] == [
+            "ordinary"
+        ]
+        assert failed_combined_manifest["guard"]["status"] == "failed"
+        assert not any(
+            (failed_combined_output / name).exists()
+            for name in [
+                "combined-summary.json",
+                "combined-coverage.lcov",
+                "combined-manifest.json",
+            ]
+        )
+        failed_combined_commands = [
+            json.loads(line)
+            for line in failed_combined_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert not any(
+            command and command[0] == "test" and "automata-ci-store" in command
+            for command in failed_combined_commands
+        )
+
+        postgres_mutation_path = runner_repository / "postgres-mutation.txt"
+        postgres_mutation_environment = dict(combined_environment)
+        postgres_mutation_environment["AUTOMATA_COVERAGE_POSTGRES_MUTATION"] = str(
+            postgres_mutation_path
+        )
+        postgres_mutation_output = (
+            runner_repository / "target" / "coverage-postgres-mutation"
+        )
+        postgres_mutation_runner = subprocess.run(
+            [
+                str(runner_under_test),
+                str(postgres_mutation_output),
+                "ordinary",
+                "postgres",
+            ],
+            cwd=runner_repository,
+            env=postgres_mutation_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert postgres_mutation_runner.returncode == 2
+        assert "workspace source changed" in postgres_mutation_runner.stderr
+        assert not any(
+            (postgres_mutation_output / name).exists()
+            for name in [
+                "summary.json",
+                "coverage.lcov",
+                "manifest.json",
+                "combined-summary.json",
+                "combined-coverage.lcov",
+                "combined-manifest.json",
+            ]
+        )
+        postgres_mutation_path.unlink()
+
+        postgres_failure_log = scratch / "postgres-failure-cargo.jsonl"
+        postgres_failure_environment = dict(combined_environment)
+        postgres_failure_environment["AUTOMATA_COVERAGE_CARGO_LOG"] = str(
+            postgres_failure_log
+        )
+        postgres_failure_environment["AUTOMATA_COVERAGE_FAIL_POSTGRES"] = "1"
+        postgres_failure_output = (
+            runner_repository / "target" / "coverage-postgres-failure"
+        )
+        postgres_failure_runner = subprocess.run(
+            [
+                str(runner_under_test),
+                str(postgres_failure_output),
+                "ordinary",
+                "postgres",
+            ],
+            cwd=runner_repository,
+            env=postgres_failure_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert postgres_failure_runner.returncode == 88
+        postgres_failure_commands = [
+            json.loads(line)
+            for line in postgres_failure_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert sum(
+            command and command[0] == "run"
+            for command in postgres_failure_commands
+        ) == 1
+        assert not any(
+            (postgres_failure_output / name).exists()
+            for name in [
+                "summary.json",
+                "coverage.lcov",
+                "manifest.json",
+                "combined-summary.json",
+                "combined-coverage.lcov",
+                "combined-manifest.json",
+            ]
+        )
+
+        combined_publication_output = (
+            runner_repository / "target" / "coverage-combined-publication"
+        )
+        combined_publication_counter = scratch / "combined-mv-counter.txt"
+        combined_publication_environment = dict(combined_environment)
+        combined_publication_environment["AUTOMATA_COVERAGE_MV_COUNTER"] = str(
+            combined_publication_counter
+        )
+        combined_publication_environment["AUTOMATA_COVERAGE_MV_FAIL_AT"] = "6"
+        combined_publication_runner = subprocess.run(
+            [
+                str(runner_under_test),
+                str(combined_publication_output),
+                "ordinary",
+                "postgres",
+            ],
+            cwd=runner_repository,
+            env=combined_publication_environment,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert combined_publication_runner.returncode == 74
+        assert combined_publication_counter.read_text(encoding="utf-8") == "6"
+        assert not any(
+            (combined_publication_output / name).exists()
+            for name in [
+                "summary.json",
+                "coverage.lcov",
+                "manifest.json",
+                "combined-summary.json",
+                "combined-coverage.lcov",
+                "combined-manifest.json",
+            ]
+        )
+
+        reversed_plan = subprocess.run(
+            [
+                str(runner_under_test),
+                "--plan",
+                str(runner_repository / "target" / "coverage-reversed"),
+                "postgres",
+                "ordinary",
+            ],
+            cwd=runner_repository,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert reversed_plan.returncode == 2
+        assert "ordinary must be the first lane" in reversed_plan.stderr
+
         mutation_output = runner_repository / "target" / "coverage-mutation"
         mutation_path = runner_repository / "source-mutation.txt"
         mutation_environment = dict(runner_environment)
@@ -803,14 +1102,6 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             for name in ["summary.json", "coverage.lcov", "manifest.json"]
         )
 
-        failed_summary = scratch / "synthetic-failed-summary.json"
-        failed_lcov = scratch / "synthetic-failed-coverage.lcov"
-        synthetic_workspace_reports(
-            runner_ci / "rust-coverage-policy.json",
-            failed_summary,
-            failed_lcov,
-            140_000,
-        )
         failed_environment = dict(runner_environment)
         failed_environment["AUTOMATA_COVERAGE_JSON_FIXTURE"] = str(failed_summary)
         failed_environment["AUTOMATA_COVERAGE_LCOV_FIXTURE"] = str(failed_lcov)
@@ -1121,11 +1412,12 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 16, planned.stdout
+        assert len(commands) == 17, planned.stdout
         expected_inventory = [
             "cargo test --workspace",
             "-p automata-ci-store --test store_postgres_execution",
-            "-p automata-ci-postgres-test-support -p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --tests",
+            "-p automata-ci-postgres-test-support --test postgres_18",
+            "-p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test auth_postgres --test runner_auth_postgres --test secret_postgres",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test rustfs_contract",
@@ -1144,6 +1436,7 @@ exit 99
             assert expected in command, command
         assert all("--ignored" in command for command in commands[1:])
         assert "--test-threads=4" in commands[1]
+        assert "--test-threads=1" in commands[2]
         assert "--tests" not in commands[1]
         assert sum(
             command.count("-p automata-ci-postgres-test-support")
@@ -1165,6 +1458,13 @@ exit 99
         postgres_verifier_source = VERIFY_POSTGRES.read_text(encoding="utf-8")
         assert not (ROOT / "ci" / "run-postgres-store-shard.sh").exists()
         assert "run-postgres-tests.sh --defer-cleanup" in runner_source
+        assert "ordinary_checkpoint=true" in runner_source.replace(" ", "")
+        assert "ordinary must be the first lane" in runner_source
+        assert "combined-manifest.json" in runner_source
+        assert (
+            'export AUTOMATA_TEST_TEMPLATE_FINGERPRINT="$source_content_digest"'
+            in runner_source
+        )
         assert postgres_runner_source.count("-p automata-ci-store") == 1
         assert "--test store_contracts" not in postgres_runner_source
         assert "--test store_migration_contracts" not in postgres_runner_source
@@ -1179,6 +1479,8 @@ exit 99
         assert "rolcreatedb OR rolsuper" in postgres_verifier_source
         assert postgres_verifier_source.count("--set=ON_ERROR_STOP=1") == 2
         assert postgres_verifier_source.count("--no-psqlrc") == 2
+        assert postgres_verifier_source.count("psql-test-database.py") == 2
+        assert 'PGDATABASE="$AUTOMATA_TEST_DATABASE_URL"' not in postgres_verifier_source
         assert "check-ignored-test-list.py" in runner_source
         assert (
             "--inventory-source podman "
@@ -1197,7 +1499,8 @@ exit 99
         assert runner_source.index(
             "validate-rust-coverage-failure.py"
         ) > runner_source.index("check-rust-coverage.py")
-        assert '--lcov "$coverage_stage/coverage.lcov"' in runner_source
+        assert '"$coverage_stage/coverage.lcov" \\' in runner_source
+        assert '"$coverage_stage/combined-coverage.lcov"' in runner_source
         assert runner_source.index(
             'mv -- "$coverage_stage/summary.json"'
         ) < runner_source.index('mv -- "$coverage_stage/manifest.json"')

@@ -1,5 +1,3 @@
-mod support;
-
 use std::{collections::BTreeSet, sync::Arc};
 
 use automata_ci_auth::{
@@ -17,7 +15,7 @@ use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial,
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use support::{TestResult, run_with_database};
+use super::support::{TestResult, run_with_database};
 
 fn key_material(id: &str, byte: u8) -> LocalKeyMaterial {
     LocalKeyMaterial::new(

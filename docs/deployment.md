@@ -482,7 +482,7 @@ fallback tenant and exposes only data whose durable publication policy permits
 anonymous access. The command above intentionally leaves optional human
 authentication disabled. Private and authenticated views require the complete
 human-auth configuration and, for a new installation, the
-[one-use bootstrap tuple](#optional-github-human-authentication).
+[one-use bootstrap tuple](#enable-github-human-authentication-for-enrollment).
 
 An authorized browser can change repository access at
 `/{owner}/{repository}/settings/access`. Dashboard metadata, logs, and artifacts

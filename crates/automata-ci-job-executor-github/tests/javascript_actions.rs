@@ -53,9 +53,12 @@ async fn checkout_materializes_the_github_workflow_directory_view() {
         compatibility.working_directory().as_str(),
         "/__w/automata/automata"
     );
-    assert!(
-        compatibility.argv().arguments()[1].contains("cp -R -- .ci/workflows .github/workflows")
-    );
+    let script = &compatibility.argv().arguments()[1];
+    assert!(script.contains("for source in .ci/workflows/*"));
+    assert!(script.contains("[ -e \"$destination\" ] || [ -L \"$destination\" ]"));
+    assert!(script.contains("portable workflow path collides with native path"));
+    assert!(script.contains("cp -- \"$source\" \"$destination\""));
+    assert!(!script.contains("cp -R"));
 }
 
 #[tokio::test]

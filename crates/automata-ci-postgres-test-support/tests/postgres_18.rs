@@ -1,4 +1,12 @@
-use std::{future::Future, str::FromStr as _, time::Duration};
+use std::{
+    future::Future,
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use automata_ci_postgres_test_support::{
     DATABASE_URL_ENVIRONMENT, NamespaceCleanup, PostgresTestHarness, TestClock, TestNamespace,
@@ -10,18 +18,24 @@ use uuid::Uuid;
 
 type NamespaceCleanupOutcome = Result<TestResult<NamespaceCleanup>, JoinError>;
 
-fn unique_harness() -> TestResult<PostgresTestHarness> {
-    let random = Uuid::new_v4().simple().to_string();
-    let namespace = TestNamespace::new(format!("r{random:.26}"))?;
-    PostgresTestHarness::from_environment_with_namespace(namespace)
+fn configured_harness() -> TestResult<PostgresTestHarness> {
+    PostgresTestHarness::from_environment()
 }
 
-async fn run_with_unique_harness<Test, TestFuture>(test: Test) -> TestResult
+async fn run_with_configured_harness<Test, TestFuture>(test: Test) -> TestResult
 where
     Test: FnOnce(PostgresTestHarness) -> TestFuture,
     TestFuture: Future<Output = TestResult> + Send + 'static,
 {
-    let harness = unique_harness()?;
+    let harness = configured_harness()?;
+    run_with_harness(harness, test).await
+}
+
+async fn run_with_harness<Test, TestFuture>(harness: PostgresTestHarness, test: Test) -> TestResult
+where
+    Test: FnOnce(PostgresTestHarness) -> TestFuture,
+    TestFuture: Future<Output = TestResult> + Send + 'static,
+{
     let cleanup_harness = harness.clone();
     let test_outcome = tokio::spawn(test(harness)).await;
     let cleanup_outcome =
@@ -121,7 +135,7 @@ async fn observed_clock(pool: &PgPool) -> TestResult<i64> {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn parallel_template_clones_are_isolated() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = harness
             .prepare_template(|pool| async move {
                 sqlx::query("CREATE TABLE automata_test.isolation_probe (value TEXT NOT NULL)")
@@ -163,7 +177,7 @@ async fn parallel_template_clones_are_isolated() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn template_clone_contains_initialized_migration_marker() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -181,7 +195,7 @@ async fn template_clone_contains_initialized_migration_marker() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn template0_database_is_application_empty() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let _template = marker_template(&harness).await?;
         harness
             .run_with_empty_database(|database| async move {
@@ -213,7 +227,7 @@ async fn template0_database_is_application_empty() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn replacement_connections_observe_schema_local_test_clock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -242,7 +256,7 @@ async fn replacement_connections_observe_schema_local_test_clock() -> TestResult
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn freeze_at_database_now_samples_the_qualified_builtin_clock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -286,7 +300,7 @@ async fn freeze_at_database_now_samples_the_qualified_builtin_clock() -> TestRes
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn advancing_test_clock_does_not_wait_for_wall_time() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         template
             .run(|database| async move {
@@ -310,7 +324,7 @@ async fn advancing_test_clock_does_not_wait_for_wall_time() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn cleanup_drops_the_exact_test_database() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         let (database_name_sender, database_name_receiver) = tokio::sync::oneshot::channel();
         let run_result = template
@@ -334,7 +348,7 @@ async fn cleanup_drops_the_exact_test_database() -> TestResult {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn panicking_test_still_drops_its_exact_database() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template = marker_template(&harness).await?;
         let run_template = template.clone();
         let (database_name_sender, database_name_receiver) = tokio::sync::oneshot::channel();
@@ -364,8 +378,76 @@ async fn panicking_test_still_drops_its_exact_database() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
+async fn incompatible_initializer_fingerprint_cannot_reuse_template() -> TestResult {
+    let database_url = std::env::var(DATABASE_URL_ENVIRONMENT)?;
+    let namespace = TestNamespace::new(
+        std::env::var("AUTOMATA_TEST_DATABASE_NAMESPACE")
+            .map_err(|_| "AUTOMATA_TEST_DATABASE_NAMESPACE is required")?,
+    )?;
+    let template_name = format!("at_{namespace}_template");
+    let first_fingerprint = "a".repeat(64);
+    let second_fingerprint = "b".repeat(64);
+    let first = PostgresTestHarness::new(&database_url, namespace.clone())?
+        .with_initializer_fingerprint(first_fingerprint)?;
+    let second = PostgresTestHarness::new(&database_url, namespace)?
+        .with_initializer_fingerprint(second_fingerprint)?;
+    let incompatible_initializer_called = Arc::new(AtomicBool::new(false));
+    let incompatible_initializer_probe = Arc::clone(&incompatible_initializer_called);
+
+    run_with_harness(first, move |first| async move {
+        let template = first
+            .prepare_template(|pool| async move {
+                sqlx::query(
+                    "CREATE TABLE automata_test.fingerprint_marker (value INTEGER NOT NULL)",
+                )
+                .execute(&pool)
+                .await?;
+                sqlx::query("INSERT INTO automata_test.fingerprint_marker (value) VALUES (17)")
+                    .execute(&pool)
+                    .await?;
+                Ok(())
+            })
+            .await?;
+
+        let error = second
+            .prepare_template(move |_pool| async move {
+                incompatible_initializer_probe.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await
+            .expect_err("an incompatible initializer fingerprint must not reuse the template");
+        assert!(
+            error.to_string().contains("ownership marker"),
+            "fingerprint mismatch must fail as an ownership-marker error: {error}"
+        );
+        assert!(
+            !incompatible_initializer_called.load(Ordering::Acquire),
+            "a rejected incompatible initializer must not execute"
+        );
+
+        template
+            .run(|database| async move {
+                let value: i32 = sqlx::query_scalar("SELECT value FROM fingerprint_marker")
+                    .fetch_one(database.pool())
+                    .await?;
+                assert_eq!(value, 17);
+                Ok(())
+            })
+            .await
+    })
+    .await?;
+
+    assert!(
+        !database_exists(&template_name).await?,
+        "the exact fingerprinted namespace must be cleaned after rejection"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"]
 async fn unmarked_canonical_crash_leftovers_are_recovered_under_namespace_lock() -> TestResult {
-    run_with_unique_harness(|harness| async move {
+    run_with_configured_harness(|harness| async move {
         let template_name = format!("at_{}_template", harness.namespace());
         create_unmarked_database(&template_name).await?;
 

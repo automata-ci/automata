@@ -8,8 +8,7 @@ fi
 
 expected_version="${AUTOMATA_EXPECTED_POSTGRES_VERSION_NUM:-180004}"
 server_version="$(
-  psql \
-    --dbname="$AUTOMATA_TEST_DATABASE_URL" \
+  ./scripts/ci/psql-test-database.py \
     --no-psqlrc \
     --set=ON_ERROR_STOP=1 \
     --tuples-only \
@@ -24,8 +23,7 @@ if [[ "$server_version" != "$expected_version" ]]; then
 fi
 
 can_create_database="$(
-  psql \
-    --dbname="$AUTOMATA_TEST_DATABASE_URL" \
+  ./scripts/ci/psql-test-database.py \
     --no-psqlrc \
     --set=ON_ERROR_STOP=1 \
     --tuples-only \

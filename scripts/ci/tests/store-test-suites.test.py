@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed inventory contract for the consolidated Store test suites."""
+"""Fail-closed inventory contract for consolidated PostgreSQL test suites."""
 
 from __future__ import annotations
 
@@ -31,6 +31,17 @@ EXPECTED_SUITE_INVENTORY = {
     "store_postgres_provider": (11, 91, 91),
     "store_postgres_security": (9, 43, 38),
 }
+ADAPTER_SUITE_INVENTORY = {
+    "automata-ci-auth-postgres": ("auth_postgres", 10, 68, 67, 2),
+    "automata-ci-runner-auth-postgres": (
+        "runner_auth_postgres",
+        1,
+        5,
+        5,
+        1,
+    ),
+    "automata-ci-secret-postgres": ("secret_postgres", 2, 6, 6, 2),
+}
 TEST_ATTRIBUTE = re.compile(r"#\[(?:tokio::)?test\]")
 PATH_MODULE = re.compile(
     r'^#\[path = "(?P<path>[^"]+)"\]\s*\nmod (?P<module>[a-z0-9_]+);$',
@@ -42,7 +53,103 @@ MANIFEST_TEST = re.compile(
 
 
 def fail(message: str) -> None:
-    raise SystemExit(f"Store test-suite inventory error: {message}")
+    raise SystemExit(f"PostgreSQL test-suite inventory error: {message}")
+
+
+def validate_adapter_suites() -> tuple[int, int, int]:
+    total_leaves = 0
+    total_tests = 0
+    total_ignored = 0
+    for package, expected in ADAPTER_SUITE_INVENTORY.items():
+        suite, expected_leaves, expected_tests, expected_ignored, expected_contracts = (
+            expected
+        )
+        package_root = ROOT / "crates" / package
+        tests = package_root / "tests"
+        manifest = (package_root / "Cargo.toml").read_text(encoding="utf-8")
+        if "autotests = false" not in manifest:
+            fail(f"{package} must disable Cargo autotest discovery")
+
+        declared = {
+            match.group("name"): match.group("path")
+            for match in MANIFEST_TEST.finditer(manifest)
+        }
+        expected_declarations = {
+            "contracts": "tests/contracts.rs",
+            suite: f"tests/{suite}.rs",
+        }
+        if declared != expected_declarations:
+            fail(
+                f"{package} explicit Cargo targets differ from the reviewed suites: "
+                f"{declared!r}"
+            )
+
+        root_source = (tests / f"{suite}.rs").read_text(encoding="utf-8")
+        if root_source.count("mod support;") != 1:
+            fail(f"{package}/{suite} must own exactly one support module")
+        if TEST_ATTRIBUTE.search(root_source) or "#[ignore" in root_source:
+            fail(f"{package}/{suite} must contain only module assignments")
+
+        assignments: dict[str, str] = {}
+        for match in PATH_MODULE.finditer(root_source):
+            relative = Path(match.group("path"))
+            module = match.group("module")
+            if relative.parent != Path(".") or relative.suffix != ".rs":
+                fail(f"{package}/{suite} has a non-local Rust module path: {relative}")
+            if relative.stem != module:
+                fail(
+                    f"{package}/{suite} maps module {module!r} to mismatched path "
+                    f"{relative}"
+                )
+            if module in assignments:
+                fail(f"{package}/{suite} assigns {module}.rs more than once")
+            assignments[module] = suite
+
+        roots = {"contracts.rs", f"{suite}.rs"}
+        leaves = {
+            path.stem for path in tests.glob("*.rs") if path.name not in roots
+        }
+        non_postgres = sorted(leaf for leaf in leaves if not leaf.startswith("postgres_"))
+        missing = sorted(leaves - assignments.keys())
+        stale = sorted(assignments.keys() - leaves)
+        if non_postgres or missing or stale:
+            fail(
+                f"{package}/{suite} non-PostgreSQL leaves={non_postgres!r}; "
+                f"missing leaves={missing!r}; stale assignments={stale!r}"
+            )
+
+        test_count = 0
+        ignored_count = 0
+        for leaf in sorted(leaves):
+            source = (tests / f"{leaf}.rs").read_text(encoding="utf-8")
+            if "mod support;" in source:
+                fail(f"{package}/{leaf}.rs still owns a duplicate support module")
+            if source.count("use super::support::") != 1:
+                fail(f"{package}/{leaf}.rs must import its suite support module once")
+            leaf_tests = len(TEST_ATTRIBUTE.findall(source))
+            if leaf_tests == 0:
+                fail(f"{package}/{leaf}.rs contains no tests")
+            test_count += leaf_tests
+            ignored_count += source.count("#[ignore")
+
+        contract_source = (tests / "contracts.rs").read_text(encoding="utf-8")
+        contract_tests = len(TEST_ATTRIBUTE.findall(contract_source))
+        if "#[ignore" in contract_source:
+            fail(f"{package}/contracts.rs must remain an ordinary target")
+        actual = (len(leaves), test_count, ignored_count, contract_tests)
+        if actual != (
+            expected_leaves,
+            expected_tests,
+            expected_ignored,
+            expected_contracts,
+        ):
+            fail(f"{package} reviewed inventory changed: actual={actual!r}")
+
+        total_leaves += len(leaves)
+        total_tests += test_count + contract_tests
+        total_ignored += ignored_count
+
+    return total_leaves, total_tests, total_ignored
 
 
 def main() -> None:
@@ -133,9 +240,13 @@ def main() -> None:
 
     test_count = sum(counts[1] for counts in actual_inventory.values())
     ignored_count = sum(counts[2] for counts in actual_inventory.values())
+    adapter_leaves, adapter_tests, adapter_ignored = validate_adapter_suites()
     print(
         "verified six Store suites: "
-        f"{len(leaves)} leaves, {test_count} tests, {ignored_count} PostgreSQL tests"
+        f"{len(leaves)} leaves, {test_count} tests, {ignored_count} PostgreSQL tests; "
+        "verified three adapter packages: "
+        f"{adapter_leaves} leaves, {adapter_tests} tests, "
+        f"{adapter_ignored} PostgreSQL tests"
     )
 
 
