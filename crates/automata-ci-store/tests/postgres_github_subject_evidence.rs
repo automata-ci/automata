@@ -6,9 +6,10 @@ use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobK
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
-    AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery,
-    CompleteProviderDelivery, EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
+    AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, ClaimGithubCheckProjection,
+    ClaimProviderDelivery, CompleteProviderDelivery, EnsureGithubServerServiceAuthority,
+    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
     GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRepository as _,
     GithubProviderManifestRevision, GithubProviderOrigins,
@@ -687,6 +688,35 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
                 )?,
             )
             .await?;
+
+        let unsealed_subject_id = Uuid::new_v4();
+        let unsealed_external_id = format!("automata-check:{unsealed_subject_id}");
+        let inserted = sqlx::query(
+            r"
+            INSERT INTO github_check_subjects (
+                id, tenant_id, repository_id, provider_delivery_id, subject_key,
+                provider_connection_id, provider_installation_id,
+                github_repository_id, github_app_id, head_sha, check_name,
+                external_id, created_at_ms, desired_updated_at_ms,
+                github_repository_name
+            )
+            SELECT $1, tenant_id, repository_id, provider_delivery_id, $2,
+                   provider_connection_id, provider_installation_id,
+                   github_repository_id, github_app_id, head_sha, check_name,
+                   $3, created_at_ms, desired_updated_at_ms,
+                   github_repository_name
+            FROM github_check_subjects
+            WHERE id = $4
+            ",
+        )
+        .bind(unsealed_subject_id)
+        .bind(SKIPPED_PATH)
+        .bind(unsealed_external_id)
+        .bind(accepted.check_subject_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        assert_eq!(inserted.rows_affected(), 1);
+
         let replay = database
             .store()
             .register_provider_delivery_workflow_inventory(
@@ -747,7 +777,65 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
                     "in_progress".to_owned(),
                     None,
                 ),
+                (SKIPPED_PATH.to_owned(), None, "queued".to_owned(), None,),
             ]
+        );
+
+        let expected_claimable: std::collections::BTreeSet<Uuid> = sqlx::query_scalar(
+            r"
+                SELECT id
+                FROM github_check_subjects
+                WHERE provider_delivery_id = $1
+                  AND (
+                    id = $2
+                    OR subject_key = $3
+                    OR subject_key = $4
+                  )
+                ",
+        )
+        .bind(accepted.delivery_id().as_uuid())
+        .bind(accepted.check_subject_id().as_uuid())
+        .bind(BUILD_PATH)
+        .bind(BROKEN_PATH)
+        .fetch_all(database.pool())
+        .await?
+        .into_iter()
+        .collect();
+        assert_eq!(
+            expected_claimable.len(),
+            3,
+            "aggregate plus two workflow Checks"
+        );
+        assert!(!expected_claimable.contains(&unsealed_subject_id));
+        let observed_at = database_now(database.pool()).await?;
+        let expires_at = checked_add_millis(observed_at, 30_000)?;
+        let mut claimed = std::collections::BTreeSet::new();
+        for _ in 0..expected_claimable.len() {
+            let projection = database
+                .store()
+                .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                    fixture.connection,
+                    GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())?,
+                    observed_at,
+                    expires_at,
+                )?)
+                .await?
+                .expect("every sealed delivery Check must be claimable");
+            claimed.insert(projection.claim().subject_id().as_uuid());
+        }
+        assert_eq!(claimed, expected_claimable);
+        assert!(
+            database
+                .store()
+                .claim_github_check_projection(ClaimGithubCheckProjection::new(
+                    fixture.connection,
+                    GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())?,
+                    observed_at,
+                    expires_at,
+                )?)
+                .await?
+                .is_none(),
+            "inventory-valid but evidence-unsealed Check must not be claimable"
         );
         assert_fanout_evidence_is_sealed_after_completion(&database, accepted.delivery_id())
             .await?;
