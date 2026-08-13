@@ -57,8 +57,12 @@ pub(crate) async fn run(args: &DemoArgs) -> Result<()> {
                 DemoWebData::context(),
             )
             .context("failed to initialize demo visualization")?
-            .merge(demo_router(data.clone()));
-            let url = format!("http://{address}{}", DemoWebData::dashboard_url());
+            .merge(demo_router(data.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                data.clone(),
+                demo_auto_refresh,
+            ));
+            let url = format!("http://{address}{}", DemoWebData::entry_url());
             eprintln!("Visual run page: {url}");
             Some(tokio::spawn(
                 async move { axum::serve(listener, router).await },
@@ -88,6 +92,26 @@ pub(crate) async fn run(args: &DemoArgs) -> Result<()> {
         let _ = args;
         bail!("the native local demo is currently available only on Windows")
     }
+}
+
+async fn demo_auto_refresh(
+    axum::extract::State(data): axum::extract::State<Arc<DemoWebData>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    if !data.is_finished()
+        && response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"))
+    {
+        response
+            .headers_mut()
+            .insert("refresh", axum::http::HeaderValue::from_static("1"));
+    }
+    response
 }
 
 #[allow(
@@ -314,6 +338,7 @@ mod windows {
         );
 
         eprintln!("EVALUATION MODE: trusted workflow processes inherit your Windows user token");
+        visualization.system("Preparing a bounded disposable workspace");
         let root = DemoRoot::new()?;
         let provider = WindowsSandboxProvider::open(
             WindowsSandboxProviderOptions::new(root.path.clone())
@@ -357,6 +382,8 @@ mod windows {
             fs::create_dir_all(scratch.join("home"))
                 .context("could not create demo process home")?;
             copy_repository(&repository, &workspace)?;
+            visualization
+                .system("Repository copied into the disposable workspace; starting execution");
             execute_steps(
                 endpoint.as_ref(),
                 &workspace,
@@ -366,6 +393,7 @@ mod windows {
             )
         })();
         drop(endpoint);
+        visualization.system("Execution stopped; removing the disposable workspace");
         let cleanup = provider.destroy(
             &DestroySandbox::new(
                 OperationId::new(),
@@ -378,8 +406,11 @@ mod windows {
             visualization.finish(false, "Workspace cleanup failed");
             return Err(error).context("demo execution ended but workspace cleanup failed");
         }
+        visualization.system("Disposable workspace removed");
         match &execution {
-            Ok(()) => visualization.finish(true, "Demo workflow completed successfully"),
+            Ok(()) => {
+                visualization.finish(true, "Evaluation succeeded: every step exited successfully");
+            }
             Err(error) => visualization.finish(false, &format!("Demo workflow failed: {error}")),
         }
         execution

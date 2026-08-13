@@ -58,12 +58,14 @@ The acknowledgement flag is mandatory. The command prints a URL such as:
 Visual run page: http://127.0.0.1:8080/__demo
 ```
 
-Open it in a browser. A dedicated evaluation dashboard displays every step as
-queued, running, succeeded, or failed with its shell, elapsed time, and exit
-code. Server-sent events update the dashboard immediately without full-page
-refreshes. Links open the ordinary Automata run and searchable job-log pages,
-which retain captured standard output, standard error, and lifecycle messages.
-A successful run ends with `demo workflow completed successfully`.
+Open it in a browser. The entry URL opens the ordinary Automata job-log page,
+using the same navigation, styling, theme control, status presentation, and log
+search as every other run. While execution is active, the page refreshes once
+per second and explains the trust boundary, selected workflow, accepted plan,
+workspace preparation, current step and shell, output, exit result, and cleanup
+in order. Use the run navigation or breadcrumbs to inspect the standard run
+summary. A successful run ends with
+`Evaluation succeeded: every step exited successfully`.
 
 The visual server remains available after execution so the result can be
 inspected. Press `Ctrl-C` to stop it. Use `--no-visual` for automation that must
