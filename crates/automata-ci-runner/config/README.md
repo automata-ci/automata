@@ -175,14 +175,15 @@ The three `runner.local-N.example.json` files assume:
 - a control-plane runner listener reachable at the configured HTTPS URL;
 - the same RustFS bucket and prefix used by the server;
 - the pinned Ubuntu 24.04 OCI image is available by its exact digest; and
-- a firewall-protected smart-Git bridge is available for the local repository
-  snapshot.
+- the isolated GitHub emulator is started by the integration harness on the
+  exact mapped origin configured below.
 
 Copy all three examples to ignored, host-specific paths. Update, at minimum,
 the three `runner_id` values, `control_endpoint`, account paths, runtime UID,
-resources, and Git bridge URLs. Do not edit the checked-in examples with
-machine credentials and never reuse an ID, client key, or spool key between
-instances.
+resources, and GitHub context origins. Keep the server, API, and GraphQL
+origins identical and change their port together with the emulator mapping.
+Do not edit the checked-in examples with machine credentials and never reuse
+an ID, client key, or spool key between instances.
 
 `control_endpoint` is also the only managed-secret delivery origin. Values are
 fetched after lease acceptance through its direct mTLS connection, retained
