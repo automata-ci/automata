@@ -347,6 +347,8 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-postgres-test-support",
+ "automata-ci-runner-auth",
+ "automata-ci-runner-auth-postgres",
  "automata-ci-store",
  "serde",
  "serde_json",

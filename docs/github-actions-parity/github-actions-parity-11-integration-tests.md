@@ -30,7 +30,7 @@ This plan was prepared from these exact revisions:
 
 The integration repository contains a useful manual product-path E2E harness.
 It can start real Automata control-plane and runner binaries with PostgreSQL,
-S3-compatible storage, mTLS, legacy static runners, and rootless Podman; send a signed
+S3-compatible storage, mTLS-enrolled runners, and rootless Podman; send a signed
 webhook through real product ingress; execute locked workflow bytes; and
 require terminal GitHub-compatible Checks plus Automata-native run/job
 evidence. Its default provider is a strict loopback GitHub emulator, not

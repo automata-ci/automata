@@ -1,7 +1,9 @@
 # `automata-runner`
 
-The `automata-ci-runner` package builds the `automata-runner` command for Linux,
-Windows, and macOS execution hosts. It validates the host, opens an mTLS session to
+The supported provisioned `automata-runner` command targets Linux and macOS execution
+hosts. Windows native execution remains source-only experimental code without a
+production enrollment path or release gate. On supported hosts the command validates
+the host, opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
@@ -91,8 +93,9 @@ containers, administrator profiles, and parallel native jobs are unsupported.
 
 Hosted Windows CI is currently disabled because Automata does not yet operate
 Windows runners. The native-provider tests remain in the repository, but they
-are not a release gate; do not deploy this path until its Windows end-to-end CI
-gate is restored.
+are not a release gate; there is deliberately no Windows enrollment or static
+registration path. Do not deploy it until secure Windows credential publication
+and the Windows end-to-end CI gate are implemented together.
 
 The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
 configured Python and PowerShell Core interpreters. Startup probes every

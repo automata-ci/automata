@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use automata_ci_auth::session_credential::SessionCredential;
 use automata_ci_core::RunnerGroup;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -169,11 +170,14 @@ async fn send(
     credential: &SessionCredential,
     body: &CreateTokenRequest<'_>,
 ) -> Result<reqwest::Response> {
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(body).context("runner enrollment token request could not be encoded")?,
+    );
     client
         .post(origin.endpoint(ENROLLMENTS_PATH))
         .header(header::AUTHORIZATION, bearer_header(credential)?)
         .header(header::CONTENT_TYPE, "application/json")
-        .json(body)
+        .body(Bytes::from_owner(encoded))
         .send()
         .await
         .map_err(reqwest::Error::without_url)
@@ -207,16 +211,16 @@ fn print_token(output: OutputFormat, issued: &IssuedToken) -> Result<()> {
             writeln!(stdout, "expires_at_ms\t{}", issued.expires_at_ms)?;
         }
         OutputFormat::Json | OutputFormat::JsonLines => {
-            writeln!(
-                stdout,
-                "{}",
-                serde_json::to_string(&IssuedTokenOutput {
+            serde_json::to_writer(
+                &mut stdout,
+                &IssuedTokenOutput {
                     enrollment_id: issued.enrollment_id,
                     token: issued.token.as_str(),
                     runner_group: &issued.runner_group,
                     expires_at_ms: issued.expires_at_ms,
-                })?
+                },
             )?;
+            writeln!(stdout)?;
         }
     }
     stdout

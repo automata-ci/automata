@@ -6,14 +6,13 @@ use uuid::Uuid;
 use automata_ci_core::{RunnerCapabilities, RunnerFeature};
 
 use crate::{
-    RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
-    RunnerCapabilityReadiness,
+    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError,
+    RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
 };
 
 use super::PostgresStore;
 
 const RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE: usize = 16;
-const RUNNER_CAPABILITY_ADMISSION_TOTAL_LIMIT: usize = 64;
 
 #[async_trait]
 impl RunnerCapabilityAdmissionRepository for PostgresStore {
@@ -29,7 +28,7 @@ impl RunnerCapabilityAdmissionRepository for PostgresStore {
         let mut after_id: Option<Uuid> = None;
         let mut inspected = 0_usize;
         loop {
-            let remaining_with_overflow_probe = RUNNER_CAPABILITY_ADMISSION_TOTAL_LIMIT
+            let remaining_with_overflow_probe = MAX_REGISTERED_RUNNERS
                 .checked_sub(inspected)
                 .and_then(|remaining| remaining.checked_add(1))
                 .ok_or(RunnerCapabilityAdmissionError::CorruptData)?;
@@ -56,7 +55,7 @@ impl RunnerCapabilityAdmissionRepository for PostgresStore {
             inspected = inspected
                 .checked_add(rows.len())
                 .ok_or(RunnerCapabilityAdmissionError::CorruptData)?;
-            if inspected > RUNNER_CAPABILITY_ADMISSION_TOTAL_LIMIT {
+            if inspected > MAX_REGISTERED_RUNNERS {
                 return Err(RunnerCapabilityAdmissionError::drift(
                     "runner capability admission",
                 ));

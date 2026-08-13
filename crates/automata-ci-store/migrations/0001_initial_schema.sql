@@ -15168,6 +15168,7 @@ BEGIN
            OR NEW.redeem_operation_id IS DISTINCT FROM OLD.redeem_operation_id
            OR NEW.redeem_request_sha256 IS DISTINCT FROM OLD.redeem_request_sha256
            OR NEW.redeem_response IS DISTINCT FROM OLD.redeem_response
+           OR NEW.redeem_certificate_expires_at_seconds IS DISTINCT FROM OLD.redeem_certificate_expires_at_seconds
        )) THEN
         RAISE EXCEPTION 'runner enrollment token authority is immutable and consumption is write-once'
             USING ERRCODE = 'integrity_constraint_violation',
@@ -25625,11 +25626,12 @@ CREATE TABLE runner_enrollment_tokens (
     redeem_operation_id uuid,
     redeem_request_sha256 bytea,
     redeem_response bytea,
+    redeem_certificate_expires_at_seconds bigint,
     CONSTRAINT runner_enrollment_tokens_digest CHECK ((octet_length(token_sha256) = 32)),
     CONSTRAINT runner_enrollment_tokens_ids_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_group_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_session_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((consumed_runner_id IS NULL) OR (consumed_runner_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((redeem_operation_id IS NULL) OR (redeem_operation_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
     CONSTRAINT runner_enrollment_tokens_lifetime CHECK (((issued_at_ms >= 0) AND ((expires_at_ms - issued_at_ms) >= 60000) AND ((expires_at_ms - issued_at_ms) <= 3600000))),
     CONSTRAINT runner_enrollment_tokens_revision_positive CHECK ((issued_authorization_revision > 0)),
-    CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL) AND (redeem_operation_id IS NULL) AND (redeem_request_sha256 IS NULL) AND (redeem_response IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL) AND (redeem_operation_id IS NOT NULL) AND (octet_length(redeem_request_sha256) = 32) AND (octet_length(redeem_response) >= 1) AND (octet_length(redeem_response) <= 524288))) IS TRUE))
+    CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL) AND (redeem_operation_id IS NULL) AND (redeem_request_sha256 IS NULL) AND (redeem_response IS NULL) AND (redeem_certificate_expires_at_seconds IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL) AND (redeem_operation_id IS NOT NULL) AND (octet_length(redeem_request_sha256) = 32) AND (octet_length(redeem_response) >= 1) AND (octet_length(redeem_response) <= 524288) AND (redeem_certificate_expires_at_seconds > (consumed_at_ms / 1000)))) IS TRUE))
 );
 
 CREATE TABLE runner_operation_receipts (
@@ -31256,13 +31258,13 @@ ALTER TABLE ONLY runner_enrollment_tokens
     ADD CONSTRAINT runner_enrollment_tokens_group_fkey FOREIGN KEY (tenant_id, runner_group_id) REFERENCES runner_groups(tenant_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_enrollment_tokens
-    ADD CONSTRAINT runner_enrollment_tokens_issuer_principal_fkey FOREIGN KEY (issued_by_principal_id) REFERENCES human_principals(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT runner_enrollment_tokens_issuer_membership_fkey FOREIGN KEY (tenant_id, issued_by_principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_enrollment_tokens
-    ADD CONSTRAINT runner_enrollment_tokens_issuer_session_fkey FOREIGN KEY (issued_by_session_id) REFERENCES human_sessions(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT runner_enrollment_tokens_issuer_session_fkey FOREIGN KEY (tenant_id, issued_by_principal_id, issued_by_session_id) REFERENCES human_sessions(tenant_id, principal_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_enrollment_tokens
-    ADD CONSTRAINT runner_enrollment_tokens_consumed_runner_fkey FOREIGN KEY (consumed_runner_id) REFERENCES runners(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT runner_enrollment_tokens_consumed_runner_fkey FOREIGN KEY (tenant_id, consumed_runner_id) REFERENCES runners(tenant_id, id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_enrollment_tokens
     ADD CONSTRAINT runner_enrollment_tokens_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT;

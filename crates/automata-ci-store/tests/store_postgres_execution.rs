@@ -15,6 +15,8 @@ mod postgres_g1;
 mod postgres_maintenance;
 #[path = "postgres_runner_clock.rs"]
 mod postgres_runner_clock;
+#[path = "postgres_runner_capability_admission.rs"]
+mod postgres_runner_capability_admission;
 #[path = "postgres_runner_control.rs"]
 mod postgres_runner_control;
 #[path = "postgres_runner_payload_tombstones.rs"]

@@ -34,9 +34,11 @@ use automata_ci_auth_postgres::{
 };
 use automata_ci_core::{
     Architecture, OperatingSystem, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel,
-    RunnerPlatform,
+    RunnerPlatform, Sha256Digest,
 };
 use automata_ci_postgres_test_support::TestClock;
+use automata_ci_runner_auth::RunnerMachineDirectory as _;
+use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -3413,12 +3415,14 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         assert_eq!(rejected_state, (0, 0, true));
         let first_response = br#"{"runner":"one"}"#;
         let second_response = br#"{"runner":"two"}"#;
+        let first_runner = RunnerId::new();
+        let second_runner = RunnerId::new();
         let (first, second) = tokio::join!(
             repository.consume_runner_enrollment(consume(
                 first_operation_id,
                 first_request_sha256,
                 first_response,
-                RunnerId::new(),
+                first_runner,
                 "runner-one",
                 8,
             )),
@@ -3426,7 +3430,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 second_operation_id,
                 second_request_sha256,
                 second_response,
-                RunnerId::new(),
+                second_runner,
                 "runner-two",
                 9,
             ))
@@ -3457,12 +3461,20 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
             RunnerEnrollmentPrepareOutcome::Rejected
         ));
         let replay = if matches!(outcomes[0], RunnerEnrollmentConsumeOutcome::Applied(_)) {
-            (first_operation_id, first_request_sha256, first_response.as_slice())
+            (
+                first_operation_id,
+                first_request_sha256,
+                first_response.as_slice(),
+                first_runner,
+                8_u8,
+            )
         } else {
             (
                 second_operation_id,
                 second_request_sha256,
                 second_response.as_slice(),
+                second_runner,
+                9_u8,
             )
         };
         assert_eq!(
@@ -3474,6 +3486,15 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 })
                 .await?,
             RunnerEnrollmentPrepareOutcome::Replayed(replay.2.to_vec())
+        );
+        let machine = PostgresRunnerMachineDirectory::new(pool.clone())
+            .find_by_leaf_sha256(Sha256Digest::from_bytes([replay.4; 32]))
+            .await?
+            .ok_or("enrolled runner certificate did not resolve through machine authority")?;
+        assert_eq!(machine.runner_id(), replay.3);
+        assert_eq!(
+            machine.external_identity().as_str(),
+            format!("automata:runner:{}", replay.3.as_uuid().hyphenated())
         );
         let counts: (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT count(*) FROM runners),(SELECT count(*) FROM runner_machine_certificates),(SELECT count(*) FROM security_audit_events WHERE action='runner.enroll')",
@@ -3548,6 +3569,43 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
             waiter.await??,
             RunnerEnrollmentConsumeOutcome::Rejected
         );
+        let expired_state: (i64, i64, i64, bool) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runners WHERE id=$2),
+                (SELECT count(*) FROM runner_machine_certificates WHERE leaf_sha256=$3),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.enroll' AND resource_id=$4),
+                redeem_response IS NULL
+            FROM runner_enrollment_tokens
+            WHERE id=$1
+            ",
+        )
+        .bind(expiring_id)
+        .bind(expiring_runner.as_uuid())
+        .bind([15_u8; 32].as_slice())
+        .bind(expiring_runner.as_uuid().hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(expired_state, (0, 0, 0, true));
+        clock
+            .set(
+                certificate_issued_at_seconds
+                    .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+                    .and_then(|seconds| seconds.checked_mul(1_000))
+                    .ok_or("certificate expiry overflow")?,
+            )
+            .await?;
+        assert!(matches!(
+            repository
+                .prepare_runner_enrollment(PrepareRunnerEnrollment {
+                    token_sha256,
+                    operation_id: replay.0,
+                    request_sha256: replay.1,
+                })
+                .await?,
+            RunnerEnrollmentPrepareOutcome::Rejected
+        ));
         Ok(())
     })
     .await
