@@ -50,9 +50,9 @@ are independent of transport TLS.
    digest, consumption marker, exact response receipt, and audit event commit atomically.
 6. The runner verifies the response against local identity/configuration and creates new
    file-backed roots, chain, and private-key destinations without overwriting different material.
-   Matching partial publication is resumed after a crash, and the durable request stage is removed
-   only after all credential files and directory entries are synchronized. The private key never
-   crosses the runner boundary.
+   After a crash, any staged response must match a byte-exact server replay before matching partial
+   publication is resumed. The durable request stage is removed only after all credential files and
+   directory entries are synchronized. The private key never crosses the runner boundary.
 
 Absent, expired, and mismatched consumed tokens return the same error. A matching retry receives
 the byte-exact response committed by the first operation, including after an ambiguous HTTP

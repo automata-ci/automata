@@ -3,11 +3,10 @@ use serde_json::Value;
 use sqlx::Row as _;
 use uuid::Uuid;
 
-use automata_ci_core::{RunnerCapabilities, RunnerFeature};
+use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerFeature};
 
 use crate::{
-    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
-    RunnerCapabilityReadiness,
+    RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
 };
 
 use super::PostgresStore;

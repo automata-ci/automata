@@ -400,8 +400,7 @@ pub use runnable::{
     RunnableScanPage, RunnableScanRequest,
 };
 pub use runner_capability_admission::{
-    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
-    RunnerCapabilityReadiness,
+    RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
 };
 pub use runner_control::{
     CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,

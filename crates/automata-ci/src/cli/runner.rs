@@ -20,7 +20,9 @@ use super::{
 
 const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 const TOKEN_PREFIX: &str = "atm_re_";
+const TOKEN_BYTES: usize = 32;
 const TOKEN_ENCODED_BYTES: usize = 43;
+const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
 const CREATE_ATTEMPTS: usize = 3;
 
 pub(crate) async fn execute_runner_command(
@@ -185,20 +187,28 @@ async fn send(
 }
 
 fn generate_token() -> Result<Zeroizing<String>> {
-    let mut entropy = Zeroizing::new([0_u8; 32]);
+    let mut entropy = Zeroizing::new([0_u8; TOKEN_BYTES]);
     getrandom::fill(&mut *entropy).context("runner enrollment token entropy is unavailable")?;
-    Ok(Zeroizing::new(format!(
-        "{TOKEN_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(entropy.as_slice())
-    )))
+    let mut token = Zeroizing::new(String::with_capacity(
+        TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES,
+    ));
+    token.push_str(TOKEN_PREFIX);
+    URL_SAFE_NO_PAD.encode_string(entropy.as_slice(), &mut token);
+    Ok(token)
 }
 
 fn valid_generated_token(token: &str) -> bool {
-    token
+    let Some(encoded) = token
         .strip_prefix(TOKEN_PREFIX)
         .filter(|encoded| encoded.len() == TOKEN_ENCODED_BYTES)
-        .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok())
-        .is_some_and(|decoded| decoded.len() == 32)
+    else {
+        return false;
+    };
+    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
+    matches!(
+        URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
+        Ok(TOKEN_BYTES)
+    )
 }
 
 fn print_token(output: OutputFormat, issued: &IssuedToken) -> Result<()> {
@@ -286,4 +296,19 @@ struct IssuedTokenOutput<'a> {
     token: &'a str,
     runner_group: &'a str,
     expires_at_ms: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    use super::{TOKEN_PREFIX, valid_generated_token};
+
+    #[test]
+    fn pending_token_validation_accepts_only_the_canonical_secret_shape() {
+        let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
+        assert!(valid_generated_token(&token));
+        assert!(!valid_generated_token("plain-secret"));
+        assert!(!valid_generated_token(&format!("{token}A")));
+    }
 }
