@@ -1787,7 +1787,7 @@ async fn seed_signed_check_delivery(
         Sha256Digest::from_bytes([3; 32]),
         ObjectKey::new(format!("service-authority/{suffix}/event"))?,
         128,
-        "application/json",
+        "application/vnd.automata.github-authenticated-event+json",
     )?;
     let owner = ProviderRepositoryOwnerId::new(EVIDENCE_OWNER_ID)?;
     database

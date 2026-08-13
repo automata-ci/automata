@@ -1707,7 +1707,7 @@ fn preparation_descriptor(profile: JobAuthorityProfile) -> LogicalActivationPrep
             0x22,
             LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE,
         ),
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         admission_object(
             "contexts/base.pb",
             0x23,

@@ -994,7 +994,7 @@ async fn insert_scheduled_run_evidence(
             plan_digest, logical_admission_digest, admitted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            'schedule',$18,$19,2,$20,$21,$22
+            'schedule',$18,$19,1,$20,$21,$22
         )
         ",
     )

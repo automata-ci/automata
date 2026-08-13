@@ -50,9 +50,11 @@ use automata_ci_store::{
     LogicalWorkflowInstanceId, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, OpenRunnerSession, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    PublishReusableWorkflowCall, ReusableCallOutputMapping, ReusableSecretPermission,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, PublishReusableWorkflowCall,
+    RegisterProviderDeliveryWorkflowInventory, ReusableCallOutputMapping, ReusableSecretPermission,
     ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
     ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
     RunnableAttemptRepository as _, RunnableScanLimit, RunnableScanRequest, RunnerGeneration,
@@ -904,7 +906,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         );
 
         let metadata = database.store().get_job_ir_metadata(left.job_id()).await?;
-        assert_eq!(metadata.version().get(), 5);
+        assert_eq!(metadata.version().get(), 1);
         assert_eq!(metadata.run_id(), fixture.command.run_id());
         assert_eq!(metadata.digest(), prepared[0].activated.job_ir().digest());
         let routing_shape: Vec<(i32, i32, i32)> = sqlx::query_as(
@@ -917,7 +919,7 @@ async fn exact_replay_takeover_and_duplicate_rows_publish_current_runnable_jobs(
         .bind(fixture.command.run_id().as_uuid())
         .fetch_all(database.pool())
         .await?;
-        assert_eq!(routing_shape, vec![(4, 5, 3), (4, 5, 3)]);
+        assert_eq!(routing_shape, vec![(1, 1, 1), (1, 1, 1)]);
         let runner = open_v5_runner(&database, &fixture.tenant, 10_300).await?;
         let runnable = database
             .store()
@@ -2412,7 +2414,7 @@ async fn admit_authenticated_fixture(
                     format!("materialization-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 accepted_at,
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
@@ -2437,6 +2439,34 @@ async fn admit_authenticated_fixture(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![
+                        ProviderDeliveryWorkflowInventoryEntry::new(
+                            fixture.command.workflow_path(),
+                            ProviderDeliveryWorkflowSourceState::Ready(
+                                fixture.command.source().digest(),
+                            ),
+                        )?,
+                        ProviderDeliveryWorkflowInventoryEntry::new(
+                            ".github/workflows/child.yml",
+                            ProviderDeliveryWorkflowSourceState::Ready(
+                                fixture.command.source().digest(),
+                            ),
+                        )?,
+                    ],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),

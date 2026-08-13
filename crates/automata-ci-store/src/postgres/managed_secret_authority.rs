@@ -262,7 +262,7 @@ async fn resolve_managed_secret_execution_scope(
           AND job.id = $2
           AND job.run_id = $12
           AND job.admission_epoch = 1
-          AND job.job_ir_schema = 5
+          AND job.job_ir_schema = 1
           AND run.id = $12
           AND run.admission_epoch = 1
           AND run.plan_schema = 1
@@ -297,7 +297,7 @@ async fn resolve_managed_secret_execution_scope(
           AND runner_session.id = $8
           AND runner_session.session_epoch = $9
           AND runner_session.runner_generation = $10
-          AND runner_session.job_ir_schema = 5
+          AND runner_session.job_ir_schema = 1
           AND runner_session.disconnected_at_ms IS NULL
         ",
     )
@@ -668,7 +668,7 @@ async fn lock_current_execution(
           AND job.id = $2
           AND job.run_id = $12
           AND job.admission_epoch = 1
-          AND job.job_ir_schema = 5
+          AND job.job_ir_schema = 1
           AND run.id = $12
           AND run.repository_id = $13
           AND run.admission_epoch = 1
@@ -706,7 +706,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 5
+          AND session.job_ir_schema = 1
           AND session.disconnected_at_ms IS NULL
         FOR UPDATE OF attempt, job
         FOR SHARE OF run, repository, marker, concrete, instance,

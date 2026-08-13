@@ -115,7 +115,7 @@ WHERE repository.tenant_id = $1
       'application/vnd.automata.workflow-plan+json'
   AND invocation.state IN ('pending', 'active')
   AND marker.orchestration_schema = 1
-  AND marker.base_context_schema = 2
+  AND marker.base_context_schema = 1
   AND marker.state IN ('pending', 'active')
   AND run.admission_epoch = 1 AND run.plan_schema = 1
   AND run.event_media_type = 'application/json'

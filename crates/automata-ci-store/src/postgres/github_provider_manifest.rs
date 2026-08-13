@@ -279,7 +279,7 @@ async fn bootstrap_locked_manifest(
                         && desired.github_repository_owner_id().is_some()
                         && desired.same_connection_identity(current.manifest())
                     {
-                        return Err(GithubProviderManifestStoreError::OwnerBindingUpgradeRequired);
+                        return Err(GithubProviderManifestStoreError::OwnerBindingRevisionRequired);
                     }
                     return Err(GithubProviderManifestStoreError::ConfigurationDrift);
                 }

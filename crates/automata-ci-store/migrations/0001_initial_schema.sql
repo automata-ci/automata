@@ -14752,7 +14752,7 @@ CREATE FUNCTION automata_require_workflow_run_runner_requirements_current() RETU
     AS $$
 BEGIN
     IF NEW.runner_requirements_schema <> 1 THEN
-        RAISE EXCEPTION 'new workflow runs require runner-requirements schema v3'
+        RAISE EXCEPTION 'new workflow runs require the current runner-requirements schema'
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'workflow_runs_runner_requirements_current_new_only';
     END IF;

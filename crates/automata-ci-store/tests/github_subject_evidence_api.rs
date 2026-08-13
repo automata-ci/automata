@@ -45,7 +45,7 @@ fn delivery(provider: &str) -> AcceptProviderDelivery {
             Sha256Digest::from_bytes([4; 32]),
             ObjectKey::new("github/events/delivery-api-1").expect("object key"),
             512,
-            "application/json",
+            "application/vnd.automata.github-authenticated-event+json",
         )
         .expect("event object"),
         UnixMillis::new(100),

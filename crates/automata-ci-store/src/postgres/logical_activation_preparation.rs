@@ -1226,7 +1226,7 @@ fn build_descriptor(
         runtime_policy,
         plan,
         event,
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         base_context,
         prerequisites,
         ready_at,
@@ -1234,7 +1234,7 @@ fn build_descriptor(
     .map_err(corrupt_value)?;
     if !prefix.is_empty() {
         let exact = get_string(row, prefix, "base_context_kind")? == "admission"
-            && get_i16(row, prefix, "base_context_schema")? == 2
+            && get_i16(row, prefix, "base_context_schema")? == 1
             && usize::try_from(get_i32(row, prefix, "prerequisite_count")?).ok()
                 == Some(descriptor.prerequisites().len())
             && decode_prefixed_digest(row, prefix, "prerequisites_digest")?
@@ -1455,7 +1455,7 @@ async fn insert_binding(
             runtime_policy_revision, runtime_policy_digest,
             claim_origin_selection_id
         ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,2,$10,$11,$12,$13,2,
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$12,$13,1,
             $14,$15,$16,$17,$18,$19,$20,$21,$22
         )
         ",

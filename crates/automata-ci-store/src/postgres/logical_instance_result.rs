@@ -1264,7 +1264,7 @@ fn target_query() -> &'static str {
       AND materialization.state = 'materialized'
       AND job.run_id = concrete.run_id
       AND job.admission_epoch = 1
-      AND job.job_ir_schema = 5
+      AND job.job_ir_schema = 1
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
       AND job.job_ir_size_bytes = instance.job_ir_size_bytes

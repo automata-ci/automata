@@ -223,7 +223,7 @@ async fn stage_authenticated_admission(
                     format!("logical-orchestration-{namespace}"),
                 )?,
                 command.request_digest(),
-                command.event().clone(),
+                common::authenticated_github_event_object(command.event())?,
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 104)?)?,
@@ -397,14 +397,14 @@ async fn assert_logical_admission_shape(
     .bind(run_id.as_uuid())
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(run_shape, (4, 2, "queued".to_owned()));
+    assert_eq!(run_shape, (1, 1, "queued".to_owned()));
 
     let snapshot_epoch: i32 =
         sqlx::query_scalar("SELECT admission_epoch FROM workflow_snapshots WHERE id = $1")
             .bind(snapshot_id.as_uuid())
             .fetch_one(database.pool())
             .await?;
-    assert_eq!(snapshot_epoch, 4);
+    assert_eq!(snapshot_epoch, 1);
 
     let marker: (Uuid, i16, Vec<u8>, String, i64) = sqlx::query_as(
         r"

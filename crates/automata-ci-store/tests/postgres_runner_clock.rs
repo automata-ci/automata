@@ -2661,14 +2661,14 @@ async fn set_runtime_authority_fixture_guards(pool: &PgPool, enabled: bool) -> T
     let statements = if enabled {
         [
             "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_insert_guard",
-            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_00_v3_identity_guard",
-            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_01_v3_database_time_guard",
+            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_00_identity_guard",
+            "ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER github_runtime_authority_01_database_time_guard",
         ]
     } else {
         [
             "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_insert_guard",
-            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_00_v3_identity_guard",
-            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_01_v3_database_time_guard",
+            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_00_identity_guard",
+            "ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER github_runtime_authority_01_database_time_guard",
         ]
     };
     for statement in statements {

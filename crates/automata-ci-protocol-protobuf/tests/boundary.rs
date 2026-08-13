@@ -182,7 +182,7 @@ fn fixture_job_ir() -> fixture_wire::JobIrEnvelope {
 
 #[test]
 fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
-    for version in [4, u32::from(JobIrVersion::current().get()) + 1] {
+    for version in [2, u32::from(JobIrVersion::current().get()) + 1] {
         let mut noncurrent_job = fixture_job_ir();
         noncurrent_job.schema_version = version;
         assert!(matches!(
@@ -190,7 +190,7 @@ fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
             Err(DecodeError::UnsupportedSchema {
                 field: "job_ir_envelope.schema_version",
                 received,
-                supported: 5,
+                supported: 1,
             }) if received == version
         ));
     }
@@ -217,8 +217,8 @@ fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
 }
 
 #[test]
-fn handshake_rejects_every_non_v5_job_ir_endpoint() {
-    for version in [4, 6] {
+fn handshake_rejects_every_noncurrent_job_ir_endpoint() {
+    for version in [2, 3] {
         let mut hello = fixture_runner_hello();
         let Some(fixture_wire::runner_frame::Payload::Hello(payload)) = hello.payload.as_mut()
         else {
@@ -234,7 +234,7 @@ fn handshake_rejects_every_non_v5_job_ir_endpoint() {
             Err(DecodeError::UnsupportedSchema {
                 field: "job_ir_version_range.minimum",
                 received,
-                supported: 5,
+                supported: 1,
             }) if received == version
         ));
 
@@ -253,7 +253,7 @@ fn handshake_rejects_every_non_v5_job_ir_endpoint() {
             Err(DecodeError::UnsupportedSchema {
                 field: "negotiated_session.selected_job_ir",
                 received,
-                supported: 5,
+                supported: 1,
             }) if received == version
         ));
     }
@@ -1017,7 +1017,7 @@ fn future_unknown_optional_fields_are_ignored() {
 }
 
 #[test]
-fn only_current_protocol_v5_is_accepted() {
+fn only_the_current_protocol_is_accepted() {
     let current = fixture_wire::RunnerFrame {
         payload: Some(fixture_wire::runner_frame::Payload::LeaseRequest(
             fixture_wire::LeaseRequest {
@@ -1027,19 +1027,15 @@ fn only_current_protocol_v5_is_accepted() {
             },
         )),
     };
-    decode_runner_frame(&encode(&current), &ProtocolLimits::default())
-        .expect("current protocol v5");
+    decode_runner_frame(&encode(&current), &ProtocolLimits::default()).expect("current protocol");
 
-    let mut legacy = current.clone();
-    let Some(fixture_wire::runner_frame::Payload::LeaseRequest(request)) = legacy.payload.as_mut()
+    let mut zero = current.clone();
+    let Some(fixture_wire::runner_frame::Payload::LeaseRequest(request)) = zero.payload.as_mut()
     else {
         panic!("lease request fixture shape");
     };
     request.header.as_mut().expect("header").protocol_version -= 1;
-    assert!(matches!(
-        decode_runner_frame(&encode(&legacy), &ProtocolLimits::default()),
-        Err(DecodeError::InvalidMessage(_))
-    ));
+    assert!(decode_runner_frame(&encode(&zero), &ProtocolLimits::default()).is_err());
 
     let mut future = current;
     let Some(fixture_wire::runner_frame::Payload::LeaseRequest(request)) = future.payload.as_mut()
@@ -1096,9 +1092,9 @@ fn message_job_ir_and_requirements_schema_skew_are_rejected_without_reconstructi
         })
     ));
 
-    let mut legacy_requirements = fixture_lease_offer();
+    let mut noncurrent_requirements = fixture_lease_offer();
     let Some(fixture_wire::server_frame::Payload::LeaseOffer(payload)) =
-        legacy_requirements.payload.as_mut()
+        noncurrent_requirements.payload.as_mut()
     else {
         panic!("lease offer fixture shape");
     };
@@ -1112,13 +1108,13 @@ fn message_job_ir_and_requirements_schema_skew_are_rejected_without_reconstructi
         .requirements
         .as_mut()
         .expect("runner requirements")
-        .schema_version = 1;
+        .schema_version = 2;
     assert!(matches!(
-        decode_server_frame(&encode(&legacy_requirements), &ProtocolLimits::default()),
+        decode_server_frame(&encode(&noncurrent_requirements), &ProtocolLimits::default()),
         Err(DecodeError::UnsupportedSchema {
             field: "runner_requirements.schema_version",
             supported,
-            received: 1,
+            received: 2,
         }) if supported == u32::from(RUNNER_REQUIREMENTS_SCHEMA_VERSION)
     ));
 }

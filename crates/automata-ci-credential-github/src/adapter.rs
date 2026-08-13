@@ -46,9 +46,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_024;
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 3_600;
 const MAX_PROVIDER_CLOCK_SKEW_SECONDS: u64 = 60;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
-const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v2\0";
-const COMPATIBLE_BROKER_POLICY_FINGERPRINT_DOMAIN_V1: &[u8] =
-    b"automata-ci/github-app-broker-policy/v1\0";
+const BROKER_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/github-app-broker-policy/v1\0";
 
 struct ValidatedResponseMetadata {
     provider_expires_at: UnixTimestamp,
@@ -144,26 +142,6 @@ impl GithubAppCredentialBroker {
     #[must_use]
     pub fn broker_policy_fingerprint(&self) -> automata_ci_store::Sha256Digest {
         self.broker_policy_fingerprint_for_domain(BROKER_POLICY_FINGERPRINT_DOMAIN)
-    }
-
-    /// Returns explicitly supported predecessor fingerprints for immutable
-    /// historical server-service authorities.
-    ///
-    /// Version 1 differs only in rejecting GitHub's unavoidable implicit
-    /// `metadata:read` permission in an otherwise exact token response. The
-    /// current broker preserves the same request permissions, origin, API
-    /// version, resource limits, timeouts, transport mode, issuer, and key.
-    /// Product routing may therefore recognize this one predecessor while
-    /// continuing to reject every unknown policy fingerprint.
-    #[must_use]
-    pub fn compatible_historical_broker_policy_fingerprints(
-        &self,
-    ) -> [automata_ci_store::Sha256Digest; 1] {
-        [
-            self.broker_policy_fingerprint_for_domain(
-                COMPATIBLE_BROKER_POLICY_FINGERPRINT_DOMAIN_V1,
-            ),
-        ]
     }
 
     fn broker_policy_fingerprint_for_domain(

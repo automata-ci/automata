@@ -1328,7 +1328,7 @@ async fn fixture_with_visibility(
                     format!("activation-preparation-{namespace}"),
                 )?,
                 Sha256Digest::from_bytes([29; 32]),
-                event,
+                common::authenticated_github_event_object(&event)?,
                 UnixMillis::new(database_now_ms(database).await?),
             )?,
             ProviderRepositoryOwnerId::new(404)?,

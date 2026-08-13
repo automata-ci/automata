@@ -180,7 +180,6 @@ fn resource_policy_accepts_only_the_exact_supported_values() {
 
 #[test]
 fn all_direct_selection_is_canonical_and_digest_bound() {
-    let exact = manifest(1, 1, 1, [7; 32], "Automata CI");
     let all_direct = manifest_with_profile_selection(
         1,
         1,
@@ -206,7 +205,6 @@ fn all_direct_selection_is_canonical_and_digest_bound() {
     ] {
         assert!(!all_direct.selects_workflow_path(rejected), "{rejected}");
     }
-    assert_ne!(all_direct.digest(), exact.digest());
 }
 
 #[test]
@@ -297,7 +295,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     );
     assert_eq!(
         original.digest().to_string(),
-        "58070630000653b9b3e33dab973ee6975b892425e0b560ed5db65c9f06cb8835"
+        "484d15f6bdc24c74fc9c3f8791cad45e5b7c7332c599cb2ea5396993a847943e"
     );
     assert_eq!(
         credential_free.authority_profile(),
@@ -340,7 +338,7 @@ fn owner_binding_uses_an_independent_domain_and_preserves_the_base_digest() {
     assert_ne!(owner.digest(), other_owner.digest());
     assert_eq!(
         legacy.digest().to_string(),
-        "58070630000653b9b3e33dab973ee6975b892425e0b560ed5db65c9f06cb8835"
+        "484d15f6bdc24c74fc9c3f8791cad45e5b7c7332c599cb2ea5396993a847943e"
     );
 }
 

@@ -370,7 +370,7 @@ fn current_plan_requires_an_explicit_resource_selection() {
 fn only_the_current_version_and_required_logical_body_decode() {
     let encoded = serde_json::to_value(valid_plan()).expect("serialize");
 
-    for version in [0, 1, 3] {
+    for version in [0, 2, 3] {
         assert!(serde_json::from_value::<WorkflowPlanVersion>(serde_json::json!(version)).is_err());
         let mut noncurrent = encoded.clone();
         noncurrent["version"] = serde_json::json!(version);
@@ -379,7 +379,7 @@ fn only_the_current_version_and_required_logical_body_decode() {
             "workflow-plan version {version} must fail closed"
         );
     }
-    assert!(WorkflowPlanVersion::new(1).is_err());
+    assert!(WorkflowPlanVersion::new(2).is_err());
     assert_eq!(
         WorkflowPlanVersion::new(WORKFLOW_PLAN_SCHEMA_VERSION).expect("current"),
         WorkflowPlanVersion::current()

@@ -508,23 +508,6 @@ fn historical_authority_with_fingerprint(
     .expect("historical authority")
 }
 
-fn historical_authority_for_broker_scope(
-    current: &GithubServerServiceAuthorityIdentity,
-    id: u128,
-    broker_fingerprint: Sha256Digest,
-    fingerprint_scope: GithubServerServiceScope,
-) -> GithubServerServiceAuthorityIdentity {
-    historical_authority_with_fingerprint(
-        current,
-        id,
-        current.app_key_spki_sha256(),
-        super::super::github_provider::authority_configuration_fingerprint(
-            broker_fingerprint,
-            fingerprint_scope,
-        ),
-    )
-}
-
 fn authority_descriptor(
     identity: GithubServerServiceAuthorityIdentity,
     state: GithubServerServiceAuthorityState,
@@ -861,24 +844,8 @@ fn durable_adapters(
     lookup: Arc<FakeAuthorityLookup>,
 ) -> GithubProviderCredentialAdapters {
     let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
-    let routes = GithubProviderCredentialRequestResolver::new(authorities, &[])
-        .expect("strict durable routes");
-    GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup, routes)
-        .expect("durable adapters")
-}
-
-fn durable_adapters_with_compatible(
-    handoffs: Arc<FakeHandoffs>,
-    authorities: &[GithubServerServiceAuthorityIdentity],
-    lookup: Arc<FakeAuthorityLookup>,
-    compatible_historical_broker_policy_fingerprints: &[Sha256Digest],
-) -> GithubProviderCredentialAdapters {
-    let lookup: Arc<dyn GithubProviderAuthorityLookup> = lookup;
-    let routes = GithubProviderCredentialRequestResolver::new(
-        authorities,
-        compatible_historical_broker_policy_fingerprints,
-    )
-    .expect("compatible durable routes");
+    let routes =
+        GithubProviderCredentialRequestResolver::new(authorities).expect("strict durable routes");
     GithubProviderCredentialAdapters::with_durable_handoffs(handoffs, authorities, lookup, routes)
         .expect("durable adapters")
 }
@@ -996,103 +963,6 @@ async fn full_checks_coordinates_are_rejected_before_handoff_io() {
         GithubChecksCredentialProviderError::Rejected
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn active_historical_authorities_use_only_their_scope_specific_live_routes() {
-    let current = authority(GithubServerServiceScope::ChecksWrite, 0x60);
-    let current_private = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x61);
-    let historical_broker_fingerprint = Sha256Digest::from_bytes([0x70; 32]);
-    let historical = historical_authority_for_broker_scope(
-        &current,
-        0x62,
-        historical_broker_fingerprint,
-        current.scope(),
-    );
-    let swapped_scope = historical_authority_for_broker_scope(
-        &current,
-        0x63,
-        historical_broker_fingerprint,
-        current_private.scope(),
-    );
-    let historical_private = historical_authority_for_broker_scope(
-        &current_private,
-        0x64,
-        historical_broker_fingerprint,
-        current_private.scope(),
-    );
-    let swapped_private_scope = historical_authority_for_broker_scope(
-        &current_private,
-        0x65,
-        historical_broker_fingerprint,
-        current.scope(),
-    );
-    let lookup = Arc::new(FakeAuthorityLookup::new([
-        authority_descriptor(
-            historical.clone(),
-            GithubServerServiceAuthorityState::Active,
-        ),
-        authority_descriptor(
-            swapped_scope.clone(),
-            GithubServerServiceAuthorityState::Active,
-        ),
-        authority_descriptor(
-            historical_private.clone(),
-            GithubServerServiceAuthorityState::Active,
-        ),
-        authority_descriptor(
-            swapped_private_scope.clone(),
-            GithubServerServiceAuthorityState::Active,
-        ),
-    ]));
-    let handoffs = Arc::new(FakeHandoffs::new(FakeHandoffMode::Exact));
-    let current_authorities = [current.clone(), current_private];
-    let adapters = durable_adapters_with_compatible(
-        Arc::clone(&handoffs),
-        &current_authorities,
-        Arc::clone(&lookup),
-        std::slice::from_ref(&historical_broker_fingerprint),
-    );
-
-    let credential = adapters
-        .acquire_checks(checks_context(&historical))
-        .await
-        .expect("historical authority on the current route");
-    assert_eq!(
-        credential.authority_selector(),
-        &GithubServerServiceAuthoritySelector::from_identity(&historical)
-    );
-    drop(credential);
-    assert_eq!(
-        adapters
-            .acquire_checks(checks_context(&swapped_scope))
-            .await
-            .expect_err("a private-source fingerprint cannot authorize Checks"),
-        GithubChecksCredentialProviderError::Rejected
-    );
-    drop(
-        adapters
-            .acquire_private_source(private_context(
-                &historical_private,
-                PrivateIdentityDrift::Exact,
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-            ))
-            .await
-            .expect("historical private authority on the current route"),
-    );
-    assert_eq!(
-        adapters
-            .acquire_private_source(private_context(
-                &swapped_private_scope,
-                PrivateIdentityDrift::Exact,
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision,
-            ))
-            .await
-            .expect_err("a Checks fingerprint cannot authorize private source"),
-        GithubDeliverySourceCredentialProviderError::Rejected
-    );
-    assert_eq!(lookup.calls.load(Ordering::SeqCst), 4);
-    assert_eq!(handoffs.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

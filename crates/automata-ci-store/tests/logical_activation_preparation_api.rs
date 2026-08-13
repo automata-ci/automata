@@ -139,7 +139,7 @@ fn descriptor(
             22,
             LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE,
         ),
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         object(
             "contexts/base.pb",
             23,

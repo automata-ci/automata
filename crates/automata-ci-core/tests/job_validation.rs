@@ -153,7 +153,7 @@ fn job_ir_version_deserialization_rejects_zero_and_validation_rejects_future_sch
 }
 
 #[test]
-fn current_runner_requirements_reject_prior_schemas_and_unknown_required_fields() {
+fn current_runner_requirements_reject_unknown_required_fields() {
     let encoded =
         serde_json::to_value(RunnerRequirements::default()).expect("serialize requirements");
     assert_eq!(encoded["environment_profile"], serde_json::Value::Null);
@@ -172,19 +172,6 @@ fn current_runner_requirements_reject_prior_schemas_and_unknown_required_fields(
     let mut unknown_resource = encoded.clone();
     unknown_resource["minimum_resources"]["future_required_resource"] = serde_json::json!(1);
     assert!(serde_json::from_value::<RunnerRequirements>(unknown_resource).is_err());
-
-    for unsupported in 1..RUNNER_REQUIREMENTS_SCHEMA_VERSION {
-        let mut prior_schema = encoded.clone();
-        prior_schema["schema_version"] = serde_json::json!(unsupported);
-        let error = serde_json::from_value::<RunnerRequirements>(prior_schema)
-            .expect_err("prior requirements schema must be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported runner-requirements schema"),
-            "unexpected prior-schema error: {error}"
-        );
-    }
 
     let mut encoded =
         serde_json::to_value(RunnerRequirements::default()).expect("serialize requirements");

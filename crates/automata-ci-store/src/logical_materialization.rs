@@ -351,7 +351,7 @@ impl LogicalInstanceMaterializationDescriptor {
         &self.job_ir
     }
 
-    /// Returns the immutable runtime-context-v2 object descriptor.
+    /// Returns the immutable runtime-context object descriptor.
     #[must_use]
     pub const fn runtime_context(&self) -> &LogicalActivationObject {
         &self.runtime_context

@@ -997,7 +997,7 @@ async fn replay_receipt(
                 && base_context_size.and_then(|size| u64::try_from(size).ok())
                     == Some(context.encoded_size())
                 && base_context_media_type.as_deref() == Some(context.media_type())
-                && base_context_schema == Some(2)
+                && base_context_schema == Some(1)
         }
         None => {
             base_context_digest.is_none()

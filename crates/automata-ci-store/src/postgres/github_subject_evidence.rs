@@ -2147,7 +2147,7 @@ fn decode_run_evidence(
     let plan_schema: i16 = row
         .try_get("workflow_plan_schema")
         .map_err(operation_error)?;
-    if plan_schema != 2 {
+    if plan_schema != 1 {
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
     let request = RecordGithubWorkflowRunSubjectEvidence::new(

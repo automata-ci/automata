@@ -1570,7 +1570,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                     format!("logical-job-result-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(

@@ -781,7 +781,7 @@ async fn lock_current_execution(
           AND job.id = $2
           AND job.run_id = $12
           AND job.admission_epoch = 1
-          AND job.job_ir_schema = 5
+          AND job.job_ir_schema = 1
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
           AND job.job_ir_digest = $15
@@ -876,7 +876,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 5
+          AND session.job_ir_schema = 1
           AND session.capability_snapshot @> '{"features":["automata.core/oidc-tokens@v1"]}'::jsonb
           AND session.disconnected_at_ms IS NULL
         FOR SHARE OF attempt, job, run, repository, workflow, snapshot, marker,
@@ -1170,7 +1170,7 @@ async fn insert_authority(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-            4, 2, $24, $25, $26, 5, $27, $28, $29, 'id-token:write',
+            1, 1, $24, $25, $26, 1, $27, $28, $29, 'id-token:write',
             $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
             $41, $42, $43, $44, $45, $46, $47
         )

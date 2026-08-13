@@ -435,7 +435,7 @@ pub struct PublishReusableWorkflowCall {
 impl PublishReusableWorkflowCall {
     /// Binds one parent call instance to its exact planned child graph.
     ///
-    /// `runtime_context` must be current runtime-context v2 protobuf metadata.
+    /// `runtime_context` must use the current protobuf metadata schema.
     /// The object contains evaluated public context and name-only secret
     /// bindings, never a `JobIR` or runnable command.
     ///

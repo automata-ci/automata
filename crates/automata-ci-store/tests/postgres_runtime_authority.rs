@@ -22,14 +22,15 @@ use automata_ci_store::{
     ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
     ClaimProviderDelivery, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, ClaimedLogicalInstanceMaterialization,
-    ClaimedLogicalJobActivation, CommandCursor, CommitGithubRuntimeAuthority, CommitLeaseHeartbeat,
-    CommitLogicalInstanceMaterialization, ConfirmGithubRuntimeAuthorityRevocation,
-    ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
-    ConsumedLogicalJobOrchestrationAuthority, DeferGithubRuntimeAuthorityRevocation,
-    DocumentSchema, EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubJobRuntimeAuthorityExecution, GithubJobRuntimeAuthorityRepository as _,
-    GithubJobRuntimeAuthorityResolution, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    ClaimedLogicalJobActivation, ClaimedProviderDelivery, CommandCursor,
+    CommitGithubRuntimeAuthority, CommitLeaseHeartbeat, CommitLogicalInstanceMaterialization,
+    ConfirmGithubRuntimeAuthorityRevocation, ConsumeSelectedLogicalInstanceMaterialization,
+    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
+    DeferGithubRuntimeAuthorityRevocation, DocumentSchema, EnsureGithubServerServiceAuthority,
+    GithubCheckHeadSha, GithubCheckName, GithubJobRuntimeAuthorityExecution,
+    GithubJobRuntimeAuthorityRepository as _, GithubJobRuntimeAuthorityResolution,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
     GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
     GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,
@@ -51,10 +52,12 @@ use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind,
     MarkGithubRuntimeAuthorityIndeterminate, ObjectKey, OpenRunnerSession,
     ProtectedGithubRuntimeAuthority, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, PublishLogicalJobActivation, QuarantineGithubRuntimeAuthority,
-    ReconcileGithubRuntimeAuthorities, RejectGithubRuntimeAuthorityMint, RenewLease,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    QuarantineGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
+    RegisterProviderDeliveryWorkflowInventory, RejectGithubRuntimeAuthorityMint, RenewLease,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
     ReusableSecretPermission, RoutingDocument, RunnerControlTransactionRepository as _,
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
@@ -63,6 +66,8 @@ use automata_ci_store::{
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
+
+const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
 use common::{TestDatabase, TestResult, run_with_database};
 
@@ -142,7 +147,7 @@ fn logical_fixture(namespace: u128, database_epoch: UnixMillis) -> LogicalFixtur
         )
         .expect("repository"),
         workflow_id,
-        manifest.workflow_path(),
+        WORKFLOW_PATH,
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -394,7 +399,7 @@ async fn admit_signed_workflow(
             AcceptProviderDelivery::new(
                 identity,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 delivery_observed_at,
             )?,
             ProviderRepositoryOwnerId::new(404)?,
@@ -428,6 +433,7 @@ async fn admit_signed_workflow(
     if claimed.claim().delivery_id() != accepted.delivery_id() {
         return Err("foreign delivery claimed".into());
     }
+    register_workflow_inventory(database, fixture, &claimed).await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -444,6 +450,33 @@ async fn admit_signed_workflow(
         )
         .await
         .map_err(|error| format!("authenticated admission failed: {error:?}"))?;
+    Ok(())
+}
+
+async fn register_workflow_inventory(
+    database: &TestDatabase,
+    fixture: &LogicalFixture,
+    claimed: &ClaimedProviderDelivery,
+) -> TestResult {
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        fixture.manifest.digest(),
+        "1414141414141414141414141414141414141414",
+        digest(0x90),
+        vec![ProviderDeliveryWorkflowInventoryEntry::new(
+            WORKFLOW_PATH,
+            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
+        )?],
+    )?;
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                inventory,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     Ok(())
 }
 
@@ -664,7 +697,7 @@ fn prepare_instance(
             "github",
             "automata-ci/automata",
             "0123456789abcdef",
-            fixture.manifest.workflow_path(),
+            WORKFLOW_PATH,
             "push",
         ),
         job_execution,
@@ -1602,7 +1635,7 @@ async fn migration_installs_and_retains_the_exact_v5_gate() -> TestResult {
         )
         .fetch_one(database.pool())
         .await?;
-        assert!(constraint.contains("job_ir_schema = 5"));
+        assert!(constraint.contains("job_ir_schema = 1"));
 
         let row_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM github_runtime_authority_issuances")

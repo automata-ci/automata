@@ -12,7 +12,7 @@ use automata_ci_protocol_protobuf::{
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
-const RUNTIME_CONTEXT_GOLDEN: &str = include_str!("fixtures/job-runtime-context-v2.sha256");
+const RUNTIME_CONTEXT_GOLDEN: &str = include_str!("fixtures/job-runtime-context-v1.sha256");
 
 #[allow(clippy::all, clippy::pedantic, dead_code)]
 mod fixture_wire {
@@ -136,7 +136,7 @@ fn runtime_context_matches_exact_wire_digest() {
     let encoded = encode_job_runtime_context(&context(), &ProtocolLimits::default())
         .expect("encode golden context");
     assert_eq!(
-        format!("{}  job-runtime-context-v2.pb\n", sha256(&encoded)),
+        format!("{}  job-runtime-context-v1.pb\n", sha256(&encoded)),
         RUNTIME_CONTEXT_GOLDEN
     );
 }
@@ -190,16 +190,16 @@ fn runtime_context_requires_canonical_classified_output_entries() {
 }
 
 #[test]
-fn runtime_context_rejects_the_unclassified_schema() {
+fn runtime_context_rejects_a_noncurrent_schema() {
     let limits = ProtocolLimits::default();
     let mut wire = wire_context();
-    wire.schema_version = 1;
+    wire.schema_version = 2;
     assert!(matches!(
         decode_job_runtime_context(&wire.encode_to_vec(), &limits),
         Err(DecodeError::UnsupportedSchema {
             field: "job_runtime_context.schema_version",
-            received: 1,
-            supported: 2,
+            received: 2,
+            supported: 1,
         })
     ));
 }

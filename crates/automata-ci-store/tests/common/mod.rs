@@ -11,6 +11,18 @@ use automata_ci_store::{
     OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, SessionEpoch,
 };
+
+#[allow(dead_code)]
+pub fn authenticated_github_event_object(
+    event: &automata_ci_store::AdmissionObject,
+) -> TestResult<automata_ci_store::AdmissionObject> {
+    Ok(automata_ci_store::AdmissionObject::new_event(
+        event.digest(),
+        event.object_key().clone(),
+        event.encoded_size(),
+        "application/vnd.automata.github-authenticated-event+json",
+    )?)
+}
 use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},

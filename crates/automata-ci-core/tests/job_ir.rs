@@ -526,7 +526,7 @@ fn noncurrent_versions_fail_closed() {
         assert_eq!(
             envelope.validate(),
             Err(JobValidationError::UnsupportedSchema {
-                supported: 5,
+                supported: 1,
                 received: version,
             })
         );

@@ -8,14 +8,9 @@ use automata_ci_store::{
     RepositoryId, RoutingDocument, TenantScope, WorkflowAdmissionIdempotency,
     WorkflowAdmissionRepository as _, WorkflowSnapshotId,
 };
-use sqlx::migrate::Migrate as _;
 use uuid::Uuid;
 
-use common::{
-    TestDatabase, TestResult, run_with_database, run_with_unmigrated_database, seed_control_plane,
-};
-
-const UI_PROJECTION_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
+use common::{TestResult, run_with_database};
 
 #[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
 struct ProjectionRow {
@@ -25,98 +20,6 @@ struct ProjectionRow {
     display_title: Option<String>,
     commit_subject: Option<String>,
     run_attempt: i32,
-}
-
-#[test]
-fn projection_migration_is_legacy_nullable_and_keyset_indexed() {
-    for column in [
-        "workflow_name TEXT",
-        "git_ref TEXT",
-        "actor TEXT",
-        "display_title TEXT",
-        "commit_subject TEXT",
-    ] {
-        assert!(
-            UI_PROJECTION_MIGRATION.contains(column),
-            "missing projection column {column}"
-        );
-        assert!(
-            !UI_PROJECTION_MIGRATION.contains(&format!("{column} NOT NULL")),
-            "legacy projection column must remain nullable: {column}"
-        );
-    }
-    for index in [
-        "workflow_runs_repository_created",
-        "workflow_runs_repository_workflow_created",
-        "workflow_runs_repository_status_created",
-        "workflow_runs_repository_ref_created",
-    ] {
-        assert!(
-            UI_PROJECTION_MIGRATION.contains(index),
-            "missing dashboard index {index}"
-        );
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn projection_upgrade_preserves_legacy_nulls_and_enforces_shapes() -> TestResult {
-    run_with_unmigrated_database(|database| async move {
-        apply_before_projection_migration(&database).await?;
-        let seed = seed_control_plane(database.pool(), 0).await?;
-
-        apply_projection_migration(&database).await?;
-
-        let legacy: ProjectionRow = sqlx::query_as(
-            r"
-            SELECT workflow_name, git_ref, actor, display_title, commit_subject,
-                   run_attempt
-            FROM workflow_runs
-            WHERE id = $1
-            ",
-        )
-        .bind(seed.run_id.as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(
-            legacy,
-            ProjectionRow {
-                workflow_name: None,
-                git_ref: None,
-                actor: None,
-                display_title: None,
-                commit_subject: None,
-                run_attempt: 1,
-            }
-        );
-
-        let invalid_ref = sqlx::query("UPDATE workflow_runs SET git_ref = 'main' WHERE id = $1")
-            .bind(seed.run_id.as_uuid())
-            .execute(database.pool())
-            .await
-            .expect_err("short refs must be rejected");
-        assert_constraint(&invalid_ref, "workflow_runs_git_ref_shape");
-
-        let indexes: Vec<String> = sqlx::query_scalar(
-            r"
-            SELECT indexname
-            FROM pg_indexes
-            WHERE schemaname = current_schema() AND tablename = 'workflow_runs'
-            ",
-        )
-        .fetch_all(database.pool())
-        .await?;
-        for expected in [
-            "workflow_runs_repository_created",
-            "workflow_runs_repository_workflow_created",
-            "workflow_runs_repository_status_created",
-            "workflow_runs_repository_ref_created",
-        ] {
-            assert!(indexes.iter().any(|index| index == expected));
-        }
-        Ok(())
-    })
-    .await
 }
 
 #[tokio::test]
@@ -215,35 +118,4 @@ fn object(digest_tag: u8, key: impl Into<String>, media_type: &str) -> TestResul
         8,
         media_type,
     )?)
-}
-
-async fn apply_before_projection_migration(database: &TestDatabase) -> TestResult {
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-    let mut connection = database.pool().acquire().await?;
-    let table_name = MIGRATOR.table_name.as_ref();
-    connection.ensure_migrations_table(table_name).await?;
-    for migration in MIGRATOR.iter().take(10) {
-        connection.apply(table_name, migration).await?;
-    }
-    Ok(())
-}
-
-async fn apply_projection_migration(database: &TestDatabase) -> TestResult {
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-    let mut connection = database.pool().acquire().await?;
-    let migration = MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 11)
-        .expect("migration 0011");
-    connection
-        .apply(MIGRATOR.table_name.as_ref(), migration)
-        .await?;
-    Ok(())
-}
-
-fn assert_constraint(error: &sqlx::Error, expected: &str) {
-    let actual = error
-        .as_database_error()
-        .and_then(sqlx::error::DatabaseError::constraint);
-    assert_eq!(actual, Some(expected), "unexpected database error: {error}");
 }

@@ -505,7 +505,7 @@ async fn runtime_fixture(
         pinned,
         plan_object,
         event_object,
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         base_context_object,
         Vec::new(),
         UnixMillis::new(10),

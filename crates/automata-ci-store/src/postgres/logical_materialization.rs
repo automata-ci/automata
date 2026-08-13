@@ -1319,7 +1319,7 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND concrete.committed_at_ms = claim.updated_at_ms
       AND job.run_id = concrete.run_id
       AND job.admission_epoch = 1
-      AND job.job_ir_schema = 5
+      AND job.job_ir_schema = 1
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
       AND job.job_ir_size_bytes = instance.job_ir_size_bytes
@@ -3593,7 +3593,7 @@ async fn insert_job(
             id, run_id, job_key, display_name, job_ir_digest,
             job_ir_object_key, requirements, created_at_ms,
             admission_epoch, job_ir_schema, job_ir_size_bytes
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,4,5,$9)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,1,$9)
         ",
     )
     .bind(request.claim().expected_job_id().as_uuid())
@@ -3668,7 +3668,7 @@ async fn insert_materialization_receipt(
             runtime_policy_revision, runtime_policy_digest
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,2,$22,$23,$24,$25,$26,$27,$28
+            $18,$19,$20,$21,1,$22,$23,$24,$25,$26,$27,$28
         )
         ",
     )
@@ -3980,7 +3980,7 @@ fn decode_receipt(
         && row
             .try_get::<i32, _>("admission_epoch")
             .map_err(operation_error)?
-            == 4
+            == 1
         && row
             .try_get::<serde_json::Value, _>("job_requirements")
             .map_err(operation_error)?

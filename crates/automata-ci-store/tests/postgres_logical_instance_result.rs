@@ -42,9 +42,11 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, OpenRunnerSession, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    QuarantineLogicalInstanceResult, RequestCancellation, ReusableSecretPermission,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, QuarantineLogicalInstanceResult,
+    RegisterProviderDeliveryWorkflowInventory, RequestCancellation, ReusableSecretPermission,
     RoutingDocument, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
     RunnerSessionRepository as _, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
@@ -1299,7 +1301,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                     format!("instance-result-{namespace}"),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 103)?)?,
@@ -1324,6 +1326,26 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                ProviderDeliveryWorkflowInventory::new(
+                    fixture.manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    Sha256Digest::from_bytes([0x90; 32]),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        fixture.command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(
+                            fixture.command.source().digest(),
+                        ),
+                    )?],
+                )?,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),

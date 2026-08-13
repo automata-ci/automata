@@ -1356,7 +1356,7 @@ pub enum GithubProviderManifestStoreError {
     ConfigurationDrift,
     /// A manifest revision must advance before numeric owner evidence changes.
     #[error("GitHub provider owner binding requires the next manifest and policy revisions")]
-    OwnerBindingUpgradeRequired,
+    OwnerBindingRevisionRequired,
     /// Durable data violates the current-only manifest contract.
     #[error("durable GitHub provider manifest data is corrupt")]
     CorruptData,

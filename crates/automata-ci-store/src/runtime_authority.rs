@@ -532,7 +532,7 @@ impl GithubRuntimeAuthorityIdentity {
     ///
     /// # Errors
     ///
-    /// Rejects nil identities, non-v5 `JobIR`, invalid sizes, or inconsistent
+    /// Rejects nil identities, noncurrent `JobIR`, invalid sizes, or inconsistent
     /// lease/request time bounds.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

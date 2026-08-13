@@ -125,7 +125,7 @@ pub enum JobIrVersionError {
     /// Schema zero is reserved and cannot appear on the wire.
     #[error("JobIR schema versions must be positive")]
     Zero,
-    /// Current peers advertise and accept only the exact v5 contract.
+    /// Current peers advertise and accept only the exact current contract.
     #[error(
         "unsupported JobIR version range {minimum:?}..={maximum:?}; expected the current version only"
     )]

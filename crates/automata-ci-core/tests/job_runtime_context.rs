@@ -319,6 +319,6 @@ fn runtime_context_and_strategy_deserialization_fail_closed() {
     )
     .expect("context");
     let mut encoded = serde_json::to_value(context).expect("serialize");
-    encoded["schema_version"] = serde_json::json!(1);
+    encoded["schema_version"] = serde_json::json!(2);
     assert!(serde_json::from_value::<JobRuntimeContext>(encoded).is_err());
 }

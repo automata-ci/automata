@@ -1043,7 +1043,7 @@ async fn insert_publication(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11, $12,
             $13, $14,
-            'application/vnd.automata.job-runtime-context.protobuf', 2,
+            'application/vnd.automata.job-runtime-context.protobuf', 1,
             $15, $16, $17, $18, $19, $20, 'credential_free', $21, NULL
         )
         ",

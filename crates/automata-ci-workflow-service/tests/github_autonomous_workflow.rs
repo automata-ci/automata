@@ -1546,7 +1546,7 @@ async fn new_harness_with(
         runtime_policy,
         plan_object,
         event_object,
-        LogicalActivationBaseContextKind::AdmissionV2,
+        LogicalActivationBaseContextKind::Admission,
         base_context_object,
         prerequisites,
         UnixMillis::new(10),

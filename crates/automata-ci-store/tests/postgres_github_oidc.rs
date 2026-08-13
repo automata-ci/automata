@@ -30,12 +30,12 @@ use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation,
     ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
     ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization, ClaimedLogicalJobActivation,
-    CommitLogicalInstanceMaterialization, ConsumeSelectedLogicalInstanceMaterialization,
-    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
-    EnsureGithubServerServiceAuthority, GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN,
-    GithubCheckHeadSha, GithubCheckName, GithubOidcAuthorityProposal,
-    GithubOidcAuthorityRepository as _, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
-    GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity,
+    ClaimedProviderDelivery, CommitLogicalInstanceMaterialization,
+    ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
+    ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
+    GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubCheckHeadSha, GithubCheckName,
+    GithubOidcAuthorityProposal, GithubOidcAuthorityRepository as _, GithubOidcCurrentPolicy,
+    GithubOidcCurrentnessClock, GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity,
     GithubOidcKeyRetentionRepository as _, GithubOidcKeyUse, GithubOidcLoadedKey,
     GithubOidcStoreError, GithubOidcSubjectPolicyMode, GithubOidcSubjectPolicyRevision,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
@@ -54,15 +54,19 @@ use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     OpenRunnerSession, PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
     ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, ReserveGithubOidcAuthority, RetainGithubOidcKey,
+    ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    RegisterProviderDeliveryWorkflowInventory, ReserveGithubOidcAuthority, RetainGithubOidcKey,
     ReusableSecretPermission, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowPlanRepository as _, WorkflowSnapshotId,
     github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
+
+const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_database};
@@ -241,7 +245,7 @@ fn logical_oidc_fixture_with_profile(
         AdmissionRepository::new(repository_id, "github", "4242", "example", "project")
             .expect("test repository"),
         workflow_id,
-        manifest.workflow_path(),
+        WORKFLOW_PATH,
         "OIDC",
         "refs/heads/main",
         snapshot_id,
@@ -454,7 +458,7 @@ async fn admit_signed_oidc_workflow(
             AcceptProviderDelivery::new(
                 identity,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 delivery_observed_at,
             )?,
             ProviderRepositoryOwnerId::new(404)?,
@@ -487,6 +491,7 @@ async fn admit_signed_oidc_workflow(
     if claimed.claim().delivery_id() != accepted.delivery_id() {
         return Err("a foreign provider delivery was claimed".into());
     }
+    register_workflow_inventory(database, fixture, &claimed).await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -500,6 +505,33 @@ async fn admit_signed_oidc_workflow(
             fixture.command.clone(),
             authenticated,
             fixture.command.admitted_at(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn register_workflow_inventory(
+    database: &TestDatabase,
+    fixture: &LogicalOidcFixture,
+    claimed: &ClaimedProviderDelivery,
+) -> TestResult {
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        fixture.manifest.digest(),
+        "1414141414141414141414141414141414141414",
+        digest(0x90),
+        vec![ProviderDeliveryWorkflowInventoryEntry::new(
+            WORKFLOW_PATH,
+            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
+        )?],
+    )?;
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                inventory,
+                claimed.claimed_at(),
+            )?,
         )
         .await?;
     Ok(())
@@ -738,7 +770,7 @@ fn prepare_oidc_instance(
             "github",
             "example/project",
             "0123456789abcdef",
-            fixture.manifest.workflow_path(),
+            WORKFLOW_PATH,
             "push",
         ),
         job_execution,
@@ -2117,9 +2149,9 @@ async fn runtime_authority_insert_requires_exact_historical_standard_profile_and
                 .await
                 .expect_err("a forged runtime-authority pin must be rejected");
             let constraint = if substitution == "policy_digest" {
-                "github_runtime_authority_v3_execution_provenance"
+                "github_runtime_authority_execution_provenance"
             } else {
-                "github_runtime_authority_v3_historical_provenance"
+                "github_runtime_authority_historical_provenance"
             };
             assert_runtime_authority_insert_rejected(&error, constraint);
             let occupied: i64 = sqlx::query_scalar(
@@ -2184,7 +2216,7 @@ async fn runtime_authority_insert_rejects_credential_free_chain_without_key_occu
             .expect_err("CredentialFree execution must not acquire GitHub runtime authority");
         assert_runtime_authority_insert_rejected(
             &error,
-            "github_runtime_authority_v3_historical_provenance",
+            "github_runtime_authority_historical_provenance",
         );
         let occupied: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM github_runtime_authority_issuances \

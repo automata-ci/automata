@@ -21,7 +21,7 @@ use automata_ci_store::{
     ClaimGithubRuntimeAuthorityMint, ClaimGithubRuntimeAuthorityRevocation,
     ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalJobOrchestration,
     ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization, ClaimedLogicalJobActivation,
-    CommitGithubRuntimeAuthority, CommitLogicalInstanceMaterialization,
+    ClaimedProviderDelivery, CommitGithubRuntimeAuthority, CommitLogicalInstanceMaterialization,
     ConsumeSelectedLogicalInstanceMaterialization, ConsumeSelectedLogicalJobOrchestration,
     ConsumedLogicalJobOrchestrationAuthority, EnsureGithubServerServiceAuthority,
     GithubCheckHeadSha, GithubCheckName, GithubJobRuntimeAuthorityExecution,
@@ -46,8 +46,10 @@ use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     OpenRunnerSession, ProtectedGithubRuntimeAuthority, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
+    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, RegisterProviderDeliveryWorkflowInventory,
     RenewLogicalActivationPreparation, RenewLogicalInstanceMaterialization,
     RenewLogicalJobActivation, ReusableSecretPermission,
     RevalidateGithubRuntimeAuthorityRevocation, RoutingDocument, RunnerGeneration,
@@ -58,6 +60,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use common::{TestDatabase, TestResult, run_with_database};
+
+const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
 fn digest(byte: u8) -> Sha256Digest {
     Sha256Digest::from_bytes([byte; 32])
@@ -125,7 +129,7 @@ fn logical_fixture(
         )
         .expect("repository"),
         workflow_id,
-        manifest.workflow_path(),
+        WORKFLOW_PATH,
         "CI",
         "refs/heads/main",
         snapshot_id,
@@ -400,7 +404,7 @@ async fn admit_signed_workflow(
             AcceptProviderDelivery::new(
                 identity,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 delivery_observed_at,
             )?,
             ProviderRepositoryOwnerId::new(404)?,
@@ -434,6 +438,7 @@ async fn admit_signed_workflow(
     if claimed.claim().delivery_id() != accepted.delivery_id() {
         return Err("foreign delivery claimed".into());
     }
+    register_workflow_inventory(database, fixture, &claimed).await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -450,6 +455,33 @@ async fn admit_signed_workflow(
         )
         .await
         .map_err(|error| format!("authenticated admission failed: {error:?}"))?;
+    Ok(())
+}
+
+async fn register_workflow_inventory(
+    database: &TestDatabase,
+    fixture: &LogicalFixture,
+    claimed: &ClaimedProviderDelivery,
+) -> TestResult {
+    let inventory = ProviderDeliveryWorkflowInventory::new(
+        fixture.manifest.digest(),
+        "1414141414141414141414141414141414141414",
+        digest(0x90),
+        vec![ProviderDeliveryWorkflowInventoryEntry::new(
+            WORKFLOW_PATH,
+            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
+        )?],
+    )?;
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claimed.claim(),
+                inventory,
+                claimed.claimed_at(),
+            )?,
+        )
+        .await?;
     Ok(())
 }
 
@@ -738,7 +770,7 @@ fn prepare_instance(
             "github",
             "example/project",
             "0123456789abcdef",
-            fixture.manifest.workflow_path(),
+            WORKFLOW_PATH,
             "push",
         ),
         job_execution,
@@ -1948,7 +1980,7 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)] // Direct-SQL evidence guards form one fail-closed matrix.
-async fn runtime_authority_v3_direct_sql_guards_fail_closed() -> TestResult {
+async fn runtime_authority_direct_sql_guards_fail_closed() -> TestResult {
     run_with_database(|database| async move {
         const FROZEN_NOW: i64 = 2_400_000_000_000;
         install_database_test_clock(&database, FROZEN_NOW).await?;
@@ -1977,7 +2009,7 @@ async fn runtime_authority_v3_direct_sql_guards_fail_closed() -> TestResult {
             issuer_mutation
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("github_runtime_authority_v3_historical_provenance")
+            Some("github_runtime_authority_historical_provenance")
         );
 
         let captured_claims: i64 = sqlx::query_scalar(
@@ -2124,7 +2156,7 @@ async fn runtime_authority_v3_direct_sql_guards_fail_closed() -> TestResult {
             backdated_begin
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("github_runtime_authority_v3_mint_begin_database_time")
+            Some("github_runtime_authority_mint_begin_database_time")
         );
 
         let mint_owner = GithubRuntimeAuthorityWorkerId::from_uuid(Uuid::new_v4())?;
@@ -2292,7 +2324,7 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn runtime_authority_v3_locks_attempt_runner_session_and_historical_manifest() -> TestResult {
+async fn runtime_authority_locks_attempt_runner_session_and_historical_manifest() -> TestResult {
     run_with_database(|database| async move {
         install_database_test_clock(&database, 2_500_000_000_000).await?;
         let (execution, manifest) =

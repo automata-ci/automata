@@ -508,7 +508,7 @@ async fn authenticate_fixture(
                     format!("admission-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 UnixMillis::new(database_now_ms(database).await?),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,

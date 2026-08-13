@@ -118,7 +118,7 @@ impl StoreBackedLogicalActivationPreparationRepository {
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError> {
         let descriptor = lease.authority().descriptor().clone();
-        if descriptor.base_context_kind() != LogicalActivationBaseContextKind::AdmissionV2 {
+        if descriptor.base_context_kind() != LogicalActivationBaseContextKind::Admission {
             return Ok(relational_evidence_failure());
         }
         let Ok(base_descriptor) = admission_blob_descriptor(descriptor.base_context()) else {

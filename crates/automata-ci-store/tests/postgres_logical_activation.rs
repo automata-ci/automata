@@ -32,12 +32,9 @@ use automata_ci_store::{
     PublishLogicalJobActivation, RenewLogicalJobActivation, ReusableSecretPermission, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
-use sqlx::migrate::Migrate as _;
 use uuid::Uuid;
 
-use common::{TestDatabase, TestResult, run_with_database, run_with_unmigrated_database};
-
-static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+use common::{TestDatabase, TestResult, run_with_database};
 
 struct Fixture {
     tenant: String,
@@ -241,7 +238,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
                     format!("activation-{}", fixture.namespace),
                 )?,
                 fixture.command.request_digest(),
-                fixture.command.event().clone(),
+                common::authenticated_github_event_object(fixture.command.event())?,
                 accepted_at,
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,
@@ -879,127 +876,6 @@ fn publication_with_changed_job_ir_reference(
         publication.published_at(),
     )
     .expect("changed content reference publication")
-}
-
-#[tokio::test]
-#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-#[allow(clippy::too_many_lines)]
-async fn v5_cut_fails_closed_instead_of_converting_obsolete_concrete_jobs() -> TestResult {
-    run_with_unmigrated_database(|database| async move {
-        let mut connection = database.pool().acquire().await?;
-        let table_name = TEST_MIGRATOR.table_name.as_ref();
-        connection.ensure_migrations_table(table_name).await?;
-        for migration in TEST_MIGRATOR.iter().take(19) {
-            connection.apply(table_name, migration).await?;
-        }
-        drop(connection);
-
-        let tenant = "activation-obsolete";
-        let repository_id = Uuid::from_u128(4_001);
-        let workflow_id = Uuid::from_u128(4_002);
-        let snapshot_id = Uuid::from_u128(4_003);
-        let run_id = Uuid::from_u128(4_004);
-        seed_tenant(&database, tenant).await?;
-        let mut legacy = database.pool().begin().await?;
-        sqlx::query(
-            r"
-            INSERT INTO repositories (
-                id, tenant_id, scm_provider, provider_repository_id,
-                owner, name, created_at_ms, updated_at_ms
-            ) VALUES ($1,$2,'github','4001','sample-owner','obsolete',1000,1000)
-            ",
-        )
-        .bind(repository_id)
-        .bind(tenant)
-        .execute(&mut *legacy)
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO workflow_definitions (
-                id, repository_id, path, created_at_ms, updated_at_ms
-            ) VALUES ($1,$2,'.ci/workflows/ci.yml',1000,1000)
-            ",
-        )
-        .bind(workflow_id)
-        .bind(repository_id)
-        .execute(&mut *legacy)
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO workflow_snapshots (
-                id, workflow_id, source_digest, source_object_key,
-                frontend_schema, created_at_ms, admission_epoch
-            ) VALUES ($1,$2,$3,'activation/obsolete.yml',1,1000,1)
-            ",
-        )
-        .bind(snapshot_id)
-        .bind(workflow_id)
-        .bind([30_u8; 32].as_slice())
-        .execute(&mut *legacy)
-        .await?;
-        sqlx::query(
-            r"
-            INSERT INTO workflow_runs (
-                id, repository_id, workflow_id, snapshot_id, run_number,
-                run_attempt, event_name, event_object_key, head_sha, status,
-                created_at_ms, updated_at_ms, admission_epoch
-            ) VALUES ($1,$2,$3,$4,1,1,'push','activation/obsolete-event.json',
-                      $5,'queued',1000,1000,1)
-            ",
-        )
-        .bind(run_id)
-        .bind(repository_id)
-        .bind(workflow_id)
-        .bind(snapshot_id)
-        .bind([9_u8; 20].as_slice())
-        .execute(&mut *legacy)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO jobs (
-                id, run_id, job_key, display_name, job_ir_digest,
-                job_ir_object_key, requirements, admission_epoch,
-                job_ir_schema, job_ir_size_bytes, created_at_ms
-            ) VALUES (
-                $1, $2, 'obsolete', 'Obsolete', $3, 'activation/obsolete-v4.pb',
-                '{"schema_version":1,"labels":[],"eligible_groups":[],"platform":null,"minimum_cpu_cores":null,"minimum_memory_bytes":null,"required_features":[]}',
-                3, 4, 128, 1001
-            )
-            "#,
-        )
-        .bind(Uuid::from_u128(4_100))
-        .bind(run_id)
-        .bind([31_u8; 32].as_slice())
-        .execute(&mut *legacy)
-        .await?;
-        legacy.commit().await?;
-
-        let mut connection = database.pool().acquire().await?;
-        let migration = TEST_MIGRATOR
-            .iter()
-            .find(|migration| migration.version == 20)
-            .expect("migration 0020");
-        let error = connection
-            .apply(table_name, migration)
-            .await
-            .expect_err("obsolete JobIR v4 rows must not be converted");
-        assert!(
-            error.to_string().contains("obsolete concrete JobIR state"),
-            "migration must report a sanitized recreation requirement: {error}"
-        );
-        let compatibility: (i32, i32, i32) = sqlx::query_as(
-            r"
-            SELECT minimum_admission_epoch, job_ir_schema,
-                   runner_requirements_schema
-            FROM automata_cluster_compatibility WHERE singleton
-            ",
-        )
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(compatibility, (3, 4, 2), "failed migration must roll back");
-        Ok(())
-    })
-    .await
 }
 
 #[tokio::test]

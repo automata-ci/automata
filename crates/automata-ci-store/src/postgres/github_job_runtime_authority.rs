@@ -377,7 +377,7 @@ async fn lock_exact_execution(
           AND job.id = $2
           AND job.run_id = $12
           AND job.admission_epoch = 1
-          AND job.job_ir_schema = 5
+          AND job.job_ir_schema = 1
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
           AND job.job_ir_digest = $15
@@ -498,7 +498,7 @@ async fn lock_exact_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 5
+          AND session.job_ir_schema = 1
           AND session.disconnected_at_ms IS NULL
           AND ($24::UUID IS NULL OR origin.provider_connection_id = $24)
           AND ($25::BIGINT IS NULL OR origin.provider_installation_id = $25)

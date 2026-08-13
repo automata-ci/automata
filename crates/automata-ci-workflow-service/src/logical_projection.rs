@@ -108,7 +108,7 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
     }
 }
 
-/// Executable v5 envelope and the exact runtime-context object to publish.
+/// Executable envelope and the exact runtime-context object to publish.
 pub struct ProjectedGithubLogicalJob {
     envelope: JobIrEnvelope,
     runtime_context: automata_ci_core::JobRuntimeContext,
