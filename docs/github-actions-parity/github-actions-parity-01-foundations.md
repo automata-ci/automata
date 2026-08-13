@@ -176,24 +176,35 @@ Acceptance:
 
 Current baseline: runner protocol v1, message schema v1, JobIR schema v1,
 runner-requirements schema v1, and one canonical greenfield
-`0001_initial_schema.sql` migration.
+`0001_initial_schema.sql`. The checked-in
+[foundation governance registry](../governance/foundation-governance-v1.json)
+is a bootstrap inventory and does not imply upgrade compatibility.
 
 Tasks:
 
+- [x] Record the canonical greenfield migration inventory and fail CI if a
+  parallel branch adds or reserves a numbered migration while that mode is
+  active.
 - [ ] Keep schema changes in the canonical greenfield migration and its
   inventory test until the first released schema creates supported durable
   upgrade state.
-- [ ] Record owners for JobIR, protobuf, result, event, and store schema
-  versions.
+- [x] Record owners and exact source evidence for the current JobIR, protobuf,
+  core envelopes, workflow-plan, workflow-runtime-policy, protocol, message,
+  runner-requirements, and canonical store contracts.
+- [ ] Complete the registry for every durable and wire format, including event
+  evidence and provider-owned persistence.
 - [ ] Require compatibility readers for every durable or wire-format change.
-- [ ] Maintain one machine-readable inventory of GitHub and stricter Automata
-  limits, enforcement phase, and reason code.
-- [ ] Require boundary-minus-one, boundary, and boundary-plus-one tests.
-- [ ] Define who updates root manifests, lockfiles, shared CI, and generated
-  fixtures during each wave.
+- [ ] Expand the seeded machine-readable inventory to every GitHub and stricter
+  Automata limit, enforcement phase, and reason code.
+- [x] Require boundary-minus-one, boundary, and boundary-plus-one tests for
+  every registered limit.
+- [x] Define who updates root manifests, lockfiles, shared CI, and generated
+  protobuf fixtures during each wave.
 
 Acceptance:
 
+- [x] Migration inventory drift fails before parallel branches can claim a
+  nonexistent next sequence.
 - [ ] Parallel schema branches coordinate changes to the canonical baseline.
 - [ ] No durable format changes without a version and compatibility test.
 - [ ] Limits have one owner and one enforcing phase.

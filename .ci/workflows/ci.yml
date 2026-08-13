@@ -52,10 +52,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Verify crate publication tooling
+      - name: Verify repository tooling
         run: |
           python3 scripts/ci/publish-crates.py --list-publishable >/dev/null
           python3 scripts/ci/tests/publish-crates.test.py
+          python3 scripts/ci/tests/foundation-governance.test.py
+          python3 scripts/ci/verify-foundation-governance.py
           ./scripts/dev/create-integration-snapshot.test.sh
 
       - name: Lint workflows and shell scripts

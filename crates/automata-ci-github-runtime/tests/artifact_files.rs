@@ -194,16 +194,29 @@ fn aggregation_is_atomic_sorted_deduplicated_and_conflict_checked() {
 }
 
 #[test]
-fn aggregate_cap_allows_identical_duplicates_but_rejects_distinct_overflow() {
+fn artifact_subject_count_boundaries() {
     let applicator = GithubCompletedStepApplicator::default();
-    let all = (0..MAX_ARTIFACT_SUBJECTS)
-        .map(|index| subject(format!("subject-{index:03}"), 'a', ArtifactSubjectKind::Oci))
-        .collect();
+    let subjects = |count| {
+        (0..count)
+            .map(|index| subject(format!("subject-{index:03}"), 'a', ArtifactSubjectKind::Oci))
+            .collect()
+    };
+
+    let below = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope("below"),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS - 1)),
+        )
+        .expect("accept one subject below the cap")
+        .into_next_state();
+    assert_eq!(below.artifact_subjects().len(), MAX_ARTIFACT_SUBJECTS - 1);
+
     let state = applicator
         .apply_completed_step(
             &JobCommandState::new(CommandFilePlatform::Unix),
             &scope("fill"),
-            &completed(all),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS)),
         )
         .expect("fill exact cap")
         .into_next_state();

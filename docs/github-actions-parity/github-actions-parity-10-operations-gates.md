@@ -592,7 +592,8 @@ holding one integration branch for weeks:
 
 Handoff checklist:
 
-- [ ] Contract owner posts exact trait/schema commit and migration number.
+- [ ] Contract owner posts the exact trait/schema commit and, only after the
+  governance mode enables durable upgrades, its reserved migration number.
 - [ ] Downstream owner rebases after that commit rather than copying types.
 - [ ] Operation-ID and fingerprint material is documented and fixture-tested.
 - [ ] Secret classification and durable-data rules are reviewed by lane C.
@@ -617,7 +618,9 @@ Before implementation starts, create issues in this order:
 - [ ] Mark the six lane starters and `FND-04` ready; leave later packages
   blocked.
 - [ ] Reserve one rotating integration owner per wave.
-- [ ] Reserve migrations and serialized-format versions for Wave 0 and Wave 1.
+- [ ] Assign canonical-schema ownership and reserve serialized-format versions
+  for Wave 0 and Wave 1; reserve migration numbers only after the governance
+  mode enables durable upgrades.
 - [ ] Attach the relevant backlog section and current code evidence to every
   issue instead of copying a stale support claim.
 - [ ] Record explicit non-goals, especially hosted-image parity, Docker socket

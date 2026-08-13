@@ -88,14 +88,6 @@ fn custody_rejects_missing_versions_duplicates_and_resource_exhaustion() {
         EphemeralJobSecretsError::DuplicateBinding
     );
 
-    let too_many = (0..=MAX_EPHEMERAL_JOB_SECRETS)
-        .map(|index| entry(&format!("grant-{index}"), "version", "x".to_owned()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        EphemeralJobSecrets::new(too_many).unwrap_err(),
-        EphemeralJobSecretsError::TooManyBindings
-    );
-
     let maximum_value = "x".repeat(65_536);
     let oversized = (0..17)
         .map(|index| {
@@ -109,6 +101,22 @@ fn custody_rejects_missing_versions_duplicates_and_resource_exhaustion() {
     let error =
         EphemeralJobSecrets::new(oversized).expect_err("aggregate plaintext must remain bounded");
     assert_eq!(error, EphemeralJobSecretsError::AggregatePlaintextTooLarge);
+}
+
+#[test]
+fn ephemeral_secret_count_boundaries() {
+    let entries = |count| {
+        (0..count)
+            .map(|index| entry(&format!("grant-{index}"), "version", "x".to_owned()))
+            .collect::<Vec<_>>()
+    };
+
+    assert!(EphemeralJobSecrets::new(entries(MAX_EPHEMERAL_JOB_SECRETS - 1)).is_ok());
+    assert!(EphemeralJobSecrets::new(entries(MAX_EPHEMERAL_JOB_SECRETS)).is_ok());
+    assert_eq!(
+        EphemeralJobSecrets::new(entries(MAX_EPHEMERAL_JOB_SECRETS + 1)).unwrap_err(),
+        EphemeralJobSecretsError::TooManyBindings
+    );
 }
 
 #[test]
