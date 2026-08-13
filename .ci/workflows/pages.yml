@@ -3,14 +3,14 @@ name: UI demo and screenshots
 on:
   pull_request:
     paths:
-      - ".github/workflows/pages.yml"
+      - ".ci/workflows/pages.yml"
       - "crates/automata-ci-ui-renderer/contract.json"
       - "ui/**"
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/pages.yml"
+      - ".ci/workflows/pages.yml"
       - "crates/automata-ci-ui-renderer/contract.json"
       - "ui/**"
   workflow_dispatch:

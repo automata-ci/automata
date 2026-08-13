@@ -157,51 +157,25 @@ is not GitHub's issuer.
 
 ## Repository workflow boundary
 
-Portable workflows executed by Automata live under `.ci/workflows`. GitHub
-does not discover that directory as native Actions configuration. Workflows
-that exercise GitHub-owned control-plane features instead live under
-`.github/workflows`: the Pages deployment, release publisher, runner-profile
-publisher, and service-proxy publisher all require native GitHub permissions,
-environments, OIDC, attestations, or artifact identity and are not portable
-Automata jobs.
+Automata repositories keep every workflow directly under `.ci/workflows`.
+The repository must not contain `.github/workflows`: GitHub supplies source,
+webhooks, and Check Run APIs, but GitHub Actions is not an execution fallback.
+Automata parses the GitHub Actions workflow language, schedules every job on an
+Automata runner, and reports each job through an Automata-owned Check Run.
 
-The native `.github/workflows/automata-check-bridge.yml` is deliberately only
-a main-push bridge. Its distinct filename prevents the portable
-`.ci/workflows/ci.yml` from colliding with a native file when the runner stages
-portable workflows for action lookup. It checks out no source and reruns no
-Rust or frontend work. With only `checks: read`, it waits for the latest Check
-Run whose head SHA is exactly `github.sha`, whose name is exactly the
-repository's configured `Automata CI` Check name, and whose numeric App
-identity equals the positive `AUTOMATA_CHECK_APP_ID` repository variable. A
-missing variable, API ambiguity or truncation, unexpected Check identity,
-non-success terminal conclusion, repeated API failure, or timeout fails the
-native workflow closed. The App ID is deployment-specific and must match the
-App configured in Automata's provider manifest; it is not inferred from an
-untrusted Check name.
-
-Repository admission rejects an archive that contains an ASCII-case-insensitive
-direct YAML filename collision between `.ci/workflows` and
-`.github/workflows`. The runner merges portable files into its compatibility
-view one file at a time and fails before execution if the target filesystem
-finds an existing native path. It never overwrites or silently selects
-different workflow bytes on Linux or Windows.
-
-The portable Automata workflow retains its `pull_request` trigger. Requiring
-its external App-owned Check on pull requests is deferred until the installed
-App subscribes to and has live acceptance evidence for pull-request delivery;
-the main-push bridge must not wait on an event for which no exact Automata
-Check can be produced.
+Actions and provider features that are not yet supported are compatibility
+gaps. They fail closed until Automata implements the matching behavior; they
+must never be routed to a GitHub-hosted runner or projected through a native
+GitHub Actions bridge.
 
 ## End-to-end acceptance gate
 
 The acceptance fixture is this repository's normal
-`.ci/workflows/ci.yml`, not a reduced smoke workflow. Automata must run those
-exact workflow bytes and repository revision. The native GitHub CI bridge only
-projects that exact-SHA Automata Check into a GitHub Actions result; it is not a
-second execution and is not differential evidence. A controlled conformance
-run must separately execute the same reviewed fixture on GitHub Actions when a
-generation-zero comparison is required. Results are compared before promotion,
-and a generation never replaces the control plane that is executing it.
+`.ci/workflows/ci.yml`, not a reduced smoke workflow. Automata must run the
+reviewed workflow bytes and repository revision directly. Differential
+conformance against GitHub Actions belongs in the isolated integration suite;
+the product repository never uses GitHub Actions as its CI runtime. A
+generation never replaces the control plane that is executing it.
 
 The fixture grows as runtime features land. It covers static distribution,
 artifacts, caches, matrices, reusable workflows, concurrency cancellation,
