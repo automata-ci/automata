@@ -1,4 +1,5 @@
 mod api_security;
+pub mod conformance_fixture;
 pub(crate) mod conformance_api;
 pub(crate) mod delegated_actor_api;
 mod form;
