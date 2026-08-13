@@ -1,6 +1,6 @@
 //! One-time runner enrollment over the human HTTPS listener.
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 use automata_ci_auth::{
     management::{
@@ -12,7 +12,8 @@ use automata_ci_auth::{
 };
 use automata_ci_auth_postgres::management::{
     ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    PostgresHumanRbacManagementRepository, PrepareRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
+    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresHumanRbacManagementRepository,
+    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
     RunnerEnrollmentPrepareOutcome,
 };
 use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerGroup};
@@ -31,7 +32,10 @@ use rcgen::{
     CertificateSigningRequestParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
 };
-use rustls::pki_types::pem::PemObject as _;
+use rustls::{
+    client::{WebPkiServerVerifier, danger::ServerCertVerifier as _},
+    pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject as _},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
@@ -63,6 +67,9 @@ pub(crate) struct RunnerCertificateIssuer {
     issuer: Issuer<'static, KeyPair>,
     client_ca_pem: String,
     server_ca_pem: String,
+    server_certificate_chain: Vec<CertificateDer<'static>>,
+    server_name: ServerName<'static>,
+    server_verifier: Arc<WebPkiServerVerifier>,
     control_endpoint: String,
     issuer_not_before_seconds: i64,
     issuer_not_after_seconds: i64,
@@ -84,6 +91,7 @@ impl RunnerCertificateIssuer {
         client_ca_pem: &[u8],
         client_ca_private_key_pem: &[u8],
         server_ca_pem: &[u8],
+        server_certificate_pem: &[u8],
         control_endpoint: String,
     ) -> Result<Self, RunnerCertificateIssuerError> {
         let client_ca_pem = std::str::from_utf8(client_ca_pem)
@@ -144,14 +152,33 @@ impl RunnerCertificateIssuer {
         }
         let issuer_not_before_seconds = client_ca.validity().not_before.timestamp();
         let issuer_not_after_seconds = client_ca.validity().not_after.timestamp();
-        let (server_roots_not_before_seconds, server_roots_not_after_seconds) =
-            server_root_validity_window(&server_ca_pem)?;
+        let (server_roots, server_roots_not_before_seconds, server_roots_not_after_seconds) =
+            server_root_authority(&server_ca_pem)?;
         let issuer = Issuer::from_ca_cert_pem(&client_ca_pem, key)
+            .map_err(|_| RunnerCertificateIssuerError)?;
+        let server_certificate_chain = CertificateDer::pem_slice_iter(server_certificate_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| RunnerCertificateIssuerError)?;
+        let server_name = ServerName::try_from(
+            endpoint
+                .host_str()
+                .ok_or(RunnerCertificateIssuerError)?
+                .to_owned(),
+        )
+        .map_err(|_| RunnerCertificateIssuerError)?;
+        if server_certificate_chain.is_empty() {
+            return Err(RunnerCertificateIssuerError);
+        }
+        let server_verifier = WebPkiServerVerifier::builder(Arc::new(server_roots))
+            .build()
             .map_err(|_| RunnerCertificateIssuerError)?;
         Ok(Self {
             issuer,
             client_ca_pem,
             server_ca_pem,
+            server_certificate_chain,
+            server_name,
+            server_verifier,
             control_endpoint,
             issuer_not_before_seconds,
             issuer_not_after_seconds,
@@ -186,6 +213,21 @@ impl RunnerCertificateIssuer {
         {
             return Err(RunnerCertificateIssuerError);
         }
+        let [server_leaf, server_intermediates @ ..] = self.server_certificate_chain.as_slice()
+        else {
+            return Err(RunnerCertificateIssuerError);
+        };
+        let issued_at =
+            u64::try_from(issued_at_seconds).map_err(|_| RunnerCertificateIssuerError)?;
+        self.server_verifier
+            .verify_server_cert(
+                server_leaf,
+                server_intermediates,
+                &self.server_name,
+                &[],
+                UnixTime::since_unix_epoch(Duration::from_secs(issued_at)),
+            )
+            .map_err(|_| RunnerCertificateIssuerError)?;
         let not_before_seconds = issued_at_seconds
             .saturating_sub(60)
             .max(self.issuer_not_before_seconds);
@@ -200,7 +242,10 @@ impl RunnerCertificateIssuer {
             .unix_timestamp()
             .min(self.issuer_not_after_seconds)
             .min(self.server_roots_not_after_seconds);
-        if expires_at_seconds <= issued_at_seconds {
+        if expires_at_seconds
+            .checked_sub(issued_at_seconds)
+            .is_none_or(|remaining| remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS)
+        {
             return Err(RunnerCertificateIssuerError);
         }
         let not_after = OffsetDateTime::from_unix_timestamp(expires_at_seconds)
@@ -239,9 +284,9 @@ impl RunnerCertificateIssuer {
     }
 }
 
-fn server_root_validity_window(
+fn server_root_authority(
     server_ca_pem: &str,
-) -> Result<(i64, i64), RunnerCertificateIssuerError> {
+) -> Result<(rustls::RootCertStore, i64, i64), RunnerCertificateIssuerError> {
     let mut roots = rustls::RootCertStore::empty();
     let mut root_count = 0_usize;
     let mut not_before_seconds = i64::MIN;
@@ -269,7 +314,7 @@ fn server_root_validity_window(
     if root_count == 0 || not_before_seconds >= not_after_seconds {
         return Err(RunnerCertificateIssuerError);
     }
-    Ok((not_before_seconds, not_after_seconds))
+    Ok((roots, not_before_seconds, not_after_seconds))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -372,7 +417,13 @@ async fn redeem_enrollment(
         Ok(document) => document,
         Err(error) => return error.into_response(),
     };
-    if !valid_redeem_document(&document, state.capability_readiness) {
+    if document.operation_id.is_nil()
+        || document.runner_name.is_empty()
+        || document.runner_name.len() > 255
+        || document.runner_name.trim() != document.runner_name
+        || document.runner_name.chars().any(char::is_control)
+        || document.capabilities.validate().is_err()
+    {
         return ApiError::InvalidRequest.into_response();
     }
     let token_sha256 = match token_digest(document.token.as_bytes()) {
@@ -383,7 +434,7 @@ async fn redeem_enrollment(
         Ok(digest) => digest,
         Err(error) => return error.into_response(),
     };
-    let prepared = match state
+    let outcome = match state
         .repository
         .prepare_runner_enrollment(PrepareRunnerEnrollment {
             token_sha256,
@@ -392,14 +443,20 @@ async fn redeem_enrollment(
         })
         .await
     {
-        Ok(RunnerEnrollmentPrepareOutcome::Prepared(prepared)) => prepared,
-        Ok(RunnerEnrollmentPrepareOutcome::Replayed(response)) => {
+        Ok(outcome) => outcome,
+        Err(error) => return repository_error(error).into_response(),
+    };
+    let prepared = match decide_enrollment_preparation(
+        outcome,
+        &document.capabilities,
+        state.capability_readiness,
+    ) {
+        EnrollmentPreparation::Prepared(prepared) => prepared,
+        EnrollmentPreparation::Replayed(response) => {
             return exact_json_response(StatusCode::CREATED, response);
         }
-        Ok(RunnerEnrollmentPrepareOutcome::Rejected) => {
-            return ApiError::EnrollmentRejected.into_response();
-        }
-        Err(error) => return repository_error(error).into_response(),
+        EnrollmentPreparation::Rejected => return ApiError::EnrollmentRejected.into_response(),
+        EnrollmentPreparation::NotReady => return ApiError::InvalidRequest.into_response(),
     };
     let runner_id = document.capabilities.runner_id().as_uuid();
     let Ok(expected_group) = RunnerGroup::new(&prepared.runner_group) else {
@@ -456,21 +513,35 @@ async fn redeem_enrollment(
     }
 }
 
-fn valid_redeem_document(
-    document: &RedeemEnrollmentDocument,
+enum EnrollmentPreparation {
+    Prepared(PreparedRunnerEnrollment),
+    Replayed(Vec<u8>),
+    Rejected,
+    NotReady,
+}
+
+fn decide_enrollment_preparation(
+    outcome: RunnerEnrollmentPrepareOutcome,
+    capabilities: &RunnerCapabilities,
     readiness: RunnerCapabilityReadiness,
-) -> bool {
-    !document.operation_id.is_nil()
-        && !document.runner_name.is_empty()
-        && document.runner_name.len() <= 255
-        && document.runner_name.trim() == document.runner_name
-        && !document.runner_name.chars().any(char::is_control)
-        && document.capabilities.validate().is_ok()
-        && (!document
-            .capabilities
-            .features()
-            .contains(&RunnerFeature::OIDC_TOKENS)
-            || readiness.github_oidc())
+) -> EnrollmentPreparation {
+    match outcome {
+        RunnerEnrollmentPrepareOutcome::Replayed(response) => {
+            EnrollmentPreparation::Replayed(response)
+        }
+        RunnerEnrollmentPrepareOutcome::Rejected => EnrollmentPreparation::Rejected,
+        RunnerEnrollmentPrepareOutcome::Prepared(_)
+            if capabilities
+                .features()
+                .contains(&RunnerFeature::OIDC_TOKENS)
+                && !readiness.github_oidc() =>
+        {
+            EnrollmentPreparation::NotReady
+        }
+        RunnerEnrollmentPrepareOutcome::Prepared(prepared) => {
+            EnrollmentPreparation::Prepared(prepared)
+        }
+    }
 }
 
 fn actor_from_request(
@@ -720,6 +791,21 @@ mod tests {
     use axum::body::Body;
     use rcgen::{BasicConstraints, CertificateParams};
 
+    fn server_certificate_chain_pem(ca_pem: &str, ca_key_pem: &str, hostname: &str) -> String {
+        let issuer_key = KeyPair::from_pem(ca_key_pem).expect("server issuer key");
+        let issuer = Issuer::from_ca_cert_pem(ca_pem, issuer_key).expect("server issuer");
+        let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server key");
+        let mut server_params =
+            CertificateParams::new(vec![hostname.to_owned()]).expect("server params");
+        server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf = server_params
+            .signed_by(&server_key, &issuer)
+            .expect("server certificate")
+            .pem();
+        format!("{leaf}{ca_pem}")
+    }
+
     #[tokio::test]
     async fn json_collector_accepts_fragmented_documents_and_rejects_oversize_bodies() {
         let fragments = futures::stream::iter([
@@ -801,6 +887,24 @@ mod tests {
     }
 
     #[test]
+    fn committed_replay_wins_when_mutation_readiness_is_false() {
+        let capabilities = RunnerCapabilities::new(
+            RunnerId::new(),
+            RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+        )
+        .with_features([RunnerFeature::OIDC_TOKENS]);
+        let response = br#"{"runner":"committed"}"#.to_vec();
+        assert!(matches!(
+            decide_enrollment_preparation(
+                RunnerEnrollmentPrepareOutcome::Replayed(response.clone()),
+                &capabilities,
+                RunnerCapabilityReadiness::unavailable(),
+            ),
+            EnrollmentPreparation::Replayed(replayed) if replayed == response
+        ));
+    }
+
+    #[test]
     fn issuer_requires_matching_ca_key_and_overrides_csr_profile() {
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
         let ca_key_pem = ca_key.serialize_pem();
@@ -813,10 +917,12 @@ mod tests {
         ];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
             ca_pem.as_bytes(),
+            server_pem.as_bytes(),
             "https://runner.example.test/".to_owned(),
         )
         .expect("matching CA material");
@@ -873,6 +979,7 @@ mod tests {
                 ca_pem.as_bytes(),
                 wrong_key.as_bytes(),
                 ca_pem.as_bytes(),
+                server_pem.as_bytes(),
                 "https://runner.example.test/".to_owned(),
             )
             .is_err()
@@ -894,10 +1001,12 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
             ca_pem.as_bytes(),
+            server_pem.as_bytes(),
             "https://runner.example.test/".to_owned(),
         )
         .expect("short-lived CA material");
@@ -918,34 +1027,34 @@ mod tests {
     }
 
     #[test]
-    fn issuer_rejects_server_roots_not_valid_at_database_time() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the trust-boundary regression keeps all generated certificate relationships visible"
+    )]
+    fn issuer_rejects_insufficient_lifetime_and_unusable_server_identity() {
         let issued_at_seconds = 1_800_000_000;
-        let client_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("client CA key");
-        let client_key_pem = client_key.serialize_pem();
-        let mut client_params = CertificateParams::default();
-        client_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        client_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        let client_ca = client_params
-            .self_signed(&client_key)
-            .expect("client CA certificate");
-        let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server CA key");
-        let mut server_params = CertificateParams::default();
-        server_params.not_before =
-            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60).expect("root not-before");
-        server_params.not_after =
-            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 3_600).expect("root not-after");
-        server_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        server_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        let server_ca = server_params
-            .self_signed(&server_key)
-            .expect("server CA certificate");
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
+        let ca_key_pem = ca_key.serialize_pem();
+        let mut ca_params = CertificateParams::default();
+        ca_params.not_before =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds - 60).expect("CA not-before");
+        ca_params.not_after = OffsetDateTime::from_unix_timestamp(
+            issued_at_seconds + MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS - 1,
+        )
+        .expect("CA not-after");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
+        let ca_pem = ca.pem();
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
-            client_ca.pem().as_bytes(),
-            client_key_pem.as_bytes(),
-            server_ca.pem().as_bytes(),
+            ca_pem.as_bytes(),
+            ca_key_pem.as_bytes(),
+            ca_pem.as_bytes(),
+            server_pem.as_bytes(),
             "https://runner.example.test/".to_owned(),
         )
-        .expect("well-formed trust material");
+        .expect("short-lived issuer material");
         let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
         let csr = CertificateParams::default()
             .serialize_request(&runner_key)
@@ -955,7 +1064,110 @@ mod tests {
         assert!(
             issuer
                 .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
-                .is_err()
+                .is_err(),
+            "one-use enrollment must not consume an almost-expired issuer"
+        );
+
+        let long_lived_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("long-lived CA key");
+        let long_lived_key_pem = long_lived_key.serialize_pem();
+        let mut long_lived_params = CertificateParams::default();
+        long_lived_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        long_lived_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let long_lived_ca = long_lived_params
+            .self_signed(&long_lived_key)
+            .expect("long-lived CA");
+        let long_lived_ca_pem = long_lived_ca.pem();
+        let wrong_hostname = server_certificate_chain_pem(
+            &long_lived_ca_pem,
+            &long_lived_key_pem,
+            "other.example.test",
+        );
+        let issuer = RunnerCertificateIssuer::from_pem(
+            long_lived_ca_pem.as_bytes(),
+            long_lived_key_pem.as_bytes(),
+            long_lived_ca_pem.as_bytes(),
+            wrong_hostname.as_bytes(),
+            "https://runner.example.test/".to_owned(),
+        )
+        .expect("structurally valid server material");
+        assert!(
+            issuer
+                .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
+                .is_err(),
+            "published roots must authenticate the configured authority hostname"
+        );
+
+        let expired_root_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("expired root key");
+        let expired_root_key_pem = expired_root_key.serialize_pem();
+        let mut expired_root_params = CertificateParams::default();
+        expired_root_params.not_before =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds - 120)
+                .expect("expired root not-before");
+        expired_root_params.not_after =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds).expect("expired root not-after");
+        expired_root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        expired_root_params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let expired_root = expired_root_params
+            .self_signed(&expired_root_key)
+            .expect("expired root");
+        let expired_root_pem = expired_root.pem();
+        let expired_server_pem = server_certificate_chain_pem(
+            &expired_root_pem,
+            &expired_root_key_pem,
+            "runner.example.test",
+        );
+        let issuer = RunnerCertificateIssuer::from_pem(
+            long_lived_ca_pem.as_bytes(),
+            long_lived_key_pem.as_bytes(),
+            expired_root_pem.as_bytes(),
+            expired_server_pem.as_bytes(),
+            "https://runner.example.test/".to_owned(),
+        )
+        .expect("structurally valid expired server trust material");
+        assert!(
+            issuer
+                .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
+                .is_err(),
+            "published server trust roots must be current at issuance"
+        );
+
+        let future_root_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("future root key");
+        let future_root_key_pem = future_root_key.serialize_pem();
+        let mut future_root_params = CertificateParams::default();
+        future_root_params.not_before = OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60)
+            .expect("future root not-before");
+        future_root_params.not_after =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 3_600)
+                .expect("future root not-after");
+        future_root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        future_root_params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let future_root = future_root_params
+            .self_signed(&future_root_key)
+            .expect("future root");
+        let future_root_pem = future_root.pem();
+        let future_server_pem = server_certificate_chain_pem(
+            &future_root_pem,
+            &future_root_key_pem,
+            "runner.example.test",
+        );
+        let issuer = RunnerCertificateIssuer::from_pem(
+            long_lived_ca_pem.as_bytes(),
+            long_lived_key_pem.as_bytes(),
+            future_root_pem.as_bytes(),
+            future_server_pem.as_bytes(),
+            "https://runner.example.test/".to_owned(),
+        )
+        .expect("structurally valid future server trust material");
+        assert!(
+            issuer
+                .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
+                .is_err(),
+            "published server trust roots must already be valid at issuance"
         );
     }
 
@@ -968,6 +1180,7 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let endpoint = "https://runner.example.test/";
         let fixed_material_limit = MAX_REDEEM_RESPONSE_BYTES - MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES;
         let root_copies = (fixed_material_limit - ca_pem.len() - endpoint.len()) / ca_pem.len();
@@ -977,6 +1190,7 @@ mod tests {
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
             near_limit_roots.as_bytes(),
+            server_pem.as_bytes(),
             endpoint.to_owned(),
         )
         .expect("fixed response material within the limit");
@@ -987,6 +1201,7 @@ mod tests {
                 ca_pem.as_bytes(),
                 ca_key_pem.as_bytes(),
                 over_limit_roots.as_bytes(),
+                server_pem.as_bytes(),
                 endpoint.to_owned(),
             )
             .is_err()
