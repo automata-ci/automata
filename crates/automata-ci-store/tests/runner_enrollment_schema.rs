@@ -27,9 +27,11 @@ fn enrollment_tokens_store_only_a_unique_fixed_length_digest() {
     assert!(table.contains(
         "CONSTRAINT runner_enrollment_tokens_digest CHECK ((octet_length(token_sha256) = 32))"
     ));
-    assert!(MIGRATION.contains(
-        "ADD CONSTRAINT runner_enrollment_tokens_digest_unique UNIQUE (token_sha256)"
-    ));
+    assert!(
+        MIGRATION.contains(
+            "ADD CONSTRAINT runner_enrollment_tokens_digest_unique UNIQUE (token_sha256)"
+        )
+    );
 }
 
 #[test]

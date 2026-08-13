@@ -152,11 +152,8 @@ impl RunnerCertificateIssuer {
         }
         let issuer_not_before_seconds = client_ca.validity().not_before.timestamp();
         let issuer_not_after_seconds = client_ca.validity().not_after.timestamp();
-        let (
-            server_roots,
-            server_roots_not_before_seconds,
-            server_roots_not_after_seconds,
-        ) = server_root_authority(&server_ca_pem)?;
+        let (server_roots, server_roots_not_before_seconds, server_roots_not_after_seconds) =
+            server_root_authority(&server_ca_pem)?;
         let issuer = Issuer::from_ca_cert_pem(&client_ca_pem, key)
             .map_err(|_| RunnerCertificateIssuerError)?;
         let server_certificate_chain = CertificateDer::pem_slice_iter(server_certificate_pem)
@@ -1141,9 +1138,8 @@ mod tests {
             KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("future root key");
         let future_root_key_pem = future_root_key.serialize_pem();
         let mut future_root_params = CertificateParams::default();
-        future_root_params.not_before =
-            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60)
-                .expect("future root not-before");
+        future_root_params.not_before = OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60)
+            .expect("future root not-before");
         future_root_params.not_after =
             OffsetDateTime::from_unix_timestamp(issued_at_seconds + 3_600)
                 .expect("future root not-after");
