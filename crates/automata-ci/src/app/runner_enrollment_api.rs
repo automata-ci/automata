@@ -741,7 +741,12 @@ mod tests {
             redeem_url: RUNNER_ENROLLMENT_REDEEM_PATH,
         };
         let document = serde_json::to_value(response).expect("create response");
-        assert!(!document.as_object().expect("response object").contains_key("token"));
+        assert!(
+            !document
+                .as_object()
+                .expect("response object")
+                .contains_key("token")
+        );
     }
 
     #[test]
@@ -820,8 +825,10 @@ mod tests {
                 .checked_sub(leaf.validity().not_before.timestamp()),
             Some(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
         );
-        assert_eq!(issued.expires_at_seconds, issued.issued_at_seconds - 60
-            + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS);
+        assert_eq!(
+            issued.expires_at_seconds,
+            issued.issued_at_seconds - 60 + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS
+        );
         assert!(
             leaf.basic_constraints()
                 .expect("basic constraints")
@@ -855,10 +862,10 @@ mod tests {
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
         let ca_key_pem = ca_key.serialize_pem();
         let mut ca_params = CertificateParams::default();
-        ca_params.not_before = OffsetDateTime::from_unix_timestamp(issued_at_seconds - 60)
-            .expect("CA not-before");
-        ca_params.not_after = OffsetDateTime::from_unix_timestamp(ca_expires_at_seconds)
-            .expect("CA not-after");
+        ca_params.not_before =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds - 60).expect("CA not-before");
+        ca_params.not_after =
+            OffsetDateTime::from_unix_timestamp(ca_expires_at_seconds).expect("CA not-after");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
@@ -896,8 +903,7 @@ mod tests {
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
         let endpoint = "https://runner.example.test/";
-        let fixed_material_limit =
-            MAX_REDEEM_RESPONSE_BYTES - MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES;
+        let fixed_material_limit = MAX_REDEEM_RESPONSE_BYTES - MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES;
         let root_copies = (fixed_material_limit - ca_pem.len() - endpoint.len()) / ca_pem.len();
         assert!(root_copies > 0);
         let near_limit_roots = ca_pem.repeat(root_copies);

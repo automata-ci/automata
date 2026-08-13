@@ -70,7 +70,10 @@ async fn insert_runner(
     .bind(group_id)
     .bind(name)
     .bind(serde_json::to_value(document)?)
-    .bind(format!("automata:runner:{}", document.runner_id().as_uuid().hyphenated()))
+    .bind(format!(
+        "automata:runner:{}",
+        document.runner_id().as_uuid().hyphenated()
+    ))
     .execute(pool)
     .await?;
     Ok(())

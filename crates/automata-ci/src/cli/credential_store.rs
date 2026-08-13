@@ -513,9 +513,9 @@ impl CliAuthProcessLock {
     pub(crate) fn load_runner_enrollment_receipt(
         &self,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, CliAuthLockError> {
-        if let Some(receipt) = self.read_runner_enrollment_receipt(
-            self.runner_enrollment_receipt.as_str(),
-        )? {
+        if let Some(receipt) =
+            self.read_runner_enrollment_receipt(self.runner_enrollment_receipt.as_str())?
+        {
             rustix::fs::fsync(&self.directory).map_err(|_| CliAuthLockError::Unavailable)?;
             return Ok(Some(receipt));
         }
@@ -627,11 +627,7 @@ impl CliAuthProcessLock {
         let temporary = self.runner_enrollment_temporary();
         let mut removed = false;
         for name in [self.runner_enrollment_receipt.as_str(), temporary.as_str()] {
-            match rustix::fs::unlinkat(
-                &self.directory,
-                name,
-                rustix::fs::AtFlags::empty(),
-            ) {
+            match rustix::fs::unlinkat(&self.directory, name, rustix::fs::AtFlags::empty()) {
                 Ok(()) => removed = true,
                 Err(rustix::io::Errno::NOENT) => {}
                 Err(_) => return Err(CliAuthLockError::Unavailable),

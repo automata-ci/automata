@@ -6,8 +6,8 @@ use uuid::Uuid;
 use automata_ci_core::{RunnerCapabilities, RunnerFeature};
 
 use crate::{
-    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError,
-    RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
+    MAX_REGISTERED_RUNNERS, RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository,
+    RunnerCapabilityReadiness,
 };
 
 use super::PostgresStore;

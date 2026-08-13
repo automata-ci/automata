@@ -46,12 +46,7 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     }
     let stage = match destinations.load_stage(&config, &origin, &args.name)? {
         Some(stage) => stage,
-        None => destinations.create_stage(
-            &config,
-            &origin,
-            &args.name,
-            load_token(args)?,
-        )?,
+        None => destinations.create_stage(&config, &origin, &args.name, load_token(args)?)?,
     };
     let bytes = if let Some(bytes) = destinations.load_response()? {
         bytes

@@ -105,8 +105,8 @@ fn load_or_create_pending(
         .load_runner_enrollment_receipt()
         .context("runner enrollment token receipt could not be loaded")?
     {
-        let pending: PendingTokenCreate = serde_json::from_slice(&bytes)
-            .context("runner enrollment token receipt is invalid")?;
+        let pending: PendingTokenCreate =
+            serde_json::from_slice(&bytes).context("runner enrollment token receipt is invalid")?;
         if pending.schema != 1
             || pending.operation_id.is_nil()
             || pending.runner_group != runner_group
