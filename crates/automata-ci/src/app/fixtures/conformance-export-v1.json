@@ -36,8 +36,111 @@
           "logicalKey": "build",
           "displayName": "Build",
           "createdAtMs": 10,
-          "jobIr": null,
-          "runtimeContext": null,
+          "jobIr": {
+            "schema_version": 1,
+            "workflow_id": "00000000-0000-0000-0000-000000000001",
+            "source": {
+              "provider": "github",
+              "repository": "automata-ci/automata",
+              "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "workflow_path": ".ci/workflows/ci.yml",
+              "event_name": "push"
+            },
+            "execution": {
+              "workflow_name": "CI",
+              "git_ref": "refs/heads/main",
+              "workspace": "/__w/automata/automata",
+              "actor": null,
+              "triggering_actor": null,
+              "run_id_alias": null,
+              "run_number": null,
+              "run_attempt": null,
+              "event": {
+                "object_key": "events/push.json",
+                "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+                "encoded_size": 2,
+                "media_type": "application/json"
+              },
+              "runtime_context": {
+                "object_key": "contexts/build.pb",
+                "digest": "2222222222222222222222222222222222222222222222222222222222222222",
+                "encoded_size": 2,
+                "media_type": "application/vnd.automata.job-runtime-context.protobuf"
+              }
+            },
+            "job": {
+              "job_id": "00000000-0000-0000-0000-000000000003",
+              "run_id": "00000000-0000-0000-0000-000000000002",
+              "name": "Build",
+              "requirements": {
+                "schema_version": 1,
+                "labels": [],
+                "eligible_groups": [],
+                "operating_system": null,
+                "architecture": null,
+                "minimum_resources": {
+                  "cpu_millis": 0,
+                  "memory_bytes": 0,
+                  "ephemeral_disk_bytes": 0,
+                  "gpu_count": 0
+                },
+                "resource_allocation": null,
+                "minimum_isolation": "process",
+                "sandbox_features": [],
+                "container_features": [],
+                "features": [],
+                "environment_profile": null
+              },
+              "instance": {
+                "logical_job_key": "build",
+                "matrix_index": 0,
+                "matrix_total": 1,
+                "matrix_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+              },
+              "continue_on_error": false,
+              "authority_profile": "standard",
+              "permission_request": { "mode": "provider_default" },
+              "outputs": [],
+              "timeout_seconds": null,
+              "environment": {},
+              "working_directory": null,
+              "container": null,
+              "services": {},
+              "steps": [
+                {
+                  "id": "build",
+                  "name": {
+                    "segments": [{ "kind": "literal", "value": "Build" }]
+                  },
+                  "condition": null,
+                  "continue_on_error": { "kind": "literal", "value": false },
+                  "timeout": null,
+                  "environment": {},
+                  "kind": {
+                    "kind": "run",
+                    "values": {
+                      "command": {
+                        "segments": [
+                          { "kind": "literal", "value": "cargo build" }
+                        ]
+                      },
+                      "shell": { "kind": "default" },
+                      "working_directory": null
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "runtimeContext": {
+            "matrix": { "kind": "object", "values": {} },
+            "strategy": {
+              "fail_fast": true,
+              "job_index": 0,
+              "job_total": 1,
+              "max_parallel": 1
+            }
+          },
           "latestAttempt": {
             "id": "attempt",
             "number": 1,

@@ -1547,7 +1547,21 @@ mod tests {
                 )
                 .expect("job instance"),
                 false,
-                Vec::new(),
+                vec![
+                    automata_ci_core::StepIr::new_literal_name(
+                        automata_ci_core::StepId::new("build").expect("step ID"),
+                        "Build",
+                        automata_ci_core::RuntimeBoolean::literal(false),
+                        automata_ci_core::SemanticStep::run(
+                            automata_ci_core::RunValueTemplates::new(
+                                automata_ci_core::ValueTemplate::literal("cargo build")
+                                    .expect("command"),
+                                automata_ci_core::ShellTemplate::default_shell(),
+                            ),
+                        ),
+                    )
+                    .expect("step name"),
+                ],
             ),
         );
         job_ir.validate().expect("representative JobIR");
