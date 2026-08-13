@@ -1,4 +1,4 @@
-//! Current-schema PostgreSQL provider-ingress and publication tests.
+//! Current-schema `PostgreSQL` provider-ingress and publication tests.
 
 mod common;
 

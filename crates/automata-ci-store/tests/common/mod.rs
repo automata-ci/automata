@@ -13,8 +13,11 @@ use automata_ci_postgres_test_support::{
     PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
 };
 use automata_ci_store::{
-    OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionRepository as _,
+    AdmitLogicalWorkflowRun, GithubProviderManifest, OpenRunnerSession, PostgresStore,
+    ProviderDeliveryClaimFence, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
+    RegisterProviderDeliveryWorkflowInventory, RoutingDocument, RunnerGeneration,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _,
 };
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
@@ -33,6 +36,35 @@ pub fn authenticated_github_event_object(
         event.encoded_size(),
         "application/vnd.automata.github-authenticated-event+json",
     )?)
+}
+
+#[allow(dead_code)] // Consolidated binaries consume different fixture subsets.
+pub async fn register_provider_delivery_workflow_inventory(
+    database: &TestDatabase,
+    manifest: &GithubProviderManifest,
+    command: &AdmitLogicalWorkflowRun,
+    claim: ProviderDeliveryClaimFence,
+    observed_at: UnixMillis,
+) -> TestResult {
+    database
+        .store()
+        .register_provider_delivery_workflow_inventory(
+            RegisterProviderDeliveryWorkflowInventory::new(
+                claim,
+                ProviderDeliveryWorkflowInventory::new(
+                    manifest.digest(),
+                    "1414141414141414141414141414141414141414",
+                    automata_ci_core::Sha256Digest::from_bytes([0x90; 32]),
+                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
+                        command.workflow_path(),
+                        ProviderDeliveryWorkflowSourceState::Ready(command.source().digest()),
+                    )?],
+                )?,
+                observed_at,
+            )?,
+        )
+        .await?;
+    Ok(())
 }
 
 static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();

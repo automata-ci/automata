@@ -1353,6 +1353,14 @@ async fn fixture_with_visibility(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &manifest,
+        &command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     command = logical_command_at(&command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),

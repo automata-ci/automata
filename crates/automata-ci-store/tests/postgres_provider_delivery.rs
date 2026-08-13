@@ -1769,6 +1769,8 @@ async fn expired_or_reclaimed_fence_cannot_be_renewed() -> TestResult {
             ),
             Err(ProviderDeliveryValueError::InvalidClaimInterval)
         ));
+        let renewal_observed_at = reclaimed.claimed_at().get() + 1;
+        clock.set(renewal_observed_at).await?;
         let reclaimed_renewal = database
             .store()
             .renew_provider_delivery_claim(renewal_request(
@@ -1776,8 +1778,8 @@ async fn expired_or_reclaimed_fence_cannot_be_renewed() -> TestResult {
                 reclaimed.attempt(),
                 reclaimed.claimed_at(),
                 reclaimed.expires_at(),
-                100,
-                1_100,
+                renewal_observed_at,
+                renewal_observed_at + 1_000,
             )?)
             .await?;
         assert_eq!(

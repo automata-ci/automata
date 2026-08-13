@@ -83,10 +83,10 @@ run_reproduction() {
     [[ "$(cargo deny --version)" == "cargo-deny 0.20.2" ]] || \
         die "renderer profile does not contain cargo-deny 0.20.2"
 
+    "${script_directory}/regenerate-renderer.sh"
     for test_script in "${repository_root}"/scripts/ui/tests/*.test.sh; do
         "${test_script}"
     done
-    "${script_directory}/regenerate-renderer.sh"
     cargo deny \
         --manifest-path "${repository_root}/target/ui-renderer-wrapper/source/Cargo.toml" \
         --locked \

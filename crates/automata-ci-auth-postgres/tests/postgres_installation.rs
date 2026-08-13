@@ -165,13 +165,13 @@ fn tenant() -> InstallationTenant {
     .expect("installation tenant")
 }
 
-fn identity() -> ProviderIdentityAssertion {
+fn identity_at(authenticated_at: UnixTimestamp) -> ProviderIdentityAssertion {
     ProviderIdentityAssertion::new(
         ProviderId::new("github").expect("provider"),
         ProviderSubject::new("424242").expect("subject"),
         "OctoCat",
         Some("The Octocat".to_owned()),
-        scenario_time(150),
+        authenticated_at,
     )
     .expect("provider identity")
 }
@@ -210,10 +210,6 @@ fn memberships() -> GithubMembershipSnapshot {
     .expect("membership snapshot")
 }
 
-fn prepare_session(pool: &sqlx::PgPool) -> PendingSessionCandidate {
-    prepare_session_at(pool, scenario_time(150))
-}
-
 fn prepare_session_at(pool: &sqlx::PgPool, issued_at: UnixTimestamp) -> PendingSessionCandidate {
     let key = SessionCredentialKey::new(
         SessionTokenDigestKeyId::new(SESSION_KEY_ID).expect("session key ID"),
@@ -243,14 +239,24 @@ fn completion_for(
     access: &str,
     refresh: &str,
 ) -> CompleteInstallationSetup {
+    completion_for_at(pool, id, access, refresh, scenario_time(150))
+}
+
+fn completion_for_at(
+    pool: &sqlx::PgPool,
+    id: &str,
+    access: &str,
+    refresh: &str,
+    completed_at: UnixTimestamp,
+) -> CompleteInstallationSetup {
     let authentication = InstallationProviderAuthentication::new(
         LoginTransactionId::new(id).expect("login ID"),
-        identity(),
+        identity_at(completed_at),
         tokens(access, refresh),
         GithubMembershipObservation::new(
             GithubMembershipSnapshotId::new(id).expect("snapshot ID"),
             memberships(),
-            scenario_time(150),
+            completed_at,
             scenario_time(600),
         )
         .expect("membership observation"),
@@ -260,14 +266,10 @@ fn completion_for(
         InstallationRevision::new(3).expect("installation revision"),
         tenant(),
         authentication,
-        prepare_session(pool),
-        scenario_time(150),
+        prepare_session_at(pool, completed_at),
+        completed_at,
     )
     .expect("completion request")
-}
-
-fn completion(pool: &sqlx::PgPool, access: &str, refresh: &str) -> CompleteInstallationSetup {
-    completion_for(pool, LOGIN_ID, access, refresh)
 }
 
 #[tokio::test]
@@ -276,6 +278,15 @@ fn completion(pool: &sqlx::PgPool, access: &str, refresh: &str) -> CompleteInsta
 async fn database_now_minus_sixty_rolls_back_expired_bootstrap_authority() -> TestResult {
     run_with_database(|database| async move {
         let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
+        let whole_second_ms = clock
+            .now()
+            .await?
+            .checked_add(999)
+            .expect("whole-second database time")
+            / 1_000
+            * 1_000;
+        clock.set(whole_second_ms).await?;
         let encryption = keyring();
         let installation = PostgresInstallationRepository::new(pool.clone(), encryption.clone());
         let login = PostgresLoginTransactionRepository::new(pool.clone(), encryption);
@@ -836,16 +847,33 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             ConsumeLoginTransactionOutcome::Consumed(_)
         ));
 
+        let completion_seconds = clock
+            .now()
+            .await?
+            .checked_add(999)
+            .expect("completion time")
+            / 1_000;
+        let completion_now_ms = completion_seconds
+            .checked_mul(1_000)
+            .expect("completion time in milliseconds");
+        clock.set(completion_now_ms).await?;
+        let completed_at = UnixTimestamp::from_seconds(u64::try_from(completion_seconds)?);
         let first = Arc::clone(&installation);
         let second = Arc::clone(&installation);
-        let first_request = completion(database.pool(), ACCESS_A, REFRESH_A);
-        let second_request = completion(database.pool(), ACCESS_B, REFRESH_B);
+        let first_request =
+            completion_for_at(database.pool(), LOGIN_ID, ACCESS_A, REFRESH_A, completed_at);
+        let second_request =
+            completion_for_at(database.pool(), LOGIN_ID, ACCESS_B, REFRESH_B, completed_at);
         let (first_outcome, second_outcome) = tokio::join!(
             first.complete(first_request),
             second.complete(second_request),
         );
         let outcomes = [first_outcome, second_outcome];
-        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "completion outcomes: {outcomes:?}"
+        );
         assert_eq!(
             outcomes
                 .iter()

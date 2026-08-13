@@ -453,6 +453,7 @@ async fn admit_authenticated_fixture(
     Ok(fixture)
 }
 
+#[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn authenticate_fixture(
     database: &TestDatabase,
     fixture: &mut AuthenticatedFixture,
@@ -533,6 +534,14 @@ async fn authenticate_fixture(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     database
         .store()

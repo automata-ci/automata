@@ -615,7 +615,7 @@ fn readable_attempt_safety(requested: &str, classified_at: i64) -> DurableAttemp
             "secret_exposure"
         }
         .to_owned(),
-        schema: 2,
+        schema: 1,
         classified_at,
     }
 }

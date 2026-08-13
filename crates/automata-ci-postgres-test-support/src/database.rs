@@ -43,7 +43,7 @@ pub struct NamespaceCleanup {
 /// A validated namespace that scopes a prepared template to one test job.
 ///
 /// Values contain only lowercase ASCII letters, digits, and underscores, and
-/// are capped so generated PostgreSQL identifiers remain within 63 bytes.
+/// are capped so generated `PostgreSQL` identifiers remain within 63 bytes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TestNamespace(String);
 
@@ -162,7 +162,7 @@ impl PostgresTestHarness {
     /// If [`DATABASE_NAMESPACE_ENVIRONMENT`](crate::DATABASE_NAMESPACE_ENVIRONMENT)
     /// is unset, a stable process-local namespace is generated. Set an explicit
     /// job namespace when multiple test processes must share one template. CI
-    /// and every reused PostgreSQL server must supply a namespace unique to the
+    /// and every reused `PostgreSQL` server must supply a namespace unique to the
     /// complete run; the fallback is only a single-process convenience.
     ///
     /// # Errors
@@ -220,7 +220,7 @@ impl PostgresTestHarness {
     ///
     /// # Errors
     ///
-    /// Returns an error if `database_url` is not a valid PostgreSQL URL.
+    /// Returns an error if `database_url` is not a valid `PostgreSQL` URL.
     pub fn new(database_url: &str, namespace: impl Into<TestNamespace>) -> TestResult<Self> {
         let admin_options = PgConnectOptions::from_str(database_url).map_err(|error| {
             message_error(format!(
@@ -248,7 +248,7 @@ impl PostgresTestHarness {
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot be reached, the namespace is
+    /// Returns an error when `PostgreSQL` 18 cannot be reached, the namespace is
     /// owned by a different fixture, initialization fails, or exact recovery
     /// and advisory-lock release cannot be completed.
     pub async fn prepare_template<Initializer, InitializerFuture>(
@@ -276,14 +276,14 @@ impl PostgresTestHarness {
         })
     }
 
-    /// Creates an application-empty test database from PostgreSQL `template0`.
+    /// Creates an application-empty test database from `PostgreSQL` `template0`.
     ///
     /// Only the `automata_test` schema is bootstrapped, so migration tests start
     /// without any current application objects or migration ledger.
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot create, bootstrap, connect to,
+    /// Returns an error when `PostgreSQL` 18 cannot create, bootstrap, connect to,
     /// or clean up the isolated database.
     pub async fn create_empty_database(&self) -> TestResult<TestDatabase> {
         let mut admin = self.admin_connection().await?;
@@ -355,7 +355,7 @@ impl PostgresTestHarness {
     /// # Errors
     ///
     /// Returns an error for an ownership mismatch, a malformed reserved name,
-    /// an administrative PostgreSQL failure, or an advisory-lock release error.
+    /// an administrative `PostgreSQL` failure, or an advisory-lock release error.
     pub async fn cleanup_namespace(&self) -> TestResult<NamespaceCleanup> {
         let template_name = DatabaseIdentifier::template(&self.namespace)?;
         let mut admin = self.admin_connection().await?;
@@ -556,7 +556,7 @@ pub struct PreparedTemplate {
 }
 
 impl PreparedTemplate {
-    /// Returns the PostgreSQL template database identifier.
+    /// Returns the `PostgreSQL` template database identifier.
     pub fn database_name(&self) -> &str {
         self.database_name.as_str()
     }
@@ -565,7 +565,7 @@ impl PreparedTemplate {
     ///
     /// # Errors
     ///
-    /// Returns an error when PostgreSQL 18 cannot clone, connect to, or recover
+    /// Returns an error when `PostgreSQL` 18 cannot clone, connect to, or recover
     /// from a failed connection to the database.
     pub async fn create_database(&self) -> TestResult<TestDatabase> {
         let database_name = DatabaseIdentifier::test(self.harness.namespace())?;
@@ -620,7 +620,7 @@ impl PreparedTemplate {
     /// # Errors
     ///
     /// Returns an error when the template is absent, its ownership marker does
-    /// not match, PostgreSQL cannot drop it, or the advisory lock cannot release.
+    /// not match, `PostgreSQL` cannot drop it, or the advisory lock cannot release.
     pub async fn cleanup(self) -> TestResult {
         let mut admin = self.harness.admin_connection().await?;
         require_postgres_18(&mut admin).await?;
@@ -649,7 +649,7 @@ impl PreparedTemplate {
     }
 }
 
-/// One isolated PostgreSQL database and its primary connection pool.
+/// One isolated `PostgreSQL` database and its primary connection pool.
 pub struct TestDatabase {
     admin_options: PgConnectOptions,
     database_name: DatabaseIdentifier,
@@ -679,7 +679,7 @@ impl TestDatabase {
         &self.pool
     }
 
-    /// Returns the exact generated PostgreSQL database identifier.
+    /// Returns the exact generated `PostgreSQL` database identifier.
     pub fn database_name(&self) -> &str {
         self.database_name.as_str()
     }
@@ -688,7 +688,7 @@ impl TestDatabase {
     ///
     /// # Errors
     ///
-    /// Returns an error if `max_connections` is zero or PostgreSQL cannot open
+    /// Returns an error if `max_connections` is zero or `PostgreSQL` cannot open
     /// the pool.
     pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
         connect_database_pool(&self.admin_options, &self.database_name, max_connections).await

@@ -3,9 +3,9 @@ use crate::common;
 use crate::github_manifest_fixture;
 
 use automata_ci_core::{
-    JOB_IR_SCHEMA_VERSION, JobAuthorityProfile, JobInstanceIdentity,
-    RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, Sha256Digest, UnixMillis, WorkflowId,
-    WorkflowJobKey,
+    JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile,
+    JobInstanceIdentity, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, Sha256Digest, UnixMillis,
+    WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
@@ -30,7 +30,7 @@ use automata_ci_store::{
     ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     PublishLogicalJobActivation, RenewLogicalJobActivation, ReusableSecretPermission, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    WORKFLOW_ADMISSION_EPOCH, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -185,6 +185,7 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
     })
 }
 
+#[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixture) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
     database
@@ -263,6 +264,14 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
+    common::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
@@ -468,7 +477,7 @@ async fn assert_current_cluster_compatibility(database: &TestDatabase) -> TestRe
     assert_eq!(
         compatibility,
         (
-            4,
+            i32::from(WORKFLOW_ADMISSION_EPOCH),
             i32::from(JOB_IR_SCHEMA_VERSION),
             i32::from(RUNNER_REQUIREMENTS_SCHEMA_VERSION),
         ),
@@ -643,7 +652,11 @@ async fn assert_published_instances(
             publication_shape.2,
             publication_shape.3
         ),
-        (2, 5, 2)
+        (
+            2,
+            i16::try_from(JOB_IR_SCHEMA_VERSION)?,
+            i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)?,
+        )
     );
 
     let instance_count: i64 = sqlx::query_scalar(

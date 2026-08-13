@@ -1,4 +1,4 @@
-//! Current-schema PostgreSQL security, observability, and schema-boundary tests.
+//! Current-schema `PostgreSQL` security, observability, and schema-boundary tests.
 
 mod common;
 
