@@ -14,7 +14,7 @@ for any platform, and the end-to-end compatibility gate has not passed.
 | --- | --- | --- | --- |
 | Build `automata` from source | Supported development path | Supported development path | Intended, not yet CI-verified |
 | `automata preview` and status commands | Supported | Supported | Intended, not yet CI-verified |
-| Single-machine workflow demo | Planned | Planned local evaluation path | Unsupported |
+| Single-machine workflow demo | Unsupported | Experimental trusted native `run:` path | Unsupported |
 | Durable `automata server` composition | Bootstrap Linux path | Unsupported | Unsupported |
 | CLI authentication and secret management | Linux Secret Service adapter | Unsupported | No supported custody adapter |
 | Build and run passive `automata-runner doctor` | Supported | Supported | Intended, not yet CI-verified |
@@ -138,10 +138,9 @@ compatibility.
 
 ## Known work
 
-The [Windows local evaluation design](windows-local-evaluation.md) defines a
-planned loopback-only composition for one trusted repository and native runner.
-It remains Planned until the complete command passes native acceptance tests;
-it does not enable the durable Windows server.
+The [Windows local evaluation guide](windows-local-evaluation.md) documents the
+experimental, disposable single-job path for trusted literal `run:` steps. It
+uses no listener or durable backend and does not enable the Windows server.
 
 The [durable Windows release roadmap](windows-release-roadmap.md) owns the
 control-plane, service, installer, recovery, and publication checklist. The

@@ -19,6 +19,8 @@ pub enum Command {
     /// This explicit mode is intended for release-image smoke tests and local
     /// UI previews. It never starts durable stores, Results, or runner control.
     Preview(PreviewArgs),
+    /// Execute one trusted, single-job workflow with the native Windows provider.
+    Demo(DemoArgs),
     /// Authenticate the operator CLI and manage its server-scoped session.
     Auth(AuthArgs),
     /// Manage encrypted Actions secrets.
@@ -44,7 +46,7 @@ impl Command {
             Self::Rerun(args) => Some(&args.operator),
             Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
-            Self::Server(_) | Self::Preview(_) => None,
+            Self::Server(_) | Self::Preview(_) | Self::Demo(_) => None,
         }
     }
 }
@@ -92,6 +94,7 @@ pub enum EnvironmentReviewDecision {
     Reject,
 }
 
+#[cfg(unix)]
 impl EnvironmentReviewDecision {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -191,6 +194,20 @@ pub struct PreviewArgs {
         default_value = "127.0.0.1:8080"
     )]
     pub listen: SocketAddr,
+}
+
+#[derive(Debug, Args)]
+/// Arguments for the disposable, trusted local Windows execution path.
+pub struct DemoArgs {
+    /// Repository tree copied into the disposable native workspace.
+    #[arg(long, default_value = ".", value_name = "PATH")]
+    pub repo: PathBuf,
+    /// Workflow file beneath the selected repository.
+    #[arg(long, value_name = "PATH")]
+    pub workflow: PathBuf,
+    /// Acknowledge that workflow processes inherit the current Windows user token.
+    #[arg(long)]
+    pub allow_host_execution: bool,
 }
 
 /// `PostgreSQL` transport policy selected at the product boundary.

@@ -12,6 +12,7 @@ pub mod app;
 /// Immutable executable version and source-revision metadata.
 pub mod build_info;
 pub mod cli;
+mod local_demo;
 pub mod preview;
 pub mod server;
 /// Cooperative process-shutdown coordination.
@@ -57,6 +58,7 @@ async fn execute(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Server(args) => Box::pin(server::serve(args)).await,
         Command::Preview(args) => preview::serve(args).await,
+        Command::Demo(args) => local_demo::run(args),
         command => {
             let operator = command
                 .operator()

@@ -35,7 +35,7 @@ mod values;
 use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 
 pub use commands::{
-    AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport,
+    AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport, DemoArgs,
     EnvironmentReviewArgs, EnvironmentReviewDecision, OperatorArgs, PreviewArgs, RerunArgs,
     RerunSelection, RunnerArgs, RunnerCommand, RunnerTokenArgs, SecretArgs, SecretCommand,
     SecretCreateArgs, SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand,

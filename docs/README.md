@@ -10,7 +10,7 @@ The quickest ways in are:
 | Build from source and inspect the interface | [Getting started](getting-started.md) |
 | Check support for a workflow feature | [Compatibility](compatibility.md) |
 | Check Linux, Windows, and macOS support | [Platform support](platform-support.md) |
-| Review the planned Windows single-machine demo | [Windows local evaluation](windows-local-evaluation.md) |
+| Run one trusted workflow locally on Windows | [Windows local evaluation](windows-local-evaluation.md) |
 | Start the durable local composition | [Control-plane setup](deployment.md) |
 | Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
 
@@ -51,8 +51,8 @@ It does not connect to repositories or execute workflows.
   lanes, corpus graduation, and evidence handoff for those work packages.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
-- [Windows local evaluation](windows-local-evaluation.md) defines the planned
-  loopback-only, single-machine demo boundary.
+- [Windows local evaluation](windows-local-evaluation.md) documents the
+  experimental disposable, single-job native demo.
 - [Durable Windows release roadmap](windows-release-roadmap.md) and the
   [control-plane proposal](windows-control-plane-design-proposal.md) preserve
   the production Windows investigation from issue #16 and PR #30.

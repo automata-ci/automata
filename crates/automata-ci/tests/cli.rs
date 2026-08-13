@@ -26,6 +26,31 @@ fn preview_is_an_explicit_dependency_free_mode() {
 }
 
 #[test]
+fn demo_requires_an_explicit_workflow_and_retains_the_host_risk_acknowledgement() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "demo",
+        "--repo",
+        "C:/source/example",
+        "--workflow",
+        ".ci/workflows/test.yml",
+        "--allow-host-execution",
+    ])
+    .expect("demo CLI must parse");
+
+    let Command::Demo(args) = cli.command else {
+        panic!("demo command expected");
+    };
+    assert_eq!(args.repo, std::path::PathBuf::from("C:/source/example"));
+    assert_eq!(
+        args.workflow,
+        std::path::PathBuf::from(".ci/workflows/test.yml")
+    );
+    assert!(args.allow_host_execution);
+    assert!(Cli::try_parse_from(["automata", "demo"]).is_err());
+}
+
+#[test]
 fn server_rejects_an_invalid_socket_address_during_parsing() {
     let result = Cli::try_parse_from(["automata", "server", "--listen", "not-an-address"]);
 
@@ -161,6 +186,7 @@ fn only_operational_top_level_commands_are_advertised() {
         [
             "server",
             "preview",
+            "demo",
             "auth",
             "secret",
             "environment-review",
@@ -585,7 +611,7 @@ fn operator_options_are_scoped_to_operator_commands() {
 #[test]
 fn operator_options_are_not_advertised_or_accepted_by_service_commands() {
     let mut command = Cli::command();
-    for service in ["server", "preview"] {
+    for service in ["server", "preview", "demo"] {
         let help = command
             .find_subcommand_mut(service)
             .expect("service command")
