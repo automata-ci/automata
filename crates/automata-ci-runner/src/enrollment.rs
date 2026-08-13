@@ -1,6 +1,9 @@
 //! Secure runner-side enrollment and local TLS credential custody.
 
-use std::{io::Read as _, time::Duration};
+use std::{
+    io::Read as _,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -35,7 +38,8 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         .context("runner enrollment could not load the product configuration")?;
     let destinations = CredentialDestinations::from_config(&config)?;
     let origin = enrollment_origin(&args.server)?;
-    if destinations.finish_interrupted_cleanup(&config)? {
+    let validation_time_seconds = current_unix_time_seconds()?;
+    if destinations.finish_interrupted_cleanup(&config, validation_time_seconds)? {
         println!("runner enrollment was already completed");
         return Ok(());
     }
@@ -96,8 +100,8 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
     };
     let enrolled: RedeemResponse =
         serde_json::from_slice(&bytes).context("runner enrollment returned an invalid response")?;
-    validate_response(&config, &enrolled)?;
-    stage.validate_certificate(&config, &enrolled)?;
+    validate_response(&config, &enrolled, validation_time_seconds)?;
+    stage.validate_certificate(&config, &enrolled, validation_time_seconds)?;
     destinations.persist_exact(
         enrolled.server_ca_pem.as_bytes(),
         enrolled.certificate_chain_pem.as_bytes(),
@@ -175,7 +179,11 @@ fn validate_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_response(config: &RunnerProductConfig, response: &RedeemResponse) -> Result<()> {
+fn validate_response(
+    config: &RunnerProductConfig,
+    response: &RedeemResponse,
+    validation_time_seconds: i64,
+) -> Result<()> {
     let expected_group = automata_ci_core::RunnerGroup::new(&response.runner_group)
         .context("runner enrollment returned an invalid group")?;
     if response.runner_id != config.runner_id().as_uuid()
@@ -183,11 +191,19 @@ fn validate_response(config: &RunnerProductConfig, response: &RedeemResponse) ->
         || config.inventory().groups() != &std::collections::BTreeSet::from([expected_group])
         || response.certificate_chain_pem.is_empty()
         || response.server_ca_pem.is_empty()
-        || response.certificate_expires_at_seconds <= 0
+        || response.certificate_expires_at_seconds <= validation_time_seconds
     {
         bail!("runner enrollment response does not match the local configuration");
     }
     Ok(())
+}
+
+fn current_unix_time_seconds() -> Result<i64> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("runner enrollment requires a valid system clock")?
+        .as_secs();
+    i64::try_from(seconds).context("runner enrollment system time is out of range")
 }
 
 fn validate_token(value: &str) -> Result<()> {

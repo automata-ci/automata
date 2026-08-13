@@ -3,8 +3,7 @@ use thiserror::Error;
 
 use crate::RepositoryOperationError;
 
-/// Maximum durable runner inventory admitted by enrollment and startup checks.
-pub const MAX_REGISTERED_RUNNERS: usize = 64;
+pub use automata_ci_core::MAX_REGISTERED_RUNNERS;
 
 /// Failures from the narrow runner-capability admission boundary.
 #[derive(Debug, Error)]

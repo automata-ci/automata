@@ -1,8 +1,7 @@
 use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
-use automata_ci_core::{RunnerCapabilities, RunnerGroup};
-use automata_ci_store::MAX_REGISTERED_RUNNERS;
+use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerGroup};
 use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 

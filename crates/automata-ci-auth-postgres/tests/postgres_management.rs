@@ -3569,14 +3569,19 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
             waiter.await??,
             RunnerEnrollmentConsumeOutcome::Rejected
         );
-        let expired_state: (i64, i64, i64, bool) = sqlx::query_as(
+        let expired_state: (i64, i64, i64, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
             r"
             SELECT
                 (SELECT count(*) FROM runners WHERE id=$2),
                 (SELECT count(*) FROM runner_machine_certificates WHERE leaf_sha256=$3),
                 (SELECT count(*) FROM security_audit_events
                     WHERE action='runner.enroll' AND resource_id=$4),
-                redeem_response IS NULL
+                consumed_at_ms IS NULL,
+                consumed_runner_id IS NULL,
+                redeem_operation_id IS NULL,
+                redeem_request_sha256 IS NULL,
+                redeem_response IS NULL,
+                redeem_certificate_expires_at_seconds IS NULL
             FROM runner_enrollment_tokens
             WHERE id=$1
             ",
@@ -3587,7 +3592,10 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         .bind(expiring_runner.as_uuid().hyphenated().to_string())
         .fetch_one(pool)
         .await?;
-        assert_eq!(expired_state, (0, 0, 0, true));
+        assert_eq!(
+            expired_state,
+            (0, 0, 0, true, true, true, true, true, true)
+        );
         clock
             .set(
                 certificate_issued_at_seconds

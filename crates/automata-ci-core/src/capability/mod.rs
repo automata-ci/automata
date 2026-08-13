@@ -26,3 +26,6 @@ pub use resource::{
     SandboxCapabilities, parse_cpu_quantity, parse_storage_quantity,
 };
 pub use selector::{RunnerGroup, RunnerLabel, SelectorError};
+
+/// Maximum durable runner inventory admitted by enrollment and startup checks.
+pub const MAX_REGISTERED_RUNNERS: usize = 64;

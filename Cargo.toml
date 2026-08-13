@@ -168,7 +168,7 @@ url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
 wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
-x509-parser = { version = "=0.18.1", default-features = false }
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 xmlparser = "=0.13.6"
 zeroize = { version = "1.8.1", features = ["derive"] }
 
