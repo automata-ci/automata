@@ -21,19 +21,20 @@ GitHub events          Browser / CLI
                  |
             fenced JobIR lease over mTLS
                  |
-     automata-runner on Linux or Windows
+ automata-runner on Linux, Windows, or macOS
                  |
           configured SandboxProvider
-                 |                |
-        rootless Podman     Windows native
+          |              |                |
+ rootless Podman   Windows native    macOS VM
 ```
 
 The workspace builds many libraries but distributes two product commands:
 
 - `automata` starts the complete control plane and provides administration
   commands. It has no per-role server selector yet.
-- `automata-runner` supervises rootless Linux or trusted native Windows
-  execution, host admission, lease renewal, logging, cancellation, and cleanup.
+- `automata-runner` supervises rootless Linux, trusted native Windows, or
+  disposable macOS VM execution, host admission, lease renewal, logging,
+  cancellation, and cleanup.
 
 The browser preview is a smaller mode of `automata`; it does not start the
 durable services or runner listener. Production dependencies never fall back
@@ -45,6 +46,11 @@ Object for process-tree lifetime and resource limits. It advertises
 unchanged, along with host filesystem and network access. This trusted-workflow
 provider is not container, VM, or restricted-token isolation; disposable
 Hyper-V VMs remain the planned strong Windows tier.
+
+The macOS provider cold-boots one Virtualization.framework VM per job with no
+NIC or host directory share. It pins the signed helper and sealed template,
+attests the guest over Virtio socket, and places APFS clones on a dedicated
+non-boot quota volume.
 
 ## Workflow boundary
 
@@ -200,12 +206,12 @@ data or live log transport.
 
 Later gates add independent control-plane roles, multiple replicas,
 Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
-KubeVirt, broader Windows behavior and Hyper-V execution, and macOS native and
-Virtualization.framework execution. The workspace contains the Rust Kubernetes
-sandbox adapter, its in-sandbox guest transport, and a runner product-config
-variant that uses ambient Kubernetes client authentication and the shared
-environment-profile startup admission. Fleet reconciliation and cluster
-provisioning remain deployment responsibilities.
+KubeVirt, and broader Windows behavior and Hyper-V execution. The workspace
+already contains disposable macOS Virtualization.framework execution, the Rust
+Kubernetes sandbox adapter, its in-sandbox guest transport, a runner
+product-config variant that uses ambient Kubernetes client authentication, and
+the shared environment-profile startup admission. Fleet reconciliation and
+cluster provisioning remain deployment responsibilities.
 
 Those providers share the scheduler, JobIR, and sandbox contracts. They are not
 available merely because their interfaces or roadmap entries exist. Their

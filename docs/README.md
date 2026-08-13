@@ -26,8 +26,8 @@ It does not connect to repositories or execute workflows.
   metrics, recording rules, alerts, and cardinality limits.
 - [Arch Linux runner host](platforms/arch-linux.md) prepares a host for the
   current rootless Podman execution profile.
-- [macOS runner plan](platforms/macos.md) records the accepted native and
-  Virtualization.framework implementation and acceptance order.
+- [macOS runner guide](platforms/macos.md) documents the disposable
+  Virtualization.framework implementation and its deployment gates.
 - [Local durable services](../deploy/dev/README.md) starts PostgreSQL and RustFS
   for development and integration tests.
 - [`automata` control plane](../crates/automata-ci/README.md) documents listener

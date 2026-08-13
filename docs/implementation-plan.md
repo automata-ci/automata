@@ -142,11 +142,12 @@ Restricted-token launch, broader Windows path and process semantics, services,
 Hyper-V isolation, signing environments, and parallel native jobs remain
 target-state work.
 
-Implement macOS shell and keychain semantics, native and
-Virtualization.framework providers, arm64 profiles, and GPU resource locks;
-the accepted initial implementation and acceptance order are recorded in the
-[macOS runner plan](platforms/macos.md). Also complete the workflow-chaining
-surfaces required by larger fleets.
+The macOS execution path is disposable Virtualization.framework VMs on ARM64;
+there is no native macOS provider. Complete the physical-host qualification,
+macOS shell semantics, and any separately isolated signing or GPU profiles
+without weakening that VM boundary. The implementation and deployment gates
+are recorded in the [macOS runner guide](platforms/macos.md). Also complete the
+workflow-chaining surfaces required by larger fleets.
 
 Gate: unchanged workflows pass per-platform differential comparison. Publish,
 deploy, recovery, and release workflows enter only after read-only and staging
@@ -154,9 +155,10 @@ gates have completed their agreed soak periods.
 
 ## Provider scope
 
-Rootless Podman on Linux and the experimental trusted native Windows slice are
-the current execution paths. The providers below are planned and must not
-appear in runner capability inventory before their gates pass.
+Rootless Podman on Linux, disposable macOS Virtualization.framework VMs, and the
+experimental trusted native Windows slice are current execution paths. The
+providers below are planned and must not appear in runner capability inventory
+before their gates pass.
 
 | Provider | Planned use | Isolation boundary |
 | --- | --- | --- |
@@ -166,7 +168,6 @@ appear in runner capability inventory before their gates pass.
 | KubeVirt | VM fleet or job sandbox | One VMI per runner or job |
 | Linux native | Trusted jobs | Account, cgroup, and LSM policy |
 | Windows Hyper-V | Hostile Windows jobs | Disposable VM |
-| macOS native / Virtualization.framework | macOS jobs | Dedicated account or disposable VM |
 
 Kubernetes is not treated as “one workflow job equals one fixed Pod.” Dynamic
 container actions, sibling services, and a shared workspace require an

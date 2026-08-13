@@ -153,22 +153,21 @@ Current design foundation:
 - [x] The first target is Apple Silicon on macOS 15 or newer, with Bash and
   `sh` as the required shell surface and configured Python or PowerShell Core
   optional.
-- [x] Delivery is staged as trusted native execution, repository-scoped
-  self-hosted validation, and then Virtualization.framework isolation on
-  physical Apple Silicon. Paid GitHub-hosted macOS execution remains disabled.
+- [x] macOS jobs use only disposable Virtualization.framework VMs on physical
+  Apple Silicon. The earlier native-process stage and host-shared resource
+  policy have been deleted. Paid GitHub-hosted macOS execution remains disabled.
 
 Remaining tasks:
 
-- [ ] Separate POSIX path syntax from Linux operating-system identity.
-- [ ] Carry explicit macOS identity through sandbox and contexts.
-- [ ] Implement the single-slot `macos_native` provider for trusted jobs, its
-  dedicated account and runner-only Keychain inputs, owned process supervisor,
-  descriptor-relative workspace access, durable recovery, and explicit
-  host-shared zero-resource policy.
+- [x] Separate POSIX path syntax from Linux operating-system identity.
+- [x] Carry explicit macOS identity through sandbox and contexts.
+- [x] Implement the single-slot `macos_virtualization` provider with a sealed
+  guest identity, runner-only Keychain inputs, Virtio socket transport,
+  descriptor-relative host state, and durable recovery.
 - [ ] Add an ARM64-only, repository-scoped self-hosted macOS 15 build,
   provider, product-config, shell, cancellation, recovery, and shipped-runner
   differential lane when dedicated capacity is available.
-- [ ] Implement the `macos_virtualization` provider with an attested macOS 15
+- [x] Implement the `macos_virtualization` provider with an attested macOS 15
   ARM64 template, private guest protocol, APFS clone cleanup, resource
   enforcement, and self-hosted physical-machine acceptance.
 - [ ] Keep action steps, containers, GPUs, Intel hosts, signing jobs,
@@ -177,7 +176,7 @@ Remaining tasks:
 
 Acceptance:
 
-- [ ] The shipped native runner on Apple Silicon macOS 15 reports
+- [ ] The shipped VM runner on Apple Silicon macOS 15 reports
   `runner.os=macOS` and `runner.arch=ARM64`, completes zero-resource Bash and
   `sh` jobs, and rejects actions, services, and containers before launch.
 - [ ] Self-hosted macOS 15 differential fixtures cover stable environment,

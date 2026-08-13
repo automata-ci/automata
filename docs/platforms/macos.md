@@ -1,113 +1,291 @@
-# macOS runner implementation plan
+# Isolated macOS runners
 
-This page records the accepted implementation order for macOS runner support.
-The trusted-native slice described in stage 1 is experimental. Native macOS
-validation is deferred until repository-scoped self-hosted capacity is
-available, and the Virtualization.framework boundary in stage 3 remains
-planned.
+Automata supports macOS jobs only through a disposable macOS 15-or-newer ARM64
+virtual machine on an Apple Silicon macOS 15+ host. The former native provider
+has been deleted. Schema v2 has no `macos_native` key, no schema-v1 migration,
+and no host-shared resource mode.
 
-The first supported host is Apple Silicon running macOS 15 or newer. Workflow
-syntax does not change: the first slice executes GitHub-compatible `run:` steps
-through Bash or `sh`, with explicitly configured Python and PowerShell Core as
-optional shells. Action steps, job and service containers, GPUs, Intel hosts,
-signing jobs, and job-scoped Keychains remain out of scope.
+## Why Virtualization.framework
 
-## Stage 1: trusted native execution
+macOS has no public, cgroup-equivalent whole-job security boundary for hostile
+processes. Process groups and `setrlimit` can help with cleanup or individual
+limits, but they leave the host kernel, identity, filesystem, Keychain, and
+network in the job's security domain. They are not accepted as isolation.
 
-Add a `macos_native` runner provider with one execution slot. It executes only
-trusted work as the dedicated runner account and advertises process isolation,
-host networking, a writable host filesystem, and the unchanged host identity.
-This is not a hostile-workload boundary.
+Apple's supported macOS-on-Apple-Silicon boundary is
+[Virtualization.framework](https://developer.apple.com/documentation/virtualization/virtualize-macos-on-a-mac).
+Its VM configuration exposes exact
+[CPU count and guest physical-memory size](https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration),
+and device arrays determine whether network interfaces, host directories, and
+Virtio sockets exist. The Automata helper configures only a private disk,
+graphics, entropy, and one
+[Virtio socket device](https://developer.apple.com/documentation/virtualization/vzvirtiosocketdeviceconfiguration).
+Both `networkDevices` and `directorySharingDevices` are empty.
 
-macOS cannot enforce Automata's whole-job CPU, memory, and process limits for a
-native process tree. The execution contract therefore distinguishes enforced
-limits from an explicit host-shared resource policy. Native macOS advertises
-one operator-configured scheduling capacity and one execution slot, but those
-CPU, memory, and PID values are admission metadata rather than hard per-job
-ceilings. Ephemeral-disk and GPU capacity remain zero. Podman and Windows
-continue to require and enforce their existing hard limits.
+The helper carries only Apple's
+[`com.apple.security.virtualization`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.virtualization)
+entitlement. Apple documents that configuration validation checks this
+entitlement. No networking, Hypervisor.framework, device-access, App Sandbox
+escape, or private entitlement is requested.
 
-Each command is owned by a same-binary supervisor over a private bounded
-control channel. The supervisor owns the POSIX process group and terminates it
-on cancellation, timeout, or channel EOF. Provider state retains the existing
-operation-replay, generation-fencing, bounded-WAL, and idempotent-destroy
-contracts. Workspace and scratch access uses descriptor-relative, no-follow
-filesystem operations below disjoint owner-only roots.
+## Boundary and trust model
 
-Runner-only secrets may be loaded from an exact macOS Keychain service/account
-pair without authentication UI. This source is limited to runner mTLS, spool,
-and object-store inputs and is never made available through a job-secret port.
+Provider startup and each job use this sequence:
 
-## Stage 2: self-hosted macOS validation (deferred)
+1. At startup, validate the full root-owned, non-writable, symlink-free trust
+   path and hash the manifest, disk image, auxiliary storage, and helper.
+2. Before each launch, re-hash and code-signature-verify the helper; the helper
+   must have exactly the virtualization entitlement, and it revalidates the
+   complete root-owned source-artifact path before opening it.
+3. Verify that the manifest, template artifacts, and provider state are on the
+   configured roleless APFS volume; that this is the only volume in a dedicated
+   non-boot APFS container; and that its exact quota and remaining capacity can
+   hold a fully dirtied clone plus 32 GiB of headroom.
+4. Create an owner-only attempt directory and APFS-clone both mutable VM
+   artifacts into it.
+5. Configure a unique VM machine identifier, exact whole vCPUs and memory, no
+   NIC, and no shared directory; then validate and cold-boot the VM.
+6. Challenge the guest over Virtio socket with a fresh nonce. The guest proves
+   its profile, agent digest, macOS version/build, architecture, and job UID/GID.
+7. Apply the process ceiling inside the guest before accepting workflow traffic.
+8. Create the attempt's private workspace and command roots inside the fresh
+   guest, then forward bounded exec/copy frames. Closing the anonymous runner
+   pipe is watched independently of blocked guest I/O and terminates the VM.
+   Destroy removes the clone under an exclusive lock.
 
-The GitHub-hosted `macos-15` lane is intentionally absent because its recurring
-cost is not justified during the project's current stage. The macOS provider,
-configuration, platform-specific tests, differential support, and supervisor
-smoke script remain in the repository so validation can resume without
-reimplementing the runner.
+The host macOS kernel, Virtualization.framework, signed helper, Rust provider,
+and immutable template are trusted. Workflow code is not. The dedicated
+`automata-job` guest account is non-admin, has no password, and owns only guest
+workspace, runner, temp, home, and tool-cache paths. Runner TLS, object-store
+credentials, spool keys, host Keychain, and host files are never mounted or
+sent into the VM.
 
-When repository-scoped self-hosted Apple Silicon capacity is available, add an
-explicitly labeled macOS 15 lane and fail closed unless Rust's host triple is
-`aarch64-apple-darwin`. It should build the shipped binaries and exercise the
-macOS provider, product configuration, context, Keychain, shell executor,
-durable state, supervisor cleanup, and shipped-runner process smoke test.
+Only `network: "disabled"` is implemented. Private egress is intentionally
+rejected until a separate authenticated host broker exists; attaching a NAT
+device would weaken the current contract.
 
-A deterministic differential fixture should run the same Bash and `sh` cases
-under the self-hosted workflow and Automata and compare stable environment,
-working-directory, command-file, output, timeout, cancellation, and conclusion
-behavior.
+## Build and sign the host tools
 
-## Stage 3: Virtualization.framework isolation
+Use Xcode's Swift toolchain on Apple Silicon:
 
-Add a `macos_virtualization` provider backed by a digest-verified Swift host
-helper and an immutable macOS 15 ARM64 template. A versioned guest agent runs
-inside each APFS-cloned disposable VM. Host and guest communicate over a
-private, bounded protocol; no host directory is shared with the guest.
+```console
+swift build -c release \
+  --package-path crates/automata-ci-sandbox-macos/swift
 
-The VM boundary enforces memory and whole-vCPU limits. A dedicated non-admin
-guest identity receives the configured process ceiling. Disabled networking
-omits the virtual NIC, while private egress uses provider-owned NAT. Runner or
-helper failure stops the VM and removes the clone through replay-safe provider
-recovery.
+codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
+  --identifier dev.automata.macos-vm-helper \
+  --entitlements crates/automata-ci-sandbox-macos/swift/virtualization.entitlements \
+  crates/automata-ci-sandbox-macos/swift/.build/release/automata-macos-vm-helper
+```
 
-GitHub-hosted ARM64 macOS runners do not provide nested virtualization. macOS-
-specific build, Keychain, shell-differential, native-process, boot, isolation,
-resource, crash-recovery, and repeated-clean-job coverage requires repository-
-scoped self-hosted Apple Silicon capacity.
+Install the helper root-owned and non-writable at
+`/Library/Automata/bin/automata-macos-vm-helper`. Record its lowercase SHA-256
+and a strict designated requirement, for example
+`identifier "dev.automata.macos-vm-helper" and anchor apple generic and
+certificate leaf[subject.OU] = "ABCDEFGHIJ"`. Replace `ABCDEFGHIJ` with the
+exact ten-character signing Team ID; this conjunctive grammar is the only
+accepted configured requirement. Production must use a reviewed Developer ID
+signature. An ad-hoc signature may be used only to inspect build and entitlement
+shape and is intentionally rejected by product configuration.
 
-## Contract changes
+## Provision bounded host storage
 
-- Execution requests select either enforced resource limits or the explicit
-  host-shared policy. Provider capability checks must match that selection.
-- Native POSIX and immutable virtual-machine launch material become first-class
-  sandbox environment forms.
-- Runner configuration accepts exactly one of `podman`, `windows_native`,
-  `macos_native`, or `macos_virtualization`, plus the matching provider-state
-  root.
-- GitHub context construction receives the exact runner platform so macOS
-  reports `RUNNER_OS=macOS` and `RUNNER_ARCH=ARM64` instead of inferring an OS
-  from POSIX path syntax.
-- The SHA-256 tool contract carries an executable and fixed arguments, allowing
-  Linux `sha256sum` and macOS `shasum -a 256` without ambient tool lookup.
+Use a dedicated APFS **container (partition)** for VM storage, not another
+volume in the macOS startup container. Apple documents that
+[volumes in one APFS container share its free space, while a per-volume quota
+limits allocation](https://support.apple.com/guide/disk-utility/add-delete-or-erase-apfs-volumes-dskua9e6a110/mac).
+Automata requires both boundaries: a fixed, non-boot
+container and exactly one roleless `AutomataVM` volume with an exact quota. This
+keeps a hostile guest's copy-on-write disk growth out of the startup container.
 
-## Acceptance gates
+Back up the host, then use Disk Utility's documented
+[**Partition** operation](https://support.apple.com/guide/disk-utility/partition-a-physical-disk-dskutl14027/mac)
+to create the fixed container. Do not use **Add APFS Volume** on `Macintosh HD`. Provision the
+container with enough capacity for the chosen quota and APFS overhead. Make the
+final volume its sole member and assign a 256 GiB (`274877906944` byte) quota;
+Apple's Disk Utility **Size Options** UI can set the quota. If a bootstrap volume
+was created during partitioning, add the quota-bearing volume and remove the
+bootstrap volume only after resolving the exact device identifiers with
+`diskutil apfs list`.
 
-- Existing Linux and Windows provider, executor, configuration, and workflow
-  tests remain unchanged and green.
-- Repository workflows do not schedule paid GitHub-hosted macOS runners while
-  self-hosted Apple Silicon capacity is unavailable.
-- Native configuration rejects the wrong OS/architecture, macOS below 15,
-  parallel slots, overlapping roots, nonzero ephemeral-disk or GPU capacity,
-  unsupported network/filesystem/privilege policies, and unsupported workflow
-  features. Configured CPU, memory, and PID capacity is explicitly advisory.
-- Native provider tests cover path attacks, bounded copies and output, WAL
-  replay and corruption, stale generations, timeout, cancellation, process
-  cleanup, supervisor loss, and restart recovery.
-- Keychain tests cover missing, ambiguous, interactive-only, oversized, and
-  malformed values without exposing secret bytes in diagnostics.
-- The shipped runner completes a zero-resource shell job with the correct
-  macOS context and rejects actions, services, and containers before launch.
-- The virtual-machine gate additionally proves template attestation, guest/host
-  filesystem separation, network modes, CPU/memory/process enforcement, helper
-  crash cleanup, WAL reopen, and repeated clean execution on physical Apple
-  Silicon.
+Verify the mounted result and record the volume UUID:
+
+```console
+diskutil info -plist /Volumes/AutomataVM \
+  | plutil -extract VolumeUUID raw -o - -
+diskutil apfs list
+```
+
+The dedicated container must show only `AutomataVM`, with no APFS role and the
+configured quota. Create the mutable provider root as the runner service
+account, and keep the template tree root-owned after sealing:
+
+```console
+runner_account=automata-runner
+template_builder="$(id -un)"
+sudo chown root:wheel /Volumes/AutomataVM
+sudo chmod 0755 /Volumes/AutomataVM
+sudo diskutil enableOwnership /Volumes/AutomataVM
+sudo install -d -o "$runner_account" -g "$(id -gn "$runner_account")" -m 0700 \
+  /Volumes/AutomataVM/state
+sudo install -d -o root -g wheel -m 0755 \
+  /Volumes/AutomataVM/templates
+sudo install -d -o "$template_builder" -g "$(id -gn "$template_builder")" -m 0700 \
+  /Volumes/AutomataVM/templates/macos-15-arm64-v1
+```
+
+At startup Automata independently resolves `df` and `diskutil -plist` data. It
+rejects the startup container, sibling volumes, virtual or disk-image backing
+stores, disabled ownership enforcement, APFS roles, UUID/device/quota
+mismatches, cross-volume template files, a read-only filesystem, a mutable or
+non-root-owned state-directory ancestry, and less free space than the full
+virtual disk plus auxiliary storage plus 32 GiB. A quota is not an
+ephemeral-disk claim: the guest still sees its fixed template disk, so
+`ephemeral_disk_bytes` remains zero.
+
+## Build and seal a template
+
+Obtain a pinned local macOS 15-or-newer IPSW from Apple. Apple's supported
+installation flow uses
+[`VZMacOSRestoreImage`](https://developer.apple.com/documentation/virtualization/vzmacosrestoreimage)
+and
+[`VZMacOSInstaller`](https://developer.apple.com/documentation/virtualization/vzmacosinstaller).
+The template tool implements that flow and preserves the hardware model,
+machine identifier, and auxiliary storage required by
+[`VZMacPlatformConfiguration`](https://developer.apple.com/documentation/virtualization/vzmacplatformconfiguration).
+
+```console
+tool=crates/automata-ci-sandbox-macos/swift/.build/release/automata-macos-template-tool
+codesign --force --sign - \
+  --entitlements crates/automata-ci-sandbox-macos/swift/virtualization.entitlements "$tool"
+
+template=/Volumes/AutomataVM/templates/macos-15-arm64-v1
+"$tool" install /absolute/path/macOS15.ipsw "$template" 128 4 8
+"$tool" boot "$template" 4 8 \
+  --provisioning-directory /absolute/path/provisioning \
+  --output-directory /absolute/path/empty-output
+```
+
+In the provisioning window, finish Setup Assistant with a temporary admin.
+Build `automata-ci-sandbox-guest` for ARM64 macOS and the release
+`automata-macos-vsock-bridge`; place them and `guest/` in the read-only
+provisioning directory. macOS 13+ automounts that temporary share under
+`/Volumes/My Shared Files/Provisioning`; a separate initially empty output
+directory is writable at `/Volumes/My Shared Files/Output`. The tool rejects
+overlapping directories or a nonempty output directory. From a guest Terminal,
+copy the provisioning bundle to a guest-local directory and run:
+
+```console
+sudo guest/install.sh automata.dev/macos-15-arm64-vm-v1 \
+  ./automata-ci-sandbox-guest ./automata-macos-vsock-bridge 502 502 512
+cp guest/guest-identity.json "/Volumes/My Shared Files/Output/guest-identity.json"
+sudo shutdown -h now
+```
+
+The script creates the disabled-password non-admin account, installs the two
+launch daemons, writes the baked guest identity, and copies that identity beside
+the guest-local provisioning assets. Remove the temporary admin and all
+guest-local provisioning material before the final shutdown. Boot once more
+without either directory option to verify that no shared directory, interactive
+login, File Sharing, Remote Login, Screen Sharing, or other remote service is
+enabled, then shut down cleanly. Use the identity copied into the dedicated host
+output directory for sealing.
+
+Seal only on an offline trusted builder:
+
+```console
+"$tool" seal "$template" \
+  /absolute/path/guest/guest-identity.json \
+  /absolute/path/automata-ci-sandbox-guest \
+  "$template/manifest.json"
+
+sudo chown -R root:wheel "$template"
+sudo chmod 0555 "$template"
+sudo chmod 0444 "$template"/{Disk.img,AuxiliaryStorage,manifest.json}
+shasum -a 256 "$template/manifest.json"
+```
+
+The sealer hashes the complete disk and auxiliary storage, embeds the serialized
+hardware model, and copies the attested OS/agent/identity values into a strict
+manifest. Build and seal at the final path: the strict manifest records absolute
+artifact paths. Moving it later is rejected. The manifest, disk, auxiliary
+storage, and provider state must remain on the dedicated quota volume;
+otherwise startup fails before a job can be leased.
+
+## Configure and run
+
+Copy
+[`runner.macos.example.json`](../../crates/automata-ci-runner/config/runner.macos.example.json)
+to an ignored host-local file. Replace the helper and manifest digests, strict
+code requirement, runner identity, endpoints, and credential sources. The
+environment profile manifest digest must exactly equal
+`macos_virtualization.template_manifest_sha256`.
+
+The only accepted boundary is:
+
+```json
+{
+  "schema_version": 2,
+  "state": { "macos_virtualization": "/Volumes/AutomataVM/state" },
+  "macos_virtualization": {
+    "helper_executable": "/Library/Automata/bin/automata-macos-vm-helper",
+    "helper_sha256": "<64 lowercase hex>",
+    "helper_code_requirement": "<strict designated requirement>",
+    "template_manifest": "/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json",
+    "template_manifest_sha256": "<64 lowercase hex>",
+    "storage_volume_uuid": "<uppercase APFS volume UUID>",
+    "storage_quota_bytes": 274877906944,
+    "boot_timeout_seconds": 300,
+    "stop_timeout_seconds": 10
+  },
+  "executor": {
+    "network": "disabled",
+    "root_filesystem": "writable",
+    "privilege": "unprivileged"
+  }
+}
+```
+
+Run one runner process and one slot per provider root:
+
+```console
+cargo build --release --bin automata-runner
+./target/release/automata-runner capabilities --config /absolute/path/runner.macos.json
+./target/release/automata-runner run --config /absolute/path/runner.macos.json
+```
+
+Startup refuses Intel, macOS before 15, fractional CPU allocations, multiple
+slots or profiles, services, containers, actions, GPUs, claimed ephemeral-disk
+capacity, private/host networking, host identity/filesystem policies, mutable or
+wrong-owner artifacts, mismatched hashes/profile, untrusted helper signatures,
+an unbounded/shared/boot-container APFS layout, insufficient clone capacity, or
+overlapping host state roots. Old schema/native configuration is an error.
+
+## Validation
+
+Repository CI intentionally does not schedule paid GitHub-hosted macOS jobs.
+When repository-scoped Apple Silicon capacity is provisioned, it must compile
+and lint the Rust and Swift components, inspect the helper entitlement, and
+exercise protocol/configuration failure paths. Before deployment, that physical
+runner must also execute the ignored
+`native_runner_process_e2e` test with the seven `AUTOMATA_MACOS_VM_*` artifact
+variables. That test verifies no Ethernet device, no host helper path,
+memory/vCPU sizing, the sealed process ceiling, shell/output behavior, and
+clone cleanup. Deployment qualification must additionally inject
+process-ceiling exhaustion, pipe loss, and helper crashes, reopen the journal,
+and run repeated clean jobs.
+
+Create `/Volumes/AutomataVM/e2e-state` as an empty `0700` directory owned by
+the physical runner service account before running the command below.
+
+```console
+AUTOMATA_MACOS_VM_HELPER=/Library/Automata/bin/automata-macos-vm-helper \
+AUTOMATA_MACOS_VM_HELPER_SHA256=<helper-sha256> \
+AUTOMATA_MACOS_VM_HELPER_REQUIREMENT='<strict-designated-requirement>' \
+AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json \
+AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
+AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
+AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
+cargo test --locked -p automata-ci-runner --test native_runner_process_e2e -- \
+  --ignored --nocapture --test-threads=1
+```
