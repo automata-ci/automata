@@ -220,7 +220,8 @@ impl RunnerCertificateIssuer {
         else {
             return Err(RunnerCertificateIssuerError);
         };
-        let issued_at = u64::try_from(issued_at_seconds).map_err(|_| RunnerCertificateIssuerError)?;
+        let issued_at =
+            u64::try_from(issued_at_seconds).map_err(|_| RunnerCertificateIssuerError)?;
         self.server_verifier
             .verify_server_cert(
                 server_leaf,
@@ -246,9 +247,7 @@ impl RunnerCertificateIssuer {
             .min(self.server_roots_not_after_seconds);
         if expires_at_seconds
             .checked_sub(issued_at_seconds)
-            .is_none_or(|remaining| {
-                remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
-            })
+            .is_none_or(|remaining| remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS)
         {
             return Err(RunnerCertificateIssuerError);
         }
@@ -535,7 +534,9 @@ fn decide_enrollment_preparation(
         }
         RunnerEnrollmentPrepareOutcome::Rejected => EnrollmentPreparation::Rejected,
         RunnerEnrollmentPrepareOutcome::Prepared(_)
-            if capabilities.features().contains(&RunnerFeature::OIDC_TOKENS)
+            if capabilities
+                .features()
+                .contains(&RunnerFeature::OIDC_TOKENS)
                 && !readiness.github_oidc() =>
         {
             EnrollmentPreparation::NotReady
@@ -793,11 +794,7 @@ mod tests {
     use axum::body::Body;
     use rcgen::{BasicConstraints, CertificateParams};
 
-    fn server_certificate_chain_pem(
-        ca_pem: &str,
-        ca_key_pem: &str,
-        hostname: &str,
-    ) -> String {
+    fn server_certificate_chain_pem(ca_pem: &str, ca_key_pem: &str, hostname: &str) -> String {
         let issuer_key = KeyPair::from_pem(ca_key_pem).expect("server issuer key");
         let issuer = Issuer::from_ca_cert_pem(ca_pem, issuer_key).expect("server issuer");
         let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server key");
@@ -923,8 +920,7 @@ mod tests {
         ];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem =
-            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1008,8 +1004,7 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem =
-            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1054,8 +1049,7 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem =
-            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let issuer = RunnerCertificateIssuer::from_pem(
             ca_pem.as_bytes(),
             ca_key_pem.as_bytes(),
@@ -1082,8 +1076,7 @@ mod tests {
         let long_lived_key_pem = long_lived_key.serialize_pem();
         let mut long_lived_params = CertificateParams::default();
         long_lived_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        long_lived_params.key_usages =
-            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        long_lived_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let long_lived_ca = long_lived_params
             .self_signed(&long_lived_key)
             .expect("long-lived CA");
@@ -1115,8 +1108,8 @@ mod tests {
         expired_root_params.not_before =
             OffsetDateTime::from_unix_timestamp(issued_at_seconds - 120)
                 .expect("expired root not-before");
-        expired_root_params.not_after = OffsetDateTime::from_unix_timestamp(issued_at_seconds)
-            .expect("expired root not-after");
+        expired_root_params.not_after =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds).expect("expired root not-after");
         expired_root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         expired_root_params.key_usages =
             vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -1154,8 +1147,7 @@ mod tests {
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
         let ca_pem = ca.pem();
-        let server_pem =
-            server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
+        let server_pem = server_certificate_chain_pem(&ca_pem, &ca_key_pem, "runner.example.test");
         let endpoint = "https://runner.example.test/";
         let fixed_material_limit = MAX_REDEEM_RESPONSE_BYTES - MIN_DYNAMIC_RESPONSE_HEADROOM_BYTES;
         let root_copies = (fixed_material_limit - ca_pem.len() - endpoint.len()) / ca_pem.len();

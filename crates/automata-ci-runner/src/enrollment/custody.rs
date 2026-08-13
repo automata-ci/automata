@@ -903,7 +903,10 @@ mod tests {
     fn completion_keeps_replay_authority_until_the_response_receipt_is_gone() {
         let root = std::env::current_dir()
             .expect("current directory")
-            .join(format!(".automata-enroll-completion-test-{}", Uuid::new_v4()));
+            .join(format!(
+                ".automata-enroll-completion-test-{}",
+                Uuid::new_v4()
+            ));
         fs::create_dir(&root).expect("test root");
         let config = product_config(&root, Uuid::new_v4());
         let destinations =

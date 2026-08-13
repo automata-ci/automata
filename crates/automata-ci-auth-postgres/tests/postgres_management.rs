@@ -28,9 +28,8 @@ use automata_ci_auth_postgres::{
     PostgresHumanRbacManagementRepository,
     management::{
         ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
-        MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-        MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PrepareRunnerEnrollment,
-        RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
+        MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+        PrepareRunnerEnrollment, RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
     },
 };
 use automata_ci_core::{
