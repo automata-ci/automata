@@ -6,7 +6,7 @@ use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{
-    AuditDescriptor, MutationAuthorization, PostgresHumanRbacManagementRepository,
+    AuditDescriptor, AuthorizedActor, MutationAuthorization, PostgresHumanRbacManagementRepository,
     authorize_mutation, closed_authorization, commit, database_time_milliseconds, finish_applied,
     map_database_error,
 };
@@ -312,146 +312,7 @@ impl PostgresHumanRbacManagementRepository {
             commit(transaction).await?;
             return Ok(closed_authorization(&authorization));
         };
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,$2))")
-            .bind(request.enrollment_id.hyphenated().to_string())
-            .bind(RUNNER_ENROLLMENT_CREATE_LOCK_SALT)
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_database_error)?;
-        let existing = sqlx::query_as::<_, CreatedEnrollmentRow>(
-            r"
-            SELECT token.tenant_id,token.runner_group_id,
-                   groups.name AS runner_group,token.token_sha256,
-                   token.issued_by_principal_id,token.issued_at_ms,
-                   token.expires_at_ms
-            FROM runner_enrollment_tokens AS token
-            JOIN runner_groups AS groups
-              ON groups.tenant_id=token.tenant_id
-             AND groups.id=token.runner_group_id
-            WHERE token.id=$1
-            FOR UPDATE
-            ",
-        )
-        .bind(request.enrollment_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-        if let Some(existing) = existing {
-            if existing.tenant_id == actor.tenant_id
-                && existing.runner_group == request.runner_group
-                && existing.token_sha256 == request.token_sha256
-                && existing.issued_by_principal_id == actor.principal_id
-                && existing.expires_at_ms.checked_sub(existing.issued_at_ms)
-                    == Some(request.lifetime_ms)
-            {
-                // The original successful transition already appended its
-                // audit event. An exact transport replay returns the same
-                // durable result without representing a second mutation.
-                commit(transaction).await?;
-                return Ok(ManagementMutationOutcome::Applied(
-                    RunnerEnrollmentTokenRecord {
-                        enrollment_id: request.enrollment_id,
-                        runner_group_id: existing.runner_group_id,
-                        runner_group: request.runner_group,
-                        expires_at_ms: existing.expires_at_ms,
-                    },
-                ));
-            }
-            return super::finish_denied(
-                transaction,
-                actor,
-                descriptor,
-                ManagementMutationOutcome::AlreadyExists,
-            )
-            .await;
-        }
-        let conflicting_digest: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM runner_enrollment_tokens WHERE token_sha256=$1 FOR UPDATE",
-        )
-        .bind(request.token_sha256.as_slice())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-        if conflicting_digest.is_some() {
-            return super::finish_denied(
-                transaction,
-                actor,
-                descriptor,
-                ManagementMutationOutcome::AlreadyExists,
-            )
-            .await;
-        }
-        sqlx::query("SAVEPOINT runner_enrollment_token_create")
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_database_error)?;
-        let issued_at_ms = database_time_milliseconds(&mut transaction)
-            .await
-            .map_err(map_database_error)?;
-        let group_id = ensure_runner_group(
-            &mut transaction,
-            &actor.tenant_id,
-            &request.runner_group,
-            issued_at_ms,
-        )
-        .await?;
-        let expires_at_ms = issued_at_ms
-            .checked_add(request.lifetime_ms)
-            .ok_or(ManagementRepositoryError::InvalidRequest)?;
-        let inserted = sqlx::query(
-            r"
-            INSERT INTO runner_enrollment_tokens (
-                id,tenant_id,runner_group_id,token_sha256,
-                issued_by_principal_id,issued_by_session_id,
-                issued_authorization_revision,issued_at_ms,expires_at_ms
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT DO NOTHING
-            ",
-        )
-        .bind(request.enrollment_id)
-        .bind(&actor.tenant_id)
-        .bind(group_id)
-        .bind(request.token_sha256.as_slice())
-        .bind(actor.principal_id)
-        .bind(actor.session_id)
-        .bind(actor.authorization_revision)
-        .bind(issued_at_ms)
-        .bind(expires_at_ms)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-        if inserted.rows_affected() != 1 {
-            // A concurrent insertion may win after the read-side conflict
-            // checks. Roll back the proposed group as well as the losing token
-            // insertion before committing the denied audit outcome.
-            sqlx::query("ROLLBACK TO SAVEPOINT runner_enrollment_token_create")
-                .execute(&mut *transaction)
-                .await
-                .map_err(map_database_error)?;
-            return super::finish_denied(
-                transaction,
-                actor,
-                descriptor,
-                ManagementMutationOutcome::AlreadyExists,
-            )
-            .await;
-        }
-        sqlx::query("RELEASE SAVEPOINT runner_enrollment_token_create")
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_database_error)?;
-        finish_applied(
-            transaction,
-            actor,
-            descriptor,
-            RunnerEnrollmentTokenRecord {
-                enrollment_id: request.enrollment_id,
-                runner_group_id: group_id,
-                runner_group: request.runner_group,
-                expires_at_ms,
-            },
-        )
-        .await
+        create_authorized_runner_enrollment(transaction, actor, descriptor, &request).await
     }
 
     /// Loads non-secret token scope before certificate signing.
@@ -584,7 +445,6 @@ impl PostgresHumanRbacManagementRepository {
             return Ok(RunnerEnrollmentConsumeOutcome::CapacityExhausted);
         }
         let normalized_name = request.runner_name.to_lowercase();
-        let external_identity = format!("automata:runner:{}", request.runner_id.hyphenated());
         let collision: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM runners WHERE id=$1 OR (tenant_id=$2 AND normalized_name=$3))",
         )
@@ -674,6 +534,170 @@ impl PostgresHumanRbacManagementRepository {
         commit(transaction).await?;
         Ok(RunnerEnrollmentConsumeOutcome::Applied(request.response))
     }
+}
+
+async fn create_authorized_runner_enrollment(
+    mut transaction: Transaction<'_, Postgres>,
+    actor: AuthorizedActor,
+    descriptor: AuditDescriptor<'_>,
+    request: &CreateRunnerEnrollmentToken,
+) -> Result<ManagementMutationOutcome<RunnerEnrollmentTokenRecord>, ManagementRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,$2))")
+        .bind(request.enrollment_id.hyphenated().to_string())
+        .bind(RUNNER_ENROLLMENT_CREATE_LOCK_SALT)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+    if let Some(existing) = load_created_enrollment(&mut transaction, request.enrollment_id).await?
+    {
+        if existing.matches(&actor, request) {
+            // The original transition already appended its audit event. Exact
+            // transport replay returns the durable result without a mutation.
+            commit(transaction).await?;
+            return Ok(ManagementMutationOutcome::Applied(
+                RunnerEnrollmentTokenRecord {
+                    enrollment_id: request.enrollment_id,
+                    runner_group_id: existing.runner_group_id,
+                    runner_group: request.runner_group.clone(),
+                    expires_at_ms: existing.expires_at_ms,
+                },
+            ));
+        }
+        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+    }
+    let conflicting_digest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM runner_enrollment_tokens WHERE token_sha256=$1 FOR UPDATE",
+    )
+    .bind(request.token_sha256.as_slice())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    if conflicting_digest.is_some() {
+        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+    }
+    let Some((group_id, expires_at_ms)) =
+        try_insert_enrollment(&mut transaction, &actor, request).await?
+    else {
+        return finish_enrollment_conflict(transaction, actor, descriptor).await;
+    };
+    finish_applied(
+        transaction,
+        actor,
+        descriptor,
+        RunnerEnrollmentTokenRecord {
+            enrollment_id: request.enrollment_id,
+            runner_group_id: group_id,
+            runner_group: request.runner_group.clone(),
+            expires_at_ms,
+        },
+    )
+    .await
+}
+
+impl CreatedEnrollmentRow {
+    fn matches(&self, actor: &AuthorizedActor, request: &CreateRunnerEnrollmentToken) -> bool {
+        self.tenant_id == actor.tenant_id
+            && self.runner_group == request.runner_group
+            && self.token_sha256 == request.token_sha256
+            && self.issued_by_principal_id == actor.principal_id
+            && self.expires_at_ms.checked_sub(self.issued_at_ms) == Some(request.lifetime_ms)
+    }
+}
+
+async fn load_created_enrollment(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment_id: Uuid,
+) -> Result<Option<CreatedEnrollmentRow>, ManagementRepositoryError> {
+    sqlx::query_as::<_, CreatedEnrollmentRow>(
+        r"
+        SELECT token.tenant_id,token.runner_group_id,
+               groups.name AS runner_group,token.token_sha256,
+               token.issued_by_principal_id,token.issued_at_ms,
+               token.expires_at_ms
+        FROM runner_enrollment_tokens AS token
+        JOIN runner_groups AS groups
+          ON groups.tenant_id=token.tenant_id
+         AND groups.id=token.runner_group_id
+        WHERE token.id=$1
+        FOR UPDATE
+        ",
+    )
+    .bind(enrollment_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_database_error)
+}
+
+async fn try_insert_enrollment(
+    transaction: &mut Transaction<'_, Postgres>,
+    actor: &AuthorizedActor,
+    request: &CreateRunnerEnrollmentToken,
+) -> Result<Option<(Uuid, i64)>, ManagementRepositoryError> {
+    sqlx::query("SAVEPOINT runner_enrollment_token_create")
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_database_error)?;
+    let issued_at_ms = database_time_milliseconds(transaction)
+        .await
+        .map_err(map_database_error)?;
+    let group_id = ensure_runner_group(
+        transaction,
+        &actor.tenant_id,
+        &request.runner_group,
+        issued_at_ms,
+    )
+    .await?;
+    let expires_at_ms = issued_at_ms
+        .checked_add(request.lifetime_ms)
+        .ok_or(ManagementRepositoryError::InvalidRequest)?;
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO runner_enrollment_tokens (
+            id,tenant_id,runner_group_id,token_sha256,
+            issued_by_principal_id,issued_by_session_id,
+            issued_authorization_revision,issued_at_ms,expires_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT DO NOTHING
+        ",
+    )
+    .bind(request.enrollment_id)
+    .bind(&actor.tenant_id)
+    .bind(group_id)
+    .bind(request.token_sha256.as_slice())
+    .bind(actor.principal_id)
+    .bind(actor.session_id)
+    .bind(actor.authorization_revision)
+    .bind(issued_at_ms)
+    .bind(expires_at_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    let inserted = inserted.rows_affected() == 1;
+    let savepoint_action = if inserted {
+        "RELEASE SAVEPOINT runner_enrollment_token_create"
+    } else {
+        // Also removes a group proposed by the losing concurrent insertion.
+        "ROLLBACK TO SAVEPOINT runner_enrollment_token_create"
+    };
+    sqlx::query(savepoint_action)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_database_error)?;
+    Ok(inserted.then_some((group_id, expires_at_ms)))
+}
+
+async fn finish_enrollment_conflict(
+    transaction: Transaction<'_, Postgres>,
+    actor: AuthorizedActor,
+    descriptor: AuditDescriptor<'_>,
+) -> Result<ManagementMutationOutcome<RunnerEnrollmentTokenRecord>, ManagementRepositoryError> {
+    super::finish_denied(
+        transaction,
+        actor,
+        descriptor,
+        ManagementMutationOutcome::AlreadyExists,
+    )
+    .await
 }
 
 fn enrolled_runner_external_identity(runner_id: Uuid) -> String {

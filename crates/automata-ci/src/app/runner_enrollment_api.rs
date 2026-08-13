@@ -65,6 +65,8 @@ pub(crate) struct RunnerCertificateIssuer {
     control_endpoint: String,
     issuer_not_before_seconds: i64,
     issuer_not_after_seconds: i64,
+    server_roots_not_before_seconds: i64,
+    server_roots_not_after_seconds: i64,
 }
 
 impl fmt::Debug for RunnerCertificateIssuer {
@@ -141,33 +143,10 @@ impl RunnerCertificateIssuer {
         }
         let issuer_not_before_seconds = client_ca.validity().not_before.timestamp();
         let issuer_not_after_seconds = client_ca.validity().not_after.timestamp();
-        let mut server_roots = rustls::RootCertStore::empty();
-        let mut server_root_count = 0_usize;
-        for certificate in
-            rustls::pki_types::CertificateDer::pem_slice_iter(server_ca_pem.as_bytes())
-        {
-            let certificate = certificate.map_err(|_| RunnerCertificateIssuerError)?;
-            let (remainder, root) = parse_x509_certificate(certificate.as_ref())
-                .map_err(|_| RunnerCertificateIssuerError)?;
-            if !remainder.is_empty()
-                || root.validity().not_before >= root.validity().not_after
-                || !root
-                    .basic_constraints()
-                    .map_err(|_| RunnerCertificateIssuerError)?
-                    .is_some_and(|constraints| constraints.value.ca)
-            {
-                return Err(RunnerCertificateIssuerError);
-            }
-            server_roots
-                .add(certificate)
-                .map_err(|_| RunnerCertificateIssuerError)?;
-            server_root_count += 1;
-        }
+        let (server_roots_not_before_seconds, server_roots_not_after_seconds) =
+            server_root_validity_window(&server_ca_pem)?;
         let issuer = Issuer::from_ca_cert_pem(&client_ca_pem, key)
             .map_err(|_| RunnerCertificateIssuerError)?;
-        if server_root_count == 0 {
-            return Err(RunnerCertificateIssuerError);
-        }
         Ok(Self {
             issuer,
             client_ca_pem,
@@ -175,6 +154,8 @@ impl RunnerCertificateIssuer {
             control_endpoint,
             issuer_not_before_seconds,
             issuer_not_after_seconds,
+            server_roots_not_before_seconds,
+            server_roots_not_after_seconds,
         })
     }
 
@@ -199,6 +180,8 @@ impl RunnerCertificateIssuer {
         let issued_at_seconds = database_time_ms.div_euclid(1_000);
         if issued_at_seconds < self.issuer_not_before_seconds
             || issued_at_seconds >= self.issuer_not_after_seconds
+            || issued_at_seconds < self.server_roots_not_before_seconds
+            || issued_at_seconds >= self.server_roots_not_after_seconds
         {
             return Err(RunnerCertificateIssuerError);
         }
@@ -214,7 +197,8 @@ impl RunnerCertificateIssuer {
             .ok_or(RunnerCertificateIssuerError)?;
         let expires_at_seconds = requested_not_after
             .unix_timestamp()
-            .min(self.issuer_not_after_seconds);
+            .min(self.issuer_not_after_seconds)
+            .min(self.server_roots_not_after_seconds);
         if expires_at_seconds <= issued_at_seconds {
             return Err(RunnerCertificateIssuerError);
         }
@@ -252,6 +236,39 @@ impl RunnerCertificateIssuer {
             expires_at_seconds,
         })
     }
+}
+
+fn server_root_validity_window(
+    server_ca_pem: &str,
+) -> Result<(i64, i64), RunnerCertificateIssuerError> {
+    let mut roots = rustls::RootCertStore::empty();
+    let mut root_count = 0_usize;
+    let mut not_before_seconds = i64::MIN;
+    let mut not_after_seconds = i64::MAX;
+    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(server_ca_pem.as_bytes()) {
+        let certificate = certificate.map_err(|_| RunnerCertificateIssuerError)?;
+        let (remainder, root) = parse_x509_certificate(certificate.as_ref())
+            .map_err(|_| RunnerCertificateIssuerError)?;
+        if !remainder.is_empty()
+            || root.validity().not_before >= root.validity().not_after
+            || !root
+                .basic_constraints()
+                .map_err(|_| RunnerCertificateIssuerError)?
+                .is_some_and(|constraints| constraints.value.ca)
+        {
+            return Err(RunnerCertificateIssuerError);
+        }
+        not_before_seconds = not_before_seconds.max(root.validity().not_before.timestamp());
+        not_after_seconds = not_after_seconds.min(root.validity().not_after.timestamp());
+        roots
+            .add(certificate)
+            .map_err(|_| RunnerCertificateIssuerError)?;
+        root_count += 1;
+    }
+    if root_count == 0 || not_before_seconds >= not_after_seconds {
+        return Err(RunnerCertificateIssuerError);
+    }
+    Ok((not_before_seconds, not_after_seconds))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -347,26 +364,14 @@ async fn redeem_enrollment(
     State(state): State<RunnerEnrollmentApiState>,
     request: Request,
 ) -> Response {
-    let _permit = match state.redemptions.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => return ApiError::RateLimited.into_response(),
+    let Ok(_permit) = state.redemptions.try_acquire() else {
+        return ApiError::RateLimited.into_response();
     };
     let document: RedeemEnrollmentDocument = match json_document(request).await {
         Ok(document) => document,
         Err(error) => return error.into_response(),
     };
-    if document.operation_id.is_nil()
-        || document.runner_name.is_empty()
-        || document.runner_name.len() > 255
-        || document.runner_name.trim() != document.runner_name
-        || document.runner_name.chars().any(char::is_control)
-        || document.capabilities.validate().is_err()
-        || (document
-            .capabilities
-            .features()
-            .contains(&RunnerFeature::OIDC_TOKENS)
-            && !state.capability_readiness.github_oidc())
-    {
+    if !valid_redeem_document(&document, state.capability_readiness) {
         return ApiError::InvalidRequest.into_response();
     }
     let token_sha256 = match token_digest(document.token.as_bytes()) {
@@ -448,6 +453,23 @@ async fn redeem_enrollment(
         ) => ApiError::Conflict.into_response(),
         Err(error) => repository_error(error).into_response(),
     }
+}
+
+fn valid_redeem_document(
+    document: &RedeemEnrollmentDocument,
+    readiness: RunnerCapabilityReadiness,
+) -> bool {
+    !document.operation_id.is_nil()
+        && !document.runner_name.is_empty()
+        && document.runner_name.len() <= 255
+        && document.runner_name.trim() == document.runner_name
+        && !document.runner_name.chars().any(char::is_control)
+        && document.capabilities.validate().is_ok()
+        && (!document
+            .capabilities
+            .features()
+            .contains(&RunnerFeature::OIDC_TOKENS)
+            || readiness.github_oidc())
 }
 
 fn actor_from_request(
@@ -699,8 +721,8 @@ mod tests {
     #[tokio::test]
     async fn json_collector_accepts_fragmented_documents_and_rejects_oversize_bodies() {
         let fragments = futures::stream::iter([
-            Ok::<_, std::convert::Infallible>(Bytes::from_static(br#"{"runner":"#)),
-            Ok(Bytes::from_static(br#"fragmented"}"#)),
+            Ok::<_, std::convert::Infallible>(Bytes::from_static(b"{\"runner\":\"")),
+            Ok(Bytes::from_static(b"fragmented\"}")),
         ]);
         let request = Request::builder()
             .header(header::CONTENT_TYPE, "application/json")
@@ -807,17 +829,17 @@ mod tests {
             .pem()
             .expect("CSR PEM");
         let runner_id = Uuid::new_v4();
-        let issued = issuer
+        let certificate = issuer
             .issue(runner_id, &csr, 1_800_000_000_123)
             .expect("issued leaf");
         let leaf = rustls::pki_types::CertificateDer::pem_slice_iter(
-            issued.certificate_chain_pem.as_bytes(),
+            certificate.certificate_chain_pem.as_bytes(),
         )
         .next()
         .expect("leaf")
         .expect("valid leaf PEM");
         let (_, leaf) = parse_x509_certificate(leaf.as_ref()).expect("valid leaf DER");
-        assert_eq!(issued.issued_at_seconds, 1_800_000_000);
+        assert_eq!(certificate.issued_at_seconds, 1_800_000_000);
         assert_eq!(
             leaf.validity()
                 .not_after
@@ -826,8 +848,8 @@ mod tests {
             Some(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
         );
         assert_eq!(
-            issued.expires_at_seconds,
-            issued.issued_at_seconds - 60 + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS
+            certificate.expires_at_seconds,
+            certificate.issued_at_seconds - 60 + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS
         );
         assert!(
             leaf.basic_constraints()
@@ -856,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn issuer_caps_the_leaf_at_an_earlier_ca_expiry() {
+    fn issuer_caps_the_leaf_at_the_earliest_trust_expiry() {
         let issued_at_seconds = 1_800_000_000;
         let ca_expires_at_seconds = issued_at_seconds + 3_600;
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
@@ -883,13 +905,55 @@ mod tests {
             .expect("CSR")
             .pem()
             .expect("CSR PEM");
-        let issued = issuer
+        let certificate = issuer
             .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
             .expect("clamped leaf");
-        assert_eq!(issued.expires_at_seconds, ca_expires_at_seconds);
+        assert_eq!(certificate.expires_at_seconds, ca_expires_at_seconds);
         assert!(
-            issued.expires_at_seconds - issued.issued_at_seconds
+            certificate.expires_at_seconds - certificate.issued_at_seconds
                 < MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS
+        );
+    }
+
+    #[test]
+    fn issuer_rejects_server_roots_not_valid_at_database_time() {
+        let issued_at_seconds = 1_800_000_000;
+        let client_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("client CA key");
+        let client_key_pem = client_key.serialize_pem();
+        let mut client_params = CertificateParams::default();
+        client_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        client_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let client_ca = client_params
+            .self_signed(&client_key)
+            .expect("client CA certificate");
+        let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("server CA key");
+        let mut server_params = CertificateParams::default();
+        server_params.not_before =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 60).expect("root not-before");
+        server_params.not_after =
+            OffsetDateTime::from_unix_timestamp(issued_at_seconds + 3_600).expect("root not-after");
+        server_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        server_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let server_ca = server_params
+            .self_signed(&server_key)
+            .expect("server CA certificate");
+        let issuer = RunnerCertificateIssuer::from_pem(
+            client_ca.pem().as_bytes(),
+            client_key_pem.as_bytes(),
+            server_ca.pem().as_bytes(),
+            "https://runner.example.test/".to_owned(),
+        )
+        .expect("well-formed trust material");
+        let runner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("runner key");
+        let csr = CertificateParams::default()
+            .serialize_request(&runner_key)
+            .expect("CSR")
+            .pem()
+            .expect("CSR PEM");
+        assert!(
+            issuer
+                .issue(Uuid::new_v4(), &csr, issued_at_seconds * 1_000)
+                .is_err()
         );
     }
 

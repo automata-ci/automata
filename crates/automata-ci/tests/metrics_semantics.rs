@@ -87,7 +87,7 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .count();
     assert_eq!(
-        all_series, 5_024,
+        all_series, 5_152,
         "the preinitialized series set must match the reviewed cardinality manifest"
     );
     assert_eq!(

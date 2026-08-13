@@ -3344,7 +3344,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
             RunnerEnrollmentPrepareOutcome::Prepared(scope)
                 if scope.enrollment_id == enrollment_id
                     && scope.runner_group == "trusted-linux"
-                    && scope.observed_at_ms > 0
+                    && scope.database_time_ms > 0
         ));
 
         let group = RunnerGroup::new("trusted-linux")?;

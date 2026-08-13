@@ -110,7 +110,8 @@ or the control-plane/spool envelope keys.
 
 - [ ] Introduce a signer port with local-PEM, KMS, and HSM implementations so the API never needs
   exportable signing-key bytes.
-- [ ] Reject issuance beyond issuer expiry and alert on issuer expiry thresholds.
+- [x] Reject issuance beyond issuer or enrolled server-root expiry.
+- [ ] Alert on issuer and server-root expiry thresholds.
 - [ ] Support client-CA overlap: trust old/new, issue only from new, then remove old after all
   leaves and retained backups age out.
 - [ ] Version the server-root bundle and design a trust-root update that cannot replace trust based

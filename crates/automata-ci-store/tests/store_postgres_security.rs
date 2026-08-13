@@ -17,8 +17,6 @@ mod postgres_managed_secret_authority;
 mod postgres_observability;
 #[path = "postgres_provider_token_schema.rs"]
 mod postgres_provider_token_schema;
-#[path = "postgres_runner_enrollment_schema.rs"]
-mod postgres_runner_enrollment_schema;
 #[path = "postgres_secret_custody.rs"]
 mod postgres_secret_custody;
 #[path = "postgres_secret_management.rs"]

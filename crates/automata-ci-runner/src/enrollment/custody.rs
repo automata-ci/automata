@@ -98,12 +98,9 @@ impl CredentialDestinations {
             return Ok(Some(stage));
         }
         if let Some(bytes) = read_bounded_temporary(&self.request_stage, MAX_STAGE_BYTES, true)? {
-            let stage: EnrollmentStage = match serde_json::from_slice(&bytes) {
-                Ok(stage) => stage,
-                Err(_) => {
-                    remove_temporary_durable(&self.request_stage)?;
-                    return Ok(None);
-                }
+            let Ok(stage) = serde_json::from_slice::<EnrollmentStage>(&bytes) else {
+                remove_temporary_durable(&self.request_stage)?;
+                return Ok(None);
             };
             stage.validate(config, origin, runner_name)?;
             publish_temporary(&self.request_stage)?;
@@ -134,6 +131,10 @@ impl CredentialDestinations {
     pub(super) fn load_response(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         if let Some(response) = read_bounded_file(&self.response_stage, MAX_RESPONSE_BYTES, true)? {
             sync_parent(&self.response_stage)?;
+            if serde_json::from_slice::<RedeemResponse>(&response).is_err() {
+                remove_durable(&self.response_stage)?;
+                return Ok(None);
+            }
             return Ok(Some(response));
         }
         let Some(response) =
@@ -334,6 +335,7 @@ fn validate_certificate_response(
         .context("runner enrollment response has invalid issuer key usage")?
         .context("runner enrollment response issuer has no key usage")?;
     let expected_common_name = expected_runner_id.hyphenated().to_string();
+    let subject_attribute_count = leaf.subject().iter_attributes().count();
     let mut common_names = leaf.subject().iter_common_name();
     let common_name = common_names.next().and_then(|name| name.as_str().ok());
     let has_subject_alternative_name = leaf
@@ -362,6 +364,7 @@ fn validate_certificate_response(
         || leaf.validity().not_after > issuer.validity().not_after
         || leaf.validity().not_after.timestamp() != response.certificate_expires_at_seconds
         || common_name != Some(expected_common_name.as_str())
+        || subject_attribute_count != 1
         || common_names.next().is_some()
         || has_subject_alternative_name
         || !issuer_constraints.value.ca
@@ -1031,6 +1034,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one profile matrix shares an issuer, key, response, and mutation sequence"
+    )]
     fn enrolled_leaf_must_match_the_staged_key_and_fixed_client_profile() {
         let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key");
         let mut ca_params = CertificateParams::default();
@@ -1041,15 +1048,15 @@ mod tests {
         let expires_at = 1_900_000_000;
         let runner_id = Uuid::new_v4();
         let issue_leaf =
-            |second_common_name: bool, subject_alternative_name: bool, extra_key_usage: bool| {
+            |extra_subject: bool, subject_alternative_name: bool, extra_key_usage: bool| {
                 let mut leaf_params = CertificateParams::default();
                 leaf_params
                     .distinguished_name
                     .push(DnType::CommonName, runner_id.to_string());
-                if second_common_name {
+                if extra_subject {
                     leaf_params
                         .distinguished_name
-                        .push(DnType::CommonName, runner_id.to_string());
+                        .push(DnType::OrganizationName, "unexpected subject");
                 }
                 if subject_alternative_name {
                     leaf_params.subject_alt_names.push(SanType::DnsName(
@@ -1113,7 +1120,7 @@ mod tests {
             &runner_key.serialize_pem(),
             expires_at - 1,
         )
-        .expect_err("a second common name must be rejected");
+        .expect_err("an extra subject attribute must be rejected");
 
         response.certificate_chain_pem =
             format!("{}{}", issue_leaf(false, true, false).pem(), issuer.pem());

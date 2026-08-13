@@ -11,7 +11,6 @@ use bytes::Bytes;
 use reqwest::{Client, StatusCode, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
 mod custody;
@@ -190,91 +189,6 @@ fn validate_response(
         || response.certificate_expires_at_seconds <= validation_time_seconds
     {
         bail!("runner enrollment response does not match the local configuration");
-    }
-    validate_certificate_chain(key, response)?;
-    let mut server_roots = rustls::RootCertStore::empty();
-    let mut server_root_count = 0_usize;
-    for certificate in
-        rustls::pki_types::CertificateDer::pem_slice_iter(response.server_ca_pem.as_bytes())
-    {
-        let certificate = certificate.context("runner enrollment returned invalid server roots")?;
-        let (remainder, parsed) = parse_x509_certificate(certificate.as_ref())
-            .context("runner enrollment returned invalid server roots")?;
-        if !remainder.is_empty()
-            || !parsed.validity().is_valid()
-            || !parsed
-                .basic_constraints()
-                .context("runner enrollment returned invalid server root constraints")?
-                .is_some_and(|constraints| constraints.value.ca)
-        {
-            bail!("runner enrollment returned an unusable server root");
-        }
-        server_roots
-            .add(certificate)
-            .context("runner enrollment returned invalid server roots")?;
-        server_root_count += 1;
-    }
-    if server_root_count == 0 {
-        bail!("runner enrollment returned no server roots");
-    }
-    Ok(())
-}
-
-fn validate_certificate_chain(key: &KeyPair, response: &RedeemResponse) -> Result<()> {
-    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(
-        response.certificate_chain_pem.as_bytes(),
-    )
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .context("runner enrollment returned an invalid certificate chain")?;
-    let [leaf_der, issuer_der] = certificates.as_slice() else {
-        bail!("runner enrollment returned an invalid certificate chain");
-    };
-    let (leaf_remainder, leaf) = parse_x509_certificate(leaf_der.as_ref())
-        .context("runner enrollment returned an invalid leaf certificate")?;
-    let (issuer_remainder, issuer) = parse_x509_certificate(issuer_der.as_ref())
-        .context("runner enrollment returned an invalid issuing certificate")?;
-    let leaf_usage = leaf
-        .key_usage()
-        .context("runner enrollment returned invalid leaf key usage")?
-        .context("runner enrollment leaf certificate has no key usage")?;
-    let leaf_extended_usage = leaf
-        .extended_key_usage()
-        .context("runner enrollment returned invalid leaf extended key usage")?
-        .context("runner enrollment leaf certificate has no extended key usage")?;
-    let issuer_constraints = issuer
-        .basic_constraints()
-        .context("runner enrollment returned invalid issuer constraints")?
-        .context("runner enrollment issuer has no basic constraints")?;
-    let issuer_usage = issuer
-        .key_usage()
-        .context("runner enrollment returned invalid issuer key usage")?
-        .context("runner enrollment issuer has no key usage")?;
-    let expected_common_name = response.runner_id.hyphenated().to_string();
-    if !leaf_remainder.is_empty()
-        || !issuer_remainder.is_empty()
-        || leaf.public_key().subject_public_key.data.as_ref() != key.public_key_raw()
-        || leaf.issuer() != issuer.subject()
-        || !leaf.validity().is_valid()
-        || !issuer.validity().is_valid()
-        || leaf.validity().not_after.timestamp() != response.certificate_expires_at_seconds
-        || leaf
-            .subject()
-            .iter_common_name()
-            .next()
-            .and_then(|name| name.as_str().ok())
-            != Some(expected_common_name.as_str())
-        || leaf
-            .basic_constraints()
-            .context("runner enrollment returned invalid leaf constraints")?
-            .is_some_and(|constraints| constraints.value.ca)
-        || !leaf_usage.value.digital_signature()
-        || !leaf_extended_usage.value.client_auth
-        || leaf_extended_usage.value.server_auth
-        || !issuer_constraints.value.ca
-        || !issuer_usage.value.key_cert_sign()
-        || leaf.verify_signature(Some(issuer.public_key())).is_err()
-    {
-        bail!("runner enrollment certificate chain does not match the request");
     }
     Ok(())
 }
