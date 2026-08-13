@@ -24,11 +24,11 @@ SUITES = (
 CURRENT_SUITES = set(SUITES[2:])
 SUPPORT_MODULES = {"github_manifest_fixture"}
 EXPECTED_SUITE_INVENTORY = {
-    "store_contracts": (33, 193, 0),
+    "store_contracts": (34, 194, 0),
     "store_migration_contracts": (1, 1, 0),
-    "store_postgres_execution": (8, 115, 114),
+    "store_postgres_execution": (9, 118, 117),
     "store_postgres_orchestration": (11, 53, 52),
-    "store_postgres_provider": (12, 101, 101),
+    "store_postgres_provider": (11, 91, 91),
     "store_postgres_security": (9, 43, 38),
 }
 TEST_ATTRIBUTE = re.compile(r"#\[(?:tokio::)?test\]")
