@@ -281,6 +281,7 @@ export const runDetailRequest: RenderRequest = {
         },
       ],
     },
+    rerun: null,
   },
 };
 

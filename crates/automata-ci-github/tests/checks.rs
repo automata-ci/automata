@@ -6,10 +6,11 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
     GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
-    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRunCreateOutcome,
-    GithubCheckRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
-    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
-    GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
+    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRequestedAction,
+    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
+    GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
+    GithubHttpLimits, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -676,6 +677,7 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn terminal_patch_sends_completion_time_and_native_output_and_validates_exact_response() {
     let server = FixtureServer::spawn().await;
     server.enqueue(ResponseSpec::json(
@@ -685,6 +687,10 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
     server.enqueue(ResponseSpec::json(
         axum::http::StatusCode::OK,
         exact_run_value(41, "completed", Some("failure")).to_string(),
+    ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("success")).to_string(),
     ));
     server.enqueue(ResponseSpec::json(
         axum::http::StatusCode::OK,
@@ -739,6 +745,25 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         )
         .await
         .expect("custom terminal response");
+    let actions = [GithubCheckRequestedAction::new(
+        "Re-run all jobs",
+        "Run every job in this workflow",
+        "rerun_all",
+    )
+    .expect("requested action")];
+    endpoint
+        .complete_check_run_with_actions(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckConclusion::Success,
+            Some(&lifecycle_timestamp()),
+            &lifecycle_timestamp(),
+            &actions,
+            &token(),
+        )
+        .await
+        .expect("terminal response with action");
 
     let requests = server.requests();
     assert_eq!(requests[0].method, "PATCH");
@@ -766,6 +791,16 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
             .as_str()
             .expect("custom text")
             .contains("`test`")
+    );
+    let action_body: Value =
+        serde_json::from_slice(&requests[3].body).expect("requested-action patch JSON");
+    assert_eq!(
+        action_body["actions"],
+        json!([{
+            "label": "Re-run all jobs",
+            "description": "Run every job in this workflow",
+            "identifier": "rerun_all"
+        }])
     );
 }
 

@@ -403,6 +403,10 @@ impl AuthenticatedGithubWebhook {
                 .map(crate::VerifiedGithubWebhook::MergeGroup),
             "repository_dispatch" => crate::webhook_event::normalize_repository_dispatch(self)
                 .map(crate::VerifiedGithubWebhook::RepositoryDispatch),
+            "check_run" => crate::webhook_event::normalize_check_run(self)
+                .map(crate::VerifiedGithubWebhook::CheckRun),
+            "check_suite" => crate::webhook_event::normalize_check_suite(self)
+                .map(crate::VerifiedGithubWebhook::CheckSuite),
             _ => Err(GithubWebhookError::UnsupportedEvent),
         }
     }

@@ -8,6 +8,7 @@ mod blocked;
 mod cancellation;
 mod conformance;
 mod error;
+mod github_check_rerun;
 mod github_checks;
 mod github_job_runtime_authority;
 mod github_oidc;
@@ -84,6 +85,10 @@ pub use conformance::{
 };
 pub use error::{
     AttemptCommandError, AttemptSnapshotError, AttemptStoreError, RepositoryOperationError,
+};
+pub use github_check_rerun::{
+    GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
+    GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckRerunValueError,
 };
 pub use github_checks::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,

@@ -3,8 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_trait::async_trait;
+use automata_ci_auth::{
+    human::{PrincipalId, TenantId},
+    management::{ManagementActor, ManagementRevision},
+    session::SessionId,
+    time::UnixTimestamp,
+};
 use automata_ci_core::{
-    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
+    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
@@ -15,10 +21,11 @@ use super::{
     secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
 };
 use crate::{
-    MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow,
-    RerunWorkflowByName, StoreError, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowConcurrency, WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection,
-    WorkflowRerunStoreError,
+    GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
+    GithubCheckRerunStoreError, GithubCheckRerunTarget, MAX_WORKFLOW_RERUN_AGE_MILLIS,
+    MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow, RerunWorkflowByName, StoreError,
+    WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowConcurrency, WorkflowRerunReceipt,
+    WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
 };
 
 const RERUN_PERMISSION: &str = "runs:rerun";
@@ -29,6 +36,8 @@ const RERUN_INVOCATION_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.invocation-i
 const RERUN_JOB_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.job-id.v1\0";
 const RERUN_CHECK_SUBJECT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.check-subject-id.v1\0";
 const RERUN_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-rerun.audit.v1\0";
+const GITHUB_CHECK_RERUN_OPERATION_ID_DOMAIN: &[u8] =
+    b"automata.github-check-rerun.operation-id.v1\0";
 
 const REPLAY_RECEIPT_SQL: &str = r"
     SELECT receipt.request_digest, receipt.repository_id, receipt.run_id,
@@ -173,6 +182,308 @@ impl WorkflowRerunRepository for PostgresStore {
     ) -> Result<WorkflowRerunReceipt, WorkflowRerunStoreError> {
         rerun_workflow_by_name_transaction(self, request).await
     }
+}
+
+#[derive(Debug)]
+struct GithubCheckRerunResolution {
+    repository_id: Uuid,
+    source_run_id: Uuid,
+    subject_kind: String,
+    logical_job_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct GithubCheckRerunActor {
+    principal_id: Uuid,
+    session_id: Uuid,
+    authorization_revision: i64,
+}
+
+#[async_trait]
+impl GithubCheckRerunRepository for PostgresStore {
+    async fn rerun_github_check(
+        &self,
+        request: GithubCheckRerunRequest,
+    ) -> Result<Vec<WorkflowRerunReceipt>, GithubCheckRerunStoreError> {
+        rerun_from_github_check(self, request).await
+    }
+}
+
+async fn rerun_from_github_check(
+    store: &PostgresStore,
+    request: GithubCheckRerunRequest,
+) -> Result<Vec<WorkflowRerunReceipt>, GithubCheckRerunStoreError> {
+    let mut transaction = store
+        .pool
+        .begin()
+        .await
+        .map_err(github_check_operation_error)?;
+    let actor = resolve_github_check_actor(&mut transaction, &request).await?;
+    let targets = resolve_github_check_targets(&mut transaction, &request).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(github_check_operation_error)?;
+
+    if targets.is_empty() {
+        return Err(GithubCheckRerunStoreError::AuthorityRejected);
+    }
+    let actor = management_actor(&request, &actor)?;
+    let mut receipts = Vec::with_capacity(targets.len());
+    for target in targets {
+        let selection = github_check_selection(&request, &target)?;
+        let operation_id = github_check_operation_id(&request, target.source_run_id);
+        let rerun = RerunWorkflow::new(
+            actor.clone(),
+            RepositoryId::from_uuid(target.repository_id),
+            RunId::from_uuid(target.source_run_id),
+            selection,
+            OperationId::from_uuid(operation_id),
+        )
+        .map_err(|_| StoreError::corrupt_data("GitHub Check rerun resolution was invalid"))?;
+        let receipt = rerun_workflow_transaction(store, rerun)
+            .await
+            .map_err(map_github_check_rerun_error)?;
+        receipts.push(receipt);
+    }
+    Ok(receipts)
+}
+
+async fn resolve_github_check_actor(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &GithubCheckRerunRequest,
+) -> Result<GithubCheckRerunActor, GithubCheckRerunStoreError> {
+    let sender_id = request.sender_id().to_string();
+    sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+        r"
+        SELECT session.principal_id, session.id, session.authorization_revision
+        FROM human_provider_identities AS identity
+        JOIN human_principals AS principal ON principal.id = identity.principal_id
+        JOIN human_sessions AS session
+          ON session.tenant_id = $1
+         AND session.principal_id = identity.principal_id
+         AND session.provider_id = identity.provider_id
+         AND session.provider_subject = identity.provider_subject
+        JOIN tenant_human_memberships AS membership
+          ON membership.tenant_id = session.tenant_id
+         AND membership.principal_id = session.principal_id
+        WHERE identity.provider_id = 'github'
+          AND identity.provider_subject = $2
+          AND principal.status = 'active'
+          AND membership.status = 'active'
+          AND session.lifecycle_status = 'active'
+          AND session.revoked_at_ms IS NULL
+          AND session.idle_expires_at_ms > automata_workflow_rerun_now_ms()
+          AND session.expires_at_ms > automata_workflow_rerun_now_ms()
+          AND session.authorization_revision = membership.authorization_revision
+        ORDER BY session.last_seen_at_ms DESC, session.id
+        LIMIT 1
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(sender_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(github_check_operation_error)?
+    .map(
+        |(principal_id, session_id, authorization_revision)| GithubCheckRerunActor {
+            principal_id,
+            session_id,
+            authorization_revision,
+        },
+    )
+    .ok_or(GithubCheckRerunStoreError::AuthorityRejected)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn resolve_github_check_targets(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &GithubCheckRerunRequest,
+) -> Result<Vec<GithubCheckRerunResolution>, GithubCheckRerunStoreError> {
+    let installation_id = i64::try_from(request.installation_id())
+        .map_err(|_| GithubCheckRerunStoreError::AuthorityRejected)?;
+    let repository_id = i64::try_from(request.github_repository_id())
+        .map_err(|_| GithubCheckRerunStoreError::AuthorityRejected)?;
+    let head_sha = request.head_sha().as_bytes().to_vec();
+    match request.target() {
+        GithubCheckRerunTarget::Run {
+            run_id,
+            suite_id,
+            external_id,
+            ..
+        } => sqlx::query_as::<_, (Uuid, Uuid, String, Option<Uuid>)>(
+            r"
+            SELECT subject.repository_id, subject.workflow_run_id,
+                   subject.subject_kind, concrete.logical_job_id
+            FROM github_check_subjects AS subject
+            JOIN github_check_projection_outbox AS outbox
+              ON outbox.subject_id = subject.id
+            LEFT JOIN logical_workflow_concrete_jobs AS concrete
+              ON concrete.run_id = subject.workflow_run_id
+             AND concrete.job_id = subject.job_id
+            WHERE subject.tenant_id = $1
+              AND subject.provider_connection_id = $2
+              AND subject.provider_installation_id = $3
+              AND subject.github_repository_id = $4
+              AND subject.github_app_id = $5
+              AND subject.head_sha = $6
+              AND subject.external_id = $7
+              AND subject.workflow_run_id IS NOT NULL
+              AND subject.desired_state = 'completed'
+              AND outbox.external_suite_id = $8
+              AND outbox.external_run_id = $9
+            ",
+        )
+        .bind(request.tenant().as_str())
+        .bind(request.connection_id().as_uuid())
+        .bind(installation_id)
+        .bind(repository_id)
+        .bind(request.app_id().as_i64())
+        .bind(head_sha)
+        .bind(external_id)
+        .bind(suite_id.as_i64())
+        .bind(run_id.as_i64())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(github_check_operation_error)?
+        .map(
+            |(repository_id, source_run_id, subject_kind, logical_job_id)| {
+                vec![GithubCheckRerunResolution {
+                    repository_id,
+                    source_run_id,
+                    subject_kind,
+                    logical_job_id,
+                }]
+            },
+        )
+        .ok_or(GithubCheckRerunStoreError::AuthorityRejected),
+        GithubCheckRerunTarget::Suite { suite_id } => {
+            let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Uuid>)>(
+                r"
+                SELECT DISTINCT subject.repository_id, subject.workflow_run_id,
+                                subject.subject_kind, NULL::UUID
+                FROM github_check_subjects AS subject
+                JOIN github_check_projection_outbox AS outbox
+                  ON outbox.subject_id = subject.id
+                WHERE subject.tenant_id = $1
+                  AND subject.provider_connection_id = $2
+                  AND subject.provider_installation_id = $3
+                  AND subject.github_repository_id = $4
+                  AND subject.github_app_id = $5
+                  AND subject.head_sha = $6
+                  AND subject.subject_kind = 'workflow'
+                  AND subject.workflow_run_id IS NOT NULL
+                  AND subject.desired_state = 'completed'
+                  AND outbox.external_suite_id = $7
+                ORDER BY subject.workflow_run_id
+                ",
+            )
+            .bind(request.tenant().as_str())
+            .bind(request.connection_id().as_uuid())
+            .bind(installation_id)
+            .bind(repository_id)
+            .bind(request.app_id().as_i64())
+            .bind(head_sha)
+            .bind(suite_id.as_i64())
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(github_check_operation_error)?;
+            Ok(rows
+                .into_iter()
+                .map(
+                    |(repository_id, source_run_id, subject_kind, logical_job_id)| {
+                        GithubCheckRerunResolution {
+                            repository_id,
+                            source_run_id,
+                            subject_kind,
+                            logical_job_id,
+                        }
+                    },
+                )
+                .collect())
+        }
+    }
+}
+
+fn management_actor(
+    request: &GithubCheckRerunRequest,
+    actor: &GithubCheckRerunActor,
+) -> Result<ManagementActor, GithubCheckRerunStoreError> {
+    let revision = u64::try_from(actor.authorization_revision)
+        .ok()
+        .and_then(|value| ManagementRevision::new(value).ok())
+        .ok_or_else(|| StoreError::corrupt_data("GitHub Check actor revision was invalid"))?;
+    Ok(ManagementActor::new(
+        TenantId::new(request.tenant().as_str().to_owned())
+            .map_err(|_| StoreError::corrupt_data("GitHub Check tenant was invalid"))?,
+        PrincipalId::new(actor.principal_id.hyphenated().to_string())
+            .map_err(|_| StoreError::corrupt_data("GitHub Check principal was invalid"))?,
+        SessionId::new(actor.session_id.hyphenated().to_string())
+            .map_err(|_| StoreError::corrupt_data("GitHub Check session was invalid"))?,
+        revision,
+        None,
+        UnixTimestamp::from_seconds(0),
+    ))
+}
+
+fn github_check_selection(
+    request: &GithubCheckRerunRequest,
+    target: &GithubCheckRerunResolution,
+) -> Result<WorkflowRerunSelection, GithubCheckRerunStoreError> {
+    let action = match request.target() {
+        GithubCheckRerunTarget::Run { action, .. } => Some(*action),
+        GithubCheckRerunTarget::Suite { .. } => None,
+    };
+    match (action, target.subject_kind.as_str(), target.logical_job_id) {
+        (None | Some(GithubCheckRerunAction::RerunAll), "workflow" | "job", _)
+        | (Some(GithubCheckRerunAction::Rerequested), "workflow", None) => {
+            Ok(WorkflowRerunSelection::EntireWorkflow)
+        }
+        (Some(GithubCheckRerunAction::RerunFailed), "workflow" | "job", _) => {
+            Ok(WorkflowRerunSelection::FailedJobsAndDependents)
+        }
+        (
+            Some(GithubCheckRerunAction::Rerequested | GithubCheckRerunAction::RerunJob),
+            "job",
+            Some(logical_job_id),
+        ) => Ok(WorkflowRerunSelection::JobAndDependents(
+            crate::LogicalWorkflowJobId::from_uuid(logical_job_id)
+                .map_err(|_| StoreError::corrupt_data("GitHub Check logical job was invalid"))?,
+        )),
+        _ => Err(GithubCheckRerunStoreError::Conflict),
+    }
+}
+
+fn github_check_operation_id(request: &GithubCheckRerunRequest, source_run_id: Uuid) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(GITHUB_CHECK_RERUN_OPERATION_ID_DOMAIN);
+    update_part(&mut hasher, request.delivery_id().as_bytes());
+    update_part(&mut hasher, request.body_sha256().as_bytes());
+    update_part(&mut hasher, source_run_id.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn map_github_check_rerun_error(error: WorkflowRerunStoreError) -> GithubCheckRerunStoreError {
+    match error {
+        WorkflowRerunStoreError::Store(error) => GithubCheckRerunStoreError::Store(error),
+        WorkflowRerunStoreError::AuthorityRejected => GithubCheckRerunStoreError::AuthorityRejected,
+        WorkflowRerunStoreError::NotFound
+        | WorkflowRerunStoreError::SourceNotTerminal
+        | WorkflowRerunStoreError::SourceExpired
+        | WorkflowRerunStoreError::AttemptLimitReached
+        | WorkflowRerunStoreError::UnsupportedSelection
+        | WorkflowRerunStoreError::ConcurrencyQueueFull
+        | WorkflowRerunStoreError::IdempotencyConflict => GithubCheckRerunStoreError::Conflict,
+    }
+}
+
+fn github_check_operation_error(error: sqlx::Error) -> GithubCheckRerunStoreError {
+    GithubCheckRerunStoreError::Store(StoreError::operation(error))
 }
 
 async fn rerun_workflow_transaction(

@@ -25,6 +25,10 @@ const MAX_DETAILS_URL_BYTES: usize = 2_048;
 const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
 const MAX_CHECK_OUTPUT_SUMMARY_BYTES: usize = 65_535;
 const MAX_CHECK_OUTPUT_TEXT_BYTES: usize = 65_535;
+const MAX_REQUESTED_ACTIONS: usize = 3;
+const MAX_REQUESTED_ACTION_IDENTIFIER_BYTES: usize = 20;
+const MAX_REQUESTED_ACTION_LABEL_BYTES: usize = 20;
+const MAX_REQUESTED_ACTION_DESCRIPTION_BYTES: usize = 40;
 const MAX_CHECK_ANNOTATION_PATH_BYTES: usize = 4_096;
 const MAX_CHECK_ANNOTATION_MESSAGE_BYTES: usize = 65_535;
 const MAX_CHECK_ANNOTATION_TITLE_BYTES: usize = 255;
@@ -331,6 +335,83 @@ impl fmt::Debug for GithubCheckOutput {
             .field("text", &self.text.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
+}
+
+/// One native button displayed on a completed GitHub Check Run.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct GithubCheckRequestedAction {
+    label: String,
+    description: String,
+    identifier: String,
+}
+
+impl GithubCheckRequestedAction {
+    /// Creates one bounded GitHub Check requested action.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, edge-whitespace, control-bearing, or
+    /// non-portable identifiers.
+    pub fn new(
+        label: impl Into<String>,
+        description: impl Into<String>,
+        identifier: impl Into<String>,
+    ) -> Result<Self, GithubCheckModelError> {
+        let label = label.into();
+        let description = description.into();
+        let identifier = identifier.into();
+        if !bounded_action_text(&label, MAX_REQUESTED_ACTION_LABEL_BYTES)
+            || !bounded_action_text(&description, MAX_REQUESTED_ACTION_DESCRIPTION_BYTES)
+            || identifier.is_empty()
+            || identifier.len() > MAX_REQUESTED_ACTION_IDENTIFIER_BYTES
+            || !identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return Err(GithubCheckModelError::InvalidRequestedAction);
+        }
+        Ok(Self {
+            label,
+            description,
+            identifier,
+        })
+    }
+
+    /// Returns the visible button label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the visible action description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Returns the stable webhook identifier.
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+}
+
+impl fmt::Debug for GithubCheckRequestedAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubCheckRequestedAction")
+            .field("label", &"[REDACTED]")
+            .field("description", &"[REDACTED]")
+            .field("identifier", &self.identifier)
+            .finish()
+    }
+}
+
+fn bounded_action_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 /// Severity displayed for one source annotation in GitHub's Checks UI.
@@ -834,6 +915,9 @@ pub enum GithubCheckModelError {
     /// Native Check output violated the bounded canonical Markdown policy.
     #[error("invalid GitHub Check output")]
     InvalidOutput,
+    /// A native requested-action button violated GitHub's bounded shape.
+    #[error("invalid GitHub Check requested action")]
+    InvalidRequestedAction,
     /// A source annotation violated path, location, or bounded text policy.
     #[error("invalid GitHub Check annotation")]
     InvalidAnnotation,
@@ -914,6 +998,8 @@ struct CompleteRunBody<'a> {
     started_at: Option<&'a str>,
     completed_at: &'a str,
     output: CheckOutputBody<'a>,
+    #[serde(skip_serializing_if = "<[GithubCheckRequestedAction]>::is_empty")]
+    actions: &'a [GithubCheckRequestedAction],
 }
 
 #[derive(Serialize)]
@@ -1387,10 +1473,41 @@ impl GithubHttpEndpoint {
         completed_at: &GithubCheckTimestamp,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
+        self.complete_check_run_with_actions(
+            repository,
+            run_id,
+            identity,
+            conclusion,
+            started_at,
+            completed_at,
+            &[],
+            server_service_token,
+        )
+        .await
+    }
+
+    /// Publishes a terminal state with optional native requested-action buttons.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same sanitized failures as [`Self::complete_check_run`] and
+    /// rejects more than three requested actions locally.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_check_run_with_actions(
+        &self,
+        repository: &RepositoryId,
+        run_id: GithubCheckRunId,
+        identity: &GithubCheckRunIdentity,
+        conclusion: GithubCheckConclusion,
+        started_at: Option<&GithubCheckTimestamp>,
+        completed_at: &GithubCheckTimestamp,
+        actions: &[GithubCheckRequestedAction],
+        server_service_token: &SecretString,
+    ) -> Result<GithubCheckRun, GithubChecksError> {
         let summary = check_summary(conclusion.summary(), identity.details_url.as_str());
         let output = GithubCheckOutput::new(conclusion.title(), summary, None)
             .map_err(|_| GithubChecksError::InvalidRequest)?;
-        self.complete_check_run_with_output(
+        self.complete_check_run_with_output_and_actions(
             repository,
             run_id,
             identity,
@@ -1398,6 +1515,7 @@ impl GithubHttpEndpoint {
             started_at,
             completed_at,
             &output,
+            actions,
             server_service_token,
         )
         .await
@@ -1421,6 +1539,42 @@ impl GithubHttpEndpoint {
         output: &GithubCheckOutput,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
+        self.complete_check_run_with_output_and_actions(
+            repository,
+            run_id,
+            identity,
+            conclusion,
+            started_at,
+            completed_at,
+            output,
+            &[],
+            server_service_token,
+        )
+        .await
+    }
+
+    /// Publishes an immutable terminal state, rich output, and native buttons.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same sanitized failures as [`Self::complete_check_run_with_output`]
+    /// and rejects more than three requested actions locally.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_check_run_with_output_and_actions(
+        &self,
+        repository: &RepositoryId,
+        run_id: GithubCheckRunId,
+        identity: &GithubCheckRunIdentity,
+        conclusion: GithubCheckConclusion,
+        started_at: Option<&GithubCheckTimestamp>,
+        completed_at: &GithubCheckTimestamp,
+        output: &GithubCheckOutput,
+        actions: &[GithubCheckRequestedAction],
+        server_service_token: &SecretString,
+    ) -> Result<GithubCheckRun, GithubChecksError> {
+        if actions.len() > MAX_REQUESTED_ACTIONS {
+            return Err(GithubChecksError::InvalidRequest);
+        }
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
         let body = CompleteRunBody {
@@ -1433,6 +1587,7 @@ impl GithubHttpEndpoint {
                 summary: output.summary(),
                 text: output.text(),
             },
+            actions,
         };
         let response =
             authenticated_checks_request(self.client.patch(endpoint), server_service_token)?

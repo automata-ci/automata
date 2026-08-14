@@ -940,6 +940,32 @@ describe("server rendering", () => {
     expect(rendered.querySelector("nav nav")).toBeNull();
   });
 
+  it("renders native browser rerun choices only when the server grants them", () => {
+    if (runDetailRequest.page.kind !== "run-detail") {
+      throw new Error("The run-detail fixture is unavailable");
+    }
+    const endpoint = `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/reruns`;
+    const request: RenderRequest = {
+      ...runDetailRequest,
+      page: {
+        ...runDetailRequest.page,
+        rerun: {
+          endpoint,
+          csrfToken: SHELL_CSRF_TOKEN,
+          failedJobsAvailable: true,
+        },
+      },
+    };
+    const rendered = new DOMParser().parseFromString(
+      renderPage(request),
+      "text/html",
+    );
+    const controls = rendered.querySelector('[aria-label="Rerun controls"]');
+    expect(controls?.textContent).toContain("Re-run all jobs");
+    expect(controls?.textContent).toContain("Re-run failed jobs");
+    expect(runDetailRequest.page.rerun).toBeNull();
+  });
+
   it("keeps decorative icons hidden and icon-only statuses accessible", () => {
     const listDocument = new DOMParser().parseFromString(
       renderPage(runListRequest),

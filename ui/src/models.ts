@@ -205,6 +205,13 @@ export interface RunDetailPageModel {
   readonly jobs: ResultCollectionModel<JobModel>;
   readonly jobPagination: PaginationModel;
   readonly artifacts: ResultCollectionModel<ArtifactModel>;
+  readonly rerun: RunRerunControlsModel | null;
+}
+
+export interface RunRerunControlsModel {
+  readonly endpoint: string;
+  readonly csrfToken: string;
+  readonly failedJobsAvailable: boolean;
 }
 
 interface JobLogRunModel {

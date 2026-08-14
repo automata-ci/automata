@@ -14,11 +14,11 @@ use automata_ci_core::{JobConclusion, JobResult, UnixMillis};
 use automata_ci_github::{
     GithubCheckAppId as HttpAppId, GithubCheckConclusion as HttpConclusion,
     GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
-    GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRetryEvidence,
-    GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId as HttpRunId,
-    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
-    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId, GithubCheckTimestamp,
-    GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
+    GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRequestedAction,
+    GithubCheckRetryEvidence, GithubCheckRun, GithubCheckRunCreateOutcome,
+    GithubCheckRunId as HttpRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation,
+    GithubCheckRunState, GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId,
+    GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
@@ -1124,9 +1124,10 @@ impl GithubChecksPublisher {
             }
             GithubCheckRunState::Queued | GithubCheckRunState::InProgress => {}
         }
+        let actions = requested_actions(claimed)?;
         let publish_result = if let Some(presentation) = presentation {
             self.endpoint
-                .complete_check_run_with_output(
+                .complete_check_run_with_output_and_actions(
                     credential.repository(),
                     update.run_id,
                     update.identity,
@@ -1134,18 +1135,20 @@ impl GithubChecksPublisher {
                     update.started_at,
                     update.completed_at,
                     presentation.output(),
+                    &actions,
                     credential.token(),
                 )
                 .await
         } else {
             self.endpoint
-                .complete_check_run(
+                .complete_check_run_with_actions(
                     credential.repository(),
                     update.run_id,
                     update.identity,
                     conclusion,
                     update.started_at,
                     update.completed_at,
+                    &actions,
                     credential.token(),
                 )
                 .await
@@ -1440,6 +1443,42 @@ impl GithubChecksPublisher {
         }
         Ok(now)
     }
+}
+
+fn requested_actions(
+    claimed: &ClaimedGithubCheckProjection,
+) -> Result<Vec<GithubCheckRequestedAction>, GithubChecksPublisherError> {
+    let mut actions = Vec::with_capacity(3);
+    if matches!(
+        claimed.details_target(),
+        GithubCheckDetailsTarget::Job { .. }
+    ) {
+        actions.push(
+            GithubCheckRequestedAction::new(
+                "Re-run this job",
+                "Run this job and its dependencies",
+                "rerun_job",
+            )
+            .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+        );
+    }
+    actions.push(
+        GithubCheckRequestedAction::new(
+            "Re-run failed jobs",
+            "Run failed jobs and dependencies",
+            "rerun_failed",
+        )
+        .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+    );
+    actions.push(
+        GithubCheckRequestedAction::new(
+            "Re-run all jobs",
+            "Run every job in this workflow",
+            "rerun_all",
+        )
+        .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+    );
+    Ok(actions)
 }
 
 async fn release_credential(credential: GithubChecksServerServiceCredential, deadline: Instant) {

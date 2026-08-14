@@ -23,8 +23,9 @@ pub use checks::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
     GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
     GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
-    GithubCheckRetryEvidence, GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId,
-    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
+    GithubCheckRequestedAction, GithubCheckRetryEvidence, GithubCheckRun,
+    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubObservedCheckConclusion,
 };
@@ -44,7 +45,8 @@ pub use webhook::{
     rehydrate_stored_authenticated_github_webhook,
 };
 pub use webhook_event::{
-    GithubMergeGroupAction, GithubPullRequestAction, GithubWebhookRef, GithubWebhookRepository,
+    GithubCheckRunAction, GithubMergeGroupAction, GithubPullRequestAction, GithubWebhookRef,
+    GithubWebhookRepository, VerifiedGithubCheckRun, VerifiedGithubCheckSuite,
     VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubRepositoryDispatch,
     VerifiedGithubWebhook,
 };

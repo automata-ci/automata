@@ -21,11 +21,16 @@ Implemented to date:
   paginated reconciliation for possibly accepted annotation updates;
 - idempotent terminal recovery that does not reload result evidence once GitHub
   already reports the exact desired conclusion.
+- same-origin browser rerun-all and rerun-failed controls backed by the existing
+  CSRF-protected, idempotent workflow-rerun transaction;
+- signed `check_run`/`check_suite` normalization, exact provider identity
+  resolution, current Automata authorization, and native rerun controls;
+- lifecycle-specific requested-action buttons on completed Check Runs.
 
-Still intentionally pending are GitHub and browser rerun controls, optional
-commit-status/deployment projections, and the rollout observability described
-below. Those pieces require their own durable idempotency state and must not be
-simulated with unsafe best-effort provider mutations.
+Still intentionally pending are optional commit-status/deployment projections
+and the rollout observability described below. Those pieces require their own
+durable idempotency state and must not be simulated with unsafe best-effort
+provider mutations.
 
 ## Outcome
 

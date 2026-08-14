@@ -264,6 +264,15 @@ struct RunDetailPage {
     jobs: VisibleCollection<Job>,
     job_pagination: Pagination,
     artifacts: VisibleCollection<Artifact>,
+    rerun: Option<RunRerunControls>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunRerunControls {
+    endpoint: String,
+    csrf_token: String,
+    failed_jobs_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1855,6 +1864,7 @@ fn workflow_navigation_item(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run_detail(
     assets: ClientAssetManifest,
     csp_nonce: String,
@@ -1910,6 +1920,28 @@ pub(super) fn run_detail(
         attempt: data.run.attempt,
     };
     let run_href = paths.run(data.run.id);
+    let rerun = mutation
+        .filter(|_| {
+            matches!(
+                data.run.status,
+                super::data::Status::Succeeded
+                    | super::data::Status::Failed
+                    | super::data::Status::Cancelled
+                    | super::data::Status::TimedOut
+                    | super::data::Status::Skipped
+                    | super::data::Status::Lost
+            )
+        })
+        .map(|mutation| RunRerunControls {
+            endpoint: format!("{run_href}/reruns"),
+            csrf_token: mutation.csrf_token.expose_secret().to_owned(),
+            failed_jobs_available: matches!(
+                data.run.status,
+                super::data::Status::Failed
+                    | super::data::Status::TimedOut
+                    | super::data::Status::Lost
+            ),
+        });
     let job_pagination = Pagination {
         previous_href: data
             .job_previous_cursor
@@ -1950,6 +1982,7 @@ pub(super) fn run_detail(
                 visibility: collection_visibility(data.artifacts.visibility),
                 items: artifacts,
             },
+            rerun,
         },
     )
 }

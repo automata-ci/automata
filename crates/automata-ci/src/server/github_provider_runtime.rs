@@ -732,15 +732,18 @@ impl GithubProviderRuntimeBuilder {
         let checks_worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let subject_evidence: Arc<dyn GithubSubjectEvidenceRepository> = store.clone();
-        let repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository> = store;
+        let repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository> =
+            store.clone();
+        let check_reruns: Arc<dyn automata_ci_store::GithubCheckRerunRepository> = store;
         let ingress = Arc::new(
-            GithubDeliveryIngress::new_with_repository_dispatch(
+            GithubDeliveryIngress::new_with_controls(
                 verifier,
                 config.webhook().verifier_revision(),
                 plan.into_connections(),
                 blobs,
                 subject_evidence,
                 repository_dispatches,
+                check_reruns,
                 delivery_clock,
             )
             .map_err(GithubProviderRuntimeBuildError::Ingress)?,
