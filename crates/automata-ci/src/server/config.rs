@@ -20,6 +20,9 @@ use automata_ci_auth::{github::GithubClientId, installation::InstallationTenant}
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
+use automata_ci_provisioning::{
+    DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
+};
 use automata_ci_results_github::ResultsPublicEndpoint;
 use automata_ci_store::{
     LeaseFailureLimit, MaintenanceBatchSize, PostgresTransportSecurity, StaleSessionTimeoutMillis,
@@ -41,6 +44,7 @@ const MAX_RESULTS_KEY_ID_BYTES: usize = 255;
 const MAX_GITHUB_CLIENT_SECRET_BYTES: usize = 16 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_CONFORMANCE_EXPORT_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_MANAGEMENT_CLIENT_CERTIFICATES: usize = 8;
 const SECRET_ENCRYPTION_KEY_BYTES: usize = 32;
 const SESSION_HASH_KEY_BYTES: usize = 32;
 const MIN_BOOTSTRAP_TOKEN_BYTES: usize = 32;
@@ -325,12 +329,55 @@ pub struct ServerConfig {
     pub(crate) runner_server_ca: SecretSource,
     pub(crate) runner_server_certificate: SecretSource,
     pub(crate) runner_server_private_key: SecretSource,
+    pub(crate) management: Option<ManagementConfig>,
     pub(crate) readiness_probe_interval: Duration,
     pub(crate) maintenance_interval: Duration,
     pub(crate) maintenance_batch_size: MaintenanceBatchSize,
     pub(crate) maximum_lease_failures: LeaseFailureLimit,
     pub(crate) stale_runner_session_timeout: StaleSessionTimeoutMillis,
     pub(crate) fallback_tenant_id: String,
+}
+
+/// Complete opt-in configuration for the private shard-management listener.
+#[derive(Clone, Debug)]
+pub struct ManagementConfig {
+    pub(crate) listen: SocketAddr,
+    authority: ProvisioningAuthority,
+    client_certificate_sha256: Vec<[u8; 32]>,
+    client_ca_certificate: SecretSource,
+    server_certificate: SecretSource,
+    server_private_key: SecretSource,
+}
+
+impl ManagementConfig {
+    /// Returns the stable authority and its exact shard and delegated-issuer scope.
+    pub const fn authority(&self) -> &ProvisioningAuthority {
+        &self.authority
+    }
+
+    pub(crate) fn client_certificate_sha256(&self) -> &[[u8; 32]] {
+        &self.client_certificate_sha256
+    }
+
+    pub(crate) fn load_client_ca_certificate_pem(
+        &self,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+        self.client_ca_certificate.load_bytes(MAX_CA_PEM_BYTES)
+    }
+
+    pub(crate) fn load_server_certificate_pem(
+        &self,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+        self.server_certificate
+            .load_bytes(MAX_CERTIFICATE_PEM_BYTES)
+    }
+
+    pub(crate) fn load_server_private_key_pem(
+        &self,
+    ) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+        self.server_private_key
+            .load_bytes(MAX_PRIVATE_KEY_PEM_BYTES)
+    }
 }
 
 /// Mandatory rotation-aware wrapping keys for durable control-plane payloads.
@@ -575,15 +622,7 @@ impl ServerConfig {
     pub fn from_args(args: &ServerArgs) -> Result<Self, ServerConfigError> {
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
-        if args.fallback_tenant_id.is_empty()
-            || args.fallback_tenant_id.len() > 255
-            || args
-                .fallback_tenant_id
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
-        {
-            return Err(ServerConfigError::InvalidFallbackTenant);
-        }
+        validate_fallback_tenant(&args.fallback_tenant_id)?;
         let s3_endpoint =
             Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
         if args.database_max_connections == 0 {
@@ -628,6 +667,7 @@ impl ServerConfig {
             return Err(ServerConfigError::MissingRunnerPublicEndpoint);
         }
         let control_plane_encryption = control_plane_encryption_configuration(args)?;
+        let management = management_configuration(args)?;
         Ok(Self {
             http_listen: args.listen,
             metrics_listen: args.metrics_listen,
@@ -666,6 +706,7 @@ impl ServerConfig {
             runner_server_ca: args.runner_server_ca_source.clone(),
             runner_server_certificate: args.runner_server_certificate_source.clone(),
             runner_server_private_key: args.runner_server_key_source.clone(),
+            management,
             readiness_probe_interval,
             maintenance_interval,
             maintenance_batch_size,
@@ -711,6 +752,11 @@ impl ServerConfig {
     /// Returns the mandatory encryption configuration for durable control-plane payloads.
     pub const fn control_plane_encryption(&self) -> &ControlPlaneEncryptionConfig {
         &self.control_plane_encryption
+    }
+
+    /// Returns the private shard-management configuration when explicitly enabled.
+    pub const fn management(&self) -> Option<&ManagementConfig> {
+        self.management.as_ref()
     }
 
     /// Returns the strict GitHub provider registry only when explicitly enabled.
@@ -780,6 +826,18 @@ impl ServerConfig {
     }
 }
 
+fn validate_fallback_tenant(value: &str) -> Result<(), ServerConfigError> {
+    if value.is_empty()
+        || value.len() > 255
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(ServerConfigError::InvalidFallbackTenant);
+    }
+    Ok(())
+}
+
 fn validate_local_listeners(args: &ServerArgs) -> Result<(), ServerConfigError> {
     if args.listen.port() == 0 || args.runner_listen.port() == 0 || args.results_listen.port() == 0
     {
@@ -797,6 +855,107 @@ fn validate_local_listeners(args: &ServerArgs) -> Result<(), ServerConfigError> 
         return Err(ServerConfigError::MetricsRequiresLoopback);
     }
     Ok(())
+}
+
+fn management_configuration(
+    args: &ServerArgs,
+) -> Result<Option<ManagementConfig>, ServerConfigError> {
+    let configured = args.management_listen.is_some()
+        || args.management_shard_id.is_some()
+        || args.management_authority_id.is_some()
+        || args.management_delegated_actor_issuer.is_some()
+        || !args.management_client_certificate_sha256.is_empty()
+        || args.management_client_ca_certificate_source.is_some()
+        || args.management_server_certificate_source.is_some()
+        || args.management_server_key_source.is_some();
+    if !configured {
+        return Ok(None);
+    }
+
+    let listen = args
+        .management_listen
+        .filter(|listen| listen.port() != 0)
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)?;
+    let shard_id = args
+        .management_shard_id
+        .as_deref()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)
+        .and_then(|value| {
+            ShardId::new(value.to_owned())
+                .map_err(|_| ServerConfigError::InvalidManagementConfiguration)
+        })?;
+    let authority_id = args
+        .management_authority_id
+        .as_deref()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)
+        .and_then(|value| {
+            ProvisioningAuthorityId::new(value.to_owned())
+                .map_err(|_| ServerConfigError::InvalidManagementConfiguration)
+        })?;
+    let delegated_actor_issuer = args
+        .management_delegated_actor_issuer
+        .as_deref()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)
+        .and_then(|value| {
+            DelegatedActorIssuer::new(value.to_owned())
+                .map_err(|_| ServerConfigError::InvalidManagementConfiguration)
+        })?;
+    if args.management_client_certificate_sha256.is_empty()
+        || args.management_client_certificate_sha256.len() > MAX_MANAGEMENT_CLIENT_CERTIFICATES
+    {
+        return Err(ServerConfigError::InvalidManagementConfiguration);
+    }
+    let mut unique_fingerprints = BTreeSet::new();
+    for encoded in &args.management_client_certificate_sha256 {
+        let fingerprint = decode_sha256_fingerprint(encoded)
+            .ok_or(ServerConfigError::InvalidManagementConfiguration)?;
+        if !unique_fingerprints.insert(fingerprint) {
+            return Err(ServerConfigError::InvalidManagementConfiguration);
+        }
+    }
+    let client_ca_certificate = args
+        .management_client_ca_certificate_source
+        .clone()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)?;
+    let server_certificate = args
+        .management_server_certificate_source
+        .clone()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)?;
+    let server_private_key = args
+        .management_server_key_source
+        .clone()
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)?;
+
+    Ok(Some(ManagementConfig {
+        listen,
+        authority: ProvisioningAuthority::new(authority_id, shard_id, delegated_actor_issuer),
+        client_certificate_sha256: unique_fingerprints.into_iter().collect(),
+        client_ca_certificate,
+        server_certificate,
+        server_private_key,
+    }))
+}
+
+fn decode_sha256_fingerprint(encoded: &str) -> Option<[u8; 32]> {
+    if encoded.len() != 64 || !encoded.is_ascii() {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    Some(decoded)
+}
+
+const fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn runner_public_authority_configuration(
@@ -1034,6 +1193,9 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
+        args.management_client_ca_certificate_source.as_ref(),
+        args.management_server_certificate_source.as_ref(),
+        args.management_server_key_source.as_ref(),
     ];
     if required
         .into_iter()
@@ -1209,6 +1371,9 @@ pub enum ServerConfigError {
     /// The optional GitHub provider registry is malformed, excessive, or incoherent.
     #[error("GitHub provider configuration is invalid")]
     InvalidGithubProviderConfiguration,
+    /// The opt-in mTLS management listener is partial, malformed, or unbounded.
+    #[error("management listener configuration is invalid")]
+    InvalidManagementConfiguration,
     /// The unauthenticated fallback tenant identity is malformed.
     #[error("fallback tenant identity is invalid")]
     InvalidFallbackTenant,
