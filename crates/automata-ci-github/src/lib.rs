@@ -8,6 +8,7 @@ mod changed_files;
 mod checks;
 mod config;
 mod endpoint;
+mod event;
 mod pagination;
 mod repository;
 mod repository_path;
@@ -36,6 +37,18 @@ pub use config::{
     GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
 };
 pub use endpoint::GithubHttpEndpoint;
+pub use event::{
+    GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    GITHUB_EVENT_REGISTRY_SCHEMA_V1, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubEventActivityPolicy,
+    GithubEventActor, GithubEventActorKind, GithubEventChangedFilesStrategy,
+    GithubEventEnvelopeError, GithubEventFacts, GithubEventRawBlobIdentity,
+    GithubEventRecursionPolicy, GithubEventRefFacts, GithubEventRefRule, GithubEventRegistryEntry,
+    GithubEventRegistryError, GithubEventRegistryV1, GithubEventRepositoryFacts,
+    GithubEventSourceRule, GithubEventTriggerModel, GithubEventTrustFact,
+    GithubMergeGroupEventFacts, GithubPullRequestEventFacts, GithubPushEventFacts,
+    GithubRepositoryDispatchEventFacts, GithubSealedEventEnvelopeV1, GithubWorkflowEventKind,
+    MAX_GITHUB_EVENT_ENVELOPE_BYTES,
+};
 pub use webhook::{
     AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubPushRef, GithubPushRefKind, GithubPushRepository,

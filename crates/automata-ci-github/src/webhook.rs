@@ -4,10 +4,13 @@ use automata_ci_scm::ExactRevision;
 use bytes::{Bytes, BytesMut};
 use reqwest::header::{HeaderMap, HeaderValue};
 use ring::{digest, hmac};
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
-use crate::repository_path::{has_ascii_case_insensitive_suffix, is_valid_component};
+use crate::{
+    event::GithubEventActor,
+    repository_path::{has_ascii_case_insensitive_suffix, is_valid_component},
+};
 
 /// Maximum exact webhook body accepted by workflow admission.
 pub const MAX_GITHUB_WEBHOOK_BODY_BYTES: usize = 26_214_400;
@@ -680,7 +683,8 @@ impl fmt::Debug for GithubWebhookBodyDigest {
 }
 
 /// Canonical kind of a full GitHub push reference.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GithubPushRefKind {
     /// A `refs/heads/...` branch reference.
     Branch,
@@ -812,7 +816,8 @@ impl fmt::Debug for GithubPushRepository {
 }
 
 /// Closed repository visibility authenticated from a GitHub webhook body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GithubRepositoryVisibility {
     /// The exact repository is anonymously readable.
     Public,
@@ -842,6 +847,7 @@ pub struct VerifiedGithubPush {
     raw_body: Bytes,
     body_sha256: GithubWebhookBodyDigest,
     installation_id: NonZeroU64,
+    actor: Option<GithubEventActor>,
     repository: GithubPushRepository,
     git_ref: GithubPushRef,
     before_commit_sha: Box<str>,
@@ -881,6 +887,12 @@ impl VerifiedGithubPush {
     /// Returns the nonzero GitHub App installation identifier.
     pub const fn installation_id(&self) -> NonZeroU64 {
         self.installation_id
+    }
+
+    /// Returns the authenticated sender facts when supplied by the webhook.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&GithubEventActor> {
+        self.actor.as_ref()
     }
 
     /// Returns the internally consistent provider repository identity.
@@ -965,6 +977,7 @@ impl fmt::Debug for VerifiedGithubPush {
             .field("body_len", &self.raw_body.len())
             .field("body_sha256", &self.body_sha256)
             .field("installation_id", &self.installation_id)
+            .field("actor", &self.actor)
             .field("repository", &self.repository)
             .field("git_ref", &self.git_ref)
             .field("before_commit_sha", &"[redacted]")
@@ -1165,7 +1178,18 @@ struct PushPayload {
     forced: bool,
     repository: PushRepositoryPayload,
     installation: PushInstallationPayload,
+    #[serde(default)]
+    sender: Option<PushActorPayload>,
     commits: BoundedCommits,
+}
+
+#[derive(Deserialize)]
+struct PushActorPayload {
+    id: u64,
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1245,6 +1269,12 @@ fn normalize_push(
     payload: PushPayload,
 ) -> Result<VerifiedGithubPush, GithubWebhookError> {
     let installation_id = durable_provider_id(payload.installation.id)?;
+    let actor = payload
+        .sender
+        .map(|actor| {
+            GithubEventActor::from_webhook_fields(actor.id, actor.login, actor.kind.as_deref())
+        })
+        .transpose()?;
     let repository = GithubPushRepository::from_webhook_fields(
         payload.repository.id,
         payload.repository.owner.id,
@@ -1271,6 +1301,7 @@ fn normalize_push(
         raw_body,
         body_sha256,
         installation_id,
+        actor,
         repository,
         git_ref,
         before_commit_sha: payload.before.into_boxed_str(),

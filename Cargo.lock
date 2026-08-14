@@ -486,6 +486,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-auth",
+ "automata-ci-blob",
+ "automata-ci-core",
  "automata-ci-scm",
  "axum",
  "bytes",
@@ -493,6 +495,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
  "time",
  "tokio",
