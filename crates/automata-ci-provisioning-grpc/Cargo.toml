@@ -1,0 +1,38 @@
+[package]
+name = "automata-ci-provisioning-grpc"
+description = "mTLS gRPC adapter for Automata Core workspace provisioning"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-provisioning.workspace = true
+bytes.workspace = true
+prost = { version = "=0.14.4", default-features = false, features = ["derive"] }
+prost-types = { version = "=0.14.4", default-features = false }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+tonic = { workspace = true, features = ["codegen", "router", "server", "tls-ring"] }
+tonic-prost.workspace = true
+tonic-types.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+rcgen = { workspace = true, features = ["pem"] }
+static_assertions.workspace = true
+tonic = { workspace = true, features = ["channel", "tls-ring"] }
+
+[build-dependencies]
+protox = { version = "=0.9.1", default-features = false }
+tonic-prost-build = { version = "=0.14.6", default-features = false, features = ["transport"] }

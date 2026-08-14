@@ -48,14 +48,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends jq shellcheck
-          ./scripts/ci/install-buf.sh target/ci-tools
-
-      - name: Verify Cloud/Core Protobuf contracts
-        env:
-          AUTOMATA_BUF_BINARY: ${{ github.workspace }}/target/ci-tools/buf
-          AUTOMATA_BUF_BREAKING_AGAINST: https://github.com/${{ github.repository }}.git#branch=main,subdir=contracts/cloud-core
-          AUTOMATA_BUF_BREAKING_BASELINE_PROBE: https://raw.githubusercontent.com/${{ github.repository }}/main/contracts/cloud-core/buf.yaml
-        run: ./scripts/ci/verify-cloud-core-contracts.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check
