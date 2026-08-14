@@ -13,7 +13,7 @@ pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
 }
 
 async fn doctor(args: &LocalDoctorArgs) -> Result<()> {
-    let request = DoctorRequest::new(engine_request(args.engine), args.state_dir.clone());
+    let request = DoctorRequest::new(engine_request(args.engine));
     let mut inspection = Box::pin(inspect(request));
     let report = tokio::select! {
         biased;
@@ -53,10 +53,6 @@ fn print_human_report(report: &DoctorReport) {
         report.operating_system(),
         report.architecture()
     );
-    match report.state_directory() {
-        Some(path) => println!("State directory: {path}"),
-        None => println!("State directory: unavailable"),
-    }
     match report.selected_engine() {
         Some(selection) => println!(
             "Container engine: {} {} (API {})",

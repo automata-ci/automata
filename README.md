@@ -50,8 +50,7 @@ workflow.
 
 Automata includes a read-only preflight for the planned disposable local
 installation. It checks the supported host tuple, Docker Engine, Docker Compose
-2.20.0 or newer, and a safe platform-native state root without creating the
-root or any containers:
+2.20.0 or newer without creating host state or any containers:
 
 ```console
 cargo run --locked -p automata-ci -- local doctor

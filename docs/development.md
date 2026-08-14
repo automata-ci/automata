@@ -267,16 +267,14 @@ adding a page kind.
 The first cross-platform local-installation slice is a read-only host check for
 x86-64 Linux, Apple Silicon macOS, and x86-64 Windows. It requires a local Linux
 Docker Engine with the supported API and matching architecture, Docker Compose
-plugin version 2.20.0 or newer, resolves a dedicated root below the native
-platform user-state directories, and rejects broad roots and a Unix root
-process:
+plugin version 2.20.0 or newer, and rejects a Unix root process:
 
 ```console
 cargo run --locked -p automata-ci -- local doctor
 cargo run --locked -p automata-ci -- local doctor --json
 ```
 
-The command does not create the state directory or any container resources.
+The command does not create host state or any container resources.
 `local up` and the worker composition remain planned; follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.

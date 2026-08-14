@@ -28,14 +28,7 @@ fn preview_is_an_explicit_dependency_free_mode() {
 #[test]
 fn local_doctor_is_an_explicit_read_only_preflight() {
     let cli = Cli::try_parse_from([
-        "automata",
-        "local",
-        "doctor",
-        "--engine",
-        "docker",
-        "--state-dir",
-        "/tmp/automata-local",
-        "--json",
+        "automata", "local", "doctor", "--engine", "docker", "--json",
     ])
     .expect("local doctor must parse");
 
@@ -44,10 +37,6 @@ fn local_doctor_is_an_explicit_read_only_preflight() {
     };
     let LocalCommand::Doctor(args) = local.command;
     assert_eq!(args.engine, LocalContainerEngine::Docker);
-    assert_eq!(
-        args.state_dir.as_deref(),
-        Some(std::path::Path::new("/tmp/automata-local"))
-    );
     assert!(args.json);
 
     assert!(
@@ -68,6 +57,17 @@ fn local_doctor_is_an_explicit_read_only_preflight() {
     assert!(
         Cli::try_parse_from(["automata", "local", "doctor", "--output", "json"]).is_err(),
         "local lifecycle output must remain an explicit command contract"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "local",
+            "doctor",
+            "--state-dir",
+            "/tmp/automata-local",
+        ])
+        .is_err(),
+        "engine-owned local state must not expose a host state-directory option"
     );
 }
 

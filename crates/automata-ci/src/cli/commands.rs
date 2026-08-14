@@ -84,9 +84,6 @@ pub struct LocalDoctorArgs {
     /// Container engine to inspect.
     #[arg(long, env = "AUTOMATA_LOCAL_ENGINE", value_enum, default_value_t)]
     pub engine: LocalContainerEngine,
-    /// Dedicated root below a platform user-state directory. A native default is used when omitted.
-    #[arg(long, env = "AUTOMATA_LOCAL_STATE_DIR", value_name = "USER_STATE_PATH")]
-    pub state_dir: Option<PathBuf>,
     /// Render one stable JSON document instead of a human-readable report.
     #[arg(long)]
     pub json: bool,
