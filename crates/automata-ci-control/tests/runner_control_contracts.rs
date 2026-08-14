@@ -1,11 +1,4 @@
-use automata_ci_core::{
-    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobSource, RunId,
-    RunValueTemplates, RunnerRequirements, RuntimeBoolean, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, ValueTemplate, WorkflowId,
-};
-use automata_ci_protocol::ProtocolLimits;
-use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_runner_control::{
+use automata_ci_control::runner_control::{
     ControlIdGenerator, ControlPortError, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
     JobIrBlobError, JobIrObjectReader, LeaseOfferCommandPublisher, LeasePoller,
     MAX_HEARTBEAT_INTERVAL_MILLIS, MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS,
@@ -13,6 +6,13 @@ use automata_ci_runner_control::{
     RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssuer,
     verify_job_ir_blob,
 };
+use automata_ci_core::{
+    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobSource, RunId,
+    RunValueTemplates, RunnerRequirements, RuntimeBoolean, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, ValueTemplate, WorkflowId,
+};
+use automata_ci_protocol::ProtocolLimits;
+use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{JobIrMetadata, ObjectKey};
 use sha2::{Digest as _, Sha256};
 use static_assertions::assert_obj_safe;

@@ -1,11 +1,11 @@
 use std::{fmt, io::Write as _, sync::Arc, time::Instant};
 
+use crate::lease::{
+    AuthenticatedRunnerSession, ClaimedLeasePoll, LeaseClock, LeasePollError, LeasePollOutcome,
+};
 use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
-};
-use automata_ci_control::{
-    AuthenticatedRunnerSession, ClaimedLeasePoll, LeaseClock, LeasePollError, LeasePollOutcome,
 };
 use automata_ci_core::{
     JobAuthorityProfile, JobIrVersionRange, JobLifecycle, LogAck, OperationId, Sha256Digest,
@@ -46,7 +46,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::port::{
+use super::observer::NoopRunnerControlObserver;
+use super::port::{
     AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, DesiredRunnerState,
     JobIrObjectReader, LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand,
     LeaseOfferCommandPublisher, LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
@@ -54,12 +55,12 @@ use crate::port::{
     RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer, decode_durable_server_command,
     is_durable_lease_offer_command,
 };
-use crate::verify::verify_job_ir_blob;
-use crate::{
-    LeaseOfferObservation, NoopRunnerControlObserver, RunnerControlFailure,
-    RunnerControlMessageKind, RunnerControlMessageOutcome, RunnerControlObserver,
-    RunnerDurableDisposition, RunnerDurableMessageKind, RunnerHandshakeOutcome,
-    RunnerHandshakeRejection, RunnerLeaseRequestStage,
+use super::verify::verify_job_ir_blob;
+use super::{
+    LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
+    RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
+    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
+    RunnerLeaseRequestStage,
 };
 
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
@@ -75,7 +76,7 @@ enum PendingCommand {
 }
 
 /// Immutable media type used for canonical terminal [`automata_ci_core::JobResult`] JSON.
-pub const JOB_RESULT_MEDIA_TYPE: &str = "application/vnd.automata.job-result+json";
+const JOB_RESULT_MEDIA_TYPE: &str = "application/vnd.automata.job-result+json";
 /// Immutable media type used for deterministic gzip-compressed log-frame JSON.
 pub const LOG_SEGMENT_MEDIA_TYPE: &str = "application/vnd.automata.log-segment+json+gzip";
 

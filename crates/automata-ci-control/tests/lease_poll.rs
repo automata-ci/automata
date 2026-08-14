@@ -1,12 +1,12 @@
 use std::{sync::Mutex, time::Duration};
 
 use async_trait::async_trait;
-use automata_ci_control::{
+use automata_ci_control::lease::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig,
     LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
     LeasePollService, LeaseTimeToLive, RunnableAttemptGate, RunnableAttemptGateDisposition,
 };
-use automata_ci_control_plane::DeterministicScheduler;
+use automata_ci_control::scheduling::DeterministicScheduler;
 use automata_ci_core::{
     Architecture, AttemptId, ContainerCapabilities, ContainerFeature, FencingToken, JobId,
     JobIrVersion, Lease, LeaseId, OperatingSystem, OperationId, ResourceCapacity, RunId,

@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use automata_ci::{build_info::BuildInfo, server::ControlPlaneMetrics};
-use automata_ci_control::{LeasePollObservation, LeasePollObserver};
-use automata_ci_runner_control::{
+use automata_ci_control::lease::{LeasePollObservation, LeasePollObserver};
+use automata_ci_control::runner_control::{
     LeaseOfferObservation, RunnerControlMessageKind, RunnerControlMessageOutcome,
     RunnerControlObserver, RunnerDurableDisposition, RunnerDurableMessageKind,
     RunnerHandshakeOutcome,

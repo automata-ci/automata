@@ -17,10 +17,17 @@ use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
 use automata_ci_blob_s3::{
     S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
 };
-use automata_ci_control::{
+use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
 };
-use automata_ci_control_plane::{DeterministicScheduler, SchedulerPolicy};
+use automata_ci_control::runner_control::{
+    ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
+    LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
+    RandomControlIdGenerator, RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts,
+    RunnerIdentityPorts, RunnerLeasePorts, RunnerRegistrationAuthorizer,
+    RunnerSessionFenceResolver, StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
+};
+use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
@@ -38,13 +45,6 @@ use automata_ci_results_github::{
 };
 use automata_ci_runner_auth::{DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits};
 use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
-use automata_ci_runner_control::{
-    ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
-    LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
-    RandomControlIdGenerator, RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts,
-    RunnerIdentityPorts, RunnerLeasePorts, RunnerRegistrationAuthorizer,
-    RunnerSessionFenceResolver, StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
-};
 use automata_ci_runner_transport::{
     ConfigurationError as TransportConfigurationError, RunnerControlHandler, RunnerControlServer,
     ServerTlsConfig, TransportLimits,
@@ -433,7 +433,8 @@ impl ProductionComponents {
             Arc::clone(&protected_environment_repository),
             managed_secret_tenant.clone(),
         ));
-        let lease_repository: Arc<dyn automata_ci_control::LeasePollRepository> = store.clone();
+        let lease_repository: Arc<dyn automata_ci_control::lease::LeasePollRepository> =
+            store.clone();
         let lease_poller: Arc<dyn LeasePoller> = Arc::new(
             LeasePollAdapter::new(
                 lease_repository,
@@ -829,7 +830,7 @@ fn build_results(
 ) -> Result<
     (
         Router,
-        Arc<dyn automata_ci_runner_control::RuntimeAuthorityIssuer>,
+        Arc<dyn automata_ci_control::runner_control::RuntimeAuthorityIssuer>,
     ),
     ServerCompositionError,
 > {
@@ -854,15 +855,16 @@ fn build_results(
         .into_iter()
         .flat_map(super::GithubProviderConfig::repositories)
         .map(|repository| repository.cache_repository().clone());
-    let runtime_authority_issuer: Arc<dyn automata_ci_runner_control::RuntimeAuthorityIssuer> =
-        Arc::new(
-            GithubResultsRuntimeAuthorityIssuer::new(
-                Arc::clone(&authority),
-                RESULTS_RUNTIME_TOKEN_VALIDITY_SECONDS,
-                cache_repositories,
-            )
-            .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?,
-        );
+    let runtime_authority_issuer: Arc<
+        dyn automata_ci_control::runner_control::RuntimeAuthorityIssuer,
+    > = Arc::new(
+        GithubResultsRuntimeAuthorityIssuer::new(
+            Arc::clone(&authority),
+            RESULTS_RUNTIME_TOKEN_VALIDITY_SECONDS,
+            cache_repositories,
+        )
+        .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?,
+    );
     let observer: Arc<dyn ResultsObserver> = Arc::new(metrics.clone());
     let repository: Arc<dyn ArtifactRepository> = Arc::new(PostgresArtifactRepository::new(
         store.postgres_pool().clone(),

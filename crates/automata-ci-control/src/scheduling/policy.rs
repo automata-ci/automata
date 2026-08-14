@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::{
+use super::{
     CandidateCapacity, CandidateDecline, CandidateDeclineReason, EffectiveRunner,
     PlacementDecision, PlacementDecline, RunnableCandidate, RunnerRequirementDecline, RunnerSlot,
     SchedulingInput,

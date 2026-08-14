@@ -5,6 +5,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_control::runner_control::{
+    ControlPortError, JobIrObjectReader, OptionalRuntimeAuthorityIssuer as _,
+    RuntimeAuthorityIssueRequest,
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionGrant, JobPermissionRequest, JobSource,
@@ -18,10 +22,6 @@ use automata_ci_credential_github::{
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_runner_control::{
-    ControlPortError, JobIrObjectReader, OptionalRuntimeAuthorityIssuer as _,
-    RuntimeAuthorityIssueRequest,
-};
 use automata_ci_store::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,
     GithubJobRuntimeAuthorityRepository, GithubJobRuntimeAuthorityResolution,

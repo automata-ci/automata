@@ -3,6 +3,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use automata_ci_control::runner_control::{
+    RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer as _,
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, Lease,
     LeaseId, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
@@ -16,7 +19,6 @@ use automata_ci_results_github::{
     GithubResultsRuntimeAuthorityIssuer, HmacResultsAuthority, HmacResultsAuthorityConfig,
     ResultsClock, ResultsPublicEndpoint, RuntimeTokenVerifier as _, TokenError,
 };
-use automata_ci_runner_control::{RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer as _};
 use automata_ci_store::{
     JobIrMetadata, ObjectKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };

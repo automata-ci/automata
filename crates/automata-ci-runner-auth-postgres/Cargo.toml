@@ -23,9 +23,9 @@ path = "tests/runner_auth_postgres.rs"
 [dependencies]
 async-trait.workspace = true
 automata-ci-auth.workspace = true
+automata-ci-control.workspace = true
 automata-ci-core.workspace = true
 automata-ci-runner-auth.workspace = true
-automata-ci-runner-control.workspace = true
 automata-ci-store.workspace = true
 sqlx.workspace = true
 uuid.workspace = true

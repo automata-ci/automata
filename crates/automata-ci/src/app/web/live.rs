@@ -3457,7 +3457,7 @@ mod tests {
         let compressed = encoder.finish().expect("finish log");
         let payload = BlobPayload::from_bytes(
             BlobKey::new("logs/test/segment.json.gz").expect("log key"),
-            MediaType::new(automata_ci_runner_control::LOG_SEGMENT_MEDIA_TYPE)
+            MediaType::new(automata_ci_control::runner_control::LOG_SEGMENT_MEDIA_TYPE)
                 .expect("log media type"),
             bytes::Bytes::from(compressed),
         );

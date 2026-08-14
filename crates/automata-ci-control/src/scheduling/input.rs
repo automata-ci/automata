@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use automata_ci_core::{AttemptId, RunnerId, RunnerSessionId};
 use thiserror::Error;
 
-use crate::{EffectiveRunner, Placement, RunnableCandidate, RunnerSlot};
+use super::{EffectiveRunner, Placement, RunnableCandidate, RunnerSlot};
 
 /// A duplicate-free scheduling snapshot borrowed from application state.
 ///

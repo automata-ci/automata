@@ -14,8 +14,15 @@ use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, ImmutableBlobStore, MemoryBlobStore,
     PutBlobOutcome, VerifiedBlob,
 };
-use automata_ci_control::{
+use automata_ci_control::lease::{
     AuthenticatedRunnerSession, LeaseClock, LeasePollError, LeasePollOutcome,
+};
+use automata_ci_control::runner_control::{
+    AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, JobIrObjectReader,
+    LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand, LeaseOfferCommandPublisher,
+    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
+    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
+    RuntimeAuthorityIssuer,
 };
 use automata_ci_core::{
     AttemptId, JobId, JobIrVersion, Lease, OperationId, RunId, RunnerId, RunnerSessionId,
@@ -23,13 +30,6 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CommandSequence as ProtocolCommandSequence, JobRuntimeAuthorities, LeaseRequest,
-};
-use automata_ci_runner_control::{
-    AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, JobIrObjectReader,
-    LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand, LeaseOfferCommandPublisher,
-    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
-    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
-    RuntimeAuthorityIssuer,
 };
 use automata_ci_store::{
     AcknowledgeRunnerCommands, BeginLeaseRequest, BegunLeaseRequest, CommandCursor,

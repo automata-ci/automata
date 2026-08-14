@@ -2,7 +2,7 @@
 
 use automata_ci_core::{AttemptId, JobId, UnixMillis};
 
-use crate::RoutingRequirements;
+use super::RoutingRequirements;
 
 /// One durable attempt that all dependency and concurrency gates have made
 /// runnable.

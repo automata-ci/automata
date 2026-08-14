@@ -8,10 +8,10 @@ use automata_ci_auth::{
     },
     time::Clock,
 };
-use automata_ci_core::Sha256Digest;
-use automata_ci_runner_control::{
+use automata_ci_control::runner_control::{
     AuthorizedRunnerRegistration, ControlPortError, RunnerRegistrationAuthorizer,
 };
+use automata_ci_core::Sha256Digest;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 

@@ -14,11 +14,11 @@ readme = "README.md"
 [dependencies]
 async-trait.workspace = true
 automata-ci-auth.workspace = true
+automata-ci-control.workspace = true
 automata-ci-core.workspace = true
 automata-ci-credential.workspace = true
 automata-ci-key-management.workspace = true
 automata-ci-protocol.workspace = true
-automata-ci-runner-control.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-store.workspace = true
 base64.workspace = true

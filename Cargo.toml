@@ -10,7 +10,6 @@ members = [
     "crates/automata-ci-blob-s3",
     "crates/automata-ci-build-support",
     "crates/automata-ci-control",
-    "crates/automata-ci-control-plane",
     "crates/automata-ci-core",
     "crates/automata-ci-credential",
     "crates/automata-ci-credential-github",
@@ -35,7 +34,6 @@ members = [
     "crates/automata-ci-runner",
     "crates/automata-ci-runner-auth",
     "crates/automata-ci-runner-auth-postgres",
-    "crates/automata-ci-runner-control",
     "crates/automata-ci-runner-crypto",
     "crates/automata-ci-runner-journal",
     "crates/automata-ci-runner-runtime",
@@ -86,7 +84,6 @@ automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
 automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
 automata-ci-build-support = { path = "crates/automata-ci-build-support", version = "0.1.0" }
 automata-ci-control = { path = "crates/automata-ci-control", version = "0.1.0" }
-automata-ci-control-plane = { path = "crates/automata-ci-control-plane", version = "0.1.0" }
 automata-ci-core = { path = "crates/automata-ci-core", version = "0.1.0" }
 automata-ci-credential = { path = "crates/automata-ci-credential", version = "0.1.0" }
 automata-ci-credential-github = { path = "crates/automata-ci-credential-github", version = "0.1.0" }
@@ -110,7 +107,6 @@ automata-ci-provisioning-postgres = { path = "crates/automata-ci-provisioning-po
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
 automata-ci-runner-auth = { path = "crates/automata-ci-runner-auth", version = "0.1.0" }
 automata-ci-runner-auth-postgres = { path = "crates/automata-ci-runner-auth-postgres", version = "0.1.0" }
-automata-ci-runner-control = { path = "crates/automata-ci-runner-control", version = "0.1.0" }
 automata-ci-runner-crypto = { path = "crates/automata-ci-runner-crypto", version = "0.1.0" }
 automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", version = "0.1.0" }
 automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }

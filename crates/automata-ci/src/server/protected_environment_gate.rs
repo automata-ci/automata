@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use automata_ci_control::{RunnableAttemptGate, RunnableAttemptGateDisposition};
+use automata_ci_control::lease::{RunnableAttemptGate, RunnableAttemptGateDisposition};
 use automata_ci_core::{AttemptId, UnixMillis};
 use automata_ci_store::{
     JobEnvironmentGatePhase, JobEnvironmentGateState, PrepareJobEnvironment,

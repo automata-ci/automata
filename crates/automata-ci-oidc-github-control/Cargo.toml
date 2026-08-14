@@ -13,10 +13,10 @@ readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true
+automata-ci-control.workspace = true
 automata-ci-core.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-protocol.workspace = true
-automata-ci-runner-control.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true

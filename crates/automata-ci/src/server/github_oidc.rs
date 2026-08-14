@@ -9,6 +9,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_control::runner_control::{
+    CompositeRuntimeAuthorityIssuer, ControlPortError, OptionalRuntimeAuthorityIssuer,
+    RuntimeAuthorityIssuer,
+};
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_oidc_github::{
     GithubOidcApi, MAXIMUM_OIDC_KEYS_PER_KEYRING, MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS,
@@ -22,10 +26,6 @@ use automata_ci_oidc_github_control::{
     ReservedGithubOidcRuntimeAuthority, UnavailableGithubOidcRuntimeAuthorityIssuer,
 };
 use automata_ci_results_github::ResultsPublicEndpoint;
-use automata_ci_runner_control::{
-    CompositeRuntimeAuthorityIssuer, ControlPortError, OptionalRuntimeAuthorityIssuer,
-    RuntimeAuthorityIssuer,
-};
 use automata_ci_store::{
     GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
@@ -812,6 +812,7 @@ struct TimeoutResponse {
 mod tests {
     use std::{fs, path::PathBuf, sync::Mutex};
 
+    use automata_ci_control::runner_control::RuntimeAuthorityIssueRequest;
     use automata_ci_core::{
         AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId,
         JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobSource, Lease, LeaseId,
@@ -826,7 +827,6 @@ mod tests {
         RuntimeAuthorityEndpoint, RuntimeAuthorityName,
     };
     use automata_ci_protocol_protobuf::encode_job_ir;
-    use automata_ci_runner_control::RuntimeAuthorityIssueRequest;
     use automata_ci_store::{
         GithubOidcStoreError, JobIrMetadata, ObjectKey, ReservedGithubOidcAuthority,
         RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,

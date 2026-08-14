@@ -4,8 +4,14 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use automata_ci_control::{
+use automata_ci_control::lease::{
     LeaseClaimRejection, LeasePollFailure, LeasePollObservation, LeasePollObserver,
+};
+use automata_ci_control::runner_control::{
+    LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
+    RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
+    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
+    RunnerLeaseRequestStage,
 };
 use automata_ci_metrics::{
     BuildInfo as MetricsBuildInfo, BuildInfoError, Counter, ExporterLimits, Family, Gauge,
@@ -16,12 +22,6 @@ use automata_ci_results_github::{
     ResultsBlobOperation, ResultsBlobOperationOutcome, ResultsHttpMethod, ResultsHttpRoute,
     ResultsHttpStatusClass, ResultsObserver, ResultsOperation, ResultsOperationOutcome,
     ResultsRepositoryOperation, ResultsRepositoryOperationOutcome, ResultsTransferDirection,
-};
-use automata_ci_runner_control::{
-    LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
-    RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
-    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerLeaseRequestStage,
 };
 use automata_ci_runner_transport::{
     RunnerTransportApplicationRejection, RunnerTransportAuthenticationRejection,

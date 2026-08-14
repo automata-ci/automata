@@ -1,8 +1,8 @@
 use std::io::{Cursor, Read as _, Write as _};
 
 use automata_ci_blob::VerifiedBlob;
+use automata_ci_control::runner_control::LOG_SEGMENT_MEDIA_TYPE;
 use automata_ci_core::{AttemptId, LogFrame, LogSequence, LogStreamId};
-use automata_ci_runner_control::LOG_SEGMENT_MEDIA_TYPE;
 use automata_ci_store::MAX_LOG_SEGMENT_BYTES;
 use thiserror::Error;
 

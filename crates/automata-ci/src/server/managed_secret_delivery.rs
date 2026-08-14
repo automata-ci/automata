@@ -10,14 +10,14 @@ use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_auth::{machine::AuthenticatedMachine, time::Clock};
+use automata_ci_control::runner_control::{
+    ControlPortError, ManagedSecretBindingIssuer, RuntimeAuthorityIssueRequest,
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, Lease, LeaseId, RunId, RunnerId, RunnerSessionId, Sha256Digest,
     UnixMillis,
 };
 use automata_ci_protocol::ManagedSecretBindingOverlay;
-use automata_ci_runner_control::{
-    ControlPortError, ManagedSecretBindingIssuer, RuntimeAuthorityIssueRequest,
-};
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerEphemeralRequest,
     EphemeralHandlerFuture, MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID,
@@ -120,7 +120,7 @@ fn protected_environment_port_error(error: &ProtectedEnvironmentStoreError) -> C
 
 /// Converts an exact private wire request into Store authority evidence.
 ///
-/// It is intentionally independent of [`automata_ci_runner_control::RuntimeAuthorityIssuer`]:
+/// It is intentionally independent of [`automata_ci_control::runner_control::RuntimeAuthorityIssuer`]:
 /// that issuer's credentials are serialized to the durable command outbox,
 /// whereas this object receives no bearer until the mTLS exchange itself.
 pub(crate) struct ManagedSecretRuntimeAuthorityIssuer {

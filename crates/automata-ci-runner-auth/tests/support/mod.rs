@@ -13,12 +13,12 @@ use automata_ci_auth::{
     machine::{ExternalRunnerIdentity, MachineAuthenticationEvidence},
     time::{Clock, UnixTimestamp},
 };
+use automata_ci_control::runner_control::DesiredRunnerState;
 use automata_ci_core::{RunnerId, Sha256Digest};
 use automata_ci_runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
     RunnerMachineDirectoryError, RunnerMachineRecord,
 };
-use automata_ci_runner_control::DesiredRunnerState;
 use automata_ci_store::RunnerGeneration;
 use sha2::{Digest as _, Sha256};
 

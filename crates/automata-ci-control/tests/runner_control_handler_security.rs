@@ -1,5 +1,3 @@
-mod support;
-
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -11,7 +9,16 @@ use automata_ci_auth::{
     machine::{AuthenticatedMachine, ExternalRunnerIdentity},
     time::UnixTimestamp,
 };
-use automata_ci_control::{ClaimedLeasePoll, LeasePollOutcome};
+use automata_ci_control::lease::{ClaimedLeasePoll, LeasePollOutcome};
+use automata_ci_control::runner_control::{
+    AuthorizedRunnerRegistration, ControlPortError, DesiredRunnerState,
+    DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
+    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, PublishedCommand, RunnerControlConfig,
+    RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
+    RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
+    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
+    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
+};
 use automata_ci_core::{
     Architecture, AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobIrVersionRange, JobLifecycle,
@@ -31,15 +38,6 @@ use automata_ci_protocol::{
     ServerToRunner, SessionDisposition, SessionResume, ValidatedRunnerToServer,
 };
 use automata_ci_protocol_protobuf::{encode_job_ir, encode_runner_frame, encode_server_frame};
-use automata_ci_runner_control::{
-    AuthorizedRunnerRegistration, ControlPortError, DesiredRunnerState,
-    DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
-    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, PublishedCommand, RunnerControlConfig,
-    RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
-    RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
-    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
-};
 use automata_ci_runner_transport::ApplicationErrorKind;
 use automata_ci_store::{
     BeginLeaseRequest, CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
@@ -54,7 +52,7 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use support::{
+use super::runner_control_support::{
     AuthorityIssuer, Authorizer, Clock, Commands, Ids, IngressObjects, Objects, Poller, Publisher,
     Receipts, Resolver, Sessions, Transactions,
 };

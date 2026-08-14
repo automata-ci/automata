@@ -1,10 +1,10 @@
 mod support;
 
 use automata_ci_auth::machine::MachineIdentityVerifier;
+use automata_ci_control::runner_control::RunnerRegistrationAuthorizer;
 use automata_ci_runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
 };
-use automata_ci_runner_control::RunnerRegistrationAuthorizer;
 use static_assertions::{assert_impl_all, assert_obj_safe};
 
 assert_obj_safe!(RunnerMachineDirectory);

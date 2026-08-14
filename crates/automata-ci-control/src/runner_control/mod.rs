@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
 //! Replica-neutral application handling for the authenticated runner-control transport.
 //!
 //! The handler deliberately owns no connection or replica-local authorization state. Every
@@ -22,16 +20,16 @@ mod port;
 mod verify;
 
 pub use handler::{
-    DurableRunnerControlHandler, JOB_RESULT_MEDIA_TYPE, LOG_SEGMENT_MEDIA_TYPE,
-    MAX_HEARTBEAT_INTERVAL_MILLIS, MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS,
-    RunnerControlConfig, RunnerControlConfigError, RunnerControlPorts, RunnerDurabilityPorts,
-    RunnerIdentityPorts, RunnerLeasePorts,
+    DurableRunnerControlHandler, LOG_SEGMENT_MEDIA_TYPE, MAX_HEARTBEAT_INTERVAL_MILLIS,
+    MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS, RunnerControlConfig,
+    RunnerControlConfigError, RunnerControlPorts, RunnerDurabilityPorts, RunnerIdentityPorts,
+    RunnerLeasePorts,
 };
 pub use observer::{
-    LeaseOfferObservation, NoopRunnerControlObserver, RunnerControlFailure,
-    RunnerControlMessageKind, RunnerControlMessageOutcome, RunnerControlObserver,
-    RunnerDurableDisposition, RunnerDurableMessageKind, RunnerHandshakeOutcome,
-    RunnerHandshakeRejection, RunnerLeaseRequestStage,
+    LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
+    RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
+    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
+    RunnerLeaseRequestStage,
 };
 pub use port::{
     AuthorizedRunnerRegistration, CompositeRuntimeAuthorityIssuer, ControlIdGenerator,

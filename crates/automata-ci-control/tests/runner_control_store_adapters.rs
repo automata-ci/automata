@@ -4,6 +4,13 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use automata_ci_control::runner_control::{
+    ControlIdGenerator, ControlPortError, LeaseOfferClaim as ControlLeaseOfferClaim,
+    LeaseOfferClaimStatus as ControlLeaseOfferClaimStatus, LeaseOfferCommand,
+    LeaseOfferCommandError, LeaseOfferCommandPublisher as _, LeaseOfferPublishOutcome,
+    LeaseOfferReplayResolution, RunnerSessionFenceResolver as _, StoreLeaseOfferCommandPublisher,
+    StoreRunnerSessionFenceResolver,
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, Lease,
     LeaseId, OperationId, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
@@ -16,13 +23,6 @@ use automata_ci_protocol::{
     RuntimeAuthorityName,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_runner_control::{
-    ControlIdGenerator, ControlPortError, LeaseOfferClaim as ControlLeaseOfferClaim,
-    LeaseOfferClaimStatus as ControlLeaseOfferClaimStatus, LeaseOfferCommand,
-    LeaseOfferCommandError, LeaseOfferCommandPublisher as _, LeaseOfferPublishOutcome,
-    LeaseOfferReplayResolution, RunnerSessionFenceResolver as _, StoreLeaseOfferCommandPublisher,
-    StoreRunnerSessionFenceResolver,
-};
 use automata_ci_store::{
     CANCEL_JOB_COMMAND_KIND, CommandSequence, CurrentRunnerSession, CurrentRunnerSessionRepository,
     DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, LeaseOfferClaim,

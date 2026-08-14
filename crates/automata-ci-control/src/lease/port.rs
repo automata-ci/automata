@@ -71,7 +71,7 @@ pub trait LeaseClock: fmt::Debug + Send + Sync {
 ///
 /// Times before the Unix epoch map to zero, and values beyond the durable
 /// timestamp range saturate at [`i64::MAX`]. Lease-expiry overflow is rejected
-/// by [`crate::LeasePollService`] before a claim is submitted.
+/// by [`crate::lease::LeasePollService`] before a claim is submitted.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemLeaseClock;
 
