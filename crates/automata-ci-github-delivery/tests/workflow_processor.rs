@@ -21,9 +21,9 @@ use automata_ci_github_delivery::{
     GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
     GithubDeliverySourceCredentialRequest, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
-    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-    GithubServerServiceCredentialRelease,
+    GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesRequest,
+    GithubPushChangedFilesAuthority, GithubPushChangedFilesError, GithubPushChangedFilesProvider,
+    GithubPushChangedFilesRequest, GithubServerServiceCredentialRelease,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -73,6 +73,7 @@ const DIFF_CREDENTIAL: &str = "installation-token-private-diff-marker";
 const ACCEPTED_WORKFLOW: &[u8] = b"name: Exact CI\non: push\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo exact\n";
 const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
 const PULL_REQUEST_WORKFLOW: &[u8] = b"name: Pull Request CI\non: pull_request\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request\n";
+const PULL_REQUEST_PATH_WORKFLOW: &[u8] = b"name: Pull Request Paths CI\non:\n  pull_request:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request-paths\n";
 
 #[derive(Debug)]
 struct FixedClock;
@@ -536,6 +537,20 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
             });
         self.result.clone()
     }
+
+    async fn pull_request_changed_files(
+        &self,
+        request: GithubPullRequestChangedFilesRequest<'_>,
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.pull_request().base_revision().as_str(), BEFORE);
+        assert_eq!(request.pull_request().head_revision().as_str(), AFTER);
+        assert_eq!(
+            request.private_action(),
+            Some(GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles)
+        );
+        self.result.clone()
+    }
 }
 
 struct Harness {
@@ -628,7 +643,10 @@ async fn harness_with_visibility(
     }
 }
 
-async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
+async fn pull_request_harness(
+    files: BTreeMap<&str, &[u8]>,
+    changed_files: Option<Arc<ChangedFiles>>,
+) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = pull_request_body();
     let raw_key = "provider-deliveries/github/event/pull-request-fixture.json";
@@ -670,13 +688,17 @@ async fn pull_request_harness(files: BTreeMap<&str, &[u8]>) -> Harness {
         GithubAuthenticatedEventKind::PullRequest,
         "refs/pull/7/merge",
     ));
+    let mut processor = GithubDeliveryWorkflowAdmissionProcessor::new(admission);
+    if let Some(changed_files) = changed_files {
+        processor = processor.with_changed_files_provider(changed_files);
+    }
     let worker = GithubDeliveryWorker::new(
         blobs.clone(),
         Arc::new(FixedSource {
             source,
             visibility: ProviderRepositoryVisibility::Private,
         }),
-        Arc::new(GithubDeliveryWorkflowAdmissionProcessor::new(admission)),
+        Arc::new(processor),
         deliveries.clone(),
         subject_evidence,
         Arc::new(FixedClock),
@@ -891,8 +913,11 @@ async fn accepted_path_replays_durable_progress_without_readmission() {
 
 #[tokio::test]
 async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
-    let harness =
-        pull_request_harness(BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_WORKFLOW)])).await;
+    let harness = pull_request_harness(
+        BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_WORKFLOW)]),
+        None,
+    )
+    .await;
 
     assert!(matches!(
         process(&harness).await.expect("pull-request processing"),
@@ -915,6 +940,33 @@ async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
         read_admission_object(&harness.blobs, command.event()).await,
         pull_request_body()
     );
+    assert_eq!(
+        outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
+        ("admitted", None)
+    );
+}
+
+#[tokio::test]
+async fn pull_request_path_filters_resolve_changed_files_and_admit_without_a_prerequisite() {
+    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
+        "src/lib.rs",
+    ]))));
+    let harness = pull_request_harness(
+        BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
+        Some(changed.clone()),
+    )
+    .await;
+
+    assert!(matches!(
+        process(&harness)
+            .await
+            .expect("pull-request path processing"),
+        GithubDeliveryWorkerOutcome::Completed(_)
+    ));
+    assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.logical.commands().len(), 1);
     assert_eq!(
         outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
         ("admitted", None)
