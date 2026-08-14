@@ -14,8 +14,8 @@ use super::{
     WebAuthorizationTransaction, WebAuthorizationTransactionParts,
 };
 
-const WEB_HEADER: &[u8; 8] = b"AUTWST01";
-const DEVICE_HEADER: &[u8; 8] = b"AUTDST01";
+const WEB_HEADER: &[u8; 8] = b"AUTWST02";
+const DEVICE_HEADER: &[u8; 8] = b"AUTDST02";
 const MAX_DEVICE_CODE_BYTES: usize = 4_096;
 const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 300;
 
@@ -32,38 +32,33 @@ impl GithubTransactionStateCodec {
     pub fn encode_web(
         transaction: WebAuthorizationTransaction,
     ) -> Result<LoginTransactionState, GithubTransactionStateError> {
-        let (state, verifier, created_at, expires_at) = transaction.into_parts().into_parts();
+        let (state, verifier, _, _) = transaction.into_parts().into_parts();
+        // The repository validates caller time and rebases the durable lifetime to
+        // database time. Persist only provider secrets so that rebase cannot make
+        // an otherwise valid transaction reject its own encrypted state.
         let mut encoded = Vec::with_capacity(128);
         encoded.extend_from_slice(WEB_HEADER);
         push_string(&mut encoded, state.expose_secret())?;
         push_string(&mut encoded, verifier.expose_secret())?;
-        push_timestamp(&mut encoded, created_at);
-        push_timestamp(&mut encoded, expires_at);
         state_from_bytes(encoded)
     }
 
-    /// Restores browser state and requires exact equality with clear durable times.
+    /// Restores browser secrets using database-authoritative durable times.
     ///
     /// # Errors
     ///
-    /// Rejects old, cross-kind, malformed, oversized, or trailing-byte state and
-    /// any authenticated/clear metadata disagreement.
+    /// Rejects old, cross-kind, malformed, oversized, or trailing-byte state.
     pub fn decode_web(
         state: LoginTransactionState,
-        expected_created_at: UnixTimestamp,
-        expected_expires_at: UnixTimestamp,
+        created_at: UnixTimestamp,
+        expires_at: UnixTimestamp,
     ) -> Result<WebAuthorizationTransaction, GithubTransactionStateError> {
         let secret = state.into_secret();
         let mut decoder = Decoder::new(secret.expose_secret());
         decoder.expect_header(WEB_HEADER)?;
         let oauth_state = decoder.read_secret_string()?;
         let verifier = decoder.read_secret_string()?;
-        let created_at = decoder.read_timestamp()?;
-        let expires_at = decoder.read_timestamp()?;
         decoder.finish()?;
-        if created_at != expected_created_at || expires_at != expected_expires_at {
-            return Err(GithubTransactionStateError::MetadataMismatch);
-        }
         let oauth_state = OAuthState::from_generated_secret(oauth_state)
             .map_err(|_| GithubTransactionStateError::InvalidState)?;
         let verifier = PkceVerifier::from_secret(verifier)
@@ -113,23 +108,22 @@ impl GithubTransactionStateCodec {
             next_poll_at,
             poll_interval_milliseconds,
         )?;
-        let mut encoded = Vec::with_capacity(96);
+        // Poll deadlines are rebased to database time after a row lock is
+        // acquired. The encrypted state therefore contains only the provider
+        // secret; the repository owns the validated durable schedule.
+        let mut encoded =
+            Vec::with_capacity(DEVICE_HEADER.len() + 2 + device_code.expose_secret().len());
         encoded.extend_from_slice(DEVICE_HEADER);
         push_string(&mut encoded, device_code.expose_secret())?;
-        push_timestamp(&mut encoded, created_at);
-        push_timestamp(&mut encoded, expires_at);
-        push_timestamp(&mut encoded, next_poll_at);
-        encoded.extend_from_slice(&poll_interval_seconds.to_be_bytes());
-        encoded.push(device_status_byte(status));
         Ok((state_from_bytes(encoded)?, metadata))
     }
 
-    /// Restores pending device state and authenticates every duplicated clear field.
+    /// Restores pending device secrets using database-authoritative durable metadata.
     ///
     /// # Errors
     ///
-    /// Rejects old, cross-kind, malformed, terminal, trailing-byte, or metadata-
-    /// mismatched state and untrusted verification origins.
+    /// Rejects old, cross-kind, malformed, trailing-byte state and untrusted
+    /// verification origins.
     pub fn decode_device(
         state: LoginTransactionState,
         metadata: GithubDeviceTransactionMetadata,
@@ -139,22 +133,9 @@ impl GithubTransactionStateCodec {
         let mut decoder = Decoder::new(secret.expose_secret());
         decoder.expect_header(DEVICE_HEADER)?;
         let device_code = decoder.read_secret_string()?;
-        let created_at = decoder.read_timestamp()?;
-        let expires_at = decoder.read_timestamp()?;
-        let next_poll_at = decoder.read_timestamp()?;
-        let poll_interval_seconds = decoder.read_u64()?;
-        let status = decode_device_status(decoder.read_u8()?)?;
         decoder.finish()?;
-        if device_code.expose_secret().len() > MAX_DEVICE_CODE_BYTES
-            || status != DeviceAuthorizationStatus::Pending
-            || created_at != metadata.created_at
-            || expires_at != metadata.expires_at
-            || next_poll_at != metadata.next_poll_at
-            || poll_interval_seconds
-                .checked_mul(1_000)
-                .is_none_or(|milliseconds| milliseconds != metadata.poll_interval_milliseconds)
-        {
-            return Err(GithubTransactionStateError::MetadataMismatch);
+        if device_code.expose_secret().len() > MAX_DEVICE_CODE_BYTES {
+            return Err(GithubTransactionStateError::InvalidState);
         }
         let verification_uri = Url::parse(&metadata.verification_uri)
             .map_err(|_| GithubTransactionStateError::InvalidMetadata)?;
@@ -162,18 +143,18 @@ impl GithubTransactionStateCodec {
             device_code,
             metadata.user_code,
             verification_uri,
-            created_at,
-            expires_at,
-            next_poll_at,
-            poll_interval_seconds,
-            status,
+            metadata.created_at,
+            metadata.expires_at,
+            metadata.next_poll_at,
+            metadata.poll_interval_milliseconds / 1_000,
+            DeviceAuthorizationStatus::Pending,
         );
         DeviceAuthorization::from_parts(parts, trusted_endpoints)
             .map_err(|_| GithubTransactionStateError::InvalidState)
     }
 }
 
-/// Device metadata duplicated between the encrypted payload and indexed durable fields.
+/// Database-authoritative device metadata stored beside encrypted provider state.
 ///
 /// The user code remains secret-bearing. This value implements neither `Clone`
 /// nor serialization and its debug representation redacts the code.
@@ -291,27 +272,6 @@ impl fmt::Debug for GithubDeviceTransactionMetadata {
     }
 }
 
-fn device_status_byte(status: DeviceAuthorizationStatus) -> u8 {
-    match status {
-        DeviceAuthorizationStatus::Pending => 0,
-        DeviceAuthorizationStatus::Complete => 1,
-        DeviceAuthorizationStatus::Denied => 2,
-        DeviceAuthorizationStatus::Expired => 3,
-    }
-}
-
-fn decode_device_status(
-    value: u8,
-) -> Result<DeviceAuthorizationStatus, GithubTransactionStateError> {
-    match value {
-        0 => Ok(DeviceAuthorizationStatus::Pending),
-        1 => Ok(DeviceAuthorizationStatus::Complete),
-        2 => Ok(DeviceAuthorizationStatus::Denied),
-        3 => Ok(DeviceAuthorizationStatus::Expired),
-        _ => Err(GithubTransactionStateError::InvalidState),
-    }
-}
-
 fn state_from_bytes(bytes: Vec<u8>) -> Result<LoginTransactionState, GithubTransactionStateError> {
     SecretBytes::new(bytes)
         .map(LoginTransactionState::new)
@@ -323,10 +283,6 @@ fn push_string(destination: &mut Vec<u8>, value: &str) -> Result<(), GithubTrans
     destination.extend_from_slice(&length.to_be_bytes());
     destination.extend_from_slice(value.as_bytes());
     Ok(())
-}
-
-fn push_timestamp(destination: &mut Vec<u8>, value: UnixTimestamp) {
-    destination.extend_from_slice(&value.as_seconds().to_be_bytes());
 }
 
 struct Decoder<'a> {
@@ -368,24 +324,6 @@ impl<'a> Decoder<'a> {
         SecretString::new(value.to_owned()).map_err(|_| GithubTransactionStateError::InvalidState)
     }
 
-    fn read_u64(&mut self) -> Result<u64, GithubTransactionStateError> {
-        self.take(8)?
-            .try_into()
-            .map(u64::from_be_bytes)
-            .map_err(|_| GithubTransactionStateError::InvalidState)
-    }
-
-    fn read_u8(&mut self) -> Result<u8, GithubTransactionStateError> {
-        self.take(1)?
-            .first()
-            .copied()
-            .ok_or(GithubTransactionStateError::InvalidState)
-    }
-
-    fn read_timestamp(&mut self) -> Result<UnixTimestamp, GithubTransactionStateError> {
-        self.read_u64().map(UnixTimestamp::from_seconds)
-    }
-
     fn finish(self) -> Result<(), GithubTransactionStateError> {
         if self.remaining.is_empty() {
             Ok(())
@@ -404,9 +342,6 @@ pub enum GithubTransactionStateError {
     /// Clear durable device metadata violates its closed bounds.
     #[error("GitHub login transaction metadata is invalid")]
     InvalidMetadata,
-    /// Authenticated metadata disagrees with its indexed durable copy.
-    #[error("GitHub login transaction authenticated metadata does not match durable metadata")]
-    MetadataMismatch,
     /// The current binary transaction encoding exceeds its bounded length.
     #[error("GitHub login transaction state exceeds its bounded format")]
     TooLarge,
