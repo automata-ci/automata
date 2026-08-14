@@ -520,6 +520,14 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_S3_FORCE_PATH_STYLE")]
     pub s3_force_path_style: bool,
 
+    /// Exact KMS key identity for S3 server-side encryption.
+    ///
+    /// Omitting this option selects provider-managed AES-256 (`SSE-S3`).
+    /// Supplying it selects `SSE-KMS`, and every read must report this exact
+    /// key identity as well as the expected encryption algorithm.
+    #[arg(long, env = "AUTOMATA_S3_KMS_KEY_ID", value_name = "KEY_ID")]
+    pub s3_kms_key_id: Option<String>,
+
     /// Permit plain HTTP only when the S3 endpoint is a literal loopback host.
     #[arg(long, env = "AUTOMATA_S3_ALLOW_LOOPBACK_HTTP")]
     pub s3_allow_loopback_http: bool,

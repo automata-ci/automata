@@ -156,6 +156,7 @@ automata server \
   --s3-allow-loopback-http \
   --s3-bucket automata-dev \
   --s3-prefix automata/v1 \
+  --s3-kms-key-id default \
   --s3-access-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-access-key" \
   --s3-secret-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-secret-key" \
   --runner-public-url https://localhost:9090/ \

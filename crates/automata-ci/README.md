@@ -178,11 +178,18 @@ automata server \
   --s3-allow-loopback-http \
   --s3-bucket automata-dev \
   --s3-prefix automata/v1 \
+  --s3-kms-key-id default \
   # ...required secret, Results, and runner TLS references...
 ```
 
 Plain HTTP object-store endpoints anywhere other than literal loopback are
 rejected even when the development option is present.
+
+Object writes use provider-managed AES-256 (`SSE-S3`) by default. Set
+`--s3-kms-key-id` to select `SSE-KMS` with one exact non-secret key identity;
+reads then fail closed unless the object store reports both `aws:kms` and that
+same identity. The pinned local RustFS service exposes its configured local
+master key as `default`, so the development command selects that identity.
 
 ## Results, artifacts, and cache
 

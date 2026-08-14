@@ -1810,6 +1810,7 @@ fn build_blob_store(
             config.s3_operation_timeout,
         )?
     };
+    let blob_config = blob_config.with_at_rest_encryption(config.s3_at_rest_encryption.clone());
     let access_key = config.load_s3_access_key()?;
     let secret_key = config.load_s3_secret_key()?;
     let session_token = config.load_s3_session_token()?;
