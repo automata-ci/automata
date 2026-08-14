@@ -18,6 +18,7 @@ use automata_ci_blob_s3::{
 };
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
+    repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_control::runner_control::{
     ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
@@ -25,6 +26,12 @@ use automata_ci_control::runner_control::{
     RandomControlIdGenerator, RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts,
     RunnerIdentityPorts, RunnerLeasePorts, RunnerRegistrationAuthorizer,
     RunnerSessionFenceResolver, StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
+    capability_admission::{RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness},
+    durable::{
+        CurrentRunnerSessionRepository, RunnerControlTransactionRepository,
+        RunnerLeaseOfferRepository,
+    },
+    repository::{RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository},
 };
 use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
@@ -61,18 +68,15 @@ use automata_ci_runner_transport::{
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_store::{
     BuiltinSecretCleanupRepository, ConformanceReadRepository, ControlPlaneMaintenanceRepository,
-    ControlPlaneStateRepository, CurrentRunnerSessionRepository, HumanWorkflowReadRepository,
-    LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
-    LogicalInstanceResultRepository, LogicalInstanceResultWorkerId, LogicalJobResultRepository,
-    LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
+    ControlPlaneStateRepository, HumanWorkflowReadRepository, LogicalActivationPreparationStore,
+    LogicalActivationRepository, LogicalActivationWorkerId, LogicalInstanceResultRepository,
+    LogicalInstanceResultWorkerId, LogicalJobResultRepository, LogicalJobResultWorkerId,
+    LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
     ManagedSecretAuthorityRepository, ProtectedEnvironmentRepository,
     RepositoryPublicationRepository, RepositorySecretManagementReadRepository,
-    RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository,
-    RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness, RunnerCommandOutbox,
-    RunnerControlTransactionRepository, RunnerLeaseOfferRepository, RunnerLeaseRequestRepository,
-    RunnerOperationReceiptRepository, RunnerSessionRepository, SecretCleanupWorkerId,
+    RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository, SecretCleanupWorkerId,
     SecretCustodyKeySet, SecretCustodyRepository, SecretMutationRecoveryRepository, TenantScope,
     WorkflowRerunRepository,
 };

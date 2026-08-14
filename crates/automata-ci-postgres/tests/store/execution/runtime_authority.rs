@@ -2,6 +2,10 @@ use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, time::Duration};
 
+use automata_ci_control::runner_control::{
+    durable::{CommitLeaseHeartbeat, RunnerControlTransactionRepository as _},
+    repository::RunnerSessionRepository as _,
+};
 use automata_ci_core::{
     Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
@@ -22,7 +26,7 @@ use automata_ci_store::{
     ClaimProviderDelivery, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, ClaimedLogicalInstanceMaterialization,
     ClaimedLogicalJobActivation, ClaimedProviderDelivery, CommandCursor,
-    CommitGithubRuntimeAuthority, CommitLeaseHeartbeat, CommitLogicalInstanceMaterialization,
+    CommitGithubRuntimeAuthority, CommitLogicalInstanceMaterialization,
     ConfirmGithubRuntimeAuthorityRevocation, ConsumeSelectedLogicalInstanceMaterialization,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
     DeferGithubRuntimeAuthorityRevocation, DocumentSchema, EnsureGithubServerServiceAuthority,
@@ -58,10 +62,10 @@ use automata_ci_store::{
     QuarantineGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
     RegisterProviderDeliveryWorkflowInventory, RejectGithubRuntimeAuthorityMint, RenewLease,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
-    ReusableSecretPermission, RoutingDocument, RunnerControlTransactionRepository as _,
-    RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
-    RunnerProtocolVersion, RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowPlanRepository as _, WorkflowSnapshotId,
+    ReusableSecretPermission, RoutingDocument, RunnerGeneration, RunnerOperationKind,
+    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, StableRunnerSlot,
+    StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowPlanRepository as _,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

@@ -1,20 +1,15 @@
 use automata_ci_core::{
-    AttemptId, FencingToken, JobId, JobIrVersion, Lease, LeaseGuard, LeaseId, LogSequence,
-    LogStreamId, OperationId, RunId, RunnerId, RunnerRequirements, RunnerSessionId, Sha256Digest,
-    UnixMillis,
+    AttemptId, FencingToken, JobId, JobIrVersion, Lease, LeaseGuard, LeaseId, OperationId, RunId,
+    RunnerId, RunnerRequirements, RunnerSessionId, Sha256Digest, UnixMillis,
 };
 use automata_ci_store::{
     AttemptAssignment, BeginLeaseRequest, CancelJobCommandPayload, CancellationRepository,
     CommandCursor, CommandReplayDisposition, CommandReplayLimit, CommandReplayPage,
-    CommandSequence, CompleteLeaseRequest, CurrentRunnerSessionRepository, DocumentSchema,
-    JobDependency, JobIrMetadata, LeaseOfferCommandIdentity, LeaseRequestKey, MAX_JOB_IR_BYTES,
-    ObjectKey, RevokedLeaseOfferFallback, RoutingDocument, RoutingLabel, RunnableAttempt,
-    RunnableAttemptRepository, RunnableScanLimit, RunnerClaimRepository, RunnerCommandOutbox,
-    RunnerControlTransactionRepository, RunnerGeneration, RunnerLeaseOfferRepository,
-    RunnerLeaseRequestRepository, RunnerLogAdmissionRequest, RunnerOperationKind,
-    RunnerOperationReceiptRepository, RunnerProtocolVersion, RunnerRoutingRepository,
-    RunnerSessionFence, RunnerSessionRepository, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
-    WorkflowPlanRepository,
+    CommandSequence, CompleteLeaseRequest, DocumentSchema, JobDependency, JobIrMetadata,
+    LeaseOfferCommandIdentity, LeaseRequestKey, MAX_JOB_IR_BYTES, ObjectKey,
+    RevokedLeaseOfferFallback, RoutingDocument, RoutingLabel, RunnableAttempt, RunnableScanLimit,
+    RunnerGeneration, RunnerOperationKind, RunnerProtocolVersion, RunnerSessionFence,
+    RunnerSlotCount, SessionEpoch, StableRunnerSlot, WorkflowPlanRepository,
 };
 
 #[test]
@@ -249,54 +244,13 @@ fn immutable_scheduler_metadata_is_bounded_and_fenced() {
 }
 
 #[test]
-fn scheduler_and_durability_ports_remain_backend_neutral_and_dyn_compatible() {
-    #[allow(clippy::too_many_arguments)]
-    fn assert_ports(
-        _: &dyn RunnerSessionRepository,
-        _: &dyn RunnerRoutingRepository,
-        _: &dyn RunnerCommandOutbox,
-        _: &dyn RunnerOperationReceiptRepository,
-        _: &dyn RunnerLeaseRequestRepository,
-        _: &dyn RunnerClaimRepository,
-        _: &dyn WorkflowPlanRepository,
-        _: &dyn RunnableAttemptRepository,
-        _: &dyn CancellationRepository,
-        _: &dyn CurrentRunnerSessionRepository,
-        _: &dyn RunnerLeaseOfferRepository,
-        _: &dyn RunnerControlTransactionRepository,
-    ) {
-    }
+fn store_values_and_ports_remain_backend_neutral_and_dyn_compatible() {
+    fn assert_ports(_: &dyn WorkflowPlanRepository, _: &dyn CancellationRepository) {}
     let _ = assert_ports;
 
     assert!(RunnableScanLimit::new(0).is_err());
     assert!(RunnableScanLimit::new(1001).is_err());
     assert!(RunnerOperationKind::new("Automata.Invalid").is_err());
-
-    let ingress_request = automata_ci_store::RunnerOperationRequest::new(
-        RunnerSessionFence::new(
-            RunnerSessionId::new(),
-            RunnerId::new(),
-            RunnerGeneration::new(1).expect("generation"),
-            SessionEpoch::new(1).expect("epoch"),
-        ),
-        OperationId::new(),
-        RunnerOperationKind::new("automata.runner.log-batch.v1").expect("kind"),
-        Sha256Digest::from_bytes([5; 32]),
-    );
-    assert!(
-        RunnerLogAdmissionRequest::new(
-            ingress_request,
-            AttemptId::new(),
-            LeaseGuard::new(LeaseId::new(), FencingToken::new(1).expect("fencing token")),
-            LogStreamId::new(),
-            DocumentSchema::new(1).expect("schema"),
-            LogSequence::new(0),
-            LogSequence::new(9_223_372_036_854_775_808),
-            UnixMillis::new(1),
-            false,
-        )
-        .is_err()
-    );
 
     let candidate_job_id = JobId::new();
     let candidate_run_id = RunId::new();

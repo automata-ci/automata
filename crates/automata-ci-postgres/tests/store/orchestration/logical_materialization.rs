@@ -2,6 +2,10 @@ use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, time::Duration};
 
+use automata_ci_control::{
+    lease::repository::RunnableAttemptRepository as _,
+    runner_control::repository::RunnerSessionRepository as _,
+};
 use automata_ci_core::{
     Architecture, AttemptId, AttemptNumber, CompiledValueTemplate, ContextValue,
     JobAuthorityProfile, JobConclusion, JobContentReference, JobExecutionContext, JobId,
@@ -56,11 +60,10 @@ use automata_ci_store::{
     RegisterProviderDeliveryWorkflowInventory, ReusableCallOutputMapping, ReusableSecretPermission,
     ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
     ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
-    RunnableAttemptRepository as _, RunnableScanLimit, RunnableScanRequest, RunnerGeneration,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _, StableRunnerSlot,
-    StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _,
-    WorkflowConcurrency, WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowRuntimePolicyPin,
-    WorkflowSnapshotId,
+    RunnableScanLimit, RunnableScanRequest, RunnerGeneration, RunnerProtocolVersion,
+    RunnerSessionFence, StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowAdmissionRepository as _, WorkflowConcurrency, WorkflowPlanRepository as _,
+    WorkflowRunStatus, WorkflowRuntimePolicyPin, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;

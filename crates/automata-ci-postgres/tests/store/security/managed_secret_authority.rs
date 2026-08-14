@@ -8,6 +8,7 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
+use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
@@ -64,10 +65,9 @@ use automata_ci_store::{
     RequestCancellation, ReserveRepositorySecretVersionMutation,
     ReserveRepositorySecretVersionMutationOutcome, ResolveManagedSecretAuthority,
     ReusableSecretPermission, ReviewJobEnvironment, RoutingDocument, RunnerGeneration,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _, SecretCustodyKeySet,
-    SecretCustodyRepository as _, SecretWorkloadGrantId, StableRunnerSlot, TenantScope,
-    VerifySecretCustody, VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency,
-    WorkflowSnapshotId,
+    RunnerProtocolVersion, RunnerSessionFence, SecretCustodyKeySet, SecretCustodyRepository as _,
+    SecretWorkloadGrantId, StableRunnerSlot, TenantScope, VerifySecretCustody,
+    VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};

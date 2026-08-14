@@ -2,6 +2,7 @@ use std::{fmt, io::Write as _, sync::Arc, time::Instant};
 
 use crate::lease::{
     AuthenticatedRunnerSession, ClaimedLeasePoll, LeaseClock, LeasePollError, LeasePollOutcome,
+    repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_blob::{
@@ -30,15 +31,11 @@ use automata_ci_runner_transport::{
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AttemptStoreError, BeginLeaseRequest,
     CommandCursor as StoreCommandCursor, CommandReplayDisposition, CommandReplayLimit,
-    CommandSequence as StoreCommandSequence, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
-    CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult, CompleteLeaseRequest,
-    DocumentSchema, HeartbeatRunnerSession, LeaseRequestCompletion, LeaseRequestKey,
-    LeaseResponseAction, ObjectKey, OpenRunnerSession, RenewLease, ResumeRunnerSession,
-    RevokedLeaseOfferFallback, RoutingDocument, RunnerCommandOutbox,
-    RunnerControlTransactionRepository, RunnerLeaseRequestRepository, RunnerLogAdmissionRequest,
-    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationReceiptRepository,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
-    RunnerSessionRepository, RunnerSessionSnapshot, StableRunnerSlot, StoreError,
+    CommandSequence as StoreCommandSequence, CompleteLeaseRequest, DocumentSchema,
+    HeartbeatRunnerSession, LeaseRequestCompletion, LeaseRequestKey, ObjectKey, OpenRunnerSession,
+    RenewLease, ResumeRunnerSession, RevokedLeaseOfferFallback, RoutingDocument,
+    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, StableRunnerSlot, StoreError,
 };
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
@@ -46,6 +43,11 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::durable::{
+    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
+    CommitRunnerLogSegment, CommitRunnerTerminalResult, LeaseResponseAction,
+    RunnerControlTransactionRepository, RunnerLogAdmissionRequest,
+};
 use super::observer::NoopRunnerControlObserver;
 use super::port::{
     AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, DesiredRunnerState,
@@ -54,6 +56,9 @@ use super::port::{
     ManagedSecretBindingIssuer, RunnerRegistrationAuthorizer, RunnerSessionFenceResolver,
     RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer, decode_durable_server_command,
     is_durable_lease_offer_command,
+};
+use super::repository::{
+    RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository,
 };
 use super::verify::verify_job_ir_blob;
 use super::{

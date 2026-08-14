@@ -35,6 +35,7 @@ sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true
 # This crate uses zeroization types directly and does not need the workspace's derive macro.
 zeroize = "1.8.1"
 

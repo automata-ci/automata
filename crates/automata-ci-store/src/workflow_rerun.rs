@@ -601,7 +601,7 @@ mod tests {
         );
         assert_eq!(
             workflow_rerun_repository_segment_byte_rejection(
-                MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES + 0
+                MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES
             ),
             None
         );

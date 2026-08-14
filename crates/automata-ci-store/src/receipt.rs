@@ -1,11 +1,10 @@
-use async_trait::async_trait;
 use std::fmt;
 
 use automata_ci_core::{OperationId, Sha256Digest, UnixMillis};
 use thiserror::Error;
 use zeroize::Zeroize as _;
 
-use crate::{DocumentSchema, RunnerSessionFence, StoreError, value::sha256_digest};
+use crate::{DocumentSchema, RunnerSessionFence, value::sha256_digest};
 
 const MAX_OPERATION_KIND_BYTES: usize = 128;
 const MAX_RECEIPT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -208,28 +207,4 @@ pub enum RunnerReceiptValueError {
     InvalidOperationKind,
     #[error("runner operation response has {size} bytes; expected 1..={maximum}")]
     InvalidResponseSize { size: usize, maximum: usize },
-}
-
-/// Generic exact-response ledger for runner RPC mutations.
-///
-/// Callers must look up a receipt before executing a side effect and must use
-/// the same `OperationId` at the provider boundary. This generic two-call seam
-/// cannot by itself make an unrelated external side effect atomic with durable
-/// repository state. Operations such as [`crate::RunnerClaimRepository::try_claim`]
-/// use a stronger, single-transaction specialized receipt.
-#[async_trait]
-pub trait RunnerOperationReceiptRepository: Send + Sync {
-    async fn lookup_operation(
-        &self,
-        request: &RunnerOperationRequest,
-    ) -> Result<Option<RunnerOperationReceipt>, StoreError>;
-
-    /// Persists the first exact response. A same-request retry returns the
-    /// original response; a different digest/kind for the key conflicts.
-    async fn record_operation(
-        &self,
-        request: RunnerOperationRequest,
-        response: RunnerOperationResponse,
-        committed_at: UnixMillis,
-    ) -> Result<RunnerOperationReceipt, StoreError>;
 }

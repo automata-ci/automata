@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use automata_ci_core::{AttemptId, JobIrVersion, UnixMillis};
 
-use crate::{
+use automata_ci_store::{
     RoutingDocument, RoutingLabel, RunnerSessionFence, RunnerSlotCount, StableRunnerSlot,
     StoreError,
 };
@@ -15,11 +15,13 @@ use crate::{
 pub struct RunnerGroupId(Uuid);
 
 impl RunnerGroupId {
+    /// Wraps the durable runner-group UUID.
     #[must_use]
     pub const fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
 
+    /// Returns the durable runner-group UUID.
     #[must_use]
     pub const fn as_uuid(self) -> Uuid {
         self.0
@@ -80,36 +82,43 @@ impl RunnerRoutingSnapshot {
         })
     }
 
+    /// Returns the exact live runner-session fence.
     #[must_use]
     pub const fn fence(&self) -> RunnerSessionFence {
         self.fence
     }
 
+    /// Returns the optional administrative runner-group ID.
     #[must_use]
     pub const fn group_id(&self) -> Option<RunnerGroupId> {
         self.group_id
     }
 
+    /// Returns the optional administrative runner-group name.
     #[must_use]
     pub fn group_name(&self) -> Option<&str> {
         self.group_name.as_deref()
     }
 
+    /// Returns the runner's authoritative routing labels.
     #[must_use]
     pub const fn labels(&self) -> &BTreeSet<RoutingLabel> {
         &self.labels
     }
 
+    /// Returns the administratively registered capabilities.
     #[must_use]
     pub const fn registered_capabilities(&self) -> &RoutingDocument {
         &self.registered_capabilities
     }
 
+    /// Returns the session-negotiated capabilities.
     #[must_use]
     pub const fn negotiated_capabilities(&self) -> &RoutingDocument {
         &self.negotiated_capabilities
     }
 
+    /// Returns the registered slot capacity.
     #[must_use]
     pub const fn slots(&self) -> RunnerSlotCount {
         self.slots
@@ -125,8 +134,10 @@ impl RunnerRoutingSnapshot {
 /// Invalid routing evidence returned by a storage adapter.
 #[derive(Clone, Copy, Debug, Eq, thiserror::Error, PartialEq)]
 pub enum RoutingSnapshotError {
+    /// The routing snapshot repeats a label.
     #[error("runner routing snapshot contains a duplicate label")]
     DuplicateLabel,
+    /// A runner group is present with an empty name.
     #[error("runner routing snapshot contains an empty group name")]
     EmptyGroupName,
 }
@@ -134,6 +145,7 @@ pub enum RoutingSnapshotError {
 /// Server-side access to authoritative routing state.
 #[async_trait]
 pub trait RunnerRoutingRepository: Send + Sync {
+    /// Loads authoritative routing state for an exact live session.
     async fn routing_for_session(
         &self,
         fence: RunnerSessionFence,
@@ -149,7 +161,10 @@ pub enum RunnerSlotAvailability {
     /// No live assignment currently owns the slot.
     Available,
     /// A live assignment currently owns the slot.
-    Occupied { attempt_id: AttemptId },
+    Occupied {
+        /// The attempt currently assigned to the slot.
+        attempt_id: AttemptId,
+    },
     /// The slot is outside the durable registration's configured capacity.
     OutOfRange,
     /// The durable runner registration is not currently online for new work.

@@ -10,6 +10,11 @@ use automata_ci_control::runner_control::{
     LeaseOfferCommandError, LeaseOfferCommandPublisher as _, LeaseOfferPublishOutcome,
     LeaseOfferReplayResolution, RunnerSessionFenceResolver as _, StoreLeaseOfferCommandPublisher,
     StoreRunnerSessionFenceResolver,
+    durable::{
+        CurrentRunnerSession, CurrentRunnerSessionRepository, LeaseOfferClaim,
+        LeaseOfferClaimStatus, PublishLeaseOffer, PublishedLeaseOffer, RunnerControlValueError,
+        RunnerLeaseOfferRepository,
+    },
 };
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, Lease,
@@ -24,11 +29,10 @@ use automata_ci_protocol::{
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{
-    CANCEL_JOB_COMMAND_KIND, CommandSequence, CurrentRunnerSession, CurrentRunnerSessionRepository,
-    DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, LeaseOfferClaim,
-    LeaseOfferClaimStatus, LeaseOfferCommandIdentity, ObjectKey, PublishLeaseOffer,
-    PublishedLeaseOffer, RunnerCommandPayload, RunnerControlValueError, RunnerGeneration,
-    RunnerLeaseOfferRepository, RunnerOperationKind, RunnerSessionFence, SessionEpoch, StoreError,
+    CANCEL_JOB_COMMAND_KIND, CommandSequence, DocumentSchema, DurableRunnerCommand,
+    EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, ObjectKey,
+    RunnerCommandPayload, RunnerGeneration, RunnerOperationKind, RunnerSessionFence, SessionEpoch,
+    StoreError,
 };
 use sha2::{Digest as _, Sha256};
 

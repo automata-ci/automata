@@ -20,6 +20,10 @@ mod config;
 mod error;
 mod observer;
 mod port;
+/// Durable lease polling and runnable-attempt repositories.
+pub mod repository;
+/// Authoritative runner routing and slot-availability contracts.
+pub mod routing;
 mod service;
 
 pub use config::{LeasePollConfig, LeaseTimeToLive, LeaseTimeToLiveError};

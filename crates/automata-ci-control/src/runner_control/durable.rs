@@ -2,17 +2,16 @@ use async_trait::async_trait;
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
 use automata_ci_core::{
     AttemptId, JobConclusion, JobIrVersion, JobLifecycle, Lease, LeaseGuard, LogSequence,
-    LogStreamId, OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+    LogStreamId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+};
+use automata_ci_store::{
+    AcknowledgeRunnerCommands, CommandCursor, DocumentSchema, DurableRunnerCommand,
+    EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, MAX_LOG_SEGMENT_BYTES,
+    MAX_TERMINAL_RESULT_BYTES, ObjectKey, RenewLease, RunnerGeneration, RunnerOperationReceipt,
+    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
+    StableRunnerSlot, StoreError,
 };
 use thiserror::Error;
-
-use crate::{
-    AcknowledgeRunnerCommands, CommandCursor, CommandSequence, DocumentSchema,
-    DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, MAX_LOG_SEGMENT_BYTES, ObjectKey,
-    RenewLease, RunnerGeneration, RunnerOperationReceipt, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence, StableRunnerSlot,
-    StoreError, value::terminal_result_bytes_rejection,
-};
 
 const MAX_UNCOMPRESSED_RUNNER_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DURABLE_LOG_SEQUENCE: u64 = 9_223_372_036_854_775_807;
@@ -77,7 +76,7 @@ pub trait CurrentRunnerSessionRepository: Send + Sync {
 pub struct LeaseOfferClaim {
     request: RunnerOperationRequest,
     protocol_version: RunnerProtocolVersion,
-    slot: crate::StableRunnerSlot,
+    slot: StableRunnerSlot,
     lease: Lease,
     job_ir: JobIrMetadata,
 }
@@ -90,7 +89,7 @@ impl LeaseOfferClaim {
     pub fn new(
         request: RunnerOperationRequest,
         protocol_version: RunnerProtocolVersion,
-        slot: crate::StableRunnerSlot,
+        slot: StableRunnerSlot,
         lease: Lease,
         job_ir: JobIrMetadata,
     ) -> Result<Self, RunnerControlValueError> {
@@ -123,7 +122,7 @@ impl LeaseOfferClaim {
 
     /// Returns the stable runner slot.
     #[must_use]
-    pub const fn slot(&self) -> crate::StableRunnerSlot {
+    pub const fn slot(&self) -> StableRunnerSlot {
         self.slot
     }
 
@@ -151,44 +150,6 @@ pub enum LeaseOfferClaimStatus {
     ClaimSuperseded,
 }
 
-/// Exact server-command identity used to resolve a replay to one typed offer publication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LeaseOfferCommandIdentity {
-    session: RunnerSessionFence,
-    operation_id: OperationId,
-    sequence: CommandSequence,
-}
-
-impl LeaseOfferCommandIdentity {
-    #[must_use]
-    pub const fn new(
-        session: RunnerSessionFence,
-        operation_id: OperationId,
-        sequence: CommandSequence,
-    ) -> Self {
-        Self {
-            session,
-            operation_id,
-            sequence,
-        }
-    }
-
-    #[must_use]
-    pub const fn session(self) -> RunnerSessionFence {
-        self.session
-    }
-
-    #[must_use]
-    pub const fn operation_id(self) -> OperationId {
-        self.operation_id
-    }
-
-    #[must_use]
-    pub const fn sequence(self) -> CommandSequence {
-        self.sequence
-    }
-}
-
 /// Complete verified lease-offer command awaiting an atomic durable publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishLeaseOffer {
@@ -205,7 +166,7 @@ impl PublishLeaseOffer {
     pub fn new(
         request: RunnerOperationRequest,
         protocol_version: RunnerProtocolVersion,
-        slot: crate::StableRunnerSlot,
+        slot: StableRunnerSlot,
         lease: Lease,
         job_ir: JobIrMetadata,
         offer_valid_until: UnixMillis,
@@ -243,7 +204,7 @@ impl PublishLeaseOffer {
 
     /// Returns the stable runner slot.
     #[must_use]
-    pub const fn slot(&self) -> crate::StableRunnerSlot {
+    pub const fn slot(&self) -> StableRunnerSlot {
         self.claim.slot()
     }
 
@@ -278,7 +239,7 @@ impl PublishLeaseOffer {
 pub struct PublishedLeaseOffer {
     request: RunnerOperationRequest,
     protocol_version: RunnerProtocolVersion,
-    slot: crate::StableRunnerSlot,
+    slot: StableRunnerSlot,
     lease: Lease,
     job_ir: JobIrMetadata,
     offer_valid_until: UnixMillis,
@@ -293,7 +254,7 @@ impl PublishedLeaseOffer {
     pub fn new(
         request: RunnerOperationRequest,
         protocol_version: RunnerProtocolVersion,
-        slot: crate::StableRunnerSlot,
+        slot: StableRunnerSlot,
         lease: Lease,
         job_ir: JobIrMetadata,
         offer_valid_until: UnixMillis,
@@ -325,7 +286,7 @@ impl PublishedLeaseOffer {
 
     /// Returns the stable runner slot.
     #[must_use]
-    pub const fn slot(&self) -> crate::StableRunnerSlot {
+    pub const fn slot(&self) -> StableRunnerSlot {
         self.slot
     }
 
@@ -531,34 +492,42 @@ impl CommitLeaseResponse {
         }
     }
 
+    /// Returns the idempotent runner operation.
     #[must_use]
     pub const fn request(&self) -> &RunnerOperationRequest {
         &self.request
     }
+    /// Returns the acknowledged command cursor.
     #[must_use]
     pub const fn command_cursor(&self) -> CommandCursor {
         self.command_cursor
     }
+    /// Returns the attempt responding to the offer.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
+    /// Returns the offered runner slot.
     #[must_use]
     pub const fn slot(&self) -> StableRunnerSlot {
         self.slot
     }
+    /// Returns the exclusive lease guard.
     #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         self.guard
     }
+    /// Returns the durable response action.
     #[must_use]
     pub const fn action(&self) -> LeaseResponseAction {
         self.action
     }
+    /// Returns the trusted observation time.
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
     }
+    /// Returns the canonical response bytes.
     #[must_use]
     pub const fn response(&self) -> &RunnerOperationResponse {
         &self.response
@@ -600,7 +569,7 @@ impl CommitRunnerTerminalResult {
         committed_at: UnixMillis,
         response: RunnerOperationResponse,
     ) -> Result<Self, RunnerControlValueError> {
-        if encoded_size == 0 || terminal_result_bytes_rejection(encoded_size).is_some() {
+        if !(1..=MAX_TERMINAL_RESULT_BYTES).contains(&encoded_size) {
             return Err(RunnerControlValueError::InvalidObjectSize);
         }
         if committed_at < completed_at {
@@ -621,46 +590,57 @@ impl CommitRunnerTerminalResult {
         })
     }
 
+    /// Returns the idempotent runner operation.
     #[must_use]
     pub const fn request(&self) -> &RunnerOperationRequest {
         &self.request
     }
+    /// Returns the completed attempt.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
+    /// Returns the exclusive lease guard.
     #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         self.guard
     }
+    /// Returns the terminal-result schema.
     #[must_use]
     pub const fn schema(&self) -> DocumentSchema {
         self.schema
     }
+    /// Returns the encoded object size.
     #[must_use]
     pub const fn encoded_size(&self) -> u64 {
         self.encoded_size
     }
+    /// Returns the terminal-result digest.
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
+    /// Returns the immutable object key.
     #[must_use]
     pub const fn object_key(&self) -> &ObjectKey {
         &self.object_key
     }
+    /// Returns the job conclusion.
     #[must_use]
     pub const fn conclusion(&self) -> JobConclusion {
         self.conclusion
     }
+    /// Returns the runner-reported completion time.
     #[must_use]
     pub const fn completed_at(&self) -> UnixMillis {
         self.completed_at
     }
+    /// Returns the trusted commit time.
     #[must_use]
     pub const fn committed_at(&self) -> UnixMillis {
         self.committed_at
     }
+    /// Returns the canonical response bytes.
     #[must_use]
     pub const fn response(&self) -> &RunnerOperationResponse {
         &self.response
@@ -893,58 +873,72 @@ impl CommitRunnerLogSegment {
         &self.admission
     }
 
+    /// Returns the idempotent runner operation.
     #[must_use]
     pub const fn request(&self) -> &RunnerOperationRequest {
         self.admission.request().request()
     }
+    /// Returns the attempt receiving the segment.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.admission.request().attempt_id()
     }
+    /// Returns the exclusive lease guard.
     #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         self.admission.request().guard()
     }
+    /// Returns the immutable log stream.
     #[must_use]
     pub const fn stream_id(&self) -> LogStreamId {
         self.admission.request().stream_id()
     }
+    /// Returns the log document schema.
     #[must_use]
     pub const fn schema(&self) -> DocumentSchema {
         self.admission.request().schema()
     }
+    /// Returns the first sequence in the segment.
     #[must_use]
     pub const fn first_sequence(&self) -> LogSequence {
         self.admission.request().first_sequence()
     }
+    /// Returns the last sequence in the segment.
     #[must_use]
     pub const fn last_sequence(&self) -> LogSequence {
         self.admission.request().last_sequence()
     }
+    /// Returns the immutable object key.
     #[must_use]
     pub const fn object_key(&self) -> &ObjectKey {
         &self.object_key
     }
+    /// Returns the encoded segment digest.
     #[must_use]
     pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
+    /// Returns the encoded segment size.
     #[must_use]
     pub const fn encoded_size(&self) -> u64 {
         self.encoded_size
     }
+    /// Returns the uncompressed segment size.
     #[must_use]
     pub const fn uncompressed_size(&self) -> u64 {
         self.uncompressed_size
     }
+    /// Returns the trusted storage time.
     #[must_use]
     pub const fn stored_at(&self) -> UnixMillis {
         self.admission.request().observed_at()
     }
+    /// Reports whether this segment closes the stream.
     #[must_use]
     pub const fn is_end_of_stream(&self) -> bool {
         self.admission.request().is_end_of_stream()
     }
+    /// Returns the canonical response bytes.
     #[must_use]
     pub const fn response(&self) -> &RunnerOperationResponse {
         &self.response

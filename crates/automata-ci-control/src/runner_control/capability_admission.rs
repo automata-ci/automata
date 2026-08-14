@@ -1,25 +1,33 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::RepositoryOperationError;
+use automata_ci_store::RepositoryOperationError;
 
 /// Failures from the narrow runner-capability admission boundary.
 #[derive(Debug, Error)]
 pub enum RunnerCapabilityAdmissionError {
+    /// The durable repository operation failed.
     #[error(transparent)]
     Operation(#[from] RepositoryOperationError),
+    /// Durable inventory conflicts with a currently composed resource.
     #[error("durable runner inventory conflicts with current {resource}")]
-    ConfigurationDrift { resource: &'static str },
+    ConfigurationDrift {
+        /// The unavailable or incompatible resource.
+        resource: &'static str,
+    },
+    /// Durable inventory violates an internal invariant.
     #[error("durable runner inventory violates an Automata invariant")]
     CorruptData,
 }
 
 impl RunnerCapabilityAdmissionError {
+    /// Wraps an infrastructure failure at the repository boundary.
     #[must_use]
     pub fn operation(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         RepositoryOperationError::from_source(source).into()
     }
 
+    /// Reports durable inventory drift for a named resource.
     #[must_use]
     pub const fn drift(resource: &'static str) -> Self {
         Self::ConfigurationDrift { resource }

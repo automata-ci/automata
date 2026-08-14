@@ -2,6 +2,30 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
+use automata_ci_control::{
+    lease::{
+        repository::{
+            RunnableAttemptRepository, RunnerClaimRepository, RunnerLeaseRequestRepository,
+        },
+        routing::{
+            RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
+            RunnerSlotAvailabilityRepository,
+        },
+    },
+    runner_control::{
+        durable::{
+            CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
+            CommitRunnerLogSegment, CommitRunnerTerminalResult, CurrentRunnerSession,
+            CurrentRunnerSessionRepository, LeaseOfferClaim, LeaseOfferClaimStatus,
+            LeaseResponseAction, PublishLeaseOffer, PublishedLeaseOffer, RawLogDisposition,
+            RunnerControlTransactionRepository, RunnerLeaseOfferRepository, RunnerLogAdmission,
+            RunnerLogAdmissionRequest,
+        },
+        repository::{
+            RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository,
+        },
+    },
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobConclusion, JobId, JobIrVersion, JobLifecycle, Lease, LeaseGuard,
     LeaseId, LogSequence, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
@@ -23,26 +47,18 @@ use automata_ci_store::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
     CancellationIntent, CancellationReason, CancellationRepository, ClaimRejection, ClaimedAttempt,
     CloseRunnerSession, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
-    CommandReplayPage, CommandSequence, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
-    CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult, CompleteLeaseRequest,
-    ConcludeBlockedAttempt, CurrentRunnerSession, CurrentRunnerSessionRepository,
+    CommandReplayPage, CommandSequence, CompleteLeaseRequest, ConcludeBlockedAttempt,
     DEFAULT_CANCELLATION_REASON, DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand,
-    HeartbeatRunnerSession, JobDependency, JobIrMetadata, LeaseOfferClaim, LeaseOfferClaimStatus,
-    LeaseOfferCommandIdentity, LeaseRequestCompletion, LeaseRequestKey, LeaseResponseAction,
-    MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT, NoWorkLeaseRequest, ObjectKey,
-    OpenRunnerSession, PublishLeaseOffer, PublishedLeaseOffer, RawLogDisposition,
-    RequestCancellation, ResumeRunnerSession, RevokedLeaseOfferFallback, RoutingDocument,
-    RoutingLabel, RunnableAttempt, RunnableAttemptRepository, RunnableQueueKey, RunnableScanLimit,
-    RunnableScanPage, RunnableScanRequest, RunnerClaimRepository, RunnerCommandOutbox,
-    RunnerCommandPayload, RunnerControlTransactionRepository, RunnerGeneration, RunnerGroupId,
-    RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerLogAdmission,
-    RunnerLogAdmissionRequest, RunnerOperationKind, RunnerOperationReceipt,
-    RunnerOperationReceiptRepository, RunnerOperationRequest, RunnerOperationResponse,
-    RunnerPayloadTombstone, RunnerPayloadTombstoneReason, RunnerProtocolVersion,
-    RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSessionFence, RunnerSessionRepository,
-    RunnerSessionSnapshot, RunnerSlotAvailability, RunnerSlotAvailabilityRepository,
-    RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError, TryClaimAttempt, TryClaimOutcome,
-    TryClaimReceipt, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
+    HeartbeatRunnerSession, JobDependency, JobIrMetadata, LeaseOfferCommandIdentity,
+    LeaseRequestCompletion, LeaseRequestKey, MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT,
+    NoWorkLeaseRequest, ObjectKey, OpenRunnerSession, RequestCancellation, ResumeRunnerSession,
+    RevokedLeaseOfferFallback, RoutingDocument, RoutingLabel, RunnableAttempt, RunnableQueueKey,
+    RunnableScanLimit, RunnableScanPage, RunnableScanRequest, RunnerCommandPayload,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest,
+    RunnerOperationResponse, RunnerPayloadTombstone, RunnerPayloadTombstoneReason,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount,
+    SessionEpoch, StableRunnerSlot, StoreError, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
+    WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
 };
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";

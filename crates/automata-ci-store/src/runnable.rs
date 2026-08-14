@@ -1,10 +1,9 @@
 use std::num::NonZeroU16;
 
-use async_trait::async_trait;
 use automata_ci_core::{AttemptId, JobId, RunId, RunnerRequirements, Sha256Digest, UnixMillis};
 use thiserror::Error;
 
-use crate::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot, StoreError};
+use crate::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
 
 /// Maximum records returned by one scheduler queue scan.
 pub const MAX_RUNNABLE_SCAN_LIMIT: u16 = 1000;
@@ -345,14 +344,4 @@ pub enum RunnableAttemptError {
     JobMetadataMismatch,
     #[error("runnable attempt and JobIR metadata identify different runs")]
     RunMetadataMismatch,
-}
-
-/// Authoritative scheduler queue port. Claims/no-work receipts atomically
-/// commit the opaque cursor advancement returned with a page.
-#[async_trait]
-pub trait RunnableAttemptRepository: Send + Sync {
-    async fn scan_runnable(
-        &self,
-        request: RunnableScanRequest,
-    ) -> Result<RunnableScanPage, StoreError>;
 }

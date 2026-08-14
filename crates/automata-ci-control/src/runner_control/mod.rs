@@ -14,9 +14,15 @@
 //! uses the same key, digest, and bytes. `PostgreSQL` then commits the fenced lifecycle/metadata and
 //! exact response receipt together, preventing visible partial ingestion.
 
+/// Startup checks for durable runner capabilities used by this control plane.
+pub mod capability_admission;
+/// Durable models and repositories for authenticated runner-control operations.
+pub mod durable;
 mod handler;
 mod observer;
 mod port;
+/// Durable runner sessions, operation receipts, and command delivery repositories.
+pub mod repository;
 mod verify;
 
 pub use handler::{

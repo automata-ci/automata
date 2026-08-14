@@ -1,5 +1,6 @@
 use std::{error::Error, future::Future, sync::Arc};
 
+use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
     RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
@@ -18,7 +19,7 @@ use automata_ci_store::{
     ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
     ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
     RegisterProviderDeliveryWorkflowInventory, RoutingDocument, RunnerGeneration,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionRepository as _,
+    RunnerProtocolVersion, RunnerSessionFence,
 };
 use sqlx::PgPool;
 use tokio::sync::OnceCell;

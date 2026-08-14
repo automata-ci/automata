@@ -10,6 +10,7 @@ use automata_ci_auth::{
     session::SessionKind,
     time::Clock,
 };
+use automata_ci_control::runner_control::capability_admission::RunnerCapabilityReadiness;
 use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerGroup};
 use automata_ci_postgres::auth::management::{
     ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
@@ -17,7 +18,6 @@ use automata_ci_postgres::auth::management::{
     PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
     RunnerEnrollmentPrepareOutcome,
 };
-use automata_ci_store::RunnerCapabilityReadiness;
 use axum::{
     Router,
     body::Bytes,

@@ -1,5 +1,6 @@
 use std::{error::Error, future::Future, sync::Arc};
 
+use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
     RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
@@ -10,7 +11,7 @@ use automata_ci_postgres_test_support::{
 };
 use automata_ci_store::{
     OpenRunnerSession, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionRepository as _, WORKFLOW_ADMISSION_EPOCH,
+    RunnerSessionFence, WORKFLOW_ADMISSION_EPOCH,
 };
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
