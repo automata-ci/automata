@@ -217,3 +217,20 @@ target shapes fail closed. Script and CSS assets must be rooted, fragment-free
 paths with the expected file type. Adding a route means adding a discriminated
 `PageModel` variant, its validator, and complete rendering in `App`; unknown
 variants fail rather than falling back to an empty client shell.
+
+## Reusable package boundary
+
+`npm run build` also assembles the private, registry-neutral `@automata/ui`
+package beneath `dist/package`. Its deliberately small public surface contains
+the existing Core page renderer, the shared application shell, the theme
+control and bootstrap script, the page-model types, and a stable compiled
+stylesheet at `@automata/ui/styles.css`. A separate host can render its own page
+content inside `Shell`; the package does not contain transport, authentication,
+data loading, Cloud-only pages, or a plugin system.
+
+`npm run verify:package` renders consumer-owned content through the packaged
+shell, checks the compiled stylesheet, creates the npm archive twice, and
+requires byte-identical tarballs with a bounded file set. The package remains
+`private` and version `0.0.0`: those guards intentionally defer its final name,
+versioning policy, registry, and release mechanism. `npm pack` can still produce
+a local archive for integration work without allowing accidental publication.

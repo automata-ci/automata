@@ -3,7 +3,7 @@ import type { RepositoryModel, ShellModel } from "../models";
 import { isVisibleDisplayCodePoint } from "../unicode";
 import { Icon } from "./Icon";
 
-interface ShellProps extends PropsWithChildren {
+export interface ShellProps extends PropsWithChildren {
   readonly shell: ShellModel;
   readonly repository: RepositoryModel | null;
   readonly currentRepositoryView?: "actions" | "settings";

@@ -8,7 +8,7 @@ if (arguments_.length === 0) {
   await rm(outputDirectory, { recursive: true, force: true });
 } else if (arguments_.length === 1 && arguments_[0] === "--production") {
   await Promise.all(
-    ["client", "ssr"].map((directory) =>
+    ["client", "package", "ssr"].map((directory) =>
       rm(`${outputDirectory}/${directory}`, { recursive: true, force: true }),
     ),
   );
