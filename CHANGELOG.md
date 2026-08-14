@@ -28,6 +28,10 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Results artifacts, CacheService v2 current/default-branch lookup, immutable
   numeric run aliases, typed dispatch-input components, and value-level output
   sensitivity.
+- Read-only `automata local doctor` preflight for the initial x86-64 Linux,
+  Apple Silicon macOS, and x86-64 Windows host tuples, a local Linux Docker
+  Engine, Docker Compose plugin 2.20.0 or newer, and dedicated roots strictly
+  below platform-native user-state directories.
 
 ### Known limitations
 

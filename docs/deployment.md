@@ -1,8 +1,9 @@
 # Control-plane setup
 
 This guide starts `automata server`, PostgreSQL, RustFS, and three dynamically
-enrolled runner processes on a development machine. Optional sections add
-GitHub login, provider ingress, and the built-in secret provider.
+enrolled runner processes on an Arch Linux development machine. GitHub login is
+required for runner enrollment; repository provider ingress and the built-in
+secret provider remain optional.
 
 > [!CAUTION]
 > This is not a production deployment. Automated certificate rotation,
@@ -13,13 +14,15 @@ GitHub login, provider ingress, and the built-in secret provider.
 | Component | Default local address | Purpose |
 | --- | --- | --- |
 | Human HTTP and SSR | `127.0.0.1:8080` | Health, readiness, UI, authentication, and administration |
-| Results API | `127.0.0.1:8081` | GitHub Actions Results-compatible requests |
+| Results API | Exact firewall-constrained RFC 1918 address on port `8081` | GitHub Actions Results-compatible requests from rootless jobs |
 | Runner control | `127.0.0.1:9090` | Direct HTTP/2 with mandatory mutual TLS |
 | PostgreSQL | `127.0.0.1:5432` | Durable coordination and metadata |
 | RustFS S3 API | `127.0.0.1:9000` | Immutable blobs |
 | RustFS console | `127.0.0.1:9001` | Local object-store administration |
 
-You need Git, rustup, OpenSSL, rootless Podman, and `podman-compose`. The
+You need Git, rustup, OpenSSL, rootless Podman, `podman-compose`, `jq`,
+`secret-tool`, and an unlocked Secret Service with encrypted backing storage.
+The operator is responsible for the external keyring's at-rest protection. The
 repository checkout supplies the Compose definition, local tests, and example
 configuration used below.
 
@@ -126,10 +129,16 @@ for instance in 1 2 3; do
 done
 ```
 
-Finish the [runner host guide](../crates/automata-ci-runner/config/README.md):
-create the owner-only spool keys and service credentials, private state roots,
-rootless Podman mounts, and immutable profiles. Do not pre-create the three TLS
-files named by each configuration; enrollment creates them without overwriting.
+Use the [runner configuration reference](../crates/automata-ci-runner/config/README.md)
+to finish reviewing the three files, then follow the
+[three-process host guide](../deploy/runner-host/README.md) through installation
+of the dedicated accounts, reviewed binary and configurations, owner-only spool
+keys and service environment, private state roots, and rootless Podman mounts.
+Stop before its dynamic-enrollment section until the server and administrator
+setup below are complete. Do not pre-create any configured TLS destination or
+adjacent enrollment stage. Each TLS directory must be mode `0700` and owned by
+its exact service account so enrollment can stage and install that identity
+without giving either of the other accounts access.
 
 On Unix, every ordinary server `file:` secret-source reference must be an
 absolute path. Automata opens each path component without following symbolic
@@ -141,42 +150,16 @@ process arguments, but the service manager must still prevent inherited
 environment disclosure. Prefer a mounted owner-only secret file or a platform
 secret-injection facility for long-running deployments.
 
-## 4. Start the server
-
-```console
-automata server \
-  --results-public-url http://127.0.0.1:8081/ \
-  --results-allow-development-http \
-  --results-signing-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/results-hmac.key" \
-  --control-plane-encryption-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/control-plane-wrapping.key" \
-  --control-plane-encryption-key-id local-control-plane-2026 \
-  --database-url-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/database-url" \
-  --database-transport loopback-plaintext \
-  --s3-endpoint http://127.0.0.1:9000/ \
-  --s3-allow-loopback-http \
-  --s3-bucket automata-dev \
-  --s3-prefix automata/v1 \
-  --s3-kms-key-id default \
-  --s3-access-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-access-key" \
-  --s3-secret-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-secret-key" \
-  --runner-public-url https://localhost:9090/ \
-  --runner-client-ca-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
-  --runner-client-ca-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca-key.pem" \
-  --runner-server-ca-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
-  --runner-server-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-chain.pem" \
-  --runner-server-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-key.pem"
-```
-
-Startup applies embedded PostgreSQL migrations, verifies the database, and
-performs a conditional immutable write/read probe against RustFS. A failed
-dependency prevents the server from becoming ready.
+## 4. Configure authentication and start the server
 
 ### Enable GitHub human authentication for enrollment
 
-The base command can start without human authentication, but runner enrollment
-is intentionally available only after it is enabled. Create a GitHub App whose
-user callback is the external origin plus
-`/auth/github/callback`, then create local keys:
+Runner enrollment requires GitHub human authentication, and a fresh database
+cannot start without one complete installation bootstrap tuple. Create a
+GitHub App whose user callback is the external origin plus
+`/auth/github/callback`, and enable Device Flow in the App settings. Device
+Flow is opt-in and cannot be enabled by an App Manifest. Then create local
+keys:
 
 ```console
 openssl rand 32 > "$AUTOMATA_LOCAL_SECRET_DIR/auth-session-hmac.key"
@@ -193,7 +176,78 @@ export AUTOMATA_AUTH_KEY_ID=local-auth-2026
 ```
 
 Create `github-client-secret` as an owner-only file; do not export its value or
-put it in an option. Restart the complete server command with these variables.
+put it in an option. Create the one-use bootstrap tuple before the first server
+start:
+
+```console
+openssl rand -hex 32 > "$AUTOMATA_LOCAL_SECRET_DIR/auth-bootstrap.token"
+chmod 0600 "$AUTOMATA_LOCAL_SECRET_DIR/auth-bootstrap.token"
+
+export AUTOMATA_BOOTSTRAP_TOKEN_SOURCE="file:${AUTOMATA_LOCAL_SECRET_DIR}/auth-bootstrap.token"
+export AUTOMATA_BOOTSTRAP_GITHUB_USER_ID='replace-with-numeric-user-id'
+export AUTOMATA_BOOTSTRAP_TENANT_ID=local
+export AUTOMATA_BOOTSTRAP_TENANT_DISPLAY_NAME='Local development'
+```
+
+`AUTOMATA_BOOTSTRAP_GITHUB_USER_ID` is the permitted user's stable numeric
+GitHub ID, not a login. An incomplete tuple or a fresh database without it
+fails closed.
+
+### Apply the Results guard and start
+
+A rootless job cannot reach a Results listener bound to host loopback. Follow
+the [Arch Linux Results-listener firewall](platforms/arch-linux.md#local-results-listener-firewall)
+through its render, route, apply, and audit steps before starting the server.
+Choose the exact private address assigned to this host and export it; the
+example below uses the address from that guide:
+
+```console
+export AUTOMATA_RESULTS_LISTEN_IP=192.168.0.8
+```
+
+Never substitute `0.0.0.0`: this development-only HTTP endpoint must be
+restricted by the documented host firewall before it starts.
+
+```console
+automata server \
+  --results-listen "${AUTOMATA_RESULTS_LISTEN_IP}:8081" \
+  --results-public-url http://host.containers.internal:8081/ \
+  --results-allow-development-http \
+  --results-trusted-private-host host.containers.internal \
+  --results-signing-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/results-hmac.key" \
+  --control-plane-encryption-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/control-plane-wrapping.key" \
+  --control-plane-encryption-key-id local-control-plane-2026 \
+  --database-url-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/database-url" \
+  --database-transport loopback-plaintext \
+  --s3-endpoint http://127.0.0.1:9000/ \
+  --s3-allow-loopback-http \
+  --s3-bucket automata-dev \
+  --s3-prefix automata/v1 \
+  --s3-kms-key-id default \
+  --s3-access-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-access-key" \
+  --s3-secret-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/s3-secret-key" \
+  --runner-public-url https://127.0.0.1:9090/ \
+  --runner-client-ca-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
+  --runner-client-ca-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca-key.pem" \
+  --runner-server-ca-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/runner-ca.pem" \
+  --runner-server-cert-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-chain.pem" \
+  --runner-server-key-source "file:${AUTOMATA_LOCAL_SECRET_DIR}/server-key.pem"
+```
+
+Startup applies embedded PostgreSQL migrations, verifies the database, and
+performs a conditional immutable write/read probe against RustFS. A failed
+dependency prevents the server from becoming ready.
+
+Before enrollment or job execution, return to the firewall guide and complete
+its post-start Podman-path capture and separate-LAN denial tests. If either
+fails, stop the server before changing or removing the exact guard.
+
+Finish the one-use `/setup` browser flow as the configured GitHub identity
+before attempting an ordinary CLI login. Remove the bootstrap tuple from future
+server starts after the durable installation reaches `configured`. See
+[Authentication and authorization](authentication.md#enable-github-human-authentication)
+for the complete state machine.
+
 Loopback HTTP works only because the origin is a literal loopback address and
 the development switch is set. Any non-local deployment requires a canonical
 HTTPS origin.
@@ -206,23 +260,32 @@ for setup state, sessions, and key rotation.
 
 ### Enroll the three runners
 
-After restarting the server with human authentication configured, sign in once
+After completing the one-use browser setup, sign in once through the Linux CLI
 and issue a separate 15-minute token for each process. Pipe it directly to the
 runner so it does not enter argv or a shell-history assignment. Literal
 loopback HTTP is accepted only for this explicit development case:
 
 ```console
-automata auth login --server http://127.0.0.1:8080
-for instance in 1 2 3; do
-  automata runner token \
-    --server http://127.0.0.1:8080 \
-    --output json \
-  | jq -r .token \
-  | automata-runner enroll \
-      --server http://127.0.0.1:8080 \
-      --config "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json" \
-      --name "local-runner-${instance}"
-done
+automata auth --server-url http://127.0.0.1:8080 login
+(
+  set -euo pipefail
+  for instance in 1 2 3; do
+    automata runner --server-url http://127.0.0.1:8080 --output json token \
+    | jq -er '.token | select(type == "string" and length > 0)' \
+    | sudo --user="automata-runner-${instance}" -- \
+        /usr/bin/automata-runner enroll \
+          --server http://127.0.0.1:8080 \
+          --config "/etc/automata-runner/instances/${instance}/runner.json" \
+          --name "local-runner-${instance}"
+  done
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now automata-runner-host.target
+  systemctl --no-pager --full status \
+    automata-runner@1.service \
+    automata-runner@2.service \
+    automata-runner@3.service
+)
 ```
 
 The runner generates its ECDSA P-256 key locally. The control plane receives a
@@ -232,7 +295,11 @@ and stored only as domain-separated digests. Interrupted enrollment can be
 rerun: a private adjacent stage retains the operation and key until all three
 credential files are durably reconciled, including when the exact server response
 had not yet been staged. The token source is not needed again after that request
-stage has been created. See the
+stage has been created. A retry must use the exact same server, configuration,
+name, and service account, with standard input redirected from `/dev/null`; do
+not create a replacement token or delete private staging after an indeterminate
+server response. The three services start only after every enrollment succeeds.
+See the
 [security and lifecycle plan](runner-control-plane-security-and-enrollment.md).
 
 ### Optional GitHub provider runtime
@@ -260,14 +327,16 @@ all authority UUIDs are unique, nested authority revisions equal the repository
 policy revision, and stable numeric GitHub installation/repository/owner IDs
 must match the App installation. The product reference documents every field,
 rotation rule, webhook path, and `standard` versus `credential_free` output-
-safety choice. Subscribe the App webhook to the configured supported events,
-grant `checks:write` for every registered repository, and grant `contents:read`
-only for Private source. The checked-in example uses the server-owned
-`{"mode":"all_direct"}` workflow selection. It discovers only canonical
-`.yml` and `.yaml` files directly beneath `.ci/workflows/` at the exact
-authenticated source revision; nested files and other extensions are not
-selected. Discovery is bounded by the manifest archive limits, and the sorted
-inventory and each path-local result are durable before the delivery completes.
+safety choice. Subscribe the App webhook to the configured supported events.
+The App's registration-wide permissions are Checks write, Contents read, Pull
+requests read, and Merge queues read; internal private-source authority remains
+scoped separately per repository. Workflow selection is server-owned and
+hardcoded to `all_direct`; it is not a provider-manifest field. That policy
+discovers only canonical `.yml` and `.yaml` files directly beneath
+`.ci/workflows/` at the exact authenticated source revision; nested files and
+other extensions are not selected. Discovery is bounded by the manifest archive
+limits, and the sorted inventory and each path-local result are durable before
+the delivery completes.
 
 The required top-level `transport` is a closed deployment policy. Production
 uses `{"mode":"github_dot_com"}`. The isolated integration suite may instead
@@ -331,43 +400,6 @@ fails startup before the App private key or webhook HMAC is loaded and before
 provider manifests or runtime state are constructed. Set the unauthenticated
 fallback with `--fallback-tenant-id` or `AUTOMATA_FALLBACK_TENANT_ID`; there is
 no tenant chooser or compatibility fallback.
-
-For a fresh database, also provide one complete installation tuple:
-
-```console
-openssl rand -hex 32 > "$AUTOMATA_LOCAL_SECRET_DIR/auth-bootstrap.token"
-chmod 0600 "$AUTOMATA_LOCAL_SECRET_DIR/auth-bootstrap.token"
-
-export AUTOMATA_BOOTSTRAP_TOKEN_SOURCE="file:${AUTOMATA_LOCAL_SECRET_DIR}/auth-bootstrap.token"
-export AUTOMATA_BOOTSTRAP_GITHUB_USER_ID='replace-with-numeric-user-id'
-export AUTOMATA_BOOTSTRAP_TENANT_ID=local
-export AUTOMATA_BOOTSTRAP_TENANT_DISPLAY_NAME='Local development'
-```
-
-`AUTOMATA_BOOTSTRAP_GITHUB_USER_ID` is the permitted user's stable numeric
-GitHub ID, not a login. The tuple arms a one-use challenge and can be removed
-after the durable installation reaches `configured`. While the installation is
-armed, the exact `/setup` page exposes the proof-bound browser setup flow; it is
-withdrawn immediately after setup completes. Device setup remains API-only and
-there is no setup CLI. The
-[authentication guide](authentication.md#enable-github-human-authentication)
-describes that lifecycle. An incomplete tuple or an unconfigured database with
-no tuple prevents startup.
-
-After setup has completed, a Linux workstation with `secret-tool` and an
-unlocked Secret Service can verify the CLI-audience path:
-
-```console
-automata auth --server-url http://127.0.0.1:8080 login
-automata auth --server-url http://127.0.0.1:8080 status
-automata auth --server-url http://127.0.0.1:8080 logout
-```
-
-The client has no plaintext credential-file fallback. It commits the device
-credential to Secret Service before activating the server's short-lived
-pending session. The selected Secret Service must itself provide encrypted
-backing storage; Automata cannot attest how that external keyring persists its
-database.
 
 The control-plane wrapping key is mandatory and must contain exactly 32 random
 bytes. It envelope-encrypts durable runner commands and RPC responses before
@@ -504,12 +536,11 @@ automata admin status
 
 The web interface at <http://127.0.0.1:8080> renders tenant-scoped workflow
 runs from PostgreSQL, with verified job logs and finalized artifacts loaded
-from immutable blob storage. This bootstrap composition uses the configured
-fallback tenant and exposes only data whose durable publication policy permits
-anonymous access. The command above intentionally leaves optional human
-authentication disabled. Private and authenticated views require the complete
-human-auth configuration and, for a new installation, the
-[one-use bootstrap tuple](#enable-github-human-authentication-for-enrollment).
+from immutable blob storage. This composition uses the tenant established by
+the completed one-use setup. Human authentication is enabled by the command
+above; the server exposes anonymously only data whose durable publication
+policy permits it, while private and authenticated views require the configured
+GitHub identity and active session.
 
 An authorized browser can change repository access at
 `/{owner}/{repository}/settings/access`. Dashboard metadata, logs, and artifacts

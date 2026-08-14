@@ -19,6 +19,8 @@ pub enum Command {
     /// This explicit mode is intended for release-image smoke tests and local
     /// UI previews. It never starts durable stores, Results, or runner control.
     Preview(PreviewArgs),
+    /// Inspect prerequisites for a disposable local Automata installation.
+    Local(LocalArgs),
     /// Authenticate the operator CLI and manage its server-scoped session.
     Auth(AuthArgs),
     /// Manage encrypted Actions secrets.
@@ -44,9 +46,50 @@ impl Command {
             Self::Rerun(args) => Some(&args.operator),
             Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
-            Self::Server(_) | Self::Preview(_) => None,
+            Self::Server(_) | Self::Preview(_) | Self::Local(_) => None,
         }
     }
+}
+
+#[derive(Debug, Args)]
+/// Disposable local-installation commands.
+pub struct LocalArgs {
+    /// Local-installation operation to perform.
+    #[command(subcommand)]
+    pub command: LocalCommand,
+}
+
+#[derive(Debug, Subcommand)]
+/// Operations supported by the local-installation supervisor.
+pub enum LocalCommand {
+    /// Check this host without creating containers or local state.
+    Doctor(LocalDoctorArgs),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "kebab-case")]
+/// Container engine selected for the disposable local installation.
+pub enum LocalContainerEngine {
+    /// Select the portable Docker Engine path.
+    #[default]
+    Auto,
+    /// Require Docker Engine and Compose plugin version 2.20.0 or newer.
+    Docker,
+}
+
+#[derive(Debug, Args)]
+/// Read-only local-installation preflight options.
+pub struct LocalDoctorArgs {
+    /// Container engine to inspect.
+    #[arg(long, env = "AUTOMATA_LOCAL_ENGINE", value_enum, default_value_t)]
+    pub engine: LocalContainerEngine,
+    /// Dedicated root below a platform user-state directory. A native default is used when omitted.
+    #[arg(long, env = "AUTOMATA_LOCAL_STATE_DIR", value_name = "USER_STATE_PATH")]
+    pub state_dir: Option<PathBuf>,
+    /// Render one stable JSON document instead of a human-readable report.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

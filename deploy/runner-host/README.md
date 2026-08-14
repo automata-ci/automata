@@ -48,10 +48,12 @@ for instance in 1 2 3; do
 done
 ```
 
-Install the binary, units, and private directory declarations as root:
+Install the reviewed binary, units, and private directory declarations as root:
 
 ```console
-sudo install -o root -g root -m 0755 automata-runner /usr/bin/automata-runner
+runner_binary="$(command -v automata-runner)"
+test -n "$runner_binary"
+sudo install -o root -g root -m 0755 "$runner_binary" /usr/bin/automata-runner
 sudo install -o root -g root -m 0644 \
   deploy/runner-host/systemd/automata-runner@.service \
   deploy/runner-host/systemd/automata-runner-host.slice \
@@ -66,48 +68,49 @@ sudo install -o root -g root -m 0644 \
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/automata-runner-host.conf
 ```
 
+The instance directory and configuration remain root-owned. Each `tls`
+directory is instead mode `0700` and owned by its exact runner account because
+that account creates its private enrollment stage, key, returned chain, and
+server roots there. The parent instance directory is not writable by the runner,
+and no other runner account can traverse the TLS directory. Do not change the
+TLS directory to a shared group-writable location and do not run enrollment as
+root or as the interactive operator.
+
 The three 20 GiB `tmpfs,noswap` mounts are separate capacity boundaries. They
 preserve the runner's exact-mount proof and prevent any instance from sharing
 Podman runtime or storage with another. They are transient provider storage,
 not advertised per-job disk quota; both `ephemeral_disk_bytes` values remain
 zero.
 
-Install one reviewed configuration per instance:
+Install one reviewed configuration per instance. Set
+`AUTOMATA_RUNNER_CONFIG_DIR` to the absolute ignored directory containing the
+three edited `runner-N.json` files; do not install the checked-in examples
+without reviewing their host-specific values. In particular, replace each
+runner ID, endpoint, profile digest/image, Git bridge, resource ceiling, and
+object-store setting as appropriate. Keep all instance-qualified paths and
+ports distinct, then install those reviewed copies:
 
 ```console
+test -n "${AUTOMATA_RUNNER_CONFIG_DIR:-}"
+test "$AUTOMATA_RUNNER_CONFIG_DIR" = "$(realpath "$AUTOMATA_RUNNER_CONFIG_DIR")"
 for instance in 1 2 3; do
   sudo install -o root -g "automata-runner-${instance}" -m 0640 \
-    "crates/automata-ci-runner/config/runner.local-${instance}.example.json" \
+    "$AUTOMATA_RUNNER_CONFIG_DIR/runner-${instance}.json" \
     "/etc/automata-runner/instances/${instance}/runner.json"
   sudo install -o root -g root -m 0600 /dev/null \
     "/etc/automata-runner/instances/${instance}/environment"
 done
 ```
 
-Review every example before starting it. In particular, replace its runner
-ID, endpoints, profile digest/image, Git bridge, resources, and object-store
-settings as appropriate. Keep all instance-qualified paths and ports distinct.
 Write the required S3 variables to each owner-only `environment` file; systemd
 reads that file before changing to the runner account.
 
-## Provision three independent identities
+## Provision non-TLS runner inputs
 
-Issue three different CA-signed `clientAuth` leaves and keys. A leaf or private
-key must never be reused between instances. Install the common server CA and
-the instance leaf/key beneath each instance boundary:
-
-```console
-for instance in 1 2 3; do
-  sudo install -o root -g root -m 0444 server-ca.pem \
-    "/etc/automata-runner/instances/${instance}/tls/server-ca.pem"
-  sudo install -o root -g root -m 0444 "runner-${instance}.pem" \
-    "/etc/automata-runner/instances/${instance}/tls/runner.pem"
-  sudo install \
-    -o "automata-runner-${instance}" -g "automata-runner-${instance}" -m 0600 \
-    "runner-${instance}-key.pem" \
-    "/etc/automata-runner/instances/${instance}/tls/runner-key.pem"
-done
-```
+Do not issue or install runner TLS leaves or keys manually. Do not create
+`server-ca.pem`, `runner.pem`, `runner-key.pem`, or any adjacent enrollment
+stage. The dynamic enrollment step below must observe all three configured TLS
+destinations as absent and creates them without overwriting.
 
 Generate and install a different 32-byte spool key for each instance. The
 example protection IDs are also distinct, so ciphertext cannot silently move
@@ -124,23 +127,62 @@ for instance in 1 2 3; do
 done
 ```
 
-Run `automata-runner capabilities --config ...` once for each configuration
-and build one server static-fleet document containing all three results. Every
-entry needs the matching runner ID, a distinct name and external identity,
-`slots: 1`, and the digest of its own active client leaf. The store deliberately
-allows only one live session per runner ID, so starting three processes against
-one registration is invalid.
-
-## Start and observe the trio
-
-Validate each configuration as the service account, then enable the target:
+Validate the installed configurations as the identities that will run them.
+This checks the immutable capability documents but does not create a
+registration or contact the control plane:
 
 ```console
 for instance in 1 2 3; do
-  sudo -u "automata-runner-${instance}" /usr/bin/automata-runner capabilities \
-    --config "/etc/automata-runner/instances/${instance}/runner.json" \
+  sudo --user="automata-runner-${instance}" -- \
+    /usr/bin/automata-runner capabilities \
+      --config "/etc/automata-runner/instances/${instance}/runner.json" \
     > /dev/null
 done
+```
+
+## Dynamically enroll three independent identities
+
+Complete the control-plane guide through administrator setup and the operator
+CLI login before continuing. The operator creates one short-lived token at a
+time, but the exact service account consumes it from standard input and creates
+its own key and private adjacent request stage. The token and key never enter a
+command argument, the configuration, or another account's custody:
+
+```console
+(
+  set -euo pipefail
+  for instance in 1 2 3; do
+    automata runner --server-url http://127.0.0.1:8080 --output json token \
+    | jq -er '.token | select(type == "string" and length > 0)' \
+    | sudo --user="automata-runner-${instance}" -- \
+        /usr/bin/automata-runner enroll \
+          --server http://127.0.0.1:8080 \
+          --config "/etc/automata-runner/instances/${instance}/runner.json" \
+          --name "local-runner-${instance}"
+  done
+)
+```
+
+Use the canonical HTTPS control-plane origin outside the explicit literal-
+loopback development case. Keep each runner name stable across recovery. If an
+enrollment was interrupted after its request stage was created, rerun the exact
+same `automata-runner enroll` command as the same service account with standard
+input redirected from `/dev/null`; the private stage retains the one-use token,
+operation, and key. Do not mint a replacement token or delete a stage whose
+server outcome is unknown. A retry fails safely when no matching stage exists.
+
+After each successful enrollment, the TLS directory contains the service-
+account-owned server roots and client chain plus a mode-`0600` private key. The
+private request and response stages are removed only after all three final files
+are durably reconciled. The service-account-owned process lock remains adjacent
+to prevent concurrent enrollment against the same destinations.
+
+## Start and observe the trio
+
+Only after all three enrollments succeed, enable the target and verify every
+service:
+
+```console
 sudo systemctl daemon-reload
 sudo systemctl enable --now automata-runner-host.target
 systemctl --no-pager --full status \

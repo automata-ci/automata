@@ -1,6 +1,6 @@
 use automata_ci::cli::{
-    AuthCommand, Cli, Command, EnvironmentReviewDecision, OutputFormat, RepositoryRef,
-    RerunSelection, SecretCommand, SecretProviderCommand, SecretScope,
+    AuthCommand, Cli, Command, EnvironmentReviewDecision, LocalCommand, LocalContainerEngine,
+    OutputFormat, RepositoryRef, RerunSelection, SecretCommand, SecretProviderCommand, SecretScope,
 };
 use automata_ci::server::{ServerConfig, ServerConfigError};
 use clap::{CommandFactory as _, Parser as _};
@@ -23,6 +23,52 @@ fn preview_is_an_explicit_dependency_free_mode() {
         panic!("preview command expected");
     };
     assert_eq!(args.listen.to_string(), "127.0.0.1:8080");
+}
+
+#[test]
+fn local_doctor_is_an_explicit_read_only_preflight() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "doctor",
+        "--engine",
+        "docker",
+        "--state-dir",
+        "/tmp/automata-local",
+        "--json",
+    ])
+    .expect("local doctor must parse");
+
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Doctor(args) = local.command;
+    assert_eq!(args.engine, LocalContainerEngine::Docker);
+    assert_eq!(
+        args.state_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/automata-local"))
+    );
+    assert!(args.json);
+
+    assert!(
+        Cli::try_parse_from(["automata", "local", "doctor", "--engine", "podman"]).is_err(),
+        "an unqualified engine must not enter the local installation contract"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "local",
+            "doctor",
+            "--server-url",
+            "https://ci.example.test",
+        ])
+        .is_err(),
+        "local lifecycle commands must not inherit the remote operator endpoint"
+    );
+    assert!(
+        Cli::try_parse_from(["automata", "local", "doctor", "--output", "json"]).is_err(),
+        "local lifecycle output must remain an explicit command contract"
+    );
 }
 
 #[test]
@@ -161,6 +207,7 @@ fn only_operational_top_level_commands_are_advertised() {
         [
             "server",
             "preview",
+            "local",
             "auth",
             "secret",
             "environment-review",
@@ -583,9 +630,9 @@ fn operator_options_are_scoped_to_operator_commands() {
 }
 
 #[test]
-fn operator_options_are_not_advertised_or_accepted_by_service_commands() {
+fn operator_options_are_not_advertised_or_accepted_by_non_operator_commands() {
     let mut command = Cli::command();
-    for service in ["server", "preview"] {
+    for service in ["server", "preview", "local"] {
         let help = command
             .find_subcommand_mut(service)
             .expect("service command")

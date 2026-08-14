@@ -155,15 +155,15 @@ gates have completed their agreed soak periods.
 
 ## Provider scope
 
-Rootless Podman on Linux, disposable macOS Virtualization.framework VMs, and the
-experimental trusted native Windows slice are current execution paths. The
-providers below are planned and must not appear in runner capability inventory
-before their gates pass.
+Rootless Podman on Linux, disposable macOS Virtualization.framework VMs, the
+experimental trusted native Windows slice, and an experimental Kubernetes
+adapter are current component paths. Kubernetes remains unavailable until its
+live cluster gate passes. The providers below are planned and must not appear
+in runner capability inventory before their gates pass.
 
 | Provider | Planned use | Isolation boundary |
 | --- | --- | --- |
 | Firecracker with jailer | Hostile Linux jobs | One KVM microVM per job |
-| Kubernetes | Ephemeral runner fleet | Node and runtime dependent |
 | Kubernetes with Kata | VM-backed pod sandbox | One VM-backed pod per runner |
 | KubeVirt | VM fleet or job sandbox | One VMI per runner or job |
 | Linux native | Trusted jobs | Account, cgroup, and LSM policy |

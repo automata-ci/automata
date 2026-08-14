@@ -485,16 +485,31 @@ table inet automata_results_guard {
 }
 ```
 
-Confirm the route and the real rootless Podman packet path before installing
-the guard. `ip route` must select host loopback for the bound address:
+Confirm the route before applying the guard. `ip route` must select host
+loopback for the bound address:
 
 ```console
 ip -4 route get 192.168.0.8
 # local 192.168.0.8 dev lo ...
 ```
 
-With the Results listener already running, capture one inbound request in one
-terminal (the `tcpdump` package is needed only for this diagnostic):
+Apply and audit the policy before starting the Results listener. Each creation
+is one atomic nftables transaction. Reapplying an exact policy is a no-op; a
+present table with any extra, missing, or changed object makes both `audit` and
+`apply` fail without modifying it.
+
+```console
+sudo ./scripts/dev/results-firewall.sh apply \
+  --listen-address 192.168.0.8 \
+  --port 8081
+sudo ./scripts/dev/results-firewall.sh audit \
+  --listen-address 192.168.0.8 \
+  --port 8081
+```
+
+Only after that audit succeeds, start the exact Results listener. With the
+guard and listener active, capture one inbound request in one terminal (the
+`tcpdump` package is needed only for this diagnostic):
 
 ```console
 sudo timeout 30s tcpdump -l -nn -i any -Q in -c 1 \
@@ -530,23 +545,10 @@ network:
 )
 ```
 
-The capture must identify `lo` as the input interface. Do not apply this
-policy if the packet arrives through any other interface: the guard is
-intentionally fail-closed and would make Results unreachable to jobs.
-
-Once the rendered rules and packet path have been reviewed, apply and audit
-the policy. Each creation is one atomic nftables transaction. Reapplying an
-exact policy is a no-op; a present table with any extra, missing, or changed
-object makes both `audit` and `apply` fail without modifying it.
-
-```console
-sudo ./scripts/dev/results-firewall.sh apply \
-  --listen-address 192.168.0.8 \
-  --port 8081
-sudo ./scripts/dev/results-firewall.sh audit \
-  --listen-address 192.168.0.8 \
-  --port 8081
-```
+The capture must identify `lo` as the input interface and the request must
+receive an HTTP response. If either check fails, stop the Results listener
+before changing or removing the guard. A non-loopback path is intentionally
+dropped; never weaken the rule to make that path work.
 
 Test denial from a separate LAN machine, not from the host itself. A request
 to `http://192.168.0.8:8081/` must time out while the Podman request above must
