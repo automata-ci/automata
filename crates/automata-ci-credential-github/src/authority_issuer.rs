@@ -284,12 +284,18 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
     ) -> Result<JobRuntimeAuthorities, ControlPortError> {
         let resolved =
             ResolvedGithubRuntimeAuthorityIdentity::new(request, resolved.identity().clone())
+                .inspect_err(|_| observe_issuance_failure("identity_cross_bind", "corrupt"))
                 .map_err(|_| ControlPortError::Corrupt)?;
         let identity = resolved.identity();
         if identity.namespace().as_str() != GITHUB_REPOSITORY_AUTHORITY_NAMESPACE {
+            observe_issuance_failure("namespace", "corrupt");
             return Err(ControlPortError::Corrupt);
         }
-        if let Some(authority) = self.load_ready(request, identity).await? {
+        if let Some(authority) = self
+            .load_ready(request, identity)
+            .await
+            .inspect_err(|error| observe_control_failure("initial_ready_load", *error))?
+        {
             return Ok(authority);
         }
 
@@ -297,6 +303,33 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
             .coordinator
             .coordinate_once(identity.clone())
             .await
+            .inspect_err(|error| {
+                let failure = match error {
+                    GithubRuntimeAuthorityCoordinatorError::Repository => "repository",
+                    GithubRuntimeAuthorityCoordinatorError::Resolution => "resolution",
+                    GithubRuntimeAuthorityCoordinatorError::Unauthorized => "unauthorized",
+                    GithubRuntimeAuthorityCoordinatorError::ResolutionIdentityMismatch => {
+                        "resolution_identity_mismatch"
+                    }
+                    GithubRuntimeAuthorityCoordinatorError::BrokerIdentityMismatch => {
+                        "broker_identity_mismatch"
+                    }
+                    GithubRuntimeAuthorityCoordinatorError::SupervisionCapacity => {
+                        "supervision_capacity"
+                    }
+                    GithubRuntimeAuthorityCoordinatorError::EnvelopePreparation => {
+                        "envelope_preparation"
+                    }
+                    GithubRuntimeAuthorityCoordinatorError::CandidateProtection => {
+                        "candidate_protection"
+                    }
+                    GithubRuntimeAuthorityCoordinatorError::InvalidTime => "invalid_time",
+                    GithubRuntimeAuthorityCoordinatorError::MintWindowExhausted => {
+                        "mint_window_exhausted"
+                    }
+                };
+                observe_issuance_failure("mint_coordination", failure);
+            })
             .map_err(coordinator_error)?;
 
         self.load_ready(request, identity)
@@ -416,6 +449,23 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
             .map(|_| ())
             .map_err(|error| store_error(&error))
     }
+}
+
+fn observe_issuance_failure(stage: &'static str, failure: &'static str) {
+    tracing::warn!(
+        stage,
+        failure,
+        "GitHub repository runtime-authority issuance failed"
+    );
+}
+
+fn observe_control_failure(stage: &'static str, error: ControlPortError) {
+    let failure = match error {
+        ControlPortError::Unavailable => "unavailable",
+        ControlPortError::Corrupt => "corrupt",
+        ControlPortError::Conflict => "conflict",
+    };
+    observe_issuance_failure(stage, failure);
 }
 
 fn protected_envelope_digest(

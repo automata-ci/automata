@@ -168,11 +168,20 @@ impl GithubJobRuntimeAuthorityRepository for PostgresStore {
             .begin()
             .await
             .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
-        let row = lock_exact_execution(&mut transaction, &selector).await?;
-        lock_exact_selection_lineage(&mut transaction, &selector, &row).await?;
-        lock_exact_private_source_authority(&mut transaction, &row).await?;
-        ensure_database_live_lease(&mut transaction, &selector).await?;
-        let evidence = decode_evidence(&selector, &row)?;
+        let row = lock_exact_execution(&mut transaction, &selector)
+            .await
+            .inspect_err(|error| observe_resolution_failure("exact_execution", error))?;
+        lock_exact_selection_lineage(&mut transaction, &selector, &row)
+            .await
+            .inspect_err(|error| observe_resolution_failure("selection_lineage", error))?;
+        lock_exact_private_source_authority(&mut transaction, &row)
+            .await
+            .inspect_err(|error| observe_resolution_failure("private_source", error))?;
+        ensure_database_live_lease(&mut transaction, &selector)
+            .await
+            .inspect_err(|error| observe_resolution_failure("live_lease", error))?;
+        let evidence = decode_evidence(&selector, &row)
+            .inspect_err(|error| observe_resolution_failure("evidence_decode", error))?;
         transaction
             .commit()
             .await
@@ -211,6 +220,19 @@ impl GithubJobRuntimeAuthorityRepository for PostgresStore {
             .map_err(GithubJobRuntimeAuthorityStoreError::operation)?;
         Ok(evidence)
     }
+}
+
+fn observe_resolution_failure(stage: &'static str, error: &GithubJobRuntimeAuthorityStoreError) {
+    let failure = match error {
+        GithubJobRuntimeAuthorityStoreError::Operation(_) => "operation",
+        GithubJobRuntimeAuthorityStoreError::Unauthorized => "unauthorized",
+        GithubJobRuntimeAuthorityStoreError::CorruptData => "corrupt_data",
+    };
+    tracing::warn!(
+        stage,
+        failure,
+        "GitHub job runtime-authority resolution failed"
+    );
 }
 
 // Every mutable execution dependency and every immutable historical authority
