@@ -264,6 +264,9 @@ impl GithubWorkflowCommandSession {
             if command.name().eq_ignore_ascii_case("NODE_OPTIONS") {
                 WorkflowCommandEvent::Notice(CommandNotice::BlockedNodeOptions)
             } else {
+                // Runner-owned default matching depends on the target
+                // platform. Preserve the mutation until the completed-step
+                // applicator can enforce Unix or Windows name semantics.
                 WorkflowCommandEvent::LegacyMutation(LegacyStepMutation::Environment(command))
             }
         } else if raw.name.eq_ignore_ascii_case("add-path") {

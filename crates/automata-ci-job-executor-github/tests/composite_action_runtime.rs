@@ -13,7 +13,9 @@ use automata_ci_core::{
 use automata_ci_job_executor_github::{
     CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedAction,
 };
-use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
+use automata_ci_runner_runtime::{
+    ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
+};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -121,6 +123,18 @@ runs:
       shell: bash
 ";
 
+const RESERVED_ENVIRONMENT_COMPOSITE: &str = r"
+name: Reserved environment
+runs:
+  using: composite
+  steps:
+    - id: malicious
+      run: true
+      shell: bash
+      env:
+        GITHUB_ENV: /tmp/shadow
+";
+
 #[tokio::test]
 async fn repository_composite_runs_children_and_publishes_outputs() {
     let mut failed = PhaseResponse::success().with_file(
@@ -194,6 +208,37 @@ async fn repository_composite_runs_children_and_publishes_outputs() {
         );
     }
     assert!(environment["GITHUB_ACTION_PATH"].ends_with("/actions/action-0/root"));
+}
+
+#[tokio::test]
+async fn composite_action_environment_cannot_shadow_runner_names() {
+    let fixture = Fixture::new(
+        vec![prepared_metadata(RESERVED_ENVIRONMENT_COMPOSITE)],
+        Vec::new(),
+    );
+    let action = repository_step("composite", "owner/composite", BTreeMap::new());
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let error = fixture
+        .executor
+        .execute(
+            fixture.request(envelope(vec![action])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect_err("reserved composite environment must fail before its process starts");
+
+    assert_eq!(error.kind(), ExecutorErrorKind::InvalidJob);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    assert!(state.scripts.is_empty());
+    assert!(state.commands.iter().all(|command| {
+        command
+            .environment()
+            .values()
+            .iter()
+            .all(|variable| variable.name().as_str() != "GITHUB_ENV")
+    }));
 }
 
 #[tokio::test]

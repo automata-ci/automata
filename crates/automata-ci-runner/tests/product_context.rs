@@ -16,7 +16,10 @@ use automata_ci_execution::{
 use automata_ci_expression_github::{
     GithubExpressionEvaluator, GithubObject, GithubStatus, GithubValue,
 };
-use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
+use automata_ci_github_runtime::{
+    CommandFilePlatform, EnvironmentMutationBlockReason, JobCommandState,
+    classify_environment_mutation,
+};
 use automata_ci_job_executor_github::{
     GithubContextPort, GithubContextRequest, GithubExecutionIdentity, GithubExecutionPhase,
     PortErrorKind,
@@ -31,6 +34,25 @@ use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase}
 const REPOSITORY_TOKEN: &str = "ghs_exact_job_repository_token";
 const OIDC_REQUEST_TOKEN: &str = "oidc_exact_job_request_token";
 const SECRET_DERIVED_NEED_SENTINEL: &str = "must-not-enter-expression-context";
+
+#[test]
+fn every_emitted_github_and_runner_default_is_protected_from_workflow_overlays() {
+    let fixture = ContextFixture::new();
+    let snapshot = fixture.snapshot().expect("context snapshot");
+
+    for variable in snapshot.environment().iter().filter(|variable| {
+        variable.name().starts_with("GITHUB_") || variable.name().starts_with("RUNNER_")
+    }) {
+        assert!(
+            matches!(
+                classify_environment_mutation(CommandFilePlatform::Unix, variable.name()),
+                Some(EnvironmentMutationBlockReason::Reserved(_))
+            ),
+            "emitted default {} is missing from the protected catalog",
+            variable.name()
+        );
+    }
+}
 
 #[test]
 fn admitted_execution_context_is_exposed_without_workspace_or_ref_rederivation() {

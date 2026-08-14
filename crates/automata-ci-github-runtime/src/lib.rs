@@ -9,6 +9,7 @@
 #![deny(missing_docs)]
 
 mod artifact;
+mod environment;
 mod error;
 mod file_command;
 mod limits;
@@ -16,6 +17,9 @@ mod model;
 mod phase;
 mod workflow_command;
 
+pub use environment::{
+    EnvironmentMutationBlockReason, ReservedEnvironmentNamespace, classify_environment_mutation,
+};
 pub use error::{
     ArtifactListEncodingError, ArtifactSubjectError, CommandFileError, CommandScopeIdError,
     PhaseApplicationError, WorkflowCommandError,

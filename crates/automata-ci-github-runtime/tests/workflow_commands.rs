@@ -242,6 +242,38 @@ fn insecure_legacy_env_and_path_commands_require_explicit_policy() {
 }
 
 #[test]
+fn legacy_set_env_defers_reserved_names_to_target_aware_application() {
+    let mut enabled = GithubWorkflowCommandSession::new(
+        WorkflowCommandLimits::default(),
+        WorkflowCommandPolicy::new(true, true),
+    );
+
+    for name in [
+        "GITHUB_ENV",
+        "github_path",
+        "gItHuB_workspace",
+        "RUNNER_OS",
+        "runner_temp",
+        "rUnNeR_arch",
+        "CI",
+        "ci",
+    ] {
+        let line = format!("::set-env name={name}::attacker");
+        let event = enabled
+            .process_line(line.as_bytes())
+            .expect("target-dependent name is preserved");
+        let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(
+            LegacyStepMutation::Environment(command),
+        )) = event
+        else {
+            panic!("expected deferred environment mutation for {name}");
+        };
+        assert_eq!(command.name(), name);
+        assert_eq!(command.value(), "attacker");
+    }
+}
+
+#[test]
 fn v2_only_trims_leading_space_while_legacy_can_have_a_prefix() {
     let mut session = GithubWorkflowCommandSession::default();
     assert!(matches!(

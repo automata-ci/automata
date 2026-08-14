@@ -60,7 +60,10 @@ use crate::{
     PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedKeyValue,
     PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretCustodyAcknowledger,
     SecretPort, action_content, container_runtime,
-    environment::{EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue},
+    environment::{
+        EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue,
+        validate_environment_overlay_names,
+    },
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
     shell::{composite_shell, resolve_shell_template, shell_argv},
@@ -417,6 +420,16 @@ impl GithubJobExecutor {
         }
         let workspace =
             job_workspace(job, &environment).map_err(|_| AdmissionRejection::InvalidJob)?;
+        validate_environment_overlay_names(
+            command_file_platform(workspace.platform()),
+            job.job().environment().keys().map(String::as_str).chain(
+                job.job()
+                    .steps()
+                    .iter()
+                    .flat_map(|step| step.environment().keys().map(String::as_str)),
+            ),
+        )
+        .map_err(|_| AdmissionRejection::InvalidJob)?;
         let event = job.execution().event();
         if event.media_type() != WORKFLOW_EVENT_MEDIA_TYPE
             || event.encoded_size() > automata_ci_execution::MAX_COPY_BYTES as u64
@@ -2916,6 +2929,10 @@ impl GithubJobExecutor {
         state: Vec<(String, ResolvedEnvironmentValue)>,
         masker: &mut SecretMasker,
     ) -> Result<automata_ci_execution::ExecutionEnvironment, ExecutorAdapterError> {
+        validate_environment_overlay_names(
+            commands.platform(),
+            action_environment.iter().map(|(name, _)| name.as_str()),
+        )?;
         let mut extra = action_environment.to_vec();
         extra.extend(action_extra_environment(
             input_environment,
@@ -3031,17 +3048,19 @@ impl GithubJobExecutor {
             )?;
             let child_environment = cancellation_dominant(
                 match child {
-                    PreparedCompositeStep::Run(step) => Self::resolve_composite_values(
+                    PreparedCompositeStep::Run(step) => Self::resolve_composite_environment(
                         &builder,
                         step.environment(),
                         &environment_context,
                         budget,
+                        commands.platform(),
                     ),
-                    PreparedCompositeStep::Uses(step) => Self::resolve_composite_values(
+                    PreparedCompositeStep::Uses(step) => Self::resolve_composite_environment(
                         &builder,
                         step.environment(),
                         &environment_context,
                         budget,
+                        commands.platform(),
                     ),
                 },
                 cancellation,
@@ -3331,6 +3350,17 @@ impl GithubJobExecutor {
                 Ok((value.name().to_owned(), resolved))
             })
             .collect()
+    }
+
+    fn resolve_composite_environment(
+        builder: &EnvironmentBuilder<'_>,
+        values: &[PreparedKeyValue],
+        context: &dyn GithubEvaluationContext,
+        budget: &mut ActionExecutionBudget,
+        platform: CommandFilePlatform,
+    ) -> Result<Vec<(String, ResolvedEnvironmentValue)>, ExecutorAdapterError> {
+        validate_environment_overlay_names(platform, values.iter().map(PreparedKeyValue::name))?;
+        Self::resolve_composite_values(builder, values, context, budget)
     }
 
     fn resolve_composite_value_map(
@@ -5233,6 +5263,14 @@ impl ExecutionAttachments {
                 PhaseApplicationNotice::BlockedNodeOptions => {
                     "NODE_OPTIONS from a command file was ignored"
                 }
+                PhaseApplicationNotice::BlockedReservedEnvironment(namespace) => match namespace {
+                    automata_ci_github_runtime::ReservedEnvironmentNamespace::Github => {
+                        "a runner-owned GITHUB default from a command file was ignored"
+                    }
+                    automata_ci_github_runtime::ReservedEnvironmentNamespace::Runner => {
+                        "a runner-owned RUNNER default from a command file was ignored"
+                    }
+                },
                 PhaseApplicationNotice::StateIgnoredForRunStep => {
                     "GITHUB_STATE from a run step was ignored"
                 }
