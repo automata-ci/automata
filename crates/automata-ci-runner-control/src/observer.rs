@@ -91,6 +91,30 @@ pub enum RunnerLeaseRequestStage {
     LeasePoll,
     /// Lease-offer construction and publication.
     OfferBuild,
+    /// Existing lease-offer claim inspection.
+    OfferClaimInspection,
+    /// Decoding a previously published lease offer.
+    OfferPublishedClaimDecode,
+    /// Reading the claimed job IR object.
+    OfferJobIrRead,
+    /// Authenticating and decoding the claimed job IR object.
+    OfferJobIrVerification,
+    /// Constructing the runtime-authority request.
+    OfferRuntimeAuthorityRequest,
+    /// Issuing runtime authorities.
+    OfferRuntimeAuthorityIssue,
+    /// Validating issued runtime authorities.
+    OfferRuntimeAuthorityValidation,
+    /// Issuing managed-secret bindings.
+    OfferManagedSecretBindingIssue,
+    /// Validating managed-secret bindings.
+    OfferManagedSecretBindingValidation,
+    /// Constructing the durable lease-offer command.
+    OfferCommandConstruction,
+    /// Publishing the durable lease-offer command.
+    OfferCommandPublication,
+    /// Constructing the runner-facing lease offer.
+    OfferConstruction,
     /// Durable command replay after polling for work.
     PostPollCommandReplay,
     /// Lease-offer response validation and revocation recovery.
