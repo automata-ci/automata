@@ -15,7 +15,9 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_blob::{BlobDescriptor, BlobKey, BlobStoreError, ImmutableBlobStore, MediaType};
+use automata_ci_blob::{
+    BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
+};
 use automata_ci_core::{
     ContextValue, JobRuntimeContext, OperationId, Sha256Digest, UnixMillis,
     WorkflowEventProvenance, WorkflowPlan,
@@ -580,10 +582,12 @@ impl GithubScheduleService {
         })
     }
 
-    /// Runs bounded passes until local shutdown.
+    /// Runs bounded passes until local shutdown or a non-recoverable failure.
     ///
     /// Claims already started in a pass are never intentionally abandoned; a
-    /// shutdown merely prevents the next pass from beginning.
+    /// shutdown merely prevents the next pass from beginning. Explicit
+    /// backend and source unavailability is retried after the bounded polling
+    /// delay; invalid or contradictory evidence remains fatal.
     ///
     /// # Errors
     ///
@@ -601,7 +605,11 @@ impl GithubScheduleService {
             if shutdown.is_cancelled() {
                 return Ok(());
             }
-            Box::pin(self.run_once()).await?;
+            match Box::pin(self.run_once()).await {
+                Ok(_) => {}
+                Err(error) if retryable_schedule_error(&error) => {}
+                Err(error) => return Err(error),
+            }
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(()),
                 () = sleep(poll) => {}
@@ -1235,6 +1243,24 @@ pub enum GithubScheduleServiceError {
     Store(#[from] GithubScheduleStoreError),
 }
 
+fn retryable_schedule_error(error: &GithubScheduleServiceError) -> bool {
+    match error {
+        GithubScheduleServiceError::SourceUnavailable
+        | GithubScheduleServiceError::PrivateSourceUnavailable
+        | GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::Operation(_))
+        | GithubScheduleServiceError::Store(GithubScheduleStoreError::Store(_)) => true,
+        GithubScheduleServiceError::Blob(error) => error.kind() == BlobStoreErrorKind::Unavailable,
+        GithubScheduleServiceError::Configuration
+        | GithubScheduleServiceError::InvalidTrustedTime
+        | GithubScheduleServiceError::InvalidArchive
+        | GithubScheduleServiceError::InvalidRegistry
+        | GithubScheduleServiceError::SourceRejected
+        | GithubScheduleServiceError::PrivateSourceRejected
+        | GithubScheduleServiceError::Manifest(_)
+        | GithubScheduleServiceError::Store(_) => false,
+    }
+}
+
 fn registry_entries(
     manifest: &GithubProviderManifest,
     claim: GithubScheduleDiscoveryClaim,
@@ -1403,5 +1429,49 @@ mod tests {
             AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE,
             "application/vnd.automata.github-schedule-evidence.v1+json"
         );
+    }
+
+    #[test]
+    fn scheduler_retries_only_explicit_transient_boundaries() {
+        let retryable = [
+            GithubScheduleServiceError::SourceUnavailable,
+            GithubScheduleServiceError::PrivateSourceUnavailable,
+            GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unavailable)),
+            GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::operation(
+                std::io::Error::other("temporary manifest backend failure"),
+            )),
+            GithubScheduleServiceError::Store(GithubScheduleStoreError::Store(
+                automata_ci_store::StoreError::Operation(
+                    automata_ci_store::RepositoryOperationError::from_source(
+                        std::io::Error::other("temporary schedule backend failure"),
+                    ),
+                ),
+            )),
+        ];
+        for error in &retryable {
+            assert!(
+                retryable_schedule_error(error),
+                "expected retryable error: {error}"
+            );
+        }
+
+        let fatal = [
+            GithubScheduleServiceError::Configuration,
+            GithubScheduleServiceError::InvalidTrustedTime,
+            GithubScheduleServiceError::InvalidArchive,
+            GithubScheduleServiceError::InvalidRegistry,
+            GithubScheduleServiceError::SourceRejected,
+            GithubScheduleServiceError::PrivateSourceRejected,
+            GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Unauthorized)),
+            GithubScheduleServiceError::Blob(BlobStoreError::new(BlobStoreErrorKind::Integrity)),
+            GithubScheduleServiceError::Manifest(GithubProviderManifestStoreError::CorruptData),
+            GithubScheduleServiceError::Store(GithubScheduleStoreError::Conflict),
+        ];
+        for error in &fatal {
+            assert!(
+                !retryable_schedule_error(error),
+                "expected fatal error: {error}"
+            );
+        }
     }
 }
