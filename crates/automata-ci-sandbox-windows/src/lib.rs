@@ -1,18 +1,20 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! Trusted native Windows whole-job sandbox provider.
+//! Hyper-V-isolated Windows container provider.
 //!
-//! This adapter is intentionally not a VM or filesystem/network sandbox. It
-//! exposes explicit host-network and host-filesystem capabilities for trusted
-//! workloads while enforcing a race-free Windows Job Object boundary and hard
-//! whole-tree resource limits through `processkit`.
+//! This crate exposes exactly one Windows execution boundary. Every job uses
+//! a fresh digest-pinned Windows container created with Hyper-V isolation,
+//! and the provider verifies the effective runtime state before returning a
+//! handle. Process-isolated and native-host Windows execution are not present.
 
+#[cfg(windows)]
+mod command;
 #[cfg(windows)]
 mod endpoint;
 #[cfg(windows)]
-mod filesystem;
+mod error;
 #[cfg(windows)]
-mod path;
+mod naming;
 #[cfg(windows)]
 mod persistence;
 #[cfg(windows)]
@@ -21,6 +23,14 @@ mod provider;
 mod unsupported;
 
 #[cfg(windows)]
-pub use provider::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
+pub use command::{
+    RuntimeCommandExecutor, RuntimeCommandOutput, RuntimeCommandRequest,
+    RuntimeCommandRequestError, RuntimeCommandTermination, SystemRuntimeCommandExecutor,
+};
+#[cfg(windows)]
+pub use provider::{WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions};
 #[cfg(not(windows))]
-pub use unsupported::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
+pub use unsupported::{WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions};
+
+/// Stable provider identifier for Hyper-V-isolated Windows containers.
+pub const WINDOWS_HYPERV_PROVIDER_ID: &str = "windows-hyperv";

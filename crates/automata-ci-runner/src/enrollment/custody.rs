@@ -818,10 +818,8 @@ fn remove_durable(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     #[cfg(unix)]
-    use std::fs::File;
+    use std::fs::{self, File};
 
     use automata_ci_core::{
         Architecture, OperatingSystem, RunnerCapabilities, RunnerId, RunnerPlatform,
@@ -834,10 +832,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::remove_durable;
-    use super::{
-        CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, persist_exact_file,
-        validate_certificate_response,
-    };
+    #[cfg(unix)]
+    use super::{CredentialDestinations, persist_exact_file};
+    use super::{EnrollmentStage, STAGE_SCHEMA, validate_certificate_response};
     #[cfg(unix)]
     use super::{
         acquire_enrollment_lock, persist_new, prepare_destination, same_destination,
@@ -872,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn partial_credential_publication_is_reconciled_exactly_without_overwrite() {
         let root = std::env::current_dir()
             .expect("current directory")

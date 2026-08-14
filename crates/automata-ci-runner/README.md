@@ -1,16 +1,18 @@
 # `automata-runner`
 
-The supported provisioned `automata-runner` command targets Linux and macOS execution
-hosts. Windows native execution remains source-only experimental code without a
-production enrollment path or release gate. On supported hosts the command validates
-the host, opens an mTLS session to
+The provisioned `automata-runner` command targets Linux and macOS execution
+hosts. Its only Windows execution provider uses Hyper-V-isolated containers;
+the component is implemented, but it
+remains a source-build path without a production enrollment flow, promoted
+runner image, or physical-host release gate. On supported hosts the command
+validates the host and opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman or Kubernetes on Linux, the experimental
-trusted-native provider on Windows, or disposable Virtualization.framework
-VMs on Apple Silicon macOS 15+. The checked-in
+configuration: rootless Podman or Kubernetes on Linux, fresh
+Hyper-V-isolated Windows containers on Windows, or disposable
+Virtualization.framework VMs on Apple Silicon macOS 15+. The checked-in
 Linux host examples
 ([one](config/runner.local-1.example.json),
 [two](config/runner.local-2.example.json), and
@@ -19,7 +21,7 @@ single-slot Podman processes; the
 [Windows](config/runner.windows.example.json) and
 [macOS](config/runner.macos.example.json) examples each remain one process and
 one slot. The [configuration guide](config/README.md) documents Kubernetes,
-Windows native containment, and the macOS VM trust boundary.
+Windows Hyper-V container isolation, and the macOS VM trust boundary.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -31,7 +33,7 @@ automata-runner doctor --json
 ```
 
 That Cargo build is suitable for configuration inspection, host diagnostics,
-and development of the trusted native Windows path. On Linux, an ordinary
+and development of the Windows Hyper-V container path. On Linux, an ordinary
 dynamically linked build is not a valid production probe payload, which must
 be a static executable that can run from a one-file root filesystem. Do not
 start a production Linux runner until an exact reviewed static archive is
@@ -90,13 +92,15 @@ optional explicitly configured standalone Python interpreter. Startup probes
 each configured interpreter through a copied script before advertising the
 profile. Every `uses:` action, including JavaScript, composite, local,
 repository, and container actions, fails closed. Job containers, service
-containers, administrator profiles, and parallel native jobs are unsupported.
+containers, administrator profiles, and host-network or host-filesystem policy
+are unsupported.
 
 Hosted Windows CI is currently disabled because Automata does not yet operate
-Windows runners. The native-provider tests remain in the repository, but they
-are not a release gate; there is deliberately no Windows enrollment or static
-registration path. Do not deploy it until secure Windows credential publication
-and the Windows end-to-end CI gate are implemented together.
+Windows runners. Unit and injected-runtime provider tests do not constitute a
+release gate; there is deliberately no Windows enrollment or static-registration
+fallback. Do not deploy it until secure Windows credential publication, a
+promoted digest-pinned Windows image, and the physical Windows end-to-end gate
+are implemented together.
 
 The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
 configured Python and PowerShell Core interpreters. Startup probes every
@@ -116,22 +120,29 @@ anonymous standard-input document. They never enter the Podman host process
 environment. Jobs do not receive runner state paths, the host Podman socket,
 control-plane credentials, or provider-control credentials.
 
-The Windows native provider is for trusted workflows only. It creates fresh
-workspace and scratch directories and uses a Windows Job Object for process,
-memory, and CPU limits and whole-tree termination. It retains host filesystem
-and network access and the runner service account's unchanged token; it is not
-a container, VM, or restricted-token boundary. Run it only as a dedicated
-non-administrative service account with administrator-provisioned restrictive
-ACLs. The safe state adapter rejects reparse traversal but cannot currently
-attest DACL ownership or hard-link counts. Those ACLs protect state from other
-host users, not from a trusted job running as the same account, so workflows
-must not access runner state paths. See the
-[Windows source-build boundary](../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
-before supplying environment-backed credentials.
+The Windows provider creates a fresh digest-pinned Windows container per job
+with runtime isolation fixed to `hyperv`, networking fixed to `none`, no host
+mounts, a writable disposable container root, and `ContainerUser` identity.
+The absolute container-runtime executable is SHA-256 pinned before use; create
+and attach inspect the realized isolation, image, labels, resources, entrypoint,
+network mode, privilege, and mount set before accepting evidence. Arguments,
+environment values, and file bytes cross a versioned framed guest protocol on
+anonymous standard input rather than the runtime command line. Runner state,
+control credentials, and object-store credentials remain on the host and are
+never mounted into the job container. Memory and CPU limits are verified from
+runtime inspection, and each workflow command is placed in a nested Job Object
+for bounded process count and whole-tree termination.
 
-Rootless Podman is a shared-kernel Linux boundary and Windows native execution
-is a trusted-host boundary. macOS uses a disposable Apple VM per job. Stronger
-Linux and Windows providers remain planned and are listed in the
+This is an implemented fail-closed boundary, not yet a production claim: the
+repository does not publish the required Windows image and does not run the
+physical-host Hyper-V acceptance suite. See the
+[Windows isolation plan](../../docs/platforms/windows.md) before preparing a
+candidate host or image.
+
+Rootless Podman is a shared-kernel Linux boundary, Windows uses a fresh Hyper-V
+utility-VM-backed container per job, and macOS uses a disposable Apple VM per
+job.
+Additional provider work remains listed in the
 [implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#provider-scope).
 
 ## Configure a host

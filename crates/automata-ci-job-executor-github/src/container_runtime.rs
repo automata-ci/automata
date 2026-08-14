@@ -2,8 +2,9 @@ use std::{collections::BTreeSet, time::Duration};
 
 use automata_ci_core::JobIrEnvelope;
 use automata_ci_execution::{
-    ExecutionEnvironment, ImmutableImage, ProviderCapabilities, ResourceLimits, SandboxCapability,
-    SandboxGeneration, SandboxLaunch, SandboxSpec, ServiceContainerBindings, ServiceContainerSpec,
+    ExecutionEnvironment, ImmutableImage, NetworkPolicy, ProviderCapabilities, ResourceLimits,
+    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxLaunch,
+    SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBindings, ServiceContainerSpec,
     ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
     ServiceTransportProtocol, TargetPath,
 };
@@ -132,6 +133,13 @@ pub(super) fn sandbox_spec(
     scratch: &TargetPath,
     service_specs: &ServiceContainerSpecs,
 ) -> Result<SandboxSpec, ExecutorAdapterError> {
+    if matches!(
+        request.environment().launch(),
+        SandboxLaunch::WindowsHyperVContainer { .. }
+    ) && !valid_windows_hyperv_contract(config, service_specs)
+    {
+        return Err(invalid_job());
+    }
     let resources = sandbox_resources(config, request)?;
     let mut spec = SandboxSpec::new(
         operation_id,
@@ -154,11 +162,21 @@ pub(super) fn sandbox_spec(
     );
     if matches!(
         request.environment().launch(),
-        SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. }
+        SandboxLaunch::VirtualMachine { .. }
     ) {
         spec = spec.with_scratch(scratch.clone());
     }
     Ok(spec)
+}
+
+fn valid_windows_hyperv_contract(
+    config: &GithubJobExecutorConfig,
+    service_specs: &ServiceContainerSpecs,
+) -> bool {
+    config.network() == NetworkPolicy::Disabled
+        && config.root_filesystem() == RootFilesystemPolicy::Writable
+        && config.privilege() == SandboxPrivilegePolicy::Unprivileged
+        && service_specs.is_empty()
 }
 
 pub(super) fn sandbox_resources(
@@ -297,4 +315,79 @@ const fn invalid_job() -> ExecutorAdapterError {
 
 const fn invalid_service() -> ExecutorAdapterError {
     ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn config(
+        network: NetworkPolicy,
+        root_filesystem: RootFilesystemPolicy,
+        privilege: SandboxPrivilegePolicy,
+    ) -> GithubJobExecutorConfig {
+        GithubJobExecutorConfig::new(
+            ResourceLimits::new(256 * 1024 * 1024, 1_000, 8).expect("resource limits"),
+            network,
+            root_filesystem,
+            privilege,
+            Duration::from_secs(1),
+            1024,
+            TargetPath::windows(r"C:\automata\runner").expect("runner root"),
+        )
+        .expect("executor config")
+    }
+
+    #[test]
+    fn windows_hyperv_policy_has_no_weaker_executor_fallback() {
+        let services = ServiceContainerSpecs::empty();
+        assert!(valid_windows_hyperv_contract(
+            &config(
+                NetworkPolicy::Disabled,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Unprivileged,
+            ),
+            &services,
+        ));
+        for candidate in [
+            config(
+                NetworkPolicy::Host,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Unprivileged,
+            ),
+            config(
+                NetworkPolicy::Disabled,
+                RootFilesystemPolicy::Host,
+                SandboxPrivilegePolicy::Unprivileged,
+            ),
+            config(
+                NetworkPolicy::Disabled,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Host,
+            ),
+        ] {
+            assert!(!valid_windows_hyperv_contract(&candidate, &services));
+        }
+
+        let service = ServiceContainerSpec::new(
+            ImmutableImage::new(format!(
+                "registry.example/service@sha256:{}",
+                "a".repeat(64)
+            ))
+            .expect("service image"),
+            ExecutionEnvironment::empty(),
+        );
+        let services = ServiceContainerSpecs::new(BTreeMap::from([("database".into(), service)]))
+            .expect("service set");
+        assert!(!valid_windows_hyperv_contract(
+            &config(
+                NetworkPolicy::Disabled,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Unprivileged,
+            ),
+            &services,
+        ));
+    }
 }

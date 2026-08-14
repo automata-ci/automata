@@ -5,7 +5,7 @@
 PostgreSQL coordinates mutable state; S3-compatible storage holds immutable
 payloads.
 
-This page describes the source tree as of 2026-08-11 and separates the current
+This page describes the source tree as of 2026-08-14 and separates the current
 composition from the provider roadmap. See [Compatibility](compatibility.md)
 for supported behavior and the [implementation plan](implementation-plan.md)
 for open gates.
@@ -25,27 +25,35 @@ GitHub events          Browser / CLI
                  |
           configured SandboxProvider
           |              |                |
- rootless Podman   Windows native    macOS VM
+ rootless Podman   Windows Hyper-V container   macOS VM
 ```
 
 The workspace builds many libraries but distributes two product commands:
 
 - `automata` starts the complete control plane and provides administration
   commands. It has no per-role server selector yet.
-- `automata-runner` supervises rootless Linux, trusted native Windows, or
-  disposable macOS VM execution, host admission, lease renewal, logging,
-  cancellation, and cleanup.
+- `automata-runner` supervises rootless Linux, Hyper-V-isolated Windows
+  container, or disposable macOS VM execution, host admission, lease renewal,
+  logging, cancellation, and cleanup.
 
 The browser preview is a smaller mode of `automata`; it does not start the
 durable services or runner listener. Production dependencies never fall back
 to preview behavior.
 
-The Windows native provider creates fresh job directories and uses a Job
-Object for process-tree lifetime and resource limits. It advertises
-`HostIdentity`: children retain the dedicated runner service account's token
-unchanged, along with host filesystem and network access. This trusted-workflow
-provider is not container, VM, or restricted-token isolation; disposable
-Hyper-V VMs remain the planned strong Windows tier.
+The Windows provider creates one fresh container with explicit Hyper-V
+isolation, disabled networking, `ContainerUser`, a digest-qualified image,
+bounded resources, and no host mounts. It verifies the effective runtime state
+before exposing a provider-neutral guest execution endpoint. Native and
+process-isolated Windows execution have been removed.
+
+That Windows path is a component foundation, not an accepted hostile-workload
+composition. It has a synchronized lifecycle journal and fail-closed startup
+reconciliation, but currently invokes a pinned local container CLI directly
+and has no independent watchdog. It also does not complete authenticated trust
+routing, a restricted container-management broker, signed image production,
+managed egress, or dedicated-host engine/host fault acceptance. The blocking
+architecture and rollout gates are in the
+[Windows isolation plan](platforms/windows.md).
 
 The macOS provider cold-boots one Virtualization.framework VM per job with no
 NIC or host directory share. It pins the signed helper and sealed template,
@@ -206,7 +214,8 @@ data or live log transport.
 
 Later gates add independent control-plane roles, multiple replicas,
 Kubernetes-based fleet reconciliation, Firecracker and KVM isolation, Kata,
-KubeVirt, and broader Windows behavior and Hyper-V execution. The workspace
+KubeVirt, and the broker, managed-egress, and production-acceptance layers for
+the one Windows Hyper-V-container route. The workspace
 already contains disposable macOS Virtualization.framework execution, the Rust
 Kubernetes sandbox adapter, its in-sandbox guest transport, a runner
 product-config variant that uses ambient Kubernetes client authentication, and

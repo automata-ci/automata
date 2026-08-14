@@ -1,17 +1,18 @@
 # Local runner bootstrap
 
 This directory contains three checked-in Linux Podman instance configurations,
-a native Windows configuration, and an isolated macOS VM configuration for
-`automata-runner`.
+a Hyper-V-isolated Windows-container configuration, and an isolated macOS VM
+configuration for `automata-runner`.
 [`runner.local-1.example.json`](runner.local-1.example.json),
 [`runner.local-2.example.json`](runner.local-2.example.json), and
 [`runner.local-3.example.json`](runner.local-3.example.json) select the same
 locked Ubuntu 24.04 profile while keeping every host-local identity, state
 path, credential path, runtime mount, and metrics port distinct.
-[`runner.windows.example.json`](runner.windows.example.json) selects the
-trusted native provider on Windows. [`runner.macos.example.json`](runner.macos.example.json)
+[`runner.windows.example.json`](runner.windows.example.json) selects the only
+Windows provider, `windows_hyperv`.
+[`runner.macos.example.json`](runner.macos.example.json)
 selects the Virtualization.framework provider on Apple Silicon macOS 15+.
-Exactly one of the `podman`, `kubernetes`, `windows_native`, and
+Exactly one of the `podman`, `kubernetes`, `windows_hyperv`, and
 `macos_virtualization` provider
 objects may be configured.
 
@@ -20,12 +21,12 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v2 accepts exactly one sandbox provider. Host runners use the
+Product schema v3 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
-`state.podman`, `state.windows_native`, and `state.macos_virtualization` and use
+`state.podman`, `state.windows_hyperv`, and `state.macos_virtualization` and use
 a top-level `kubernetes` object. Windows and macOS runners use their matching
-provider name in both locations. Schema v1 and the removed macOS native key are
-rejected, not migrated. The runner loads
+provider name in both locations. Schema v1, schema v2, `windows_native`, and the
+removed macOS native key are rejected, not migrated. The runner loads
 credentials through Kubernetes' standard in-cluster or ambient kubeconfig
 discovery; the JSON remains secret-free.
 
@@ -101,37 +102,37 @@ Start with the
 then provision a Linux runner host with the
 [Arch Linux guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md).
 
-## Windows native example
+## Windows Hyper-V-isolated container example
 
-The Windows example is an unprovisionable experimental source-build path for
-trusted workflows.
-It advertises PowerShell and `cmd.exe` shell steps, with optional support for an
-absolute standalone Python interpreter, and uses fresh job directories plus Job
-Object process containment; it is not container or VM isolation. Run
-it under a dedicated non-administrative service account: children retain that
-account's token because restricted-token launch is not implemented. The Job
-Object controls process lifetime and resource use, not privilege. The example's
-`host` privilege policy explicitly acknowledges that unchanged identity; it is
-not an unprivileged sandbox policy. Pre-provision restrictive ACLs on every
-configured state and execution root, and supply its
-private key, spool key, and object-store credentials only through the service
-supervisor's private environment. Only workflow `run:` steps are supported;
-every `uses:` action, including JavaScript, composite, local, repository, and
-container actions, fails closed. Job containers, service containers,
-administrator profiles, and active Podman doctor checks remain unsupported.
-Every configured interpreter is exercised through a copied script during
-startup admission before the runner advertises the profile.
+The Windows example is an unprovisionable source-build path for the implemented
+Hyper-V container provider. It requires one absolute SHA-256-pinned container
+runtime executable, one immutable Windows image reference, and the exact guest
+agent path baked into that image. Every job receives a fresh container with
+`--isolation hyperv`, no network, no host mounts, a writable disposable root,
+and `ContainerUser` identity. Configuration rejects every host-network,
+host-filesystem, administrator, native-process, process-isolated-container, or
+mutable-image alternative.
 
-The current safe Windows adapter rejects reparse traversal but cannot attest
-DACL ownership or hard-link counts. ACLs protect these roots from other host
-users; they do not isolate runner state from a trusted job that inherits the
-same account and host-filesystem access. Such workflows must not touch the
-configured runner state paths.
+It advertises only PowerShell and `cmd.exe` shell steps plus command files, with
+optional support for one absolute standalone Python interpreter. Every
+configured interpreter is exercised through a copied script in a disposable
+container before the runner advertises the profile. Every `uses:` action,
+including JavaScript, composite, local, repository, and container actions,
+fails closed. Job containers, service containers, and active Podman doctor
+checks remain unsupported. The host state root contains provider ownership and
+recovery metadata only; no runner state or credential path is mounted into a
+job container.
+
+The checked-in runtime and image digests are placeholders, not promoted
+artifacts. Unit and injected-runtime tests do not prove a physical Windows host,
+HCS/HCN behavior, image contents, patch compatibility, or nested Job Object
+enforcement. Keep this runner out of production until a reviewed image and the
+physical-host acceptance gate are published.
 
 Copy [`runner.windows.example.json`](runner.windows.example.json) to an ignored
-host-specific path and follow the
-[Windows source-build boundary](../../../docs/getting-started.md#windows-source-build-and-native-runner-boundary)
-before starting `automata-runner run --config C:\path\to\runner.windows.json`.
+host-specific path, replace every placeholder digest, and follow the
+[Windows isolation plan](../../../docs/platforms/windows.md) before starting
+`automata-runner run --config C:\path\to\runner.windows.json`.
 
 ## macOS virtual-machine example
 

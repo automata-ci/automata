@@ -41,35 +41,52 @@ Acceptance:
 - [ ] A stale endpoint, runner, credential, mount, or workspace prevents a
   passing result.
 
-### IT-09 — Windows native adapter
+### IT-09 — Hyper-V-isolated Windows container adapter
 
-**Owner:** P with R and X review. **Size:** L. **Dependencies:** IT-01, IT-07,
-FND-02, WIN-03, CACHE-03.
+**Owner:** P with R, C, and X review. **Size:** XL. **Dependencies:** IT-01,
+IT-07, FND-02, WIN-ISO-01 through WIN-ISO-10, WIN-01, WIN-02, CACHE-03.
 
-**Primary scope:** hosted/dedicated Windows execution through the shipped
-runner process without implying VM/container isolation.
+**Primary scope:** a fresh Hyper-V-isolated Windows container on a dedicated
+host through the shipped runner, restricted container-management broker,
+selected engine, and bounded guest executable, with hostile and crash-recovery
+evidence for the exact profile.
 
 Tasks:
 
-- [ ] Implement the common adapter contract on Windows with exact OS,
-  PowerShell, runner, provider, profile, and filesystem evidence.
-- [ ] Launch the shipped `automata-runner run` process and bind its identity to
+- [ ] Implement the common adapter contract with exact host OS/security state,
+  runner, broker, engine, runtime client, provider, image, guest executable,
+  profile, network policy, and tool-manifest evidence.
+- [ ] Launch the shipped control plane, `automata-runner run`, broker service,
+  engine integration, and guest executable; bind every identity and digest to
   the accepted release bundle.
-- [ ] Record the inherited host identity/network/filesystem and Job Object
-  process/resource-containment boundary explicitly.
-- [ ] Run only scenarios admitted by the Windows product capability set; fail
-  rather than falling back to Linux or silently omitting `uses:` steps.
-- [ ] Prove Job Object descendant cleanup, provider restart reconciliation,
-  workspace/scratch removal, and no stale generation reuse.
+- [ ] Prove untrusted, unknown, fork, Dependabot, and secret-bearing work cannot
+  downgrade to a native, process-isolated, Linux, or alternate Windows profile.
+- [ ] Prove one fresh Hyper-V-isolated container, writable layer, runtime
+  identity, credential, operation, and generation per job with no host share,
+  host pipe, device, or engine endpoint.
+- [ ] Exercise the hostile host/path/identity/process/secret/network matrix from
+  the [Windows runner isolation plan](../platforms/windows.md).
+- [ ] Kill runner, broker, engine, guest exec, container, network policy, and
+  host at every durable transition; prove exact recovery, destructive cleanup,
+  or host quarantine.
+- [ ] Run only scenarios admitted by the exact Windows Hyper-V-container
+  capability set; fail rather than falling back, enabling process isolation,
+  launching nested containers, or silently omitting `uses:` steps.
+- [ ] Prove workload descendant cleanup, provider/broker/engine restart
+  reconciliation, container/writable-layer/network-policy removal, and no stale
+  generation reuse.
 - [ ] Run cross-OS cache evidence only after `CACHE-03` accepts its archive
   semantics.
 
 Acceptance:
 
-- [ ] One shipped-process Windows smoke passes with exact logs/results and
-  cleanup evidence.
-- [ ] The adapter cannot advertise Windows support before `WIN-03` and
-  `CACHE-03` accept the gate fixture.
+- [ ] One shipped-product Windows smoke and the full hostile/fault matrix pass
+  with exact externally retained logs, Results, isolation, and cleanup evidence.
+- [ ] A host, container, writable layer, endpoint, credential, or policy leak
+  prevents a passing result and drains the host.
+- [ ] The adapter cannot advertise the Windows Hyper-V-container profile before
+  WIN-ISO-11 accepts its evidence; official action acceptance remains gated by
+  WIN-03 and GATE-02.
 
 ### IT-10 — Kubernetes provider adapter
 

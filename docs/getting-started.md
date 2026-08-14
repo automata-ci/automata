@@ -67,76 +67,71 @@ downloads and compiles Rust dependencies, then embeds the
 checked-in server-side renderer and browser assets, so it may take a few
 minutes.
 
-### Windows source-build and native-runner boundary
-
-The experimental native Windows provider executes trusted shell-step workflows
-through `automata-runner run`. It uses a fresh workspace and scratch directory
-per job plus a Windows Job Object for whole-process-tree cancellation and hard
-process, memory, and CPU limits. It advertises process isolation, host network,
-host filesystem, and shell steps; it is not a container or virtual-machine
-security boundary. A Job Object does not reduce Windows token privileges: each
-child retains the dedicated service account's token. Restricted-token launch
-is not implemented. The example therefore selects the explicit `host`
-privilege policy; this declares unchanged host identity rather than asserting
-an unprivileged sandbox identity.
+### Windows Hyper-V-container source-build boundary
 
 The checked-in
 [`runner.windows.example.json`](../crates/automata-ci-runner/config/runner.windows.example.json)
-selects the native provider and advertises PowerShell and `cmd.exe` shell steps;
-an absolute standalone `python.exe` may also be configured and is probed before
-the runner registers.
-It deliberately supports only workflow `run:` steps: every `uses:` action,
-including JavaScript, composite, local, repository, and container actions,
-fails closed. Install the standalone PowerShell 7 MSI or ZIP distribution at
-the configured
-`C:\Program Files\PowerShell\7\pwsh.exe` path. Microsoft Store/MSIX-packaged
-shells and `WindowsApps` execution aliases are rejected because their package
-job cannot participate in the runner's single whole-job Job Object.
-The current native workspace mapping is also single-slot, so Windows
-configuration rejects `max_parallel_jobs` values other than `1`.
+selects `windows_hyperv` and schema version 3. It defines an absolute local
+container CLI path and SHA-256, a digest-qualified Windows Server Core image,
+an in-image guest executable, an in-container workspace, disabled networking,
+a writable container root, `ContainerUser`, and CPU, memory, and process
+limits.
 
-Adapt that file only for an already provisioned control plane and object store,
-then run:
+The example's image and runtime digests are placeholders. It will not work
+until a laboratory Windows Server 2025 host has the Hyper-V and Containers
+roles, the selected Windows container engine, an exact preloaded compatible
+image containing the guest executable and configured shells, and real reviewed
+digests. The provider never pulls at job startup. It creates with explicit
+Hyper-V isolation and verifies the effective isolation, network, user, image,
+entrypoint, resource, ownership, and no-mount state before executing a step.
+
+The current Windows executor admits only workflow `run:` steps. JavaScript,
+composite, local, repository, and container `uses:` actions, job and service
+containers, egress, devices, administrator profiles, and reboot/interactive
+semantics fail closed or remain unaccepted. PowerShell, Windows PowerShell,
+`cmd.exe`, optional Python, and every configured path must exist inside the
+immutable image; host shell paths are not mounted into the job.
+
+Adapt the file only for an offline component laboratory with an already
+provisioned control plane, object store, engine, and qualified image, then run:
 
 ```powershell
 automata-runner run --config C:\path\to\runner.windows.json
 ```
 
-Use this path only for trusted workflows under a dedicated, non-administrative
-runner service account. Administrators must pre-provision restrictive ACLs on
-the journal, encrypted spool, native-provider, home, temporary, and tool-cache
-roots and their trusted ancestors. The Windows adapter rejects reparse-point
-traversal but its current safe, stable-Rust path cannot attest DACL ownership or
-hard-link counts. Because jobs inherit the same account and host-filesystem
-access, those ACLs protect against other host users, not against the trusted job
-itself. Keep the journal free of secret bytes; spool content is authenticated
-ciphertext, and workflows must not access runner state paths.
+Run the runner under a dedicated non-administrative service identity.
+Pre-provision restrictive ACLs on journal, encrypted spool,
+`state.windows_hyperv`, configuration, runtime, update, and evidence roots and
+their trusted ancestors. Keep the journal free of secret bytes; spool content
+is authenticated ciphertext, and workflows must never access runner state or
+the container-engine endpoint.
 
-The JSON configuration itself and public TLS roots or certificate chains may be
-read from bounded, regular, non-reparse files. Owner-only file policy cannot yet
-be proven with the safe Windows adapter, so private keys, spool keys, and object
-store credentials must use the example's environment sources. Supply those
-variables through the service supervisor's private environment, not an
-interactive shell history.
+The JSON configuration and public TLS roots or certificate chains may be read
+from bounded regular non-reparse files. Private keys, spool keys, and object
+store credentials must use the example's environment sources until the
+Windows credential-custody contract is implemented. Supply them through the
+service supervisor's private environment, not an interactive shell history.
 
 The following runner boundaries fail closed on Windows:
 
 - owner-only file-backed credential and secret sources;
 - `automata-runner doctor --active`, which is specifically the Linux rootless
   Podman isolation probe;
-- job containers, service containers, and administrator job profiles; and
+- job containers, service containers, networked and administrator profiles;
+  and
 - every `uses:` action, including JavaScript, composite, local, repository,
   and container actions. Only `run:` steps are supported.
 
-Linux with rootless Podman remains the container-isolated execution-host path.
-The Windows path is a pre-1.0 trusted native runner and is not production-ready.
-A successful source build or passive doctor report alone is not execution
-evidence. Hosted Windows CI is currently disabled because Automata does not yet
-operate Windows runners; the native-provider test sources remain in the
-repository, but they are not a release gate. Do not deploy this path until a
-Windows runner and its end-to-end CI gate are restored. On Linux, a normal
-dynamically linked Cargo build is still not a valid `scratch` probe payload for
-a production runner session.
+The Windows path remains pre-1.0 component code and is not production-ready. A
+successful source build, injected-runtime test, passive doctor report, or local
+container create is not isolation evidence. Hosted Windows CI is disabled
+because Automata does not operate an accepted Windows fleet. Do not deploy this
+path for repository workloads until the
+[Windows isolation plan](platforms/windows.md) completes authenticated
+`EVT-01` -> `AUTH-02` -> `WIN-ISO-01` routing, the restricted management
+and recovery gates, and dedicated-host IT-09/GATE-02 acceptance. On Linux, a
+normal dynamically linked Cargo build is still not a valid `scratch` probe
+payload for a production runner session.
 
 ## Verify the installation
 
@@ -163,9 +158,9 @@ older copies before continuing. Mixing binaries from different source
 checkouts can create an accidental version mismatch.
 
 Installing the command does not provision an execution host or prove that it
-can execute a job. Linux execution uses rootless Podman; Windows offers the
-trusted native provider described above. Inspect a host without starting a
-runner:
+can execute a job. Linux execution uses rootless Podman; the Windows
+Hyper-V-container provider remains an offline component foundation. Inspect a
+host without starting a runner:
 
 ```console
 automata-runner doctor --server http://127.0.0.1:8080 --json
@@ -178,7 +173,8 @@ useful preparation, but the Linux `automata-runner run` path performs its own
 mandatory probe with the configured Podman binary and clean provider
 environment before it opens a control-plane session. On Windows, `--active`
 returns an error instead of attempting Linux isolation; `run` requires the
-explicit native-provider configuration and provisioning described above.
+explicit `windows_hyperv` configuration, engine, image, and laboratory
+provisioning described above.
 
 ## Start the durable composition
 
@@ -253,6 +249,7 @@ automata admin --server-url http://127.0.0.1:8180 status
 On Linux, use the
 [Arch Linux host guide](platforms/arch-linux.md) and rerun the active probe only
 after the documented kernel, cgroup, and rootless-networking prerequisites are
-in place. The active probe is intentionally unavailable for the native Windows
-provider. Do not deploy that path until hosted Windows end-to-end CI is
-restored.
+in place. That Podman diagnostic does not apply to Windows. Windows startup
+instead performs create, inspect, guest-probe, shell-probe, and destroy
+admission through the Hyper-V-container provider. Do not deploy it until the
+physical Windows end-to-end gate is accepted.

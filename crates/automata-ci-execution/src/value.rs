@@ -436,11 +436,14 @@ pub enum SandboxLaunch {
         /// Literal command keeping the whole-job container alive.
         keepalive: ExecutionArgv,
     },
-    /// Launch trusted commands as native host processes.
-    ///
-    /// Native providers must advertise host network/filesystem semantics and
-    /// process-tree containment while enforcing every requested resource limit.
-    Native,
+    /// Launch inside a Windows container whose runtime is required to enforce
+    /// Hyper-V isolation without a process-isolation fallback.
+    WindowsHyperVContainer {
+        /// Exact immutable Windows container image selected by the profile.
+        image: ImmutableImage,
+        /// Literal Windows command keeping the whole-job container alive.
+        keepalive: ExecutionArgv,
+    },
     /// Boot a disposable virtual machine from one immutable template.
     VirtualMachine {
         /// SHA-256 of the exact template manifest admitted for this profile.
@@ -485,22 +488,27 @@ impl SandboxEnvironment {
         })
     }
 
-    /// Binds a trusted native Windows launch to an exact scheduler-selected profile.
+    /// Binds a Hyper-V-isolated Windows container launch to an exact profile.
     ///
     /// # Errors
     ///
-    /// Rejects a workspace that does not use drive-qualified Windows syntax.
-    pub fn native(
+    /// Rejects a keepalive program or workspace that does not use normalized,
+    /// drive-qualified Windows syntax.
+    pub fn windows_hyperv_container(
         attestation: EnvironmentProfile,
+        image: ImmutableImage,
+        keepalive: ExecutionArgv,
         workspace: TargetPath,
         default_environment: ExecutionEnvironment,
     ) -> Result<Self, ValueError> {
-        if workspace.platform() != TargetPlatform::Windows {
+        if keepalive.program().platform() != TargetPlatform::Windows
+            || workspace.platform() != TargetPlatform::Windows
+        {
             return Err(ValueError::InvalidTargetPath);
         }
         Ok(Self {
             attestation,
-            launch: SandboxLaunch::Native,
+            launch: SandboxLaunch::WindowsHyperVContainer { image, keepalive },
             workspace,
             default_environment,
         })
@@ -557,8 +565,9 @@ impl SandboxEnvironment {
     #[must_use]
     pub const fn image(&self) -> Option<&ImmutableImage> {
         match &self.launch {
-            SandboxLaunch::Container { image, .. } => Some(image),
-            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. } => None,
+            SandboxLaunch::Container { image, .. }
+            | SandboxLaunch::WindowsHyperVContainer { image, .. } => Some(image),
+            SandboxLaunch::VirtualMachine { .. } => None,
         }
     }
 
@@ -568,8 +577,9 @@ impl SandboxEnvironment {
     #[must_use]
     pub const fn keepalive(&self) -> Option<&ExecutionArgv> {
         match &self.launch {
-            SandboxLaunch::Container { keepalive, .. } => Some(keepalive),
-            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. } => None,
+            SandboxLaunch::Container { keepalive, .. }
+            | SandboxLaunch::WindowsHyperVContainer { keepalive, .. } => Some(keepalive),
+            SandboxLaunch::VirtualMachine { .. } => None,
         }
     }
 

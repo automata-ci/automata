@@ -118,7 +118,7 @@ impl StaticGithubToolchain {
         })
     }
 
-    /// Creates the required shell paths for a native Windows runner profile.
+    /// Creates the required in-image shell paths for a Windows container profile.
     ///
     /// # Errors
     ///

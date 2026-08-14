@@ -26,8 +26,9 @@ durable rerun and protected-environment authority,
 value-safe managed-secret delivery, and immutable multi-workflow fanout. The
 baseline has no supported database or mixed-version upgrade source. These are
 component or experimental foundations unless a later item records product
-acceptance. Hosted Windows CI was removed from `main`; the native Windows path
-therefore remains source-tested but is not a release gate.
+acceptance. Hosted Windows CI was removed from `main`; the replacement
+Hyper-V-container component is source-tested but is not a release gate until
+the dedicated-host acceptance suite returns.
 
 The final baseline retains exact cleanup custody when sandbox creation has an
 uncertain outcome and the provider returns a recovery handle. Missing custody
@@ -1291,8 +1292,8 @@ See
 - [ ] Test workspace and command-file reparse or symlink attacks.
 - [ ] Add artifact attestations and policy enforcement.
 - [ ] Add audit logs for approvals, reruns, bypasses, and secret changes.
-- [ ] Document that native Windows currently inherits host identity and is
-  suitable only for trusted workflows.
+- [ ] Publish the accepted Hyper-V-container host, image, broker, isolation,
+  recovery, and compatibility evidence for Windows workflows.
 
 ## 25. Explicit divergence decisions
 
@@ -1315,7 +1316,8 @@ stating that a behavior is unsupported.
 - [ ] Decide whether GitHub-hosted image parity is a goal or labels merely map
   to Automata profiles.
 - [ ] Decide whether macOS is part of the compatibility promise.
-- [ ] Decide whether hostile Windows workflows wait for Hyper-V isolation.
+- [x] Require hostile Windows workflows to wait for the Hyper-V-container
+  acceptance gate; no weaker Windows fallback is permitted.
 - [ ] Decide which GitHub UI, administration, and billing surfaces Automata
   will reproduce.
 - [ ] Document that Automata's per-job `resources` syntax is not portable

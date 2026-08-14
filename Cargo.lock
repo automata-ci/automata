@@ -552,7 +552,6 @@ dependencies = [
  "automata-ci-runner-journal",
  "automata-ci-runner-runtime",
  "automata-ci-runner-spool",
- "automata-ci-sandbox-windows",
  "automata-ci-scm",
  "automata-ci-workflow-github",
  "bytes",
@@ -945,6 +944,7 @@ name = "automata-ci-sandbox-guest"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "processkit",
  "rustix",
  "serde",
  "serde_json",
@@ -1007,12 +1007,11 @@ name = "automata-ci-sandbox-windows"
 version = "0.1.0"
 dependencies = [
  "automata-ci-execution",
- "processkit",
+ "automata-ci-sandbox-guest",
+ "base64 0.23.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
- "tokio",
 ]
 
 [[package]]

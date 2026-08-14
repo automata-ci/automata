@@ -1,17 +1,18 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 //! Versioned, framed transport used to keep command arguments and environment
-//! values out of Kubernetes Pod specifications and exec request URLs.
+//! values out of Kubernetes Pod specifications, exec request URLs, and
+//! Windows container-runtime command lines.
 
 use std::{collections::BTreeMap, fmt, io, path::Path};
 
 #[cfg(unix)]
 use std::{
     collections::VecDeque,
-    process::Stdio,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
 };
+#[cfg(any(unix, windows))]
+use std::{process::Stdio, time::Duration};
 
 #[cfg(target_os = "linux")]
 use std::os::{
@@ -26,43 +27,54 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
     process::Command,
-    sync::{mpsc, watch},
+    sync::mpsc,
+};
+#[cfg(unix)]
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::watch,
     task::JoinSet,
 };
 
 /// Current guest protocol version.
-pub const GUEST_PROTOCOL_VERSION: u16 = 2;
+///
+/// Version 3 adds the one-shot standard-I/O probe and the optional
+/// per-execution process-limit field used by Hyper-V-isolated Windows
+/// containers. Earlier versions are rejected instead of being interpreted as
+/// the current wire contract.
+pub const GUEST_PROTOCOL_VERSION: u16 = 3;
 /// Maximum encoded request or response frame.
 pub const MAX_GUEST_FRAME_BYTES: usize = 32 * 1024 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_OUTPUT_DATA_RECORDS: usize = 65_534;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_OPERATION_ID_BYTES: usize = 128;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_TARGET_PATH_BYTES: usize = 4_096;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_EXECUTION_ARGUMENTS: usize = 4_096;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_EXECUTION_ARGV_BYTES: usize = 1024 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_ENVIRONMENT_VARIABLES: usize = 1_024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_ENVIRONMENT_NAME_BYTES: usize = 128;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 1024 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_COMMAND_TIMEOUT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_EXECUTION_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(unix, windows))]
+const MAX_PROCESS_LIMIT: u32 = 1_000_000;
 #[cfg(unix)]
 const MAX_REPLAY_ENTRIES: usize = 256;
 #[cfg(unix)]
@@ -72,6 +84,13 @@ const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestRequest {
+    /// Verifies that the exact guest executable understands this protocol.
+    Probe {
+        /// Protocol version selected by the caller.
+        protocol: u16,
+        /// Idempotent operation identifier.
+        operation_id: String,
+    },
     /// Proves the exact guest agent and sealed template before job traffic.
     Hello {
         /// Protocol version selected by the caller.
@@ -108,6 +127,12 @@ pub enum GuestRequest {
         timeout_millis: u64,
         /// Aggregate stdout/stderr byte limit.
         output_limit: usize,
+        /// Optional whole-command-tree process ceiling.
+        ///
+        /// Windows Hyper-V containers require this value and enforce it with a
+        /// nested Job Object. Unix guests reject it because their process limit
+        /// is configured at guest-service admission instead.
+        process_limit: Option<u32>,
     },
     /// Write one bounded file inside the sandbox.
     WriteFile {
@@ -136,6 +161,14 @@ pub enum GuestRequest {
 impl fmt::Debug for GuestRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Probe {
+                protocol,
+                operation_id,
+            } => formatter
+                .debug_struct("GuestRequest::Probe")
+                .field("protocol", protocol)
+                .field("operation_id", operation_id)
+                .finish(),
             Self::Hello {
                 protocol,
                 operation_id,
@@ -161,6 +194,7 @@ impl fmt::Debug for GuestRequest {
                 operation_id,
                 arguments,
                 environment,
+                process_limit,
                 ..
             } => formatter
                 .debug_struct("GuestRequest::Exec")
@@ -168,6 +202,7 @@ impl fmt::Debug for GuestRequest {
                 .field("operation_id", operation_id)
                 .field("argument_count", &arguments.len())
                 .field("environment_count", &environment.len())
+                .field("process_limit", process_limit)
                 .field("payload", &"[REDACTED]")
                 .finish(),
             Self::WriteFile {
@@ -198,11 +233,12 @@ impl fmt::Debug for GuestRequest {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl GuestRequest {
     fn protocol(&self) -> u16 {
         match self {
-            Self::Hello { protocol, .. }
+            Self::Probe { protocol, .. }
+            | Self::Hello { protocol, .. }
             | Self::Configure { protocol, .. }
             | Self::Exec { protocol, .. }
             | Self::WriteFile { protocol, .. }
@@ -212,7 +248,8 @@ impl GuestRequest {
 
     fn operation_id(&self) -> &str {
         match self {
-            Self::Hello { operation_id, .. }
+            Self::Probe { operation_id, .. }
+            | Self::Hello { operation_id, .. }
             | Self::Configure { operation_id, .. }
             | Self::Exec { operation_id, .. }
             | Self::WriteFile { operation_id, .. }
@@ -291,6 +328,11 @@ pub enum GuestTermination {
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuestResponse {
+    /// The guest executable accepted the exact protocol version.
+    Ready {
+        /// Guest protocol version.
+        protocol: u16,
+    },
     /// Guest identity and nonce proof returned before job operations.
     Hello {
         /// Guest protocol version.
@@ -354,6 +396,10 @@ pub enum GuestResponse {
 impl fmt::Debug for GuestResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Ready { protocol } => formatter
+                .debug_struct("GuestResponse::Ready")
+                .field("protocol", protocol)
+                .finish(),
             Self::Hello {
                 protocol,
                 profile_id,
@@ -581,6 +627,46 @@ pub async fn forward_stdio(_socket: &Path) -> Result<(), GuestProtocolError> {
     Err(unsupported_unix_transport().into())
 }
 
+/// Handles one framed request on standard input and writes one framed response.
+///
+/// This transport is used by Hyper-V-isolated Windows containers so argv,
+/// environment values, and file bytes never enter the container-runtime
+/// command line. It deliberately serves one request and exits; lifecycle and
+/// replay fencing remain owned by the host provider.
+///
+/// # Errors
+///
+/// Returns a sanitized framing or standard-I/O failure.
+#[cfg(any(unix, windows))]
+pub async fn serve_stdio_once() -> Result<(), GuestProtocolError> {
+    let mut input = tokio::io::stdin();
+    let frame = read_frame(&mut input).await?;
+    let request: GuestRequest = decode_frame(&frame)?;
+    let response = match immediate_rejection(&request) {
+        Some(response) => response,
+        None => handle_request(request, None).await,
+    };
+    let mut output = tokio::io::stdout();
+    output.write_all(&encode_frame(&response)?).await?;
+    output.flush().await?;
+    Ok(())
+}
+
+/// Rejects the one-shot standard-I/O transport on unsupported platforms.
+///
+/// # Errors
+///
+/// Always returns an unsupported transport error.
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::unused_async)]
+pub async fn serve_stdio_once() -> Result<(), GuestProtocolError> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "guest stdio transport is unavailable",
+    )
+    .into())
+}
+
 /// Checks whether the configured guest listener accepts connections.
 #[must_use]
 #[cfg(unix)]
@@ -689,16 +775,7 @@ async fn serve_connection(
 ) -> Result<(), GuestProtocolError> {
     let frame = read_frame(&mut stream).await?;
     let request: GuestRequest = decode_frame(&frame)?;
-    let immediate_response = if request.protocol() != GUEST_PROTOCOL_VERSION {
-        Some(GuestResponse::Rejected {
-            protocol: GUEST_PROTOCOL_VERSION,
-            kind: GuestRejection::UnsupportedProtocol,
-        })
-    } else if !valid_operation_id(request.operation_id()) {
-        Some(rejected(GuestRejection::InvalidRequest))
-    } else {
-        None
-    };
+    let immediate_response = immediate_rejection(&request);
     if let Some(response) = immediate_response {
         stream.write_all(&encode_frame(&response)?).await?;
         stream.shutdown().await?;
@@ -718,6 +795,20 @@ async fn serve_connection(
     writer.write_all(&encode_frame(&response)?).await?;
     writer.shutdown().await?;
     Ok(())
+}
+
+#[cfg(any(unix, windows))]
+fn immediate_rejection(request: &GuestRequest) -> Option<GuestResponse> {
+    if request.protocol() != GUEST_PROTOCOL_VERSION {
+        Some(GuestResponse::Rejected {
+            protocol: GUEST_PROTOCOL_VERSION,
+            kind: GuestRejection::UnsupportedProtocol,
+        })
+    } else if !valid_operation_id(request.operation_id()) {
+        Some(rejected(GuestRejection::InvalidRequest))
+    } else {
+        None
+    }
 }
 
 #[cfg(unix)]
@@ -905,7 +996,7 @@ async fn replay_request(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, GuestProtocolError> {
     let mut header = [0_u8; 4];
     reader.read_exact(&mut header).await?;
@@ -921,9 +1012,12 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, Gue
     Ok(frame)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) -> GuestResponse {
     match request {
+        GuestRequest::Probe { .. } => GuestResponse::Ready {
+            protocol: GUEST_PROTOCOL_VERSION,
+        },
         GuestRequest::Hello { nonce, .. } => {
             if valid_attestation_value(&nonce) {
                 identity.map_or_else(
@@ -963,6 +1057,7 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
             working_directory,
             timeout_millis,
             output_limit,
+            process_limit,
             ..
         } => {
             execute(
@@ -972,6 +1067,7 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
                 working_directory,
                 timeout_millis,
                 output_limit,
+                process_limit,
             )
             .await
         }
@@ -986,7 +1082,7 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn valid_attestation_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_OPERATION_ID_BYTES
@@ -1007,7 +1103,15 @@ fn configure_process_limit(process_limit: u32) -> io::Result<()> {
     .map_err(Into::into)
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn configure_process_limit(_process_limit: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Windows process limits are enforced by the container runtime",
+    ))
+}
+
+#[cfg(any(unix, windows))]
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     program: String,
@@ -1016,6 +1120,7 @@ async fn execute(
     working_directory: String,
     timeout_millis: u64,
     output_limit: usize,
+    process_limit: Option<u32>,
 ) -> GuestResponse {
     if !valid_execution_request(
         &program,
@@ -1024,6 +1129,7 @@ async fn execute(
         &working_directory,
         timeout_millis,
         output_limit,
+        process_limit,
     ) {
         return rejected(GuestRejection::InvalidRequest);
     }
@@ -1037,11 +1143,7 @@ async fn execute(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_process_group(&mut command);
-    let Ok(mut child) = command.spawn() else {
-        return rejected(GuestRejection::OperationFailed);
-    };
-    let Some(process_group) = child.id() else {
+    let Ok((mut child, containment)) = spawn_contained(command, process_limit) else {
         return rejected(GuestRejection::OperationFailed);
     };
     let Some(stdout) = child.stdout.take() else {
@@ -1060,7 +1162,7 @@ async fn execute(
     let (status, mut records, truncated) = collect_process_output(
         &mut child,
         &mut receiver,
-        process_group,
+        &containment,
         output_limit,
         Duration::from_millis(timeout_millis),
     )
@@ -1075,7 +1177,7 @@ async fn execute(
         Some(Err(_)) => {
             stdout_task.abort();
             stderr_task.abort();
-            terminate_process_group(process_group);
+            containment.terminate();
             let _ = child.kill().await;
             let _ = child.wait().await;
             return rejected(GuestRejection::OperationFailed);
@@ -1083,7 +1185,7 @@ async fn execute(
         None => {
             stdout_task.abort();
             stderr_task.abort();
-            terminate_process_group(process_group);
+            containment.terminate();
             let _ = child.kill().await;
             let _ = child.wait().await;
             (GuestTermination::TimedOut, truncated)
@@ -1111,11 +1213,11 @@ async fn execute(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn collect_process_output(
     child: &mut tokio::process::Child,
     receiver: &mut mpsc::Receiver<(GuestOutputStream, Vec<u8>)>,
-    process_group: u32,
+    containment: &ProcessContainment,
     output_limit: usize,
     deadline: Duration,
 ) -> (
@@ -1135,7 +1237,7 @@ async fn collect_process_output(
             () = &mut deadline => return (None, records, truncated),
             result = child.wait(), if status.is_none() => {
                 status = Some(result);
-                terminate_process_group(process_group);
+                containment.terminate();
             },
             record = receiver.recv(), if output_open => match record {
                 Some((stream, data)) => {
@@ -1161,22 +1263,66 @@ async fn collect_process_output(
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+struct ProcessContainment {
+    process_group: u32,
+}
+
+#[cfg(windows)]
+struct ProcessContainment {
+    job: processkit::ProcessGroup,
+}
+
+#[cfg(unix)]
+fn spawn_contained(
+    mut command: Command,
+    process_limit: Option<u32>,
+) -> Result<(tokio::process::Child, ProcessContainment), ()> {
+    if process_limit.is_some() {
+        return Err(());
+    }
     command.process_group(0);
+    let child = command.spawn().map_err(|_| ())?;
+    let process_group = child.id().ok_or(())?;
+    Ok((child, ProcessContainment { process_group }))
+}
+
+#[cfg(windows)]
+fn spawn_contained(
+    command: Command,
+    process_limit: Option<u32>,
+) -> Result<(tokio::process::Child, ProcessContainment), ()> {
+    let process_limit = process_limit
+        .filter(|value| (1..=MAX_PROCESS_LIMIT).contains(value))
+        .ok_or(())?;
+    let job = processkit::ProcessGroup::with_options(
+        processkit::ProcessGroupOptions::default().max_processes(process_limit),
+    )
+    .map_err(|_| ())?;
+    let child = job.spawn(command).map_err(|_| ())?;
+    Ok((child, ProcessContainment { job }))
 }
 
 #[cfg(unix)]
-fn terminate_process_group(process_group: u32) {
-    let Ok(process_group) = i32::try_from(process_group) else {
-        return;
-    };
-    let Some(process_group) = rustix::process::Pid::from_raw(process_group) else {
-        return;
-    };
-    let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+impl ProcessContainment {
+    fn terminate(&self) {
+        let Ok(process_group) = i32::try_from(self.process_group) else {
+            return;
+        };
+        let Some(process_group) = rustix::process::Pid::from_raw(process_group) else {
+            return;
+        };
+        let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+    }
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+impl ProcessContainment {
+    fn terminate(&self) {
+        let _ = self.job.kill_all();
+    }
+}
+
+#[cfg(any(unix, windows))]
 async fn read_output<R: AsyncRead + Unpin>(
     mut reader: R,
     stream: GuestOutputStream,
@@ -1196,13 +1342,19 @@ async fn read_output<R: AsyncRead + Unpin>(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn write_file(path: &str, content_base64: &str) -> GuestResponse {
     let Ok(content) = BASE64.decode(content_base64) else {
         return rejected(GuestRejection::InvalidRequest);
     };
     if !valid_absolute_path(path) || content.len() > MAX_GUEST_FRAME_BYTES / 2 {
         return rejected(GuestRejection::InvalidRequest);
+    }
+    let Some(parent) = Path::new(path).parent() else {
+        return rejected(GuestRejection::InvalidRequest);
+    };
+    if tokio::fs::create_dir_all(parent).await.is_err() {
+        return rejected(GuestRejection::OperationFailed);
     }
     match tokio::fs::write(path, content).await {
         Ok(()) => GuestResponse::WriteFile {
@@ -1212,7 +1364,7 @@ async fn write_file(path: &str, content_base64: &str) -> GuestResponse {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
     if !valid_absolute_path(path) || byte_limit == 0 || byte_limit > MAX_GUEST_FRAME_BYTES / 2 {
         return rejected(GuestRejection::InvalidRequest);
@@ -1241,7 +1393,7 @@ async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn rejected(kind: GuestRejection) -> GuestResponse {
     GuestResponse::Rejected {
         protocol: GUEST_PROTOCOL_VERSION,
@@ -1261,7 +1413,27 @@ fn valid_absolute_path(value: &str) -> bool {
         && !value.contains('\0')
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn valid_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes.len() <= MAX_TARGET_PATH_BYTES
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+        && !value.contains('/')
+        && !value.contains("\\\\")
+        && !value.contains('\0')
+        && value.split('\\').skip(1).all(|component| {
+            !matches!(component, "." | "..")
+                && !component.ends_with([' ', '.'])
+                && !component
+                    .bytes()
+                    .any(|byte| matches!(byte, b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'))
+        })
+}
+
+#[cfg(any(unix, windows))]
 fn valid_operation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_OPERATION_ID_BYTES
@@ -1270,7 +1442,7 @@ fn valid_operation_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn valid_execution_request(
     program: &str,
     arguments: &[String],
@@ -1278,6 +1450,7 @@ fn valid_execution_request(
     working_directory: &str,
     timeout_millis: u64,
     output_limit: usize,
+    process_limit: Option<u32>,
 ) -> bool {
     let argv_bytes = arguments.iter().try_fold(program.len(), |bytes, argument| {
         (!argument.contains('\0'))
@@ -1305,6 +1478,17 @@ fn valid_execution_request(
         && environment_bytes.is_some_and(|bytes| bytes <= MAX_ENVIRONMENT_BYTES)
         && (1..=MAX_COMMAND_TIMEOUT_MILLIS).contains(&timeout_millis)
         && (1..=MAX_EXECUTION_OUTPUT_BYTES).contains(&output_limit)
+        && valid_process_limit(process_limit)
+}
+
+#[cfg(unix)]
+const fn valid_process_limit(process_limit: Option<u32>) -> bool {
+    process_limit.is_none()
+}
+
+#[cfg(windows)]
+fn valid_process_limit(process_limit: Option<u32>) -> bool {
+    process_limit.is_some_and(|value| (1..=MAX_PROCESS_LIMIT).contains(&value))
 }
 
 #[cfg(test)]
@@ -1312,6 +1496,70 @@ mod tests {
     use super::*;
 
     const OPERATION_ONE: &str = "00000000-0000-4000-8000-000000000001";
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn protocol_v3_rejects_every_prior_wire_version() {
+        assert_eq!(GUEST_PROTOCOL_VERSION, 3);
+        for protocol in [1, 2] {
+            let request = GuestRequest::Probe {
+                protocol,
+                operation_id: OPERATION_ONE.into(),
+            };
+            assert_eq!(
+                immediate_rejection(&request),
+                Some(GuestResponse::Rejected {
+                    protocol: GUEST_PROTOCOL_VERSION,
+                    kind: GuestRejection::UnsupportedProtocol,
+                })
+            );
+        }
+        let current = GuestRequest::Probe {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: OPERATION_ONE.into(),
+        };
+        assert_eq!(immediate_rejection(&current), None);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn write_file_creates_the_attempt_scoped_parent_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "automata-guest-write-parent-{}",
+            std::process::id()
+        ));
+        let target = root.join("attempt").join("commands").join("probe.txt");
+        let target = target.to_string_lossy();
+        assert!(matches!(
+            write_file(&target, &BASE64.encode(b"probe")).await,
+            GuestResponse::WriteFile {
+                protocol: GUEST_PROTOCOL_VERSION
+            }
+        ));
+        assert_eq!(tokio::fs::read(target.as_ref()).await.unwrap(), b"probe");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_execution_requires_an_explicit_bounded_process_limit() {
+        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
+        let valid = |process_limit| {
+            valid_execution_request(
+                r"C:\Windows\System32\cmd.exe",
+                &[],
+                &BTreeMap::new(),
+                &working_directory,
+                1_000,
+                1_024,
+                process_limit,
+            )
+        };
+        assert!(valid(Some(8)));
+        assert!(!valid(None));
+        assert!(!valid(Some(0)));
+        assert!(!valid(Some(MAX_PROCESS_LIMIT + 1)));
+    }
 
     #[test]
     fn frame_round_trip_redacts_debug() {
@@ -1324,6 +1572,7 @@ mod tests {
             working_directory: "/tmp".into(),
             timeout_millis: 1_000,
             output_limit: 1_024,
+            process_limit: None,
         };
         let frame = encode_frame(&request).expect("frame");
         assert_eq!(

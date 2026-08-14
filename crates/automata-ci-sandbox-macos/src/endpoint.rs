@@ -278,6 +278,7 @@ impl MacosVirtualizationEndpoint {
             working_directory: request.working_directory().as_str().to_owned(),
             timeout_millis,
             output_limit: request.output_limit(),
+            process_limit: None,
         };
         let response = exchange(
             &self.entry,
@@ -457,6 +458,7 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
             ..
         } => ExecutionErrorKind::InvalidEnvironment,
         GuestResponse::Rejected { .. }
+        | GuestResponse::Ready { .. }
         | GuestResponse::Hello { .. }
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }

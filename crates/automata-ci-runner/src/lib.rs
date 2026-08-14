@@ -4,8 +4,8 @@
 //! Before the production command opens a control-plane session, Linux execution
 //! either requires the configured rootless-Podman network probe and cleanup to
 //! succeed or constructs the authenticated Kubernetes adapter. Trusted Windows
-//! execution uses native processes contained by a Job Object with explicit
-//! host-network and host-filesystem semantics; macOS execution uses one
+//! execution uses fresh Hyper-V-isolated Windows containers with networking
+//! disabled and no host mounts; macOS execution uses one
 //! disposable Virtualization.framework machine per job.
 //! Every path exercises configured environments through exact lifecycle
 //! admission before supervising fenced job execution.

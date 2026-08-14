@@ -289,6 +289,7 @@ fn exec_request(request: &ExecutionCommand) -> Result<GuestRequest, ExecutionErr
         working_directory: request.working_directory().as_str().into(),
         timeout_millis,
         output_limit: request.output_limit(),
+        process_limit: None,
     })
 }
 
@@ -400,7 +401,8 @@ fn copy_from_result(response: GuestResponse, byte_limit: usize) -> Result<Vec<u8
 
 const fn response_protocol(response: &GuestResponse) -> u16 {
     match response {
-        GuestResponse::Hello { protocol, .. }
+        GuestResponse::Ready { protocol }
+        | GuestResponse::Hello { protocol, .. }
         | GuestResponse::Configured { protocol }
         | GuestResponse::Exec { protocol, .. }
         | GuestResponse::WriteFile { protocol }
@@ -422,6 +424,7 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
                 | GuestRejection::OperationConflict,
             ..
         }
+        | GuestResponse::Ready { .. }
         | GuestResponse::Hello { .. }
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }

@@ -499,6 +499,7 @@ async fn exec_and_copy_round_trips_preserve_exact_guest_requests_and_results() {
             working_directory: "/workspace/subdir".into(),
             timeout_millis: 1_250,
             output_limit: 1_024,
+            process_limit: None,
         }
     );
     assert_eq!(

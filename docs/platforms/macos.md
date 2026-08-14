@@ -225,7 +225,7 @@ The only accepted boundary is:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "state": { "macos_virtualization": "/Volumes/AutomataVM/state" },
   "macos_virtualization": {
     "helper_executable": "/Library/Automata/bin/automata-macos-vm-helper",
