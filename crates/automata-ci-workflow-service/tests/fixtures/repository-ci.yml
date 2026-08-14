@@ -147,9 +147,7 @@ jobs:
           AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
         run: |
           cargo test -p automata-ci-store --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-runner-auth-postgres --tests --all-features --locked -- --ignored --test-threads=1
-          cargo test -p automata-ci-secret-postgres --tests --all-features --locked -- --ignored --test-threads=1
+          cargo test -p automata-ci-postgres --test postgres --all-features --locked -- --ignored --test-threads=1
           cargo test -p automata-ci-results-github --test postgres_artifacts --all-features --locked -- --ignored --test-threads=1
           cargo test -p automata-ci-results-github --test postgres_cache --all-features --locked -- --ignored --test-threads=1
 

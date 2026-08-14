@@ -13,7 +13,7 @@ it only when a complete private management-listener configuration is supplied;
 standalone self-hosted deployments expose no placeholder endpoint. The product
 maps a dedicated-CA-verified leaf certificate through an exact SHA-256 pin to a
 stable shard-scoped authority, and supplies the durable
-`automata-ci-provisioning-postgres` transaction adapter.
+`automata-ci-postgres` provisioning transaction adapter.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,

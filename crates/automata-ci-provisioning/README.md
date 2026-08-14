@@ -8,4 +8,4 @@ idempotency identity, and durable provisioning behind explicit ports.
 It contains no gRPC, HTTP, SQL, Cloud billing, or private Automata Cloud code.
 The public versioned wire schema lives beside its gRPC adapter in
 `automata-ci-provisioning-grpc`; the atomic PostgreSQL adapter lives in
-`automata-ci-provisioning-postgres`.
+the `provisioning` namespace of `automata-ci-postgres`.
