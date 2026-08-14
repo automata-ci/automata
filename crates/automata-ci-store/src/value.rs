@@ -79,7 +79,7 @@ impl RunnerProtocolVersion {
 pub struct RunnerGeneration(NonZeroU64);
 
 impl RunnerGeneration {
-    /// Creates a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Creates a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -99,7 +99,7 @@ impl RunnerGeneration {
 pub struct SessionEpoch(NonZeroU64);
 
 impl SessionEpoch {
-    /// Creates a positive epoch representable by `PostgreSQL` `BIGINT`.
+    /// Creates a positive epoch within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -285,16 +285,6 @@ pub(crate) fn validate_text(
         return Err(DurabilityValueError::ControlCharacter { field });
     }
     Ok(())
-}
-
-pub(crate) fn decode_sha256_digest(
-    bytes: Vec<u8>,
-) -> Result<automata_ci_core::Sha256Digest, DurabilityValueError> {
-    let length = bytes.len();
-    let bytes = bytes
-        .try_into()
-        .map_err(|_| DurabilityValueError::InvalidDigestLength { length })?;
-    Ok(automata_ci_core::Sha256Digest::from_bytes(bytes))
 }
 
 pub(crate) fn sha256_digest(bytes: &[u8]) -> automata_ci_core::Sha256Digest {

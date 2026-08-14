@@ -63,7 +63,7 @@ pub enum AttemptSnapshotError {
 ///
 /// Its display text is deliberately stable and sanitized. Operators can still
 /// inspect the type-erased [`Error::source`] chain in trusted logs, while API
-/// handlers and alternative adapters do not depend on a concrete database
+/// handlers and alternative adapters do not depend on a concrete storage
 /// driver's error type.
 #[derive(Debug, Error)]
 #[error("attempt repository operation failed")]

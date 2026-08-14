@@ -594,13 +594,13 @@ elif arguments and arguments[0] == "test":
     if mutation:
         Path(mutation).write_text("changed during coverage\\n", encoding="utf-8")
     postgres_mutation = os.environ.get("AUTOMATA_COVERAGE_POSTGRES_MUTATION")
-    if postgres_mutation and "automata-ci-store" in arguments:
+    if postgres_mutation and "automata-ci-postgres" in arguments:
         Path(postgres_mutation).write_text(
             "changed during PostgreSQL coverage\\n", encoding="utf-8"
         )
     if (
         os.environ.get("AUTOMATA_COVERAGE_FAIL_POSTGRES") == "1"
-        and "automata-ci-store" in arguments
+        and "automata-ci-postgres" in arguments
     ):
         raise SystemExit(88)
 elif arguments and arguments[0] == "run":
@@ -750,7 +750,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             for command in combined_commands
         )
         assert any(
-            command and command[0] == "test" and "automata-ci-store" in command
+            command and command[0] == "test" and "automata-ci-postgres" in command
             for command in combined_commands
         )
         workspace_index = next(
@@ -766,7 +766,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
         postgres_index = next(
             index
             for index, command in enumerate(combined_commands)
-            if command and command[0] == "test" and "automata-ci-store" in command
+            if command and command[0] == "test" and "automata-ci-postgres" in command
         )
         cleanup_index = next(
             index
@@ -832,7 +832,7 @@ os.execv({real_mv!r}, [{real_mv!r}, *sys.argv[1:]])
             for line in failed_combined_log.read_text(encoding="utf-8").splitlines()
         ]
         assert not any(
-            command and command[0] == "test" and "automata-ci-store" in command
+            command and command[0] == "test" and "automata-ci-postgres" in command
             for command in failed_combined_commands
         )
 
@@ -1321,12 +1321,11 @@ exit 99
             capture_output=True,
         )
         commands = planned.stdout.splitlines()
-        assert len(commands) == 17, planned.stdout
+        assert len(commands) == 16, planned.stdout
         expected_inventory = [
             "cargo test --workspace",
-            "-p automata-ci-store --test store_postgres_execution",
-            "-p automata-ci-postgres-test-support --test postgres_18",
             "-p automata-ci-postgres --test postgres",
+            "-p automata-ci-postgres-test-support --test postgres_18",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test rustfs_contract",
@@ -1351,6 +1350,7 @@ exit 99
             command.count("-p automata-ci-postgres-test-support")
             for command in commands
         ) == 1
+        assert all("-p automata-ci-store" not in command for command in commands)
         unknown_plan = subprocess.run(
             [str(RUN), "--plan", str(scratch / "unknown-plan"), "ordinary", "policy-only"],
             cwd=ROOT.parent,

@@ -93,13 +93,10 @@ if [[ "$plan" != true ]]; then
   fi
 fi
 
-printf 'PostgreSQL lane: Store current-schema suites\n' >&2
+printf 'PostgreSQL lane: adapters and Store\n' >&2
 run_bounded_tests cargo test \
-  -p automata-ci-store \
-  --test store_postgres_execution \
-  --test store_postgres_orchestration \
-  --test store_postgres_provider \
-  --test store_postgres_security \
+  -p automata-ci-postgres \
+  --test postgres \
   --all-features \
   --locked \
   -- \
@@ -115,16 +112,6 @@ run_bounded_tests cargo test \
   -- \
   --ignored \
   --test-threads=1
-
-printf 'PostgreSQL lane: product adapters\n' >&2
-run_bounded_tests cargo test \
-  -p automata-ci-postgres \
-  --test postgres \
-  --all-features \
-  --locked \
-  -- \
-  --ignored \
-  --test-threads=4
 
 printf 'PostgreSQL lane: GitHub Results integration\n' >&2
 run_bounded_tests cargo test \

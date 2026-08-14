@@ -3,7 +3,7 @@ use automata_ci_auth::authorization::{
     AuthorizationContext, AuthorizationRequest, OutputVisibility, Permission,
     RepositoryPublicationPolicy, RepositoryResource, SecretExposureClass,
 };
-use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
+use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::{
     AttemptId, AttemptNumber, JobConclusion, JobId, JobLifecycle, LogSequence, LogStreamId, RunId,
     RunnerId, Sha256Digest, UnixMillis, WorkflowId,
@@ -39,7 +39,7 @@ pub enum HumanReadValueError {
     /// A requested page size is zero or exceeds its closed endpoint limit.
     #[error("page size must be within the human-read bound")]
     InvalidPageSize,
-    /// An artifact identifier is not a positive durable database identity.
+    /// An artifact identifier is not a positive durable repository identity.
     #[error("artifact IDs are positive durable integers")]
     InvalidArtifactId,
 }
@@ -144,7 +144,7 @@ impl HumanPageSize {
         Ok(Self(value))
     }
 
-    /// Returns the validated number of rows requested for a human page.
+    /// Returns the validated number of records requested for a human page.
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0
@@ -248,7 +248,7 @@ pub struct HumanRepository {
 pub struct HumanRepositoryPage {
     /// Repositories authorized within the exact tenant query.
     pub repositories: Vec<HumanRepository>,
-    /// Exclusive cursor for a later page, when more rows exist.
+    /// Exclusive cursor for a later page, when more records exist.
     pub next_cursor: Option<HumanRepositoryCursor>,
 }
 
@@ -317,7 +317,7 @@ impl HumanWorkflowListQuery {
 pub struct HumanWorkflowPage {
     /// Workflows found under the exact tenant/repository parent.
     pub workflows: Vec<HumanWorkflow>,
-    /// Exclusive cursor for a later page, when more rows exist.
+    /// Exclusive cursor for a later page, when more records exist.
     pub next_cursor: Option<HumanWorkflowCursor>,
 }
 
@@ -352,9 +352,9 @@ pub enum HumanRunStatusFilter {
 /// Direction from a run keyset boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HumanRunPageDirection {
-    /// Selects rows older than the supplied keyset boundary.
+    /// Selects records older than the supplied keyset boundary.
     Older,
-    /// Selects rows newer than the supplied keyset boundary.
+    /// Selects records newer than the supplied keyset boundary.
     Newer,
 }
 
@@ -602,7 +602,7 @@ pub struct HumanJobAttempt {
     pub changed_at: UnixMillis,
     /// Immutable first lease issue time when execution began.
     ///
-    /// This is absent for never-leased attempts and historical terminal rows
+    /// This is absent for never-leased attempts and historical terminal records
     /// whose mutable lease custody was cleared before start retention existed.
     pub started_at: Option<UnixMillis>,
     /// Terminal time, absent while the attempt remains open.
@@ -696,7 +696,7 @@ impl HumanJobScope {
     }
 }
 
-/// Bounded navigation row for one job in a selected run.
+/// Bounded navigation record for one job in a selected run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanJobNavigation {
     /// Durable job identity within the selected run.
@@ -926,7 +926,7 @@ pub trait HumanWorkflowReadRepository: std::fmt::Debug + Send + Sync {
     /// `secrets:metadata:read`. Implementations must reject an empty,
     /// duplicate, unsupported, or unbounded permission set, evaluate every
     /// accepted permission before keyset pagination, and must not leak
-    /// unauthorized rows through scan thresholds, cursors, or counts.
+    /// unauthorized records through scan thresholds, cursors, or counts.
     async fn list_repositories(
         &self,
         query: &HumanRepositoryListQuery,
@@ -997,19 +997,6 @@ pub trait HumanWorkflowReadRepository: std::fmt::Debug + Send + Sync {
         context: &AuthorizationContext,
         target: &HumanAuthorizationTarget,
     ) -> Result<bool, StoreError>;
-}
-
-pub(crate) fn blob_descriptor(
-    object_key: String,
-    digest: Sha256Digest,
-    encoded_size: u64,
-    media_type: String,
-) -> Result<BlobDescriptor, StoreError> {
-    let key = BlobKey::new(object_key)
-        .map_err(|_| StoreError::corrupt_data("immutable object key is invalid"))?;
-    let media_type = MediaType::new(media_type)
-        .map_err(|_| StoreError::corrupt_data("immutable object media type is invalid"))?;
-    Ok(BlobDescriptor::new(key, digest, encoded_size, media_type))
 }
 
 fn valid_route_text(value: &str) -> bool {

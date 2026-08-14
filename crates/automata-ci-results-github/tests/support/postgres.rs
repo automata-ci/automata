@@ -4,11 +4,12 @@ use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
     RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
 };
+use automata_ci_postgres::store::PostgresStore;
 use automata_ci_postgres_test_support::{
     PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
 };
 use automata_ci_store::{
-    OpenRunnerSession, PostgresStore, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
+    OpenRunnerSession, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
     RunnerSessionFence, RunnerSessionRepository as _, WORKFLOW_ADMISSION_EPOCH,
 };
 use sqlx::PgPool;

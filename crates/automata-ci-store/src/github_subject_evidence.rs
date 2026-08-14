@@ -51,16 +51,6 @@ impl GithubAuthenticatedEventKind {
             Self::RepositoryDispatch => "repository_dispatch",
         }
     }
-
-    pub(crate) const fn from_durable(value: &str) -> Option<Self> {
-        match value.as_bytes() {
-            b"push" => Some(Self::Push),
-            b"pull_request" => Some(Self::PullRequest),
-            b"merge_group" => Some(Self::MergeGroup),
-            b"repository_dispatch" => Some(Self::RepositoryDispatch),
-            _ => None,
-        }
-    }
 }
 
 /// Bounded selector coordinates for a authenticated GitHub event.
@@ -133,14 +123,6 @@ impl GithubRepositoryDispatchResolutionAuthority {
         match self {
             Self::PublicAnonymous => "public_anonymous",
             Self::PrivateSourceAuthority => "private_source_authority",
-        }
-    }
-
-    pub(crate) const fn from_durable(value: &str) -> Option<Self> {
-        match value.as_bytes() {
-            b"public_anonymous" => Some(Self::PublicAnonymous),
-            b"private_source_authority" => Some(Self::PrivateSourceAuthority),
-            _ => None,
         }
     }
 }
@@ -273,7 +255,7 @@ impl fmt::Debug for AcceptManifestPinnedGithubDelivery {
 }
 
 /// Immutable provider, signed-owner, Check, and service-authority evidence for
-/// one GitHub inbox row.
+/// one GitHub inbox record.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ManifestPinnedGithubDeliveryEvidence {
     delivery_id: ProviderDeliveryId,
@@ -410,7 +392,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         self.manifest.tenant()
     }
 
-    /// Returns the immutable inbox row identity.
+    /// Returns the immutable inbox record identity.
     #[must_use]
     pub const fn delivery_id(&self) -> ProviderDeliveryId {
         self.delivery_id
@@ -561,7 +543,7 @@ impl ManifestPinnedGithubDeliveryReceipt {
         &self.evidence
     }
 
-    /// Returns the immutable inbox row identity.
+    /// Returns the immutable inbox record identity.
     #[must_use]
     pub const fn delivery_id(&self) -> ProviderDeliveryId {
         self.evidence.delivery_id()
@@ -625,8 +607,8 @@ impl AuthenticatedGithubDeliveryClaim {
     /// # Errors
     ///
     /// Rejects an invalid attempt, pre-epoch time, or an empty/excessive total
-    /// claim horizon. The database additionally requires every field to match
-    /// the row-locked current inbox claim before admission or replay.
+    /// claim horizon. The repository additionally requires every field to match
+    /// the record-locked current inbox claim before admission or replay.
     pub fn new(
         claim: ProviderDeliveryClaimFence,
         attempt: u16,
@@ -928,6 +910,7 @@ impl RecordGithubWorkflowRunSubjectEvidence {
         self.admitted_at
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn matches_logical_admission(
         &self,
         delivery_id: ProviderDeliveryId,
@@ -966,6 +949,7 @@ pub struct ValidateGithubWorkflowRunSubjectEvidenceReplay {
     current_claim: AuthenticatedGithubDeliveryClaim,
     observed_at: UnixMillis,
     durable_admitted_at: UnixMillis,
+    #[cfg(feature = "adapter-spi")]
     command: AdmitLogicalWorkflowRun,
 }
 
@@ -999,11 +983,12 @@ impl ValidateGithubWorkflowRunSubjectEvidenceReplay {
             current_claim,
             observed_at,
             durable_admitted_at,
+            #[cfg(feature = "adapter-spi")]
             command: command.clone(),
         })
     }
 
-    /// Returns the exact row-locked claim that must authorize this replay.
+    /// Returns the exact record-locked claim that must authorize this replay.
     #[must_use]
     pub const fn current_claim(&self) -> AuthenticatedGithubDeliveryClaim {
         self.current_claim
@@ -1021,6 +1006,7 @@ impl ValidateGithubWorkflowRunSubjectEvidenceReplay {
         self.durable_admitted_at
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn command(&self) -> &AdmitLogicalWorkflowRun {
         &self.command
     }
@@ -1161,7 +1147,7 @@ pub enum GithubSubjectEvidenceStoreError {
     /// The exact immutable evidence receipt does not exist.
     #[error("GitHub subject evidence was not found")]
     NotFound,
-    /// Durable rows violate the current-only signed-owner contract.
+    /// Durable records violate the current-only signed-owner contract.
     #[error("durable GitHub subject evidence is corrupt")]
     CorruptData,
 }
@@ -1183,7 +1169,7 @@ pub trait GithubSubjectEvidenceRepository: Send + Sync {
         request: AcceptManifestPinnedGithubDelivery,
     ) -> Result<ManifestPinnedGithubDeliveryReceipt, GithubSubjectEvidenceStoreError>;
 
-    /// Loads exact immutable worker/admission evidence for one inbox row.
+    /// Loads exact immutable worker/admission evidence for one inbox record.
     async fn load_manifest_pinned_github_delivery_evidence(
         &self,
         tenant: &TenantScope,

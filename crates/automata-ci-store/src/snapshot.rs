@@ -10,7 +10,7 @@ use crate::AttemptSnapshotError;
 ///
 /// Use [`AttemptSnapshot::builder`] when implementing a storage adapter. The
 /// builder accepts an entire [`Lease`] instead of independent optional lease
-/// columns, so a caller cannot accidentally publish a partial lease tuple.
+/// fields, so a caller cannot accidentally publish a partial lease tuple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttemptSnapshot {
     pub(crate) attempt_id: AttemptId,

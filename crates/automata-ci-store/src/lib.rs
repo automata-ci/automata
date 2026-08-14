@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Durable control-plane storage ports and their `PostgreSQL` adapter.
+//! Backend-neutral durable control-plane values and repository ports.
 
 mod admission;
 mod assignment;
@@ -27,12 +27,10 @@ mod logical_run_finalization;
 mod logical_work_selection;
 mod maintenance;
 mod managed_secret_authority;
-mod migration;
 mod observability;
 mod operation;
 mod outbox;
 mod plan;
-mod postgres;
 mod protected_environment;
 mod provider_delivery;
 mod publication;
@@ -56,6 +54,16 @@ mod value;
 mod web;
 mod workflow_rerun;
 mod workflow_runtime_policy;
+
+/// Unstable construction and inspection hooks for Automata's first-party
+/// durable adapters.
+///
+/// This module is not a supported public API. It is feature-gated so that
+/// ordinary Store consumers cannot accidentally depend on adapter trust-boundary
+/// operations, and it may change without notice alongside first-party adapters.
+#[cfg(feature = "adapter-spi")]
+#[doc(hidden)]
+pub mod adapter_spi;
 
 pub use admission::{
     AdmissionObject, AdmissionRepository, AdmitWorkflowRun, AdmitWorkflowRunBuilder,
@@ -340,11 +348,6 @@ pub use outbox::{
 };
 pub use plan::{
     JobDependency, JobDependencyError, JobIrMetadata, JobIrMetadataError, WorkflowPlanRepository,
-};
-pub use postgres::{
-    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
-    PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
-    PostgresStoreError, PostgresTransportSecurity,
 };
 pub use protected_environment::{
     BindLeasedJobSecrets, DeploymentEnvironmentName, EnvironmentReviewDecision,

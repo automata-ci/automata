@@ -668,7 +668,7 @@ impl ClaimLogicalActivationPreparation {
 pub struct LogicalActivationPreparationGeneration(NonZeroU64);
 
 impl LogicalActivationPreparationGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -684,10 +684,6 @@ impl LogicalActivationPreparationGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated preparation generation fits i64")
     }
 }
 
@@ -862,7 +858,7 @@ impl RenewLogicalActivationPreparation {
         &self.claim
     }
 
-    /// Returns the requested database-issued renewal duration.
+    /// Returns the requested repository-issued renewal duration.
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
@@ -954,7 +950,7 @@ impl RenewedLogicalActivationPreparation {
         self.successor_expires_at
     }
 
-    /// Returns the immutable database validation time stored with the receipt.
+    /// Returns the immutable repository validation time stored with the receipt.
     #[must_use]
     pub const fn validated_at(&self) -> UnixMillis {
         self.validated_at
@@ -1182,7 +1178,7 @@ pub enum LogicalActivationPreparationValueError {
     /// A renewal did not extend the exact live claim.
     #[error("logical activation preparation renewal interval is invalid")]
     InvalidRenewalInterval,
-    /// A claim generation was zero or exceeded `BIGINT`.
+    /// A claim generation was zero or exceeded the signed 64-bit storage boundary.
     #[error("logical activation preparation generation is invalid")]
     InvalidGeneration,
     /// A source order exceeded the current plan bound.
@@ -1200,7 +1196,7 @@ pub enum LogicalActivationPreparationValueError {
     /// The workspace-policy output was not canonical.
     #[error("logical activation preparation workspace is invalid")]
     InvalidWorkspace,
-    /// A prerequisite evidence row was malformed.
+    /// A prerequisite evidence record was malformed.
     #[error("logical activation prerequisite evidence is invalid")]
     InvalidPrerequisite,
     /// The direct prerequisite set was malformed or duplicated.
@@ -1229,7 +1225,7 @@ pub enum LogicalActivationPreparationValueError {
 /// Durable preparation claim or binding failure.
 #[derive(Debug, Error)]
 pub enum LogicalActivationPreparationStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The target is absent, cross-tenant, non-root, non-current, or non-step.

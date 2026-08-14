@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-store"
-description = "Durable control-plane storage ports and PostgreSQL adapter for Automata"
+description = "Durable control-plane storage values and repository ports for Automata"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,25 +12,13 @@ readme = "README.md"
 publish.workspace = true
 autotests = false
 
+[features]
+default = []
+adapter-spi = []
+
 [[test]]
 name = "store_contracts"
 path = "tests/store_contracts.rs"
-
-[[test]]
-name = "store_postgres_execution"
-path = "tests/store_postgres_execution.rs"
-
-[[test]]
-name = "store_postgres_orchestration"
-path = "tests/store_postgres_orchestration.rs"
-
-[[test]]
-name = "store_postgres_provider"
-path = "tests/store_postgres_provider.rs"
-
-[[test]]
-name = "store_postgres_security"
-path = "tests/store_postgres_security.rs"
 
 [dependencies]
 async-trait.workspace = true
@@ -43,17 +31,10 @@ automata-ci-schedule.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
-subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-automata-ci-postgres-test-support.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

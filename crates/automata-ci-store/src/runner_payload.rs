@@ -12,22 +12,13 @@ pub enum RunnerPayloadTombstoneReason {
 }
 
 impl RunnerPayloadTombstoneReason {
-    /// Returns the closed durable representation used by the `PostgreSQL` schema.
+    /// Returns the closed representation used at the durable repository boundary.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Acknowledged => "acknowledged",
             Self::SessionClosed => "session_closed",
             Self::SessionSuperseded => "session_superseded",
-        }
-    }
-
-    pub(crate) fn from_durable(value: &str) -> Option<Self> {
-        match value {
-            "acknowledged" => Some(Self::Acknowledged),
-            "session_closed" => Some(Self::SessionClosed),
-            "session_superseded" => Some(Self::SessionSuperseded),
-            _ => None,
         }
     }
 }

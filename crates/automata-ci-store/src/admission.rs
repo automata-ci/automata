@@ -42,7 +42,7 @@ uuid_value!(/// Tenant-scoped durable repository identity.
 uuid_value!(/// Immutable source/plan snapshot identity.
     WorkflowSnapshotId);
 
-/// Complete immutable object identity retained by the relational store.
+/// Complete immutable object identity retained by the durable repository.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmissionObject {
     digest: Sha256Digest,
@@ -747,7 +747,7 @@ impl WorkflowAdmissionReceipt {
     }
 }
 
-/// Atomic relational persistence boundary for one materialized workflow DAG.
+/// Atomic repository persistence boundary for one materialized workflow DAG.
 #[async_trait]
 pub trait WorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
     /// Commits an entire run or returns the exact prior receipt for an

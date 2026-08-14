@@ -67,7 +67,7 @@ impl LogicalActivationWorkerId {
 pub struct LogicalActivationGeneration(NonZeroU64);
 
 impl LogicalActivationGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -83,10 +83,6 @@ impl LogicalActivationGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated activation generation fits in i64")
     }
 }
 
@@ -429,7 +425,7 @@ impl RenewLogicalJobActivation {
         &self.claim
     }
 
-    /// Returns the requested database-issued renewal duration.
+    /// Returns the requested repository-issued renewal duration.
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
@@ -521,7 +517,7 @@ impl RenewedLogicalJobActivation {
         self.successor_expires_at
     }
 
-    /// Returns the immutable database validation time stored with the receipt.
+    /// Returns the immutable repository validation time stored with the receipt.
     #[must_use]
     pub const fn validated_at(&self) -> UnixMillis {
         self.validated_at
@@ -976,7 +972,7 @@ impl ActivatedLogicalInstanceDescriptor {
     /// Rejects a logical key that does not match the claimed job or object
     /// descriptors of the wrong kind. Value-free environment-gate evidence is
     /// mandatory for every newly constructed instance; only historical durable
-    /// decoding may represent a pre-evidence row.
+    /// decoding may represent a pre-evidence record.
     pub fn new(
         claimed: &ClaimedLogicalJobActivation,
         identity: &JobInstanceIdentity,
@@ -1024,9 +1020,10 @@ impl ActivatedLogicalInstanceDescriptor {
 
     /// Decodes either a current instance or retained pre-evidence history.
     ///
-    /// `None` is accepted only on this internal durable path so terminal rows
-    /// written before the evidence migration remain readable.
-    #[allow(clippy::too_many_arguments)] // Mirrors one immutable durable descriptor row exactly.
+    /// `None` is accepted only on this internal durable path so terminal records
+    /// written before evidence was introduced remain readable.
+    #[cfg(feature = "adapter-spi")]
+    #[allow(clippy::too_many_arguments)] // Mirrors one immutable durable descriptor record exactly.
     pub(crate) fn from_durable(
         id: LogicalWorkflowInstanceId,
         run_id: RunId,
@@ -1287,7 +1284,7 @@ pub enum LogicalActivationValueError {
     /// Renewal did not extend a live claim within the fixed duration bound.
     #[error("logical activation renewal interval is invalid or does not extend the live claim")]
     InvalidRenewalInterval,
-    /// The durable generation did not fit a positive `PostgreSQL` `BIGINT`.
+    /// The durable generation did not fit the positive signed 64-bit storage boundary.
     #[error("logical activation generation must be positive and fit PostgreSQL BIGINT")]
     InvalidGeneration,
     /// An object was empty or exceeded the current blob bound.
@@ -1346,7 +1343,7 @@ pub enum LogicalActivationValueError {
 /// Durable activation-claim or publication failure.
 #[derive(Debug, Error)]
 pub enum LogicalActivationStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The target is absent, cross-tenant, non-current, or not a step job.
@@ -1546,7 +1543,7 @@ fn validate_workspace(value: &str) -> Result<(), LogicalActivationValueError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "adapter-spi"))]
 mod tests {
     use super::*;
     use crate::{

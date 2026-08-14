@@ -12,9 +12,10 @@ pub use automata_ci_oidc_github::{
     OIDC_JWKS_CACHE_SECONDS,
 };
 use automata_ci_oidc_github::{
-    MAXIMUM_REQUEST_BEARER_LIFETIME_SECONDS, OidcAudience, OidcAuthorityId, OidcClaimSet,
-    OidcKeyId, OidcSubject, RsaPublicJwk,
+    MAXIMUM_REQUEST_BEARER_LIFETIME_SECONDS, OidcAuthorityId, OidcKeyId, RsaPublicJwk,
 };
+#[cfg(feature = "adapter-spi")]
+use automata_ci_oidc_github::{OidcAudience, OidcClaimSet, OidcSubject};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -34,6 +35,7 @@ pub const GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN: &[u8] =
 /// Domain prefix for the canonical public RS256 JWK fingerprint.
 pub const GITHUB_OIDC_RS256_PUBLIC_KEY_FINGERPRINT_DOMAIN: &[u8] =
     b"automata/github-oidc/rs256-public-key-fingerprint:v1\0";
+#[cfg(feature = "adapter-spi")]
 const GITHUB_OIDC_CLAIM_EVIDENCE_DOMAIN: &[u8] = b"automata/github-oidc/claim-evidence:v1\0";
 
 /// Fingerprints canonical public RS256 key material without accepting a private key.
@@ -216,16 +218,10 @@ pub enum GithubOidcSubjectPolicyMode {
 }
 
 impl GithubOidcSubjectPolicyMode {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::StableOwnerEvidence => "stable_owner_evidence",
-        }
-    }
-
-    pub(crate) fn from_str(value: &str) -> Result<Self, GithubOidcStoreError> {
-        match value {
-            "stable_owner_evidence" => Ok(Self::StableOwnerEvidence),
-            _ => Err(GithubOidcStoreError::CorruptData),
         }
     }
 }
@@ -255,6 +251,7 @@ impl GithubOidcSubjectPolicyRevision {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "adapter-spi")]
 pub(crate) fn github_oidc_claim_evidence_digest(
     permission_evidence_sha256: Sha256Digest,
     subject_policy_mode: GithubOidcSubjectPolicyMode,
@@ -574,6 +571,7 @@ pub struct ReservedGithubOidcAuthority {
 }
 
 impl ReservedGithubOidcAuthority {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn new(
         authority_id: OidcAuthorityId,
         request_bearer_key_id: OidcKeyId,
@@ -673,23 +671,6 @@ impl GithubOidcLoadedKey {
     #[must_use]
     pub const fn key_sha256(&self) -> Sha256Digest {
         self.fingerprint
-    }
-}
-
-impl GithubOidcKeyUse {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::RequestBearer => "request_bearer",
-            Self::IdTokenSigning => "id_token_signing",
-        }
-    }
-
-    pub(crate) fn from_str(value: &str) -> Result<Self, GithubOidcStoreError> {
-        match value {
-            "request_bearer" => Ok(Self::RequestBearer),
-            "id_token_signing" => Ok(Self::IdTokenSigning),
-            _ => Err(GithubOidcStoreError::CorruptData),
-        }
     }
 }
 
@@ -860,7 +841,7 @@ impl GithubOidcKeyDeadline {
     ///
     /// # Errors
     ///
-    /// Rejects zero or values outside the `PostgreSQL` timestamp domain.
+    /// Rejects zero or values outside the durable timestamp domain.
     pub fn from_durable_parts(
         key_use: GithubOidcKeyUse,
         key_id: OidcKeyId,

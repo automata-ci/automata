@@ -21,13 +21,12 @@ use automata_ci_blob_s3::S3AtRestEncryption;
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
+use automata_ci_postgres::store::PostgresTransportSecurity;
 use automata_ci_provisioning::{
     DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
 };
 use automata_ci_results_github::ResultsPublicEndpoint;
-use automata_ci_store::{
-    LeaseFailureLimit, MaintenanceBatchSize, PostgresTransportSecurity, StaleSessionTimeoutMillis,
-};
+use automata_ci_store::{LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis};
 
 use crate::cli::{DatabaseTransport, ServerArgs};
 

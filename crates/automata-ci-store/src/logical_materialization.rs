@@ -66,7 +66,7 @@ impl LogicalMaterializationWorkerId {
 pub struct LogicalMaterializationGeneration(NonZeroU64);
 
 impl LogicalMaterializationGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -82,10 +82,6 @@ impl LogicalMaterializationGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated materialization generation fits in i64")
     }
 }
 
@@ -236,7 +232,7 @@ impl LogicalInstanceMaterializationDescriptor {
     /// Rehydrates and authenticates one immutable activated instance.
     ///
     /// Repository adapters use this constructor after reading the exact
-    /// relational descriptor. It performs no blob I/O.
+    /// durable descriptor. It performs no blob I/O.
     ///
     /// # Errors
     ///
@@ -615,7 +611,7 @@ impl RenewLogicalInstanceMaterialization {
         &self.claim
     }
 
-    /// Returns the requested database-issued renewal duration.
+    /// Returns the requested repository-issued renewal duration.
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
@@ -707,7 +703,7 @@ impl RenewedLogicalInstanceMaterialization {
         self.successor_expires_at
     }
 
-    /// Returns the immutable database validation time stored with the receipt.
+    /// Returns the immutable repository validation time stored with the receipt.
     #[must_use]
     pub const fn validated_at(&self) -> UnixMillis {
         self.validated_at
@@ -741,7 +737,7 @@ pub struct CommitLogicalInstanceMaterialization {
 }
 
 impl CommitLogicalInstanceMaterialization {
-    /// Verifies decoded `JobIR` evidence and builds one fenced SQL commit.
+    /// Verifies decoded `JobIR` evidence and builds one fenced repository commit.
     ///
     /// `encoded_job_ir` and `encoded_runtime_context` must be the exact
     /// immutable bytes named by the claimed descriptor. Decoding them into
@@ -851,6 +847,7 @@ impl CommitLogicalInstanceMaterialization {
         self.authority_profile
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn requirements_json(&self) -> &serde_json::Value {
         &self.requirements_json
     }
@@ -1021,7 +1018,7 @@ pub enum LogicalMaterializationValueError {
     /// The claim interval was empty or exceeded its fixed bound.
     #[error("logical materialization claim interval is invalid or too long")]
     InvalidClaimInterval,
-    /// The monotonic generation was zero or exceeded `PostgreSQL` `BIGINT`.
+    /// The monotonic generation was zero or exceeded the signed 64-bit storage boundary.
     #[error("logical materialization generation is invalid")]
     InvalidGeneration,
     /// A renewal did not extend the exact current live claim.
@@ -1069,7 +1066,7 @@ pub enum LogicalMaterializationValueError {
 /// Durable materialization claim or commit failure.
 #[derive(Debug, Error)]
 pub enum LogicalMaterializationStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The target is absent, cross-tenant, non-current, or not activated.

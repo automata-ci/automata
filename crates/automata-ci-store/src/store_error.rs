@@ -124,39 +124,4 @@ impl StoreError {
     pub fn corrupt_data(message: impl Into<String>) -> Self {
         Self::CorruptData(message.into())
     }
-
-    pub(crate) fn generation_mismatch(
-        runner_id: RunnerId,
-        expected: RunnerGeneration,
-        actual: RunnerGeneration,
-    ) -> Self {
-        Self::RunnerGenerationMismatch {
-            runner_id,
-            expected,
-            actual,
-        }
-    }
-
-    pub(crate) fn fence_rejected(session_id: RunnerSessionId) -> Self {
-        Self::SessionFenceRejected(session_id)
-    }
-
-    pub(crate) fn epoch_exhausted(runner_id: RunnerId) -> Self {
-        Self::SessionEpochExhausted(runner_id)
-    }
-
-    pub(crate) fn invalid_session_epoch(value: i64) -> Self {
-        Self::corrupt_data(format!("invalid runner session epoch {value}"))
-    }
-
-    pub(crate) fn invalid_generation(value: i64) -> Self {
-        Self::corrupt_data(format!("invalid runner generation {value}"))
-    }
-
-    pub(crate) fn invalid_operation_receipt(message: impl Into<String>) -> Self {
-        Self::corrupt_data(format!(
-            "invalid runner operation receipt: {}",
-            message.into()
-        ))
-    }
 }

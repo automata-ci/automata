@@ -25,6 +25,7 @@ const MAX_JOB_CONTENT_BYTES: u64 = 16_777_216;
 const MAX_SECRET_REFERENCE_BYTES: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum JobModelLimitRejection {
     ExecutionContextTextBytes,
     ContentKeyBytes,

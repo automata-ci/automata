@@ -32,6 +32,7 @@ use automata_ci_github_delivery::{
     GithubDeliverySourceCredentialRequest, GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
     GithubDeliveryWorkflowAdmissionProcessor, GithubServerServiceCredentialRelease,
 };
+use automata_ci_postgres::store::PostgresStore;
 use automata_ci_postgres_test_support::{
     PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
 };
@@ -50,9 +51,9 @@ use automata_ci_store::{
     LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
     LogicalInstanceMaterializationSelectionOutcome, LogicalJobOrchestrationSelectionOutcome,
     LogicalMaterializationRepository, LogicalMaterializationWorkerId, LogicalWorkQuarantineOutcome,
-    LogicalWorkSelectionRepository, LogicalWorkSelectionStoreError, PostgresStore,
-    ProviderDeliveryClaimOwnerId, ProviderRepositoryVisibility,
-    QuarantineLogicalInstanceMaterialization, QuarantineLogicalJobOrchestration, TenantScope,
+    LogicalWorkSelectionRepository, LogicalWorkSelectionStoreError, ProviderDeliveryClaimOwnerId,
+    ProviderRepositoryVisibility, QuarantineLogicalInstanceMaterialization,
+    QuarantineLogicalJobOrchestration, TenantScope,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousActivationLease, AutonomousMaterializationLease,

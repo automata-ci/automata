@@ -114,7 +114,7 @@ impl WorkflowPermissionPolicy {
         )
     }
 
-    /// Returns the exact canonical JSON bytes persisted beside the relational
+    /// Returns the exact canonical JSON bytes persisted beside the durable
     /// policy aggregate.
     ///
     /// # Errors
@@ -149,7 +149,7 @@ impl WorkflowPermissionPolicy {
     }
 }
 
-/// Positive immutable policy revision representable by `PostgreSQL` `BIGINT`.
+/// Positive immutable policy revision within the signed 64-bit storage boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkflowRuntimePolicyRevision(NonZeroU64);
 
@@ -170,10 +170,6 @@ impl WorkflowRuntimePolicyRevision {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated runtime-policy revision fits BIGINT")
     }
 }
 
@@ -441,7 +437,7 @@ impl WorkflowRuntimePolicy {
     /// Returns the SHA-256 identity of [`Self::canonical_bytes`].
     ///
     /// This immutable-object identity is intentionally distinct from the
-    /// domain-separated relational semantic [`Self::digest`].
+    /// domain-separated repository semantic [`Self::digest`].
     #[must_use]
     pub const fn canonical_digest(&self) -> Sha256Digest {
         self.canonical_digest
@@ -671,7 +667,7 @@ impl WorkflowRuntimePolicyReceipt {
 /// Invalid policy value.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum WorkflowRuntimePolicyValueError {
-    /// A revision was zero or outside `PostgreSQL` `BIGINT`.
+    /// A revision was zero or outside the signed 64-bit storage boundary.
     #[error("workflow runtime policy revision is invalid")]
     InvalidRevision,
     /// The repository identity was nil.
@@ -718,7 +714,7 @@ pub enum WorkflowRuntimePolicyValueError {
 /// Durable runtime-policy failure.
 #[derive(Debug, Error)]
 pub enum WorkflowRuntimePolicyStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The repository is absent, foreign, or not configured for this policy.

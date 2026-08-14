@@ -487,6 +487,7 @@ pub struct ManagedSecretExecutionScope {
 }
 
 impl ManagedSecretExecutionScope {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn from_durable(tenant: TenantScope, repository_id: RepositoryId) -> Self {
         Self {
             tenant,
@@ -528,13 +529,13 @@ impl ResolveManagedSecretAuthority {
     /// Constructs one exact current execution authority request.
     ///
     /// `runtime_context_digest` must identify the verified encoded context from
-    /// which `bindings` was decoded. The `PostgreSQL` adapter rechecks that digest
-    /// against the immutable current concrete-job row before considering grants.
+    /// which `bindings` was decoded. The repository rechecks that digest against
+    /// the immutable current concrete-job record before considering grants.
     ///
     /// # Errors
     ///
     /// Rejects nil/cross-bound execution identities, an invalid or expired lease,
-    /// negative time, or numeric fences outside `PostgreSQL` `BIGINT`.
+    /// negative time, or numeric fences outside the signed 64-bit storage boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant: TenantScope,
@@ -698,16 +699,6 @@ pub enum ManagedSecretGrantMode {
     CapabilityOnly,
 }
 
-impl ManagedSecretGrantMode {
-    pub(crate) const fn from_durable(value: &str) -> Option<Self> {
-        match value.as_bytes() {
-            b"readable_secret" => Some(Self::ReadableSecret),
-            b"capability_only" => Some(Self::CapabilityOnly),
-            _ => None,
-        }
-    }
-}
-
 /// One value-free, exact-version provider target authorized for the workload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagedSecretScope {
@@ -736,6 +727,7 @@ pub struct ManagedSecretAuthorityBinding {
     provider_supports_dynamic_leases: bool,
 }
 
+#[cfg(feature = "adapter-spi")]
 pub(crate) struct ManagedSecretAuthorityBindingParts {
     pub(crate) grant_id: SecretWorkloadGrantId,
     pub(crate) provider_id: ManagedSecretProviderId,
@@ -749,6 +741,7 @@ pub(crate) struct ManagedSecretAuthorityBindingParts {
 }
 
 impl ManagedSecretAuthorityBinding {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_verified_parts(parts: ManagedSecretAuthorityBindingParts) -> Self {
         Self {
             grant_id: parts.grant_id,
@@ -861,6 +854,7 @@ pub struct ManagedSecretAuthorityReceipt {
 }
 
 impl ManagedSecretAuthorityReceipt {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_verified_parts(
         operation_id: ManagedSecretDeliveryOperationId,
         credential_key_id: String,
@@ -1049,6 +1043,7 @@ pub struct ManagedSecretDeliveryAcknowledgement {
 }
 
 impl ManagedSecretDeliveryAcknowledgement {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn from_durable(
         operation_id: ManagedSecretDeliveryOperationId,
         acknowledged_at: UnixMillis,
@@ -1094,7 +1089,7 @@ pub enum ManagedSecretAuthorityStoreError {
     /// The current exact-set cardinality exceeds the closed delivery bound.
     #[error("managed-secret workload authority capacity is exhausted")]
     ResourceExhausted,
-    /// Persisted rows violate the current value-free authority contract.
+    /// Persisted records violate the current value-free authority contract.
     #[error("managed-secret durable authority state is corrupt")]
     CorruptData,
     /// The durable store is temporarily unavailable.

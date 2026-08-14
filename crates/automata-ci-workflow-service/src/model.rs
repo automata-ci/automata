@@ -17,6 +17,7 @@ const _: () = assert!(MAX_SOURCE_BYTES as u64 == MAX_ADMISSION_OBJECT_BYTES);
 const _: () = assert!(MAX_EVENT_BYTES as u64 == MAX_ADMISSION_EVENT_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum WorkflowAdmissionLimitRejection {
     IdentityBytes,
     SourceBytes,

@@ -74,7 +74,7 @@ macro_rules! positive_provider_id {
 
         impl $name {
             /// Constructs a positive provider numeric identity representable by
-            /// the durable signed `BIGINT` schema.
+            /// the signed 64-bit durable-storage boundary.
             ///
             /// # Errors
             ///
@@ -93,9 +93,6 @@ macro_rules! positive_provider_id {
                 self.0.get()
             }
 
-            pub(crate) fn as_i64(self) -> i64 {
-                i64::try_from(self.get()).expect("validated provider ID fits in i64")
-            }
         }
     };
 }
@@ -124,14 +121,6 @@ impl ProviderRepositoryVisibility {
         match self {
             Self::Public => "public",
             Self::Private => "private",
-        }
-    }
-
-    pub(crate) fn from_durable_str(value: &str) -> Option<Self> {
-        match value {
-            "public" => Some(Self::Public),
-            "private" => Some(Self::Private),
-            _ => None,
         }
     }
 }
@@ -472,7 +461,7 @@ impl ProviderDeliveryClaimFence {
     ///
     /// # Errors
     ///
-    /// Rejects a zero or signed-database-incompatible fence value.
+    /// Rejects a zero fence or one outside the signed 64-bit storage boundary.
     pub fn from_durable_parts(
         delivery_id: ProviderDeliveryId,
         owner: ProviderDeliveryClaimOwnerId,
@@ -501,10 +490,6 @@ impl ProviderDeliveryClaimFence {
     #[must_use]
     pub const fn fence(self) -> u64 {
         self.fence.get()
-    }
-
-    pub(crate) fn fence_i64(self) -> i64 {
-        i64::try_from(self.fence()).expect("validated provider-delivery fence fits in i64")
     }
 }
 
@@ -699,7 +684,7 @@ impl RenewProviderDeliveryClaim {
     /// Constructs one bounded claim-renewal request.
     ///
     /// The timing evidence retains an immutable, non-widening predecessor
-    /// deadline across retries. The database additionally enforces the total
+    /// deadline across retries. The repository additionally enforces the total
     /// lifetime measured from the original durable claim time.
     ///
     /// # Errors
@@ -783,7 +768,7 @@ impl RenewProviderDeliveryClaim {
         self.expires_at
     }
 
-    /// Returns the immutable process-local deadline for acquiring the exact row lock.
+    /// Returns the immutable process-local deadline for acquiring the exact record lock.
     #[must_use]
     pub const fn deadline(self) -> Instant {
         self.timing.deadline()
@@ -1411,7 +1396,7 @@ impl RejectProviderDelivery {
     }
 }
 
-/// Invalid provider-delivery values rejected outside database transactions.
+/// Invalid provider-delivery values rejected outside repository transactions.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ProviderDeliveryValueError {
     #[error("{0} must not be empty or contain surrounding whitespace")]

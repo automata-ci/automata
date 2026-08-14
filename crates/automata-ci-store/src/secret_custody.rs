@@ -6,7 +6,7 @@
 //! before readiness. Only a fresh decrypt-only rotation successor may be
 //! prestaged before its first canary exists.
 //! The schema rejects built-in ciphertext without a canary identity, but that
-//! row-level fact does not prove the process loaded matching bytes. Product
+//! record-level fact does not prove the process loaded matching bytes. Product
 //! composition must require a freshly verified receipt at each write boundary.
 
 use std::{fmt, num::NonZeroU64};
@@ -25,6 +25,7 @@ pub const SECRET_CUSTODY_CANARY_GENERATION: u64 = 1;
 pub(crate) const SECRET_CUSTODY_CANARY_SCHEMA_VERSION: u16 = 1;
 
 const KEY_SET_DIGEST_DOMAIN: &[u8] = b"automata.store.secret-custody.key-set.v1\0";
+#[cfg(feature = "adapter-spi")]
 const REQUIREMENTS_DIGEST_DOMAIN: &[u8] = b"automata.store.secret-custody.requirements.v1\0";
 const ACTIVE_PROVIDER: usize = 0;
 const ENCRYPTED_ENVELOPES: usize = 1;
@@ -92,6 +93,7 @@ impl SecretCustodyKeySet {
         self.digest
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn contains(&self, key_id: &KeyId) -> bool {
         self.key_ids.binary_search(key_id).is_ok()
     }
@@ -116,6 +118,7 @@ pub struct SecretCustodyRequirements {
 }
 
 impl SecretCustodyRequirements {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_durable_parts(
         states: [bool; REQUIREMENT_STATE_COUNT],
         required_key_ids: Vec<KeyId>,
@@ -236,6 +239,7 @@ impl VerifySecretCustody {
         }
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn configured_keys(&self) -> Option<&SecretCustodyKeySet> {
         self.configured_keys.as_ref()
     }
@@ -263,6 +267,7 @@ impl fmt::Debug for VerifySecretCustody {
 pub struct SecretCustodyCanaryGeneration(NonZeroU64);
 
 impl SecretCustodyCanaryGeneration {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new(value: u64) -> Result<Self, SecretCustodyValueError> {
         NonZeroU64::new(value)
             .filter(|value| value.get() == SECRET_CUSTODY_CANARY_GENERATION)
@@ -285,6 +290,7 @@ pub struct SecretCustodyCanaryBinding {
 }
 
 impl SecretCustodyCanaryBinding {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn new(key_id: KeyId, generation: SecretCustodyCanaryGeneration) -> Self {
         Self { key_id, generation }
     }
@@ -328,6 +334,7 @@ pub struct VerifiedSecretCustody {
 }
 
 impl VerifiedSecretCustody {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_verified_parts(
         configured_keys: &SecretCustodyKeySet,
         requirements: &SecretCustodyRequirements,
@@ -503,6 +510,7 @@ fn key_set_digest(active_key_id: &KeyId, key_ids: &[KeyId]) -> Sha256Digest {
     Sha256Digest::from_bytes(digest.finalize().into())
 }
 
+#[cfg(feature = "adapter-spi")]
 fn requirements_digest(requirements: &SecretCustodyRequirements) -> Sha256Digest {
     let mut digest = Sha256::new();
     digest.update(REQUIREMENTS_DIGEST_DOMAIN);

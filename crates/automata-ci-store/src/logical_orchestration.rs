@@ -18,7 +18,7 @@ use crate::{
     Sha256Digest, StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 
-/// Relational logical-orchestration schema installed for phase-one admission.
+/// Logical-orchestration schema for phase-one admission.
 pub const LOGICAL_ORCHESTRATION_SCHEMA: u16 = 1;
 
 const MAX_TEXT_BYTES: usize = 1_024;
@@ -69,15 +69,6 @@ pub enum LogicalWorkflowJobKind {
     Steps,
     /// A job that invokes another reusable workflow.
     ReusableWorkflow,
-}
-
-impl LogicalWorkflowJobKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Steps => "steps",
-            Self::ReusableWorkflow => "reusable_workflow",
-        }
-    }
 }
 
 /// One source-level job retained for deterministic later activation.
@@ -306,7 +297,6 @@ pub struct ResolveAuthenticatedWorkflowDispatchSource {
     workflow_id: WorkflowId,
     git_ref: String,
     commit_sha: String,
-    commit_sha_bytes: Vec<u8>,
 }
 
 impl fmt::Debug for ResolveAuthenticatedWorkflowDispatchSource {
@@ -344,14 +334,13 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
             ));
         }
         let commit_sha = commit_sha.into();
-        let commit_sha_bytes = decode_commit_sha(&commit_sha)?;
+        decode_commit_sha(&commit_sha)?;
         Ok(Self {
             actor,
             repository_id,
             workflow_id,
             git_ref,
             commit_sha,
-            commit_sha_bytes,
         })
     }
 
@@ -383,10 +372,6 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
     #[must_use]
     pub fn commit_sha(&self) -> &str {
         &self.commit_sha
-    }
-
-    pub(crate) fn commit_sha_bytes(&self) -> &[u8] {
-        &self.commit_sha_bytes
     }
 }
 
@@ -974,7 +959,7 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
     /// evidence receipt on replay.
     ///
     /// The current claim is only authority to attempt this operation.
-    /// Implementations must row-lock and reject it unless the exact current
+    /// Implementations must record-lock and reject it unless the exact current
     /// inbox owner, attempt, fence, and lease horizon are live at
     /// `observed_at`, and durable signed-ingress, manifest, queued-Check,
     /// repository, source, plan, and run evidence all agree with `command`.
@@ -1029,7 +1014,7 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The Git ref was not a full `refs/...` name.
     #[error("Git ref must be a canonical full refs/... name")]
     InvalidGitRef,
-    /// The run attempt did not fit a positive SQL integer.
+    /// The run attempt did not fit the positive signed 32-bit storage boundary.
     #[error("workflow run attempt must fit a positive PostgreSQL INTEGER")]
     InvalidRunAttempt,
     /// The base runtime-context object did not use the current canonical media type.
@@ -1076,7 +1061,7 @@ pub enum LogicalWorkflowAdmissionValueError {
 /// Durable current logical-admission failure.
 #[derive(Debug, Error)]
 pub enum LogicalWorkflowAdmissionStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// An idempotency identity was reused with different canonical evidence.
